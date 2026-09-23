@@ -402,7 +402,7 @@ class IdentityService:
     def _service_scopes(raw: dict | None) -> dict:
         """校验并规范化服务授权范围，拒绝拼错字段造成的假授权。"""
         scopes = raw or {}
-        allowed_keys = {"stations", "analysis_tasks", "instrument_serials"}
+        allowed_keys = {"stations", "analysis_tasks", "instrument_serials", "plan_proposals"}
         unknown = sorted(set(scopes) - allowed_keys)
         if unknown:
             raise ValidationFailed(
@@ -418,6 +418,17 @@ class IdentityService:
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise ValidationFailed(f"{key} 必须是字符串数组", code="service_scope_invalid")
             normalized[key] = sorted({item.strip() for item in value if item.strip()})
+        proposals = scopes.get("plan_proposals")
+        if proposals is not None:
+            # 外部优化器：可向哪些方案提交下一轮提案。all 表示本组织全部已批准方案
+            if proposals == "all":
+                normalized["plan_proposals"] = "all"
+            elif isinstance(proposals, list) and all(isinstance(item, str) for item in proposals):
+                normalized["plan_proposals"] = sorted({item.strip() for item in proposals if item.strip()})
+            else:
+                raise ValidationFailed(
+                    "plan_proposals 只能是 all 或方案编号数组", code="service_scope_invalid",
+                )
         tasks = scopes.get("analysis_tasks")
         if tasks is not None:
             if tasks == "all":

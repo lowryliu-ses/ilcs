@@ -160,3 +160,29 @@ def test_business_event_wait_is_rejected_until_an_emitter_exists():
     issues = wait_issues({"kind": "wait", "wait_for": {"mode": "event", "event": "lims.ready"}})
     assert issues and "暂不支持" in issues[0]
     assert wait_issues({"kind": "wait", "dur": 3, "wait_for": {"mode": "duration"}}) == []
+
+
+# ---------- 多通道设备（C 批 ③） ----------
+
+
+def test_multi_channel_station_runs_windows_in_parallel():
+    """8 通道充放电柜：同一时刻最多 8 个时间窗，第 9 个等最早结束的那个。"""
+    from app.domain.scheduling import earliest_free
+
+    cycler = StationSpec(id="CYC", channels=2, positions=32, limits={"cap.test": {}})
+    long = timedelta(hours=10)
+    context = SchedulingContext(
+        stations=[cycler],
+        busy={"CYC": [Interval(T0, T0 + long)]},
+    )
+    assert earliest_free(context, "CYC", T0, timedelta(hours=1)) == T0, "还有一个空闲通道，立即开始"
+    context.busy["CYC"].append(Interval(T0, T0 + timedelta(hours=3)))
+    assert earliest_free(context, "CYC", T0, timedelta(hours=1)) == T0 + timedelta(hours=3), "两个通道都占着，等先结束的那个"
+
+
+def test_single_position_station_still_serializes():
+    from app.domain.scheduling import earliest_free
+
+    station = StationSpec(id="COAT", limits={"cap.coat": {}})
+    context = SchedulingContext(stations=[station], busy={"COAT": [Interval(T0, T0 + timedelta(hours=1))]})
+    assert earliest_free(context, "COAT", T0, timedelta(minutes=30)) == T0 + timedelta(hours=1)

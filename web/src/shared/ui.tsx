@@ -27,7 +27,7 @@ const STATE_CLASS: Record<string, string> = {
   missing: 'fault', disabled: 'fault', partial: 'fault',
   // 结束、归档
   done: 'done', retired: 'done', closed: 'done', skipped: 'done', acked: 'done',
-  completed: 'done', superseded: 'done', exhausted: 'done', left: 'done',
+  completed: 'done', superseded: 'done', exhausted: 'done', left: 'done', split: 'done',
   // 终止、取消
   aborted: 'aborted', aborting: 'aborted', cancelled: 'aborted', disposed: 'aborted', not_sent: 'aborted',
   not_executed: 'aborted',
@@ -36,7 +36,7 @@ const STATE_CLASS: Record<string, string> = {
 
 /** 步骤类型的中文名。批次详情、任务中心、报告都读同一份。 */
 export const STEP_KIND_LABEL: Record<string, string> = {
-  device: '设备', manual: '人工', wait: '等待', review: '审核',
+  device: '设备', manual: '人工', wait: '等待', review: '审核', gate: '质检关卡', split: '样本拆分',
 };
 
 /** 开跑检查的三种结论。「不适用」不是通过的近义词，颜色也不一样。 */

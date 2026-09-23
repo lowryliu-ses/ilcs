@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ...schemas import StepReviewIn, StepSubmitIn
+from ...schemas import GateDecisionIn, StepReviewIn, StepSubmitIn
 from ...services.workflow_service import WorkflowService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
 
@@ -44,3 +44,17 @@ def review_step(
     if replay is not None:
         return replay
     return guard.remember(WorkflowService(db, ctx).decide_review(step_run_id, body, user))
+
+
+@router.post("/{step_run_id}/gate-decision")
+def decide_gate(
+    step_run_id: str, payload: GateDecisionIn, db: DbSession, guard: IdempotencyGuard,
+    user: CurrentUser, ctx=require("step.review"),
+):
+    """保持中的质检关卡：QA 签名放行，或判不合格按报废处理。"""
+    body = payload.model_dump()
+    guard.bind(ctx, body).required()
+    replay = guard.replay()
+    if replay is not None:
+        return replay
+    return guard.remember(WorkflowService(db, ctx).decide_gate(step_run_id, body, user))

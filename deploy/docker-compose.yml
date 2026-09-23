@@ -113,6 +113,66 @@ services:
     networks:
       - backend
 
+  # ---------- 试点：外部 SiLA 2 模拟设备（可选，--profile pilot 才启动） ----------
+  # 与真设备一样走网络接入：系统侧把工位适配器配成 sila2_v1，host 填服务名。
+  # 首次启动生成自签证书到 ../secrets/sila/，适配器 ca_file 指向 /run/secrets/ilcs/sila/<设备ID>.crt。
+  # 设备自报 simulator=true：正式环境（ILCS_ENVIRONMENT=production）会拒绝接入它们。
+  sila-sim-lh:
+    image: ilcs-api:latest
+    container_name: ilcs-sila-sim-lh
+    profiles: ["pilot"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SIM_DEVICE_ID: SIM-LH-01
+      SIM_PROFILE: liquid_handler
+      SIM_PORT: "50052"
+      SIM_HOST_NAME: sila-sim-lh
+      SIM_CERT_DIR: /run/secrets/ilcs/sila
+      SIM_TASK_SECONDS: "20"
+      SIM_MATERIAL_MAP: '{"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}'
+    volumes:
+      - ../secrets/sila:/run/secrets/ilcs/sila
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "simulators/sila_device/server.py"]
+    networks:
+      - backend
+
+  sila-sim-cycler:
+    image: ilcs-api:latest
+    container_name: ilcs-sila-sim-cycler
+    profiles: ["pilot"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SIM_DEVICE_ID: SIM-CYC-01
+      SIM_PROFILE: cycler
+      SIM_PORT: "50053"
+      SIM_HOST_NAME: sila-sim-cycler
+      SIM_CERT_DIR: /run/secrets/ilcs/sila
+      SIM_CHANNELS: "8"
+      SIM_TASK_SECONDS: "60"
+    volumes:
+      - ../secrets/sila:/run/secrets/ilcs/sila
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "simulators/sila_device/server.py"]
+    networks:
+      - backend
+
   web:
     image: nginx:alpine
     container_name: ilcs-web

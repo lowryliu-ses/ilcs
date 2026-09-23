@@ -23,9 +23,10 @@ from ..core.errors import (
 from ..domain import workflow
 from ..domain.access import same_person
 from ..domain.steps import (
-    DEVICE, MANUAL, REVIEW, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize, step_id_of,
+    DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize,
+    step_id_of,
 )
-from ..models import Batch, StepRun, User, WorkflowEvent
+from ..models import Batch, Sample, StepRun, User, WorkflowEvent
 from ..repositories.batches import BatchRepository, SampleRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.governance import UserRepository
@@ -377,23 +378,274 @@ class WorkflowService:
         if not self.advances.claim(batch.id, run.step_id, run.attempt, next_step_id or ""):
             return {"next": None, "duplicate": True}
         next_run = self.open_step(batch, index)
-        # 设备步骤才下指令；人工、等待、审核不创建假适配器
+        return self.enter(batch, next_run, index)
+
+    def enter(self, batch: Batch, run: StepRun, index: int) -> dict:
+        """一个步骤实例开出来之后做什么。
+
+        设备步骤下指令；质检关卡与样本拆分由系统立即判定 / 执行，不等人也不等设备；
+        人工、等待、审核只留待办，不创建假适配器。
+        """
+        if run.kind == GATE:
+            return self._evaluate_gate(batch, run, index)
+        if run.kind == SPLIT:
+            return self._split_samples(batch, run)
         command_id = ""
-        if next_run.kind == DEVICE:
+        if run.kind == DEVICE:
             if workflow.hold_blocks_device_action(batch.state):
-                next_run.state = workflow.PENDING
-                return {"next": self.run_out(next_run), "device_blocked": True}
+                run.state = workflow.PENDING
+                return {"next": self.run_out(run), "device_blocked": True}
             from .batch_service import BatchService
 
             command = BatchService(self.db, self.ctx).issue_command(
-                batch, "dispatch", index, step_run_id=next_run.id
+                batch, "dispatch", index, step_run_id=run.id
             )
             command_id = command.id
         return {
-            "next": self.run_out(next_run),
+            "next": self.run_out(run),
             "command_id": command_id,
             "batch_state": batch.state,
         }
+
+    # ---------- 质检关卡 ----------
+
+    def _active_samples(self, batch: Batch) -> list[Sample]:
+        return [s for s in self.samples.for_batch(batch.id) if s.state not in {"failed", "split"}]
+
+    def _evaluate_gate(self, batch: Batch, run: StepRun, index: int) -> dict:
+        """读测量来源步骤最近一次检查点里的测量值，按阈值判定。
+
+        取不到数值不等于合格：一律转人工判断。逐孔位判定时不合格的样本单独剔除，
+        其余样本继续；全部不合格才按关卡的不合格去向处理整批。
+        """
+        from ..repositories.execution import CheckpointRepository
+
+        gate = (run.step_snapshot or {}).get("gate") or {}
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        source = gate.get("source_step_id")
+        checkpoint = (
+            CheckpointRepository(self.db).latest_for_step(batch.id, ids.index(source))
+            if source in ids else None
+        )
+        delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
+        field = gate.get("field")
+        low, high = gate.get("min"), gate.get("max")
+        name = (run.step_snapshot or {}).get("name") or "质检关卡"
+        run.started_at = run.started_at or now()
+
+        if gate.get("scope") == "sample":
+            wells = delivered.get("wells") or {}
+            values, failed, undecided = {}, [], []
+            for sample in self._active_samples(batch):
+                value = (wells.get(sample.well) or {}).get(field)
+                values[sample.well] = value
+                verdict = workflow.judge(value, low, high)
+                if verdict is True:
+                    continue
+                (undecided if verdict is None else failed).append(sample.well)
+                sample.state = "failed"
+                sample.flag_note = (
+                    f"质检关卡「{name}」{'无测量值，无法判定' if verdict is None else f'不合格：{field}={value}'}"
+                )
+            run.form_data = {"field": field, "min": low, "max": high, "scope": "sample",
+                             "values": values, "failed": failed, "undecided": undecided,
+                             "checkpoint_id": checkpoint.id if checkpoint else ""}
+            if len(failed) + len(undecided) < len(values):
+                self._close_run(run, workflow.COMPLETED, (
+                    f"{len(values) - len(failed) - len(undecided)} 个样本合格；"
+                    f"剔除不合格 {len(failed)} 个、无法判定 {len(undecided)} 个"
+                ))
+                self.audit.record(None, "质检关卡判定", batch.id, before="待判定", after="合格（部分剔除）",
+                                  detail=f"{name}：{run.reason}")
+                return self._advance(run, batch)
+            return self._gate_failed(batch, run, index, gate, f"全部 {len(values)} 个样本不合格或无法判定")
+
+        value = delivered.get(field)
+        verdict = workflow.judge(value, low, high)
+        run.form_data = {"field": field, "min": low, "max": high, "scope": "batch", "value": value,
+                         "checkpoint_id": checkpoint.id if checkpoint else ""}
+        if verdict is True:
+            self._close_run(run, workflow.COMPLETED, f"{field}={value} 合格")
+            self.audit.record(None, "质检关卡判定", batch.id, before="待判定", after="合格",
+                              detail=f"{name}：{field}={value}（下限 {low}，上限 {high}）")
+            return self._advance(run, batch)
+        if verdict is None:
+            return self._gate_hold(batch, run, f"测量来源没有 {field} 的数值，无法判定")
+        return self._gate_failed(batch, run, index, gate, f"{field}={value} 超出范围（下限 {low}，上限 {high}）")
+
+    def _close_run(self, run: StepRun, state: str, reason: str) -> None:
+        run.state = state
+        run.reason = reason
+        run.ended_at = now()
+        run.row_version = int(run.row_version or 0) + 1
+
+    def _gate_failed(self, batch: Batch, run: StepRun, index: int, gate: dict, reason: str) -> dict:
+        name = (run.step_snapshot or {}).get("name") or "质检关卡"
+        on_fail = gate.get("on_fail")
+        if on_fail == "rework":
+            rounds = len([r for r in self.runs.for_batch(batch.id)
+                          if r.step_id == run.step_id and r.state == workflow.FAILED]) + 1
+            if rounds <= int(gate.get("max_rework") or 0):
+                self._close_run(run, workflow.FAILED, f"{reason}；第 {rounds} 次返工")
+                return self._rework(batch, run, index, gate, rounds)
+            return self._gate_hold(batch, run, f"{reason}；已返工 {rounds - 1} 次仍不合格，转人工判断")
+        if on_fail == "scrap":
+            self._close_run(run, workflow.FAILED, f"{reason}；按方法报废")
+            return self._gate_scrap(batch, run, reason)
+        return self._gate_hold(batch, run, reason)
+
+    def _rework(self, batch: Batch, run: StepRun, index: int, gate: dict, rounds: int) -> dict:
+        """返工：从返工目标到关卡之间已完成的步骤作废（记录保留），流程从返工目标重做。"""
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        target = ids.index(gate["rework_to"])
+        if not self.advances.claim(batch.id, run.step_id, run.attempt, f"rework:{gate['rework_to']}"):
+            return {"next": None, "duplicate": True}
+        for row in self.runs.for_batch(batch.id):
+            if target <= row.step_index < index and row.state == workflow.COMPLETED:
+                row.state = workflow.SUPERSEDED
+                row.reason = f"质检关卡第 {rounds} 次返工，本次结论作废"
+                row.row_version = int(row.row_version or 0) + 1
+                self._retire_split_children(row)
+        new_run = self.open_step(batch, target)
+        self.audit.record(
+            None, "质检不合格返工", batch.id, before=run.reason,
+            after=f"回到第 {target + 1} 步（第 {new_run.attempt} 次）",
+            detail=f"{(run.step_snapshot or {}).get('name')}：第 {rounds} 次返工；原记录保留，标为已被返工取代",
+        )
+        return {**self.enter(batch, new_run, target), "rework": rounds}
+
+    def _gate_scrap(self, batch: Batch, run: StepRun, reason: str) -> dict:
+        for sample in self._active_samples(batch):
+            sample.state = "failed"
+            sample.flag_note = f"质检关卡报废：{reason}"
+        batch.state = "fault"
+        batch.failure_reason = f"质检不合格，按方法报废：{reason}"
+        batch.held_at = batch.held_at or now()
+        self._gate_alarm(batch, run, batch.failure_reason, "核对测量；确认后终止批次并处置样品。")
+        return {"next": None, "batch_state": batch.state, "scrapped": True}
+
+    def _gate_hold(self, batch: Batch, run: StepRun, reason: str) -> dict:
+        """保持待人工判断：关卡留在待判定，批次保持；QA 签名放行或判不合格。"""
+        run.reason = reason
+        run.row_version = int(run.row_version or 0) + 1
+        batch.state = "paused"
+        batch.held_at = batch.held_at or now()
+        batch.failure_reason = f"质检关卡待人工判断：{reason}"
+        self._gate_alarm(batch, run, batch.failure_reason, "QA 在批次页对该关卡签名放行或判为不合格。")
+        return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_decision": True}
+
+    def _gate_alarm(self, batch: Batch, run: StepRun, message: str, response: str) -> None:
+        from .alarm_service import AlarmService
+
+        AlarmService(self.db, self.ctx).raise_alarm(
+            severity=2, source_type="batch", source_id=batch.id, message=message[:500],
+            response=response, owner="QA", origin="system", condition_key=f"gate:{run.id}",
+        )
+
+    def decide_gate(self, step_run_id: str, payload: dict, user: User) -> dict:
+        """人工判定保持中的质检关卡。放行要写理由并签名，判不合格按报废处理。"""
+        run = self.runs.lock(step_run_id)
+        if run is None:
+            raise NotFound("步骤实例不存在")
+        if run.kind != GATE:
+            raise StateConflict("该步骤不是质检关卡")
+        if run.state != workflow.READY:
+            raise StateConflict(f"关卡已是 {workflow.STATE_LABEL.get(run.state, run.state)}，不需要人工判定")
+        if user.role not in {"qa", "admin"}:
+            raise PermissionDenied("质检关卡的人工判定需要 QA 角色")
+        conclusion = payload.get("conclusion")
+        if conclusion not in {"approved", "rejected"}:
+            raise ValidationFailed("判定结论只能是 approved 或 rejected")
+        reason = (payload.get("reason") or "").strip()
+        if not reason:
+            raise ValidationFailed("人工判定必须写明依据")
+        signature = self.identity.consume_signature(
+            payload.get("signature_id"), user, f"质检关卡人工判定：{conclusion}",
+            object_ref=run.id, strict=True,
+        )
+        batch = self.batches.get(run.batch_id)
+        from .alarm_service import AlarmService
+
+        AlarmService(self.db, self.ctx).resolve_condition(f"gate:{run.id}", f"QA 判定：{conclusion}；{reason}")
+        run.form_data = {**(run.form_data or {}), "decision": conclusion, "decision_reason": reason,
+                         "decided_by": user.id}
+        run.reviewed_by = user.id
+        self.audit.record(
+            user, "质检关卡人工判定", run.batch_id, sign=True, meaning=signature.meaning,
+            signature_id=signature.id, before="待人工判断",
+            after="放行" if conclusion == "approved" else "不合格", detail=reason,
+        )
+        if conclusion == "approved":
+            self._close_run(run, workflow.COMPLETED, f"人工放行：{reason}")
+            batch.state = "running"
+            batch.held_at = None
+            batch.failure_reason = ""
+            outcome = self._advance(run, batch)
+        else:
+            self._close_run(run, workflow.FAILED, f"人工判不合格：{reason}")
+            outcome = self._gate_scrap(batch, run, reason)
+        self.db.commit()
+        return {"step_run": self.run_out(run), "advance": outcome}
+
+    # ---------- 样本拆分 ----------
+
+    def _split_samples(self, batch: Batch, run: StepRun) -> dict:
+        """每个在用样本拆出 N 个子样本：登记子物理样本（谱系指向母样），生成子运行分配。
+
+        母样本的运行分配标为已拆分，之后的步骤、检测与统计都落在子样本上；
+        子样本继承条件分组，等于把重复数放大 N 倍。
+        """
+        from ..models import PhysicalSample
+
+        split = (run.step_snapshot or {}).get("split") or {}
+        count = int(split.get("count") or 0)
+        child_type = split.get("child_type") or ""
+        suffix = "" if run.attempt == 1 else f"r{run.attempt}"
+        parents = self._active_samples(batch)
+        children: list[str] = []
+        for sample in parents:
+            container = f"{sample.container_id}-{run.step_id}{suffix}"
+            for number in range(1, count + 1):
+                physical_id = f"{sample.physical_sample_id or sample.id}-{run.step_id}{suffix}-{number}"
+                if self.db.get(PhysicalSample, physical_id) is None:
+                    self.db.add(PhysicalSample(
+                        id=physical_id, org_id=batch.org_id, barcode=physical_id,
+                        source=f"批次 {batch.id} 第 {run.step_index + 1} 步拆分", sample_type=child_type,
+                        parent_id=sample.physical_sample_id or None, current_location=container,
+                        custodian=batch.operator, lifecycle_state="in_use", origin="batch_generated",
+                        created_by=self.ctx.subject_id,
+                    ))
+                child = Sample(
+                    id=f"{sample.id}-{number}{suffix}", org_id=batch.org_id, physical_sample_id=physical_id,
+                    batch_id=batch.id, container_id=container, well=f"{sample.well}-{number}",
+                    position=sample.position * count + number, condition_group=sample.condition_group,
+                    condition_label=sample.condition_label, repeat=(sample.repeat - 1) * count + number,
+                    levels=sample.levels, is_control=sample.is_control, state="running",
+                )
+                self.db.add(child)
+                children.append(child.id)
+            sample.state = "split"
+            sample.flag_note = f"第 {run.step_index + 1} 步拆分为 {count} 个{child_type}"
+        self.db.flush()
+        run.form_data = {"parents": len(parents), "count": count, "child_type": child_type,
+                         "children": children}
+        self._close_run(run, workflow.COMPLETED, f"{len(parents)} 个样本各拆分为 {count} 个{child_type}")
+        self.audit.record(
+            None, "样本拆分", batch.id, before=f"{len(parents)} 个样本", after=f"{len(children)} 个{child_type}",
+            detail="子样本谱系指向母样，继承条件分组；母样运行分配标为已拆分",
+        )
+        return self._advance(run, batch)
+
+    def _retire_split_children(self, run: StepRun) -> None:
+        if run.kind != SPLIT:
+            return
+        for child_id in (run.form_data or {}).get("children") or []:
+            child = self.db.get(Sample, child_id)
+            if child is not None:
+                child.state = "failed"
+                child.flag_note = "所属拆分步骤被质检返工作废"
 
     def finish_batch(self, batch: Batch, user: User | None = None, detail: str = "") -> None:
         before = "运行中" if batch.state == "running" else batch.state

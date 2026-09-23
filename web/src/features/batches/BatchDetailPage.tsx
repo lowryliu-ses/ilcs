@@ -51,6 +51,7 @@ export function BatchDetailPage() {
   const [reviewing, setReviewing] = useState<StepRunRow | null>(null);
   const [viewing, setViewing] = useState<StepRunRow | null>(null);
   const [verifying, setVerifying] = useState<BatchDetail['commands'][number] | null>(null);
+  const [gateDeciding, setGateDeciding] = useState<StepRunRow | null>(null);
 
   if (!batch.data) return <div className="boot">{batch.error ? batch.error.message : '加载中…'}</div>;
   const data = batch.data;
@@ -185,6 +186,11 @@ export function BatchDetailPage() {
                   {step.run && step.kind === 'review' && ['ready', 'running'].includes(step.run.state) && can('step.review') ? (
                     <button className="btn sm primary" onClick={() => setReviewing(step.run)}>
                       审核
+                    </button>
+                  ) : null}
+                  {step.run && step.kind === 'gate' && step.run.state === 'ready' && can('step.review') ? (
+                    <button className="btn sm primary" onClick={() => setGateDeciding(step.run)}>
+                      质检判定
                     </button>
                   ) : null}
                   {step.run && step.kind === 'wait' && step.run.state === 'waiting' ? (
@@ -443,6 +449,10 @@ export function BatchDetailPage() {
         <StepReviewDialog run={reviewing} onClose={() => setReviewing(null)} invalidates={invalidates} />
       ) : null}
       {viewing ? <RecordDialog run={viewing} onClose={() => setViewing(null)} /> : null}
+
+      {gateDeciding ? (
+        <GateDecisionDialog run={gateDeciding} onClose={() => setGateDeciding(null)} invalidates={invalidates} />
+      ) : null}
 
       {verifying ? (
         <VerifyCommandDialog
@@ -994,6 +1004,76 @@ function ManualSubmitDialog({
 }
 
 /** 审核节点。批准才继续，退回生成上一个人工步骤的新尝试；不接受任意目标状态。 */
+/* 保持中的质检关卡：测量不合格或取不到数值时由 QA 判定。放行要写依据；判不合格按报废处理。 */
+function GateDecisionDialog({
+  run,
+  onClose,
+  invalidates,
+}: {
+  run: StepRunRow;
+  onClose: () => void;
+  invalidates: string[];
+}) {
+  const toast = useToast();
+  const { sign } = useSignature();
+  const [conclusion, setConclusion] = useState<'approved' | 'rejected'>('rejected');
+  const [reason, setReason] = useState('');
+  const decide = useMutation(
+    (signatureId: string) =>
+      api.post(`/step-runs/${run.id}/gate-decision`, { conclusion, reason, signature_id: signatureId }, true),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push(conclusion === 'approved' ? '已放行，流程继续' : '已判不合格，批次按报废处理');
+        onClose();
+      },
+    },
+  );
+  const measured = run.form_data as { field?: string; value?: unknown; min?: unknown; max?: unknown } | undefined;
+  return (
+    <Modal
+      title={`质检判定 · ${run.step_name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            disabled={decide.pending || !reason.trim()}
+            onClick={() =>
+              sign(`质检关卡人工判定：${conclusion === 'approved' ? '放行' : '不合格'}`, run.id, ['质检判定属实'])
+                .then((signatureId) => (signatureId ? decide.run(signatureId) : undefined))
+                .catch((error) => toast.push(error.message))
+            }
+          >
+            签署并提交
+          </button>
+        </>
+      }
+    >
+      <div className="note warn">{run.reason || '关卡待人工判断'}</div>
+      {measured?.field ? (
+        <div className="small mono">
+          {measured.field} = {String(measured.value ?? '无数值')}（下限 {String(measured.min ?? '—')}，上限{' '}
+          {String(measured.max ?? '—')}）
+        </div>
+      ) : null}
+      <Field label="结论">
+        <select value={conclusion} onChange={(event) => setConclusion(event.target.value as typeof conclusion)}>
+          <option value="rejected">不合格（按报废处理）</option>
+          <option value="approved">放行，流程继续</option>
+        </select>
+      </Field>
+      <Field label="判定依据（必填）">
+        <textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {decide.error ? <div className="note bad">{decide.error.message}</div> : null}
+    </Modal>
+  );
+}
+
 function StepReviewDialog({
   run,
   onClose,

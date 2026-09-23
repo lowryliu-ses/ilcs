@@ -5,7 +5,7 @@ import { api } from '../../shared/api';
 import { num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { Factor, LotRow, MetricRow, PlanDetail } from '../../shared/types';
+import type { DesignSpace, Factor, LotRow, MetricRow, PlanDetail, ProposalRow } from '../../shared/types';
 import { useSignature } from '../../shared/signature';
 import {
   Blocked, CheckList, ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast,
@@ -405,7 +405,208 @@ export function PlanDetailPage() {
       ) : null}
 
       {editing ? <FactorEditor plan={data} onClose={() => setEditing(false)} invalidates={invalidates} /> : null}
+
+      {data.is_matrix ? <CampaignPanel plan={data} invalidates={invalidates} /> : null}
     </div>
+  );
+}
+
+/* 闭环实验活动：设计空间随审批冻结，外部优化器的提案超出它一律拒绝；
+   接受的提案只生成下一轮方案草稿，仍需锁定、提交并由 QA 批准。 */
+function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: string[] }) {
+  const { can } = useSession();
+  const toast = useToast();
+  const [editingSpace, setEditingSpace] = useState(false);
+  const proposals = useQuery<ProposalRow[]>(`plans:${plan.id}:proposals`, () =>
+    api.get<ProposalRow[]>(`/plans/${plan.id}/proposals`),
+  );
+  const space = plan.design_space ?? {};
+  const bounds = Object.entries(space.bounds ?? {});
+  const editable = plan.state === 'draft' && plan.approval_state !== 'approved' && can('plan.edit');
+  return (
+    <div className="grid cols-2">
+      <Panel
+        title={`闭环实验 · 第 ${plan.round_no ?? 1} 轮`}
+        aside={
+          <button
+            className="btn sm"
+            onClick={() =>
+              api.download(`/plans/${plan.id}/dataset.csv`, `${plan.id}-dataset.csv`).catch((e) => toast.push(e.message))
+            }
+          >
+            导出训练数据
+          </button>
+        }
+      >
+        {plan.parent_plan_id ? (
+          <div className="small">
+            由 <Link to={`/plans/${plan.parent_plan_id}`}>{plan.parent_plan_id}</Link> 的提案生成
+          </div>
+        ) : null}
+        {plan.design_points?.length ? (
+          <div className="small muted">本方案条件为 {plan.design_points.length} 个显式设计点（不做全因子组合）</div>
+        ) : null}
+        <div className="small" style={{ marginTop: 6 }}>
+          <b>设计空间</b>
+          {bounds.length ? (
+            <ul className="tight">
+              {bounds.map(([name, bound]) => (
+                <li key={name}>
+                  {name}：{bound.min ?? '−∞'} … {bound.max ?? '+∞'}
+                </li>
+              ))}
+              {(space.forbidden ?? []).map((rule, index) => (
+                <li key={`f${index}`} className="bad-text">
+                  禁止：{Object.entries(rule).map(([k, v]) => `${k}=${v}`).join('、')}
+                </li>
+              ))}
+              {space.max_points ? <li>每轮最多 {space.max_points} 个点</li> : null}
+            </ul>
+          ) : (
+            <div className="muted">未设置：不能接收外部提案</div>
+          )}
+        </div>
+        {editable ? (
+          <button className="btn sm" onClick={() => setEditingSpace(true)}>
+            编辑设计空间
+          </button>
+        ) : (
+          <div className="tiny muted">设计空间随方案审批冻结；已批准的方案才能接收提案</div>
+        )}
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          外部优化器用服务身份调用 POST /api/runtime/plans/{plan.id}/proposals（需 plan_proposals 授权）。
+          训练数据只含复核通过、质量有效的当前结果版本。
+        </div>
+      </Panel>
+      <Panel title={`收到的提案（${proposals.data?.length ?? 0}）`} flush>
+        {proposals.data?.length ? (
+          <table>
+            <tbody>
+              {proposals.data.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <span className="mono small">{row.proposal_id}</span>
+                    <div className="tiny muted">
+                      {row.source || '—'} · {row.model_version || '—'} · {row.points.length} 点
+                    </div>
+                    {row.issues.length ? <div className="tiny bad-text">{row.issues.slice(0, 3).join('；')}</div> : null}
+                  </td>
+                  <td>
+                    <Pill state={row.state === 'accepted' ? 'approved' : 'rejected'} label={row.state === 'accepted' ? '已接受' : '已拒绝'} />
+                  </td>
+                  <td className="row-end">
+                    {row.created_plan_id ? <Link to={`/plans/${row.created_plan_id}`}>{row.created_plan_id}</Link> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <Empty>还没有提案</Empty>
+        )}
+      </Panel>
+      {editingSpace ? (
+        <DesignSpaceDialog plan={plan} invalidates={invalidates} onClose={() => setEditingSpace(false)} />
+      ) : null}
+    </div>
+  );
+}
+
+function DesignSpaceDialog({
+  plan,
+  invalidates,
+  onClose,
+}: {
+  plan: PlanDetail;
+  invalidates: string[];
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const initial = plan.design_space ?? {};
+  const [bounds, setBounds] = useState<Record<string, { min: number | ''; max: number | '' }>>(() =>
+    Object.fromEntries(
+      plan.factors.map((factor) => {
+        const bound = initial.bounds?.[factor.name] ?? {};
+        return [factor.name, { min: bound.min ?? '', max: bound.max ?? '' }];
+      }),
+    ),
+  );
+  const [maxPoints, setMaxPoints] = useState<number | ''>(initial.max_points ?? '');
+  const [forbidden, setForbidden] = useState(() => JSON.stringify(initial.forbidden ?? [], null, 0));
+  const [error, setError] = useState('');
+  const save = useMutation((payload: Record<string, unknown>) => api.patch(`/plans/${plan.id}`, payload), {
+    invalidates,
+    onSuccess: () => {
+      toast.push('设计空间已保存；随方案审批冻结');
+      onClose();
+    },
+  });
+  const submit = () => {
+    let rules: DesignSpace['forbidden'];
+    try {
+      rules = JSON.parse(forbidden || '[]');
+      if (!Array.isArray(rules)) throw new Error();
+    } catch {
+      setError('禁止组合必须是 JSON 数组，如 [{"FEC 含量": 10, "注液量": 40}]');
+      return;
+    }
+    const design_space: DesignSpace = {
+      bounds: Object.fromEntries(
+        Object.entries(bounds).map(([name, bound]) => [
+          name,
+          { min: bound.min === '' ? null : bound.min, max: bound.max === '' ? null : bound.max },
+        ]),
+      ),
+      forbidden: rules,
+      ...(maxPoints === '' ? {} : { max_points: maxPoints }),
+    };
+    save.run({ design_space, row_version: plan.row_version }).catch((e) => setError(e.message));
+  };
+  return (
+    <Modal
+      title={`设计空间 · ${plan.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={save.pending} onClick={submit}>
+            保存
+          </button>
+        </>
+      }
+    >
+      <div className="note">外部优化器的提案必须落在这里的边界内、且不命中禁止组合；超出的整份提案被拒绝并留档。</div>
+      {plan.factors.map((factor) => (
+        <div className="grid cols-3" key={factor.name}>
+          <Field label="因子">
+            <input readOnly value={`${factor.name}${factor.unit ? `（${factor.unit.trim()}）` : ''}`} />
+          </Field>
+          <Field label="下限">
+            <NumberInput
+              value={bounds[factor.name]?.min ?? ''}
+              ariaLabel={`${factor.name} 下限`}
+              onChange={(next) => setBounds((current) => ({ ...current, [factor.name]: { ...current[factor.name], min: next } }))}
+            />
+          </Field>
+          <Field label="上限">
+            <NumberInput
+              value={bounds[factor.name]?.max ?? ''}
+              ariaLabel={`${factor.name} 上限`}
+              onChange={(next) => setBounds((current) => ({ ...current, [factor.name]: { ...current[factor.name], max: next } }))}
+            />
+          </Field>
+        </div>
+      ))}
+      <Field label="每轮最多设计点数（可选）">
+        <NumberInput value={maxPoints} ariaLabel="最多设计点数" onChange={(next) => setMaxPoints(next)} />
+      </Field>
+      <Field label="禁止组合（JSON 数组）" hint='如 [{"FEC 含量": 10, "注液量": 40}]'>
+        <textarea rows={2} className="mono" value={forbidden} onChange={(event) => setForbidden(event.target.value)} />
+      </Field>
+      {error ? <div className="note bad">{error}</div> : null}
+    </Modal>
   );
 }
 

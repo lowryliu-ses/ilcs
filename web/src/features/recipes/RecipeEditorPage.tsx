@@ -24,6 +24,7 @@ import {
   kindOf,
   needsStation,
   STEP_KINDS,
+  AUTOMATIC_KINDS,
   type StepKind,
 } from './rules';
 
@@ -155,7 +156,7 @@ export function RecipeEditorPage() {
     });
 
   /** 人工、等待、审核节点不绑定能力，也不占工位——它们不需要「可承接工位」。 */
-  const addNonDeviceStep = (kind: 'manual' | 'wait' | 'review') => {
+  const addNonDeviceStep = (kind: 'manual' | 'wait' | 'review' | 'gate' | 'split') => {
     if (kind === 'manual') {
       insert({
         kind: 'manual',
@@ -170,6 +171,17 @@ export function RecipeEditorPage() {
     }
     if (kind === 'wait') {
       insert({ kind: 'wait', name: '等待', cap: '', params: {}, dur: 30, wait_for: { mode: 'duration' } });
+      return;
+    }
+    if (kind === 'gate') {
+      insert({
+        kind: 'gate', name: '质检关卡', cap: '', params: {}, dur: 0,
+        gate: { scope: 'batch', on_fail: 'hold', max_rework: 2 },
+      });
+      return;
+    }
+    if (kind === 'split') {
+      insert({ kind: 'split', name: '样本拆分', cap: '', params: {}, dur: 0, split: { count: 4, child_type: '' } });
       return;
     }
     insert({ kind: 'review', name: '审核', cap: '', params: {}, dur: 0, review_role: 'qa' });
@@ -285,7 +297,7 @@ export function RecipeEditorPage() {
           step={step}
           selected={selected === index}
           readOnly={readOnly}
-          issues={stepIssues(step, capabilityIndex)}
+          issues={stepIssues(step, capabilityIndex, draft.steps, index)}
           fits={stationsForStep(stations.data, step).map((station) => station.id)}
           capabilityName={capabilityIndex[step.cap]?.name ?? step.cap}
           paramLabels={capabilityIndex[step.cap]?.params ?? {}}
@@ -362,7 +374,7 @@ export function RecipeEditorPage() {
               <div className="cap-head">
                 <b>非设备节点</b>
               </div>
-              <div className="small muted">人工记录、定时等待、流程审核；它们不绑定能力，也不占工位。</div>
+              <div className="small muted">人工记录、定时等待、流程审核、质检关卡、样本拆分；它们不绑定能力，也不占工位。</div>
               <div className="filters" style={{ marginTop: 6 }}>
                 <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('manual')}>
                   + 人工
@@ -372,6 +384,12 @@ export function RecipeEditorPage() {
                 </button>
                 <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('review')}>
                   + 审核
+                </button>
+                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('gate')}>
+                  + 质检关卡
+                </button>
+                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('split')}>
+                  + 样本拆分
                 </button>
               </div>
             </div>
@@ -419,6 +437,7 @@ export function RecipeEditorPage() {
             index={selected}
             step={draft.steps[selected]}
             previous={draft.steps[selected - 1]}
+            steps={draft.steps}
             capabilities={capabilities.data ?? []}
             capabilityIndex={capabilityIndex}
             stations={stations.data}
@@ -584,10 +603,16 @@ function FlowNode({
             ? step.wait_for?.mode === 'event'
               ? `等待事件 ${step.wait_for.event || '未选择'}`
               : '定时等待'
+            : kind === 'gate'
+            ? `${step.gate?.field || '未选字段'} ${step.gate?.min ?? '−∞'}…${step.gate?.max ?? '+∞'} · ${
+                { rework: '返工', scrap: '报废', hold: '保持' }[step.gate?.on_fail ?? 'hold']
+              }`
+            : kind === 'split'
+            ? `每样本拆 ${step.split?.count ?? '?'} 个${step.split?.child_type || ''}`
             : `审核角色 ${step.review_role || 'qa'}`}
         </span>
         <span className="fn-foot">
-          <span className="mono">{kind === 'review' ? '—' : `${step.dur} min`}</span>
+          <span className="mono">{AUTOMATIC_KINDS.includes(kind) ? '—' : `${step.dur} min`}</span>
           {requiresStation ? (
             <span className={fits.length ? 'muted' : 'bad'}>{fits.length ? fits.join(' ') : '无可承接工位'}</span>
           ) : (
@@ -605,6 +630,7 @@ function StepProperties({
   index,
   step,
   previous,
+  steps,
   capabilities,
   capabilityIndex,
   stations,
@@ -621,6 +647,7 @@ function StepProperties({
   index: number;
   step: RecipeStep;
   previous?: RecipeStep;
+  steps: RecipeStep[];
   capabilities: CapabilityRow[];
   capabilityIndex: Record<string, CapabilityRow>;
   stations: StationRow[] | undefined;
@@ -666,6 +693,8 @@ function StepProperties({
               }
               if (next === 'wait' && !current.wait_for) current.wait_for = { mode: 'duration' };
               if (next === 'review' && !current.review_role) current.review_role = 'qa';
+              if (next === 'gate' && !current.gate) current.gate = { scope: 'batch', on_fail: 'hold', max_rework: 2 };
+              if (next === 'split' && !current.split) current.split = { count: 4, child_type: '' };
             })
           }
         >
@@ -815,6 +844,28 @@ function StepProperties({
         </Field>
       ) : null}
 
+      {kind === 'gate' ? <GateFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} /> : null}
+      {kind === 'split' ? (
+        <div className="grid cols-2">
+          <Field label="每个样本拆分份数" hint="如一瓶电解液做 4 个扣电">
+            <NumberInput
+              value={step.split?.count ?? ''}
+              disabled={readOnly}
+              ariaLabel="拆分份数"
+              onChange={(next) => onSet((current) => void (current.split = { ...current.split, count: next === '' ? undefined : next }))}
+            />
+          </Field>
+          <Field label="子样本类型">
+            <input
+              value={step.split?.child_type ?? ''}
+              readOnly={readOnly}
+              placeholder="扣电 / 极片"
+              onChange={(event) => onSet((current) => void (current.split = { ...current.split, child_type: event.target.value }))}
+            />
+          </Field>
+        </div>
+      ) : null}
+
       {kind === 'review' ? (
         <Field label="审核角色" hint="批准才继续；本人不能审核本人提交的上游记录">
           <select
@@ -866,15 +917,17 @@ function StepProperties({
         <div className="small muted">该能力无参数</div>
       ) : null}
 
-      <Field label="计划时长 min" hint="仅用于排程；实际终点由设备事件决定">
-        <NumberInput
-          value={step.dur}
-          invalid={!(step.dur > 0)}
-          disabled={readOnly}
-          ariaLabel="计划时长"
-          onChange={(next) => onSet((current) => void (current.dur = next === '' ? 0 : next))}
-        />
-      </Field>
+      {!AUTOMATIC_KINDS.includes(kind) ? (
+        <Field label="计划时长 min" hint="仅用于排程；实际终点由设备事件决定">
+          <NumberInput
+            value={step.dur}
+            invalid={!(step.dur > 0)}
+            disabled={readOnly}
+            ariaLabel="计划时长"
+            onChange={(next) => onSet((current) => void (current.dur = next === '' ? 0 : next))}
+          />
+        </Field>
+      ) : null}
 
       <label className="check">
         <input
@@ -1116,5 +1169,103 @@ function RecipeProperties({
 
       <div className="small muted">选中画布上的步骤可编辑它的参数与硬时限。</div>
     </Panel>
+  );
+}
+
+/* 质检关卡：读取之前某个设备步骤回执里的测量值（如 KF 水分、黏度、面密度），按阈值自动判定。
+   取不到数值不等于合格——一律转人工判断。 */
+function GateFields({
+  step,
+  steps,
+  index,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  steps: RecipeStep[];
+  index: number;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const gate = step.gate ?? {};
+  const idOf = (row: RecipeStep, position: number) => row.step_id || `s${String(position + 1).padStart(2, '0')}`;
+  const earlier = steps.slice(0, index).map((row, position) => ({ row, position, id: idOf(row, position) }));
+  const set = (change: Partial<NonNullable<RecipeStep['gate']>>) =>
+    onSet((current) => void (current.gate = { ...current.gate, ...change }));
+  return (
+    <>
+      <div className="grid cols-2">
+        <Field label="测量来源（之前的设备步骤）">
+          <select value={gate.source_step_id ?? ''} disabled={readOnly} onChange={(event) => set({ source_step_id: event.target.value })}>
+            <option value="">选择步骤</option>
+            {earlier
+              .filter(({ row }) => kindOf(row) === 'device')
+              .map(({ row, position, id }) => (
+                <option key={id} value={id}>
+                  第 {position + 1} 步 · {row.name}
+                </option>
+              ))}
+          </select>
+        </Field>
+        <Field label="测量字段" hint="设备回执 delivered 里的键，如 water_ppm">
+          <input value={gate.field ?? ''} readOnly={readOnly} onChange={(event) => set({ field: event.target.value })} />
+        </Field>
+      </div>
+      <div className="grid cols-3">
+        <Field label="下限">
+          <NumberInput
+            value={gate.min ?? ''}
+            disabled={readOnly}
+            ariaLabel="下限"
+            onChange={(next) => set({ min: next === '' ? null : next })}
+          />
+        </Field>
+        <Field label="上限">
+          <NumberInput
+            value={gate.max ?? ''}
+            disabled={readOnly}
+            ariaLabel="上限"
+            onChange={(next) => set({ max: next === '' ? null : next })}
+          />
+        </Field>
+        <Field label="判定范围">
+          <select value={gate.scope ?? 'batch'} disabled={readOnly} onChange={(event) => set({ scope: event.target.value as 'batch' | 'sample' })}>
+            <option value="batch">整批（一个测量值）</option>
+            <option value="sample">逐孔位（不合格样本单独剔除）</option>
+          </select>
+        </Field>
+      </div>
+      <div className="grid cols-3">
+        <Field label="不合格去向">
+          <select value={gate.on_fail ?? 'hold'} disabled={readOnly} onChange={(event) => set({ on_fail: event.target.value as 'rework' | 'scrap' | 'hold' })}>
+            <option value="hold">保持，待 QA 判定</option>
+            <option value="rework">返工</option>
+            <option value="scrap">报废</option>
+          </select>
+        </Field>
+        {gate.on_fail === 'rework' ? (
+          <>
+            <Field label="返工回到">
+              <select value={gate.rework_to ?? ''} disabled={readOnly} onChange={(event) => set({ rework_to: event.target.value })}>
+                <option value="">选择步骤</option>
+                {earlier.map(({ row, position, id }) => (
+                  <option key={id} value={id}>
+                    第 {position + 1} 步 · {row.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="最多返工次数" hint="超过后转 QA 判定">
+              <NumberInput
+                value={gate.max_rework ?? ''}
+                disabled={readOnly}
+                ariaLabel="最多返工次数"
+                onChange={(next) => set({ max_rework: next === '' ? undefined : next })}
+              />
+            </Field>
+          </>
+        ) : null}
+      </div>
+    </>
   );
 }

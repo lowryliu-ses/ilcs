@@ -23,6 +23,7 @@ from urllib.request import (
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core.config import settings
+from .contract import parse_receipt
 from .base import (
     AdapterContract, AdapterError, AdapterIndeterminate, AdapterUnreachable, CommandRequest,
     CommandResult,
@@ -30,7 +31,6 @@ from .base import (
 
 DRIVER = "http_json_v1"
 MAX_RESPONSE_BYTES = 1024 * 1024
-STATES = {"accepted", "running", "done", "failed", "unknown"}
 # 这些状态码说明网关收到了请求但没有给出确定结论：重复投递冲突、超时、限流。
 # 设备可能已经在动作，不能当成「明确拒绝」去走可重试分支。
 INDETERMINATE_STATUS = {408, 409, 425, 429}
@@ -284,51 +284,8 @@ class HttpJsonAdapter:
             "target_command_id": request.target_command_id,
         }
 
-    def _device_time(self, value) -> datetime:
-        """设备时间统一换算为库内的无时区 UTC。带偏移的按偏移换算，不带的按 device_timezone。"""
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise AdapterIndeterminate("设备回执 device_ts 不是 ISO-8601 时间") from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=self.device_timezone)
-        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-
     def _result(self, response: dict, command_id: str) -> CommandResult:
-        # 回执已经到达，字段不合规只说明「无法确认」，不能说明「设备没动」
-        returned_id = str(response.get("command_id") or "")
-        if returned_id != command_id:
-            raise AdapterIndeterminate(
-                f"设备回执 command_id 不匹配：期望 {command_id}，实际 {returned_id or '缺失'}"
-            )
-        state = str(response.get("state") or "")
-        if state not in STATES:
-            raise AdapterIndeterminate(f"设备回执状态 {state or '缺失'} 不受支持")
-        timestamp = response.get("device_ts")
-        if not timestamp:
-            raise AdapterIndeterminate("设备回执缺少 device_ts")
-        device_ts = self._device_time(timestamp)
-        quality = str(response.get("quality") or "")
-        if quality not in {"good", "bad", "uncertain"}:
-            raise AdapterIndeterminate("设备回执 quality 只能是 good、bad 或 uncertain")
-        telemetry = []
-        for point in response.get("telemetry") or []:
-            try:
-                telemetry.append(
-                    (str(point["metric"]), float(point["value"]), point.get("setpoint"))
-                )
-            except (KeyError, TypeError, ValueError) as exc:
-                raise AdapterIndeterminate("设备回执 telemetry 格式无效") from exc
-        return CommandResult(
-            command_id=returned_id,
-            state=state,
-            device_ts=device_ts,
-            quality=quality,
-            delivered=response.get("delivered") or {},
-            telemetry=tuple(telemetry),
-            error=str(response.get("error") or ""),
-            origin=f"real:{DRIVER}",
-        )
+        return parse_receipt(response, command_id, f"real:{DRIVER}", self.device_timezone)
 
     def submit(self, request: CommandRequest) -> CommandResult:
         response = self._call(

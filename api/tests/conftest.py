@@ -62,14 +62,20 @@ def _clean() -> None:
         shutil.rmtree(files)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def no_resident_executor():
     """测试里没有常驻执行器：存活检查默认关闭，由专门用例显式打开。
 
     改的是运行时配置对象，不设环境变量——环境变量会泄漏进构造 `Settings()` 的配置门禁用例。
+    每个用例都取「当前」模块里的 settings：有用例会卸载并重新导入 app.*，之后进程里的
+    settings 就换成了新对象，只在会话开始时改一次会漏掉它。
     """
-    from app.core.config import settings
+    import sys
 
+    module = sys.modules.get("app.core.config")
+    if module is None:
+        from app.core import config as module
+    settings = module.settings
     original = settings.executor_stale_sec
     settings.executor_stale_sec = 0
     yield
@@ -111,7 +117,7 @@ def reset_runtime():
     from app.core.clock import now
     from app.core.db import SessionLocal
     from app.models import (
-        Adapter, Alarm, Allocation, Batch, Recipe, Station, StepRun, WorkflowEvent,
+        Adapter, Alarm, Allocation, Batch, Recipe, ResourceBooking, Station, StepRun, WorkflowEvent,
     )
 
     with SessionLocal() as session:
@@ -139,6 +145,10 @@ def reset_runtime():
             adapter.supports_dedup = True
         for recipe in session.query(Recipe).all():
             recipe.needs_revision = False
+        # 上一用例登记的维护 / 人工占用：排程会绕开它们，不清掉就会把后面用例的批次推迟
+        session.query(ResourceBooking).filter(ResourceBooking.state.in_(["pending", "confirmed"])).update(
+            {"state": "cancelled"}, synchronize_session=False
+        )
         # 上一用例制造的失联 / 联锁条件报警：设备已恢复健康，条件随之复位
         session.query(Alarm).filter(Alarm.condition_key.like("station:%")).update(
             {"condition_active": False, "state": "closed"}, synchronize_session=False

@@ -54,6 +54,7 @@ class StationService:
                     "status": station.status,
                     "cal_due": station.cal_due,
                     "positions": station.positions,
+                    "channels": station.channels or 1,
                     "clean": station.clean,
                     "limits": station.limits,
                     "retired": station.retired,
@@ -368,7 +369,8 @@ class StationService:
             id=payload["id"], org_id=self.ctx.org_id, asset_id=payload.get("asset_id", ""),
             island=payload.get("island", 0), name=payload["name"],
             model=payload.get("model", ""), status="idle", cal_due=payload.get("cal_due", ""),
-            positions=payload.get("positions", 1), clean=True, limits=payload.get("limits") or {},
+            positions=payload.get("positions", 1), channels=max(1, int(payload.get("channels") or 1)),
+            clean=True, limits=payload.get("limits") or {},
         )
         self.stations.add(station)
         if payload.get("protocol"):
@@ -494,7 +496,7 @@ class StationService:
         """改台账信息（名称、型号、岛、样品位、校准到期）。能力极限走单独的签名接口。"""
         station = self._require_station(station_id)
         self.stations.check_version(station, changes.pop("row_version", None), "工位")
-        allowed = {"name", "model", "island", "positions", "cal_due", "asset_id"}
+        allowed = {"name", "model", "island", "positions", "channels", "cal_due", "asset_id"}
         rejected = [k for k in changes if k not in allowed]
         if rejected:
             raise DomainError(f"这些字段不能在这里修改：{'、'.join(rejected)}；能力极限请用极限编辑并签名")

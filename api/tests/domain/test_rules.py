@@ -193,3 +193,18 @@ def test_stale_heartbeat_blocks_only_that_station():
 
     assert state["open"], "全站门只由联锁与执行器决定"
     assert state["blocked_stations"] == {"ST-03": "ST-03 遥测数据超时 7 min"}
+
+
+def test_probed_device_is_not_degraded_within_its_probe_period():
+    """执行器每 10 s 探测一次的设备，心跳 8 s 前是正常的；推心跳的设备 8 s 仍算降级。"""
+    adapters = [
+        AdapterHealth("ST-06", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(seconds=8),
+                      heartbeat_interval_sec=15),
+        AdapterHealth("ST-04", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(seconds=8)),
+        AdapterHealth("ST-07", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(seconds=20),
+                      heartbeat_interval_sec=15),
+    ]
+
+    state = evaluate_gate(adapters, NOW, stale_sec=300, degraded_sec=5)
+
+    assert state["degraded"] == ["ST-04 心跳间隔 8 s 超过 5 s 阈值", "ST-07 心跳间隔 20 s 超过 15 s 阈值"]

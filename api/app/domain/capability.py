@@ -10,6 +10,8 @@ class StationSpec:
     clean: bool = True
     cal_due: str = ""
     positions: int = 1
+    # 并行通道数：同一时刻能同时承接几个批次；样品位是单个批次的容量，二者不是一回事
+    channels: int = 1
     limits: dict[str, dict[str, list[float]]] = field(default_factory=dict)
     retired: bool = False
     # 一台资产可映射多个工位；容量约束按资产算，不按工位 ID 算

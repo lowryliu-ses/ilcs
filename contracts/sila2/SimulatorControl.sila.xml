@@ -1,0 +1,36 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="ilcs" FeatureVersion="1.0" MaturityLevel="Draft" Originator="ai.ses" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>SimulatorControl</Identifier>
+  <DisplayName>Simulator Control</DisplayName>
+  <Description>Fault injection for the ILCS SiLA 2 device simulator. Real devices do not implement this feature.</Description>
+  <Command>
+    <Identifier>SetFault</Identifier>
+    <DisplayName>Set Fault</DisplayName>
+    <Description>Set the active fault mode: none | offline | slow_submit | lost_receipt | no_dedup | fail | partial | stuck | interlock | busy | clock_skew. Parameter carries seconds for offline/slow_submit/clock_skew.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>Mode</Identifier>
+      <DisplayName>Mode</DisplayName>
+      <Description>Fault mode.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Parameter</Identifier>
+      <DisplayName>Parameter</DisplayName>
+      <Description>Numeric parameter as text, or empty.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>StateJson</Identifier>
+      <DisplayName>State Json</DisplayName>
+      <Description>Current simulator state.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+  </Command>
+  <Property>
+    <Identifier>SimulatorState</Identifier>
+    <DisplayName>Simulator State</DisplayName>
+    <Description>JSON: fault mode, task counts, executions per command id.</Description>
+    <Observable>No</Observable>
+    <DataType><Basic>String</Basic></DataType>
+  </Property>
+</Feature>

@@ -9,10 +9,14 @@ from ..core.config import settings
 from ..models import Adapter
 from .base import AdapterContract, AdapterError, DeviceAdapter
 from .http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
+from .sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
 from .simulation import SimulationAdapter
 
 _CACHE: dict[str, DeviceAdapter] = {}
-REAL_IMPLEMENTATIONS: dict[str, type] = {HTTP_JSON_DRIVER: HttpJsonAdapter}
+REAL_IMPLEMENTATIONS: dict[str, type] = {
+    HTTP_JSON_DRIVER: HttpJsonAdapter,
+    SILA2_DRIVER: Sila2Adapter,
+}
 
 
 def adapter_for(record: Adapter, capabilities: tuple[str, ...] = ()) -> DeviceAdapter:
@@ -56,3 +60,15 @@ def contract_of(record: Adapter) -> AdapterContract:
 
 def reset_cache() -> None:
     _CACHE.clear()
+
+
+def probe_interval(record: Adapter) -> float | None:
+    """由执行器主动探测在线的适配器返回探测周期（秒）；设备自己推心跳的返回 None。
+
+    `heartbeat_mode` 可在适配器配置里显式指定；sila2_v1 默认探测，其余默认推送。
+    """
+    if record.kind != "real":
+        return None
+    config = record.config or {}
+    mode = config.get("heartbeat_mode") or ("probe" if record.driver == SILA2_DRIVER else "push")
+    return float(config.get("probe_interval_sec") or 10) if mode == "probe" else None

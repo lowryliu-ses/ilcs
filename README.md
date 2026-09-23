@@ -149,6 +149,14 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 设备回执里报了实际消耗 | 按指令号去重直接入库存消耗；超预留或对不上预留不入账并报警；偏差超 5% 入账并报警待复核 |
 | 设备遥测上报 | 同一 `event_id` 只入库一次；设备时钟超前 5 分钟整批拒收；保留 1 年 |
 | 维护工单 | 建单即登记维护占用；开工资产转维护状态；完工写记录签名，不合格资产保持维护状态 |
+| 工位接到 SiLA 2 设备（`sila2_v1`） | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
+| 正式环境接入自报为模拟器的 SiLA 设备 | 健康检查拒绝 |
+| 质检关卡测量值超限 | 按方法配置返工（超过次数转 QA）/ 报废 / 保持待 QA 签名判定；取不到数值一律不放行 |
+| 逐孔位质检 | 不合格样本单独剔除，其余继续 |
+| 样本拆分节点 | 每个样本拆出 N 个子样本，谱系指向母样，继承条件分组 |
+| 多通道设备（`channels`） | 同一工位最多 N 个时间窗重叠；样品位不影响并行 |
+| 外部优化器提案 | 须落在已批准方案的设计空间内；接受只生成下一轮方案草稿，仍需 QA 批准；拒绝的也留档 |
+| 训练数据导出 | 整个实验活动各轮，只含复核通过、质量有效的当前结果版本 |
 | 硬时限无法满足 | 排程拒绝并指出是第几步 |
 | 编辑器里把某步时长改成 0 | 校验清单指出是第几步，提交评审 409 |
 | 不可中断能力请求保持 | 409，给出能力侧的副作用说明 |
@@ -165,11 +173,12 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 ```
 api/         FastAPI 服务：core / models / domain / repositories / services / adapters / api
-api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单
+api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单 → 0011 并行通道 / 设计空间 / 闭环提案
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
+simulators/  外部 SiLA 2 模拟设备（配液工作站 / 充放电柜，含故障注入），见 simulators/sila_device/README.md
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）
-contracts/   OpenAPI 快照
+contracts/   OpenAPI 快照；sila2/ 下是设备侧 TaskExecution 特性契约
 docs/        需求文档与迁移报告
 ```
 
@@ -263,6 +272,21 @@ Compose 将网络拆成 `frontend` 与 `backend`：nginx 只能访问 API，Post
 反查引用，不能只凭 `ref_type/ref_id` 辅助字段判断；正式环境把保留期设为 0 会被配置门禁拒绝。
 
 Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到同机其他 `deploy-*` 容器。
+
+### 试点：外部 SiLA 2 模拟设备
+
+真机到位前，可随 `ilcs` 项目启动两台外部 SiLA 2 模拟设备（配液工作站 `sila-sim-lh`、8 通道充放电柜
+`sila-sim-cycler`），只在后端网络可见、不占宿主端口：
+
+```bash
+sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/sila     # 证书目录，模拟设备首次启动写入自签证书
+# deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加 sila-sim-lh,sila-sim-cycler
+cd /opt/ilcs/deploy && docker compose --profile pilot up -d sila-sim-lh sila-sim-cycler
+```
+
+然后在「工位与能力」页把试点工位的适配器改成 `kind=real`、`driver=sila2_v1`，配置示例见
+[设备适配器配置模板](docs/设备适配器配置模板.md)；在线状态由执行器探测。模拟设备自报为模拟器，
+`ILCS_ENVIRONMENT=production` 时会被拒绝接入。故障注入与验收用法见 [simulators/sila_device/README.md](simulators/sila_device/README.md)。
 
 ### PostgreSQL 与附件备份恢复演练
 

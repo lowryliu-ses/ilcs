@@ -12,3 +12,7 @@ reportlab==4.2.5
 psycopg2-binary==2.9.10
 httpx==0.28.1
 pytest==8.3.4
+# SiLA 2 设备驱动（sila2_v1）与外部模拟设备共用；版本固定，驱动用到了客户端的调用细节
+sila2==0.14.0
+# 模拟设备生成自签 TLS 证书（sila2[cryptography] 的可选依赖）
+cryptography==50.0.1

@@ -47,3 +47,11 @@ def service_may_submit_task(scopes: dict, task_id: str) -> bool:
 def same_person(a: str, b: str) -> bool:
     """职责分离判据：按稳定用户 ID 比较，显示名称变化不改变历史身份。"""
     return bool(a) and bool(b) and a == b
+
+
+def service_may_propose(scopes: dict, plan_id: str) -> bool:
+    """外部优化器只能向授权过的方案提交提案；未声明范围就没有权限。"""
+    allowed = (scopes or {}).get("plan_proposals")
+    if allowed == "all":
+        return True
+    return isinstance(allowed, list) and plan_id in set(allowed)

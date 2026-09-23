@@ -247,6 +247,8 @@ class PlanCreateIn(BaseModel):
     seed: int = 1
     factors: list[dict[str, Any]] = []
     control: dict[str, Any] | None = None
+    design_space: dict[str, Any] = {}
+    design_points: list[list[Any]] = []
     sample_count: int = Field(default=0, ge=0, le=96)
     sample_ids: list[str] = []
     required_metrics: list[str] = []
@@ -265,10 +267,25 @@ class PlanPatchIn(Versioned):
     seed: int | None = None
     factors: list[dict[str, Any]] | None = None
     control: dict[str, Any] | None = None
+    # 设计空间随方案审批冻结，约束之后外部优化器的提案
+    design_space: dict[str, Any] | None = None
+    design_points: list[list[Any]] | None = None
     sample_count: int | None = Field(default=None, ge=0, le=96)
     sample_ids: list[str] | None = None
     required_metrics: list[str] | None = None
     resource_requirements: list[dict[str, Any]] | None = None
+
+
+class ProposalIn(BaseModel):
+    """下一轮实验提案。proposal_id 是提案方的稳定编号：同号重发回放原结论。"""
+
+    proposal_id: str = Field(min_length=1, max_length=128)
+    source: str = Field(default="", max_length=128)
+    model_version: str = Field(default="", max_length=128)
+    rationale: str = ""
+    # 每个点是 {因子名: 水平}；因子名必须与方案一致
+    points: list[dict[str, Any]] = Field(min_length=1, max_length=96)
+    repeats: int | None = Field(default=None, ge=1, le=12)
 
 
 class DecisionIn(BaseModel):
@@ -358,6 +375,13 @@ class StepSubmitIn(Versioned):
     checks: dict[str, bool] = {}
     note: str = ""
     signature_id: str | None = None
+
+
+class GateDecisionIn(Signed):
+    """保持中的质检关卡人工判定：放行或判不合格，都要写依据。"""
+
+    conclusion: Literal["approved", "rejected"]
+    reason: str
 
 
 class StepReviewIn(Versioned):
@@ -713,6 +737,7 @@ class StationCreateIn(Signed):
     model: str = ""
     cal_due: str = ""
     positions: int = Field(default=1, ge=1)
+    channels: int = Field(default=1, ge=1, le=512)
     limits: dict[str, dict[str, list[float]]] = {}
     asset_id: str = ""
     protocol: str = ""
@@ -752,6 +777,7 @@ class StationPatchIn(BaseModel):
     model: str | None = None
     island: int | None = None
     positions: int | None = Field(default=None, ge=1)
+    channels: int | None = Field(default=None, ge=1, le=512)
     cal_due: str | None = None
     asset_id: str | None = None
     # 乐观并发：带上读到的版本，别人先改过就 409，不做后写覆盖前写

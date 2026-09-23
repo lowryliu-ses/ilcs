@@ -529,6 +529,7 @@ class BatchService:
                 "id": plan.id, "name": plan.name, "plan_type": plan.plan_type, "goal": plan.goal,
                 "repeats": plan.repeats, "layout": plan.layout, "seed": plan.seed,
                 "factors": plan.factors, "control": plan.control,
+                "design_points": plan.design_points or [], "round_no": plan.round_no,
                 "sample_count": plan.sample_count, "sample_ids": plan.sample_ids,
                 "required_metrics": plan.required_metrics, "version": plan.version,
             }
@@ -549,6 +550,7 @@ class BatchService:
             assignments = well_layout(
                 plan.factors or [], plan.control, plan.repeats,
                 batch.recipe_snapshot.get("plate", 0), plan.layout, plan.seed,
+                plan.design_points or None,
             )
             rows = [
                 {
@@ -835,6 +837,9 @@ class BatchService:
         command = None
         if run.kind == DEVICE:
             command = self.issue_command(batch, "dispatch", 0, step_run_id=run.id)
+        elif run.kind in {"gate", "split"}:
+            # 系统自动执行的节点：开跑即判定 / 拆分，然后继续推进
+            self.workflow.enter(batch, run, 0)
         self.audit.record(
             user, "下发批次", batch.id, sign=True, meaning=signature.meaning, before="已排程",
             after="运行中", signature_id=signature.id,

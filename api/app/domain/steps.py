@@ -12,8 +12,15 @@ DEVICE = "device"
 MANUAL = "manual"
 WAIT = "wait"
 REVIEW = "review"
-KINDS = (DEVICE, MANUAL, WAIT, REVIEW)
-KIND_NAMES = {DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核"}
+# 质检关卡：读上游设备步骤回执里的测量值按阈值自动判定，不合格按配置返工 / 报废 / 保持
+GATE = "gate"
+# 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系
+SPLIT = "split"
+KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT)
+KIND_NAMES = {
+    DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核", GATE: "质检关卡", SPLIT: "样本拆分",
+}
+GATE_ON_FAIL = {"rework": "返工", "scrap": "报废", "hold": "保持待人工判断"}
 
 # 每类步骤适用哪些字段。不适用的字段即时校验时不提示缺失，服务端也不据此阻塞。
 APPLICABLE: dict[str, set[str]] = {
@@ -21,6 +28,8 @@ APPLICABLE: dict[str, set[str]] = {
     MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard"},
     WAIT: {"dur", "wait_for", "hard"},
     REVIEW: {"review_role", "dur"},
+    GATE: {"gate"},
+    SPLIT: {"split"},
 }
 
 
@@ -101,7 +110,7 @@ def consumes_materials(step: dict[str, Any]) -> bool:
     被物料项永久拦住——这正是需求 DEV-07.3 点名的误拦。方法级是否要 BOM 由
     `recipe_rules.recipe_checks` 综合 BOM 与这些声明来判断。
     """
-    if kind_of(step) in {WAIT, REVIEW}:
+    if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT}:
         return False
     return bool((step or {}).get("consumes_materials", False))
 
@@ -170,6 +179,52 @@ def review_issues(step: dict[str, Any]) -> list[str]:
     if role not in {"qa", "researcher", "admin"}:
         return [f"审核角色 {role} 不在可选范围内"]
     return []
+
+
+def gate_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -> list[str]:
+    """质检关卡的配置。测量来源必须是它之前的设备步骤，返工目标不能晚于测量来源。"""
+    gate = (step or {}).get("gate") or {}
+    issues: list[str] = []
+    ids = [step_id_of(row, position) for position, row in enumerate(steps)]
+    source = str(gate.get("source_step_id") or "")
+    if source not in ids[:index]:
+        issues.append("质检关卡必须指定它之前的一个设备步骤作为测量来源")
+    elif kind_of(steps[ids.index(source)]) != DEVICE:
+        issues.append("测量来源必须是设备步骤：只有设备回执里有测量值")
+    if not str(gate.get("field") or "").strip():
+        issues.append("质检关卡必须指定测量字段（设备回执 delivered 里的键）")
+    bounds = [gate.get("min"), gate.get("max")]
+    numeric = [b for b in bounds if isinstance(b, (int, float)) and not isinstance(b, bool)]
+    if not numeric:
+        issues.append("质检关卡至少要有下限或上限")
+    elif len(numeric) == 2 and gate["min"] > gate["max"]:
+        issues.append("质检关卡下限不能大于上限")
+    if gate.get("scope", "batch") not in {"batch", "sample"}:
+        issues.append("判定范围只能是整批（batch）或逐孔位（sample）")
+    on_fail = gate.get("on_fail")
+    if on_fail not in GATE_ON_FAIL:
+        issues.append("不合格去向必须是返工、报废或保持待人工判断")
+    if on_fail == "rework":
+        target = str(gate.get("rework_to") or "")
+        if target not in ids[:index]:
+            issues.append("返工必须回到关卡之前的某一步")
+        elif source in ids and ids.index(target) > ids.index(source):
+            issues.append("返工目标不能晚于测量来源：否则返工不会重新测量")
+        rounds = gate.get("max_rework")
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 5:
+            issues.append("最多返工次数必须是 1–5 的整数；超过后转人工判断")
+    return issues
+
+
+def split_issues(step: dict[str, Any]) -> list[str]:
+    split = (step or {}).get("split") or {}
+    count = split.get("count")
+    issues: list[str] = []
+    if not isinstance(count, int) or isinstance(count, bool) or not 2 <= count <= 96:
+        issues.append("拆分份数必须是 2–96 的整数")
+    if not str(split.get("child_type") or "").strip():
+        issues.append("必须写明子样本类型（如 扣电、极片）")
+    return issues
 
 
 def missing_form_values(step: dict[str, Any], values: dict[str, Any]) -> list[str]:

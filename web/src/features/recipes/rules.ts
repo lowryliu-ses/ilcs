@@ -11,14 +11,19 @@ import type { BomItem, CapabilityRow, Check, RecipeStep, StationRow } from '../.
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
 
-export type StepKind = 'device' | 'manual' | 'wait' | 'review';
+export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
 
 export const STEP_KINDS: [StepKind, string][] = [
   ['device', '设备'],
   ['manual', '人工'],
   ['wait', '等待'],
   ['review', '审核'],
+  ['gate', '质检关卡'],
+  ['split', '样本拆分'],
 ];
+
+/** 系统即时判定 / 执行的节点：没有预定时长，也不占工位。 */
+export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split'];
 
 /** 旧步骤没有 kind：一律按设备步骤解释——它们本来就是。 */
 export function kindOf(step: RecipeStep): StepKind {
@@ -39,7 +44,7 @@ export function needsStation(step: RecipeStep): boolean {
 /** 只有显式声明消耗物料的步骤才要 BOM。默认是「不消耗」。 */
 export function consumesMaterials(step: RecipeStep): boolean {
   const kind = kindOf(step);
-  if (kind === 'wait' || kind === 'review') return false;
+  if (kind !== 'device' && kind !== 'manual') return false;
   return Boolean(step.consumes_materials);
 }
 
@@ -138,8 +143,50 @@ function reviewIssues(step: RecipeStep): string[] {
   return [];
 }
 
-/** 与工位无关的完整性问题，对应后端 step_issues。 */
-export function stepIssues(step: RecipeStep, capabilities: CapabilityIndex): string[] {
+const stepIdOf = (step: RecipeStep, index: number) => step.step_id || `s${String(index + 1).padStart(2, '0')}`;
+
+/** 质检关卡，对应后端 gate_issues：测量来源是之前的设备步骤，返工目标不晚于测量来源。 */
+function gateIssues(step: RecipeStep, steps: RecipeStep[], index: number): string[] {
+  const gate = step.gate ?? {};
+  const issues: string[] = [];
+  const ids = steps.map(stepIdOf);
+  const source = gate.source_step_id ?? '';
+  const sourceIndex = ids.slice(0, index).indexOf(source);
+  if (sourceIndex < 0) issues.push('质检关卡必须指定它之前的一个设备步骤作为测量来源');
+  else if (kindOf(steps[sourceIndex]) !== 'device') issues.push('测量来源必须是设备步骤：只有设备回执里有测量值');
+  if (!gate.field?.trim()) issues.push('质检关卡必须指定测量字段（设备回执 delivered 里的键）');
+  const bounds = [gate.min, gate.max].filter((b): b is number => typeof b === 'number' && Number.isFinite(b));
+  if (!bounds.length) issues.push('质检关卡至少要有下限或上限');
+  else if (bounds.length === 2 && (gate.min as number) > (gate.max as number)) issues.push('质检关卡下限不能大于上限');
+  if (!gate.on_fail) issues.push('不合格去向必须是返工、报废或保持待人工判断');
+  if (gate.on_fail === 'rework') {
+    const target = ids.slice(0, index).indexOf(gate.rework_to ?? '');
+    if (target < 0) issues.push('返工必须回到关卡之前的某一步');
+    else if (sourceIndex >= 0 && target > sourceIndex) issues.push('返工目标不能晚于测量来源：否则返工不会重新测量');
+    const rounds = gate.max_rework;
+    if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1 || rounds > 5) {
+      issues.push('最多返工次数必须是 1–5 的整数；超过后转人工判断');
+    }
+  }
+  return issues;
+}
+
+function splitIssues(step: RecipeStep): string[] {
+  const split = step.split ?? {};
+  const issues: string[] = [];
+  const count = split.count;
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 96) issues.push('拆分份数必须是 2–96 的整数');
+  if (!split.child_type?.trim()) issues.push('必须写明子样本类型（如 扣电、极片）');
+  return issues;
+}
+
+/** 与工位无关的完整性问题，对应后端 step_issues（关卡的跨步骤校验对应 validate_steps）。 */
+export function stepIssues(
+  step: RecipeStep,
+  capabilities: CapabilityIndex,
+  steps: RecipeStep[] = [step],
+  index = 0,
+): string[] {
   const issues: string[] = [];
   if (!step.name?.trim()) issues.push('步骤名称为空');
   const kind = kindOf(step);
@@ -147,10 +194,12 @@ export function stepIssues(step: RecipeStep, capabilities: CapabilityIndex): str
   if (kind === 'device') issues.push(...deviceIssues(step, capabilities));
   else if (kind === 'manual') issues.push(...manualIssues(step));
   else if (kind === 'wait') issues.push(...waitIssues(step));
+  else if (kind === 'gate') issues.push(...gateIssues(step, steps, index));
+  else if (kind === 'split') issues.push(...splitIssues(step));
   else issues.push(...reviewIssues(step));
 
-  // 审核节点没有预定时长，其余三类都要
-  if (kind !== 'review') {
+  // 审核、质检关卡、样本拆分即时判定 / 登记，没有预定时长
+  if (!AUTOMATIC_KINDS.includes(kind)) {
     if (typeof step.dur !== 'number' || !Number.isFinite(step.dur) || step.dur <= 0) {
       issues.push('计划时长必须大于 0');
     }
@@ -171,7 +220,7 @@ export function editorChecks(
   capabilities: CapabilityIndex,
   sopVersionId = '',
 ): Check[] {
-  const issues = steps.map((step) => stepIssues(step, capabilities));
+  const issues = steps.map((step, index) => stepIssues(step, capabilities, steps, index));
   const noStation = steps
     .map((step, index) => (!needsStation(step) || stationsForStep(stations, step).length ? null : index + 1))
     .filter((index): index is number => index !== null);

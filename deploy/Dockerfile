@@ -16,6 +16,9 @@ COPY --chown=ilcs:ilcs api /opt/ilcs/api
 COPY --chown=ilcs:ilcs executor /opt/ilcs/executor
 # 迁移脚本必须进镜像：迁移是部署的独立步骤，在容器里执行
 COPY --chown=ilcs:ilcs scripts /opt/ilcs/scripts
+# SiLA 2 特性契约与外部模拟设备：驱动与模拟器读同一份特性定义
+COPY --chown=ilcs:ilcs contracts /opt/ilcs/contracts
+COPY --chown=ilcs:ilcs simulators /opt/ilcs/simulators
 
 WORKDIR /opt/ilcs/api
 USER ilcs

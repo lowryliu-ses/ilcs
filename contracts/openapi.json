@@ -1088,6 +1088,34 @@
         "title": "FlagIn",
         "type": "object"
       },
+      "GateDecisionIn": {
+        "description": "保持中的质检关卡人工判定：放行或判不合格，都要写依据。",
+        "properties": {
+          "conclusion": {
+            "enum": [
+              "approved",
+              "rejected"
+            ],
+            "title": "Conclusion",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id",
+          "conclusion",
+          "reason"
+        ],
+        "title": "GateDecisionIn",
+        "type": "object"
+      },
       "GoldenBatchIn": {
         "properties": {
           "batch_id": {
@@ -2268,6 +2296,20 @@
             ],
             "title": "Control"
           },
+          "design_points": {
+            "default": [],
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "title": "Design Points",
+            "type": "array"
+          },
+          "design_space": {
+            "default": {},
+            "title": "Design Space",
+            "type": "object"
+          },
           "factors": {
             "default": [],
             "items": {
@@ -2377,6 +2419,32 @@
               }
             ],
             "title": "Control"
+          },
+          "design_points": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {},
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Design Points"
+          },
+          "design_space": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Design Space"
           },
           "factors": {
             "anyOf": [
@@ -2548,6 +2616,62 @@
           }
         },
         "title": "PlanPatchIn",
+        "type": "object"
+      },
+      "ProposalIn": {
+        "description": "下一轮实验提案。proposal_id 是提案方的稳定编号：同号重发回放原结论。",
+        "properties": {
+          "model_version": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Model Version",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 96,
+            "minItems": 1,
+            "title": "Points",
+            "type": "array"
+          },
+          "proposal_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "rationale": {
+            "default": "",
+            "title": "Rationale",
+            "type": "string"
+          },
+          "repeats": {
+            "anyOf": [
+              {
+                "maximum": 12.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeats"
+          },
+          "source": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "points"
+        ],
+        "title": "ProposalIn",
         "type": "object"
       },
       "PublishIn": {
@@ -3855,6 +3979,13 @@
             "title": "Cal Due",
             "type": "string"
           },
+          "channels": {
+            "default": 1,
+            "maximum": 512.0,
+            "minimum": 1.0,
+            "title": "Channels",
+            "type": "integer"
+          },
           "credential_ref": {
             "default": "",
             "title": "Credential Ref",
@@ -3973,6 +4104,19 @@
               }
             ],
             "title": "Cal Due"
+          },
+          "channels": {
+            "anyOf": [
+              {
+                "maximum": 512.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channels"
           },
           "island": {
             "anyOf": [
@@ -11708,6 +11852,68 @@
         ]
       }
     },
+    "/api/plans/{plan_id}/dataset.csv": {
+      "get": {
+        "description": "整个实验活动（各轮方案）的训练数据：只含复核通过、质量有效的当前结果版本。",
+        "operationId": "export_dataset_api_plans__plan_id__dataset_csv_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Dataset",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
     "/api/plans/{plan_id}/decision": {
       "post": {
         "description": "批准或驳回。批准后版本冻结；作者不能批准自己写的方案。",
@@ -11837,6 +12043,138 @@
           }
         ],
         "summary": "Lock Plan",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/{plan_id}/proposals": {
+      "get": {
+        "description": "这个方案收到过的提案，含被拒绝的与拒绝原因。",
+        "operationId": "list_proposals_api_plans__plan_id__proposals_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Proposals",
+        "tags": [
+          "plan"
+        ]
+      },
+      "post": {
+        "description": "研究员提交下一轮提案。校验通过只生成方案草稿，仍需锁定、提交并由 QA 批准。",
+        "operationId": "submit_proposal_api_plans__plan_id__proposals_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Submit Proposal",
         "tags": [
           "plan"
         ]
@@ -14302,6 +14640,89 @@
           }
         },
         "summary": "Command Event",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/plans/{plan_id}/proposals": {
+      "post": {
+        "description": "外部优化器提交下一轮提案。服务身份须在 plan_proposals 范围内授权该方案。",
+        "operationId": "optimizer_proposal_api_runtime_plans__plan_id__proposals_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimizer Proposal",
         "tags": [
           "runtime"
         ]
@@ -17181,6 +17602,94 @@
           }
         ],
         "summary": "Review Queue",
+        "tags": [
+          "workflow"
+        ]
+      }
+    },
+    "/api/step-runs/{step_run_id}/gate-decision": {
+      "post": {
+        "description": "保持中的质检关卡：QA 签名放行，或判不合格按报废处理。",
+        "operationId": "decide_gate_api_step_runs__step_run_id__gate_decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "step_run_id",
+            "required": true,
+            "schema": {
+              "title": "Step Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateDecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decide Gate",
         "tags": [
           "workflow"
         ]

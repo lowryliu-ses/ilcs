@@ -19,7 +19,7 @@ from ..core.config import settings
 from ..core.context import AccessContext, system_context
 from ..domain import workflow
 from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
-from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Telemetry
+from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from ..repositories.execution import (
     DISPATCHING, AdapterExecutionRepository, CheckpointRepository, CommandRepository,
@@ -510,6 +510,7 @@ class ExecutorLoop:
         ExecutorLiveness(self.db).beat()
         if simulate_heartbeat:
             self.heartbeat_simulated()
+        self.probe_devices()
         self.db.commit()
         monitor = DeviceMonitor(self.db)
         stations = monitor.stations()
@@ -673,6 +674,43 @@ class ExecutorLoop:
         self.db.commit()
         return completed
 
+    def probe_devices(self) -> int:
+        """主动探测真实设备的在线状态。
+
+        SiLA 设备不会往系统推心跳：由执行器按周期读取设备身份，读到了才算在线，并同步设备
+        自报的联锁与是否接受指令。探测失败只标失联，不编造心跳。心跳方式可在适配器配置里用
+        `heartbeat_mode` 指定：`probe`（sila2_v1 默认）或 `push`（设备自己上报，http_json_v1 默认）。
+        """
+        from ..adapters.registry import probe_interval
+
+        probed = 0
+        moment = now()
+        for record in self.adapters.list():
+            interval = probe_interval(record) if record.enabled else None
+            if interval is None:
+                continue
+            if record.connected and record.last_heartbeat and (moment - record.last_heartbeat).total_seconds() < interval:
+                continue
+            probed += 1
+            try:
+                health = adapter_for(record).healthcheck()
+            except AdapterUnreachable as exc:
+                record.connected = False
+                record.note = f"探测失败：{exc}"[:500]
+                continue
+            except (AdapterError, NotImplementedError) as exc:
+                # 身份不符、正式环境里的模拟器：设备在线也不能用
+                record.connected = False
+                record.accepts_commands = False
+                record.note = f"探测拒绝：{exc}"[:500]
+                continue
+            record.connected = True
+            record.last_heartbeat = moment
+            record.site_interlock = bool(health.get("interlock"))
+            record.accepts_commands = bool(health.get("accepts_commands", True))
+            record.note = f"探测在线：{health.get('device_id', '')}"
+        return probed
+
     def heartbeat_simulated(self) -> None:
         """只给模拟适配器补心跳。真实设备的在线状态必须由它自己上报。"""
         timestamp = now()
@@ -733,6 +771,9 @@ class ExecutorLoop:
         for command in self.commands.in_flight():
             if command.type not in DISPATCHING:
                 continue  # 保持 / 终止不占用工位的「当前指令」
+            station = self.db.get(Station, command.station_id)
+            if station is not None and (station.channels or 1) > 1:
+                continue  # 多通道设备同时有多条在途指令，「当前指令」只记最近一条，不能据此判不一致
             record = self.adapters.get(command.station_id)
             if record and record.current_command_id == command.id:
                 continue

@@ -101,6 +101,7 @@ export function StationsPage() {
               <th>工位</th>
               <th>状态</th>
               <th className="num">样品位</th>
+              <th className="num" title="同一时刻能同时承接的批次数">通道</th>
               <th>校准到期</th>
               <th>实现能力</th>
               <th />
@@ -124,6 +125,7 @@ export function StationsPage() {
                   <div className="tiny muted">{station.clean ? '已清洗' : '未清洗'}</div>
                 </td>
                 <td className="num">{station.positions}</td>
+                <td className="num">{station.channels ?? 1}</td>
                 <td className="small mono">{station.cal_due}</td>
                 <td className="small">
                   {Object.keys(station.limits).map((capability) => (
@@ -550,7 +552,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
             <option value="real">真实设备</option>
           </select>
         </Field>
-        <Field label="驱动键" hint="已内置 http_json_v1；其他键必须先在后端注册">
+        <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）与 sila2_v1（SiLA 2 TaskExecution）；其他键必须先在后端注册">
           <input
             className="mono"
             value={draft.kind === 'simulation' ? 'simulation' : draft.driver}
@@ -573,7 +575,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
           <input value={draft.version} onChange={(event) => update('version', event.target.value)} />
         </Field>
       </div>
-      <Field label="连接配置 JSON" hint='http_json_v1 示例：{"base_url":"https://gateway/api/v1","verify_tls":true,"expected_device_id":"ST-01"}'>
+      <Field label="连接配置 JSON" hint='http_json_v1：{"base_url":"https://gateway/api/v1","verify_tls":true,"expected_device_id":"ST-01"}；sila2_v1：{"host":"sila-sim-lh","port":50052,"ca_file":"/run/secrets/ilcs/sila/SIM-LH-01.crt","expected_device_id":"SIM-LH-01"}'>
         <textarea className="mono" rows={8} value={configText} onChange={(event) => setConfigText(event.target.value)} />
       </Field>
       <Field label="凭据引用" hint="只接受 vault://、env://、file://；不要填写密码、token 或私钥原文">
@@ -998,7 +1000,7 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
 function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[]; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
-  const [form, setForm] = useState({ id: 'ST-', name: '', island: 1, model: '', cal_due: '', positions: 1 });
+  const [form, setForm] = useState({ id: 'ST-', name: '', island: 1, model: '', cal_due: '', positions: 1, channels: 1 });
   const [protocol, setProtocol] = useState('');
   const [adapterVersion, setAdapterVersion] = useState('');
   const [adapterKind, setAdapterKind] = useState<'simulation' | 'real'>('simulation');
@@ -1111,6 +1113,9 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
         <Field label="样品位">
           <NumberInput value={form.positions} ariaLabel="样品位" invalid={!(form.positions >= 1)} onChange={(v) => setForm({ ...form, positions: Number(v) || 1 })} />
         </Field>
+        <Field label="并行通道数" hint="同一时刻能同时承接几个批次，如 8 通道充放电柜填 8">
+          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
+        </Field>
         <Field label="校准到期">
           <input value={form.cal_due} placeholder="2027-01-01" onChange={(e) => setForm({ ...form, cal_due: e.target.value })} />
         </Field>
@@ -1140,7 +1145,7 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
                 <option value="real">真实设备</option>
               </select>
             </Field>
-            <Field label="驱动键" hint="已内置 http_json_v1；其他键必须先在后端注册">
+            <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）与 sila2_v1（SiLA 2 TaskExecution）；其他键必须先在后端注册">
               <input
                 className="mono"
                 value={adapterKind === 'simulation' ? 'simulation' : adapterDriver}
@@ -1210,7 +1215,7 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
   const toast = useToast();
   const [form, setForm] = useState({
     name: station.name, model: station.model, island: station.island,
-    positions: station.positions, cal_due: station.cal_due,
+    positions: station.positions, channels: station.channels ?? 1, cal_due: station.cal_due,
   });
   const [error, setError] = useState('');
 
@@ -1252,6 +1257,9 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
       <div className="grid cols-2">
         <Field label="样品位">
           <NumberInput value={form.positions} ariaLabel="样品位" invalid={!(form.positions >= 1)} onChange={(v) => setForm({ ...form, positions: Number(v) || 1 })} />
+        </Field>
+        <Field label="并行通道数" hint="同一时刻能同时承接几个批次，如 8 通道充放电柜填 8">
+          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
         </Field>
         <Field label="校准到期">
           <input value={form.cal_due} onChange={(e) => setForm({ ...form, cal_due: e.target.value })} />

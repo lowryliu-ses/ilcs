@@ -5,7 +5,8 @@
 """
 from fastapi import APIRouter
 
-from ...schemas import CommandEventIn, HeartbeatIn, TelemetryIn
+from ...schemas import CommandEventIn, HeartbeatIn, ProposalIn, TelemetryIn
+from ...services.proposal_service import ProposalService
 from ...services.station_service import StationService
 from ..deps import DbSession, ServiceCtx
 
@@ -51,3 +52,9 @@ def adapter_contracts(db: DbSession, ctx: ServiceCtx):
         {"station_id": record.station_id, **contract_of(record).as_dict()}
         for record in service.adapters.list()
     ]
+
+
+@router.post("/plans/{plan_id}/proposals", status_code=201)
+def optimizer_proposal(plan_id: str, payload: ProposalIn, db: DbSession, ctx: ServiceCtx):
+    """外部优化器提交下一轮提案。服务身份须在 plan_proposals 范围内授权该方案。"""
+    return ProposalService(db, ctx).submit(plan_id, payload.model_dump())

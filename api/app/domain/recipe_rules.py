@@ -10,7 +10,8 @@ from typing import Any
 
 from .capability import StationSpec, out_of_range, stations_for_step
 from .steps import (
-    DEVICE, KIND_NAMES, KINDS, MANUAL, REVIEW, WAIT, consumes_materials, kind_of,
+    DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, REVIEW, SPLIT, WAIT, consumes_materials, gate_issues, kind_of,
+    split_issues,
     manual_issues, needs_station, resource_demand, review_issues, step_id_of, wait_issues,
 )
 
@@ -70,9 +71,11 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(wait_issues(step))
     elif kind == REVIEW:
         issues.extend(review_issues(step))
+    elif kind == SPLIT:
+        issues.extend(split_issues(step))
 
-    # 时长：审核节点没有预定时长，其余三类都要
-    if kind != REVIEW:
+    # 时长：审核、质检关卡、样本拆分是即时判定 / 登记，没有预定时长
+    if kind not in {REVIEW, GATE, SPLIT}:
         dur = step.get("dur")
         if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
             issues.append("计划时长必须大于 0")
@@ -98,6 +101,9 @@ def validate_steps(
         kind = kind_of(step)
         step_id = step_id_of(step, index)
         issues = step_issues(step, capabilities)
+        if kind == GATE:
+            # 关卡要看前后步骤，只能在整条流程上校验
+            issues.extend(gate_issues(step, steps, index))
         if step_id in seen_ids:
             issues.append(f"步骤标识 {step_id} 与第 {seen_ids[step_id] + 1} 步重复")
         seen_ids[step_id] = index
@@ -123,6 +129,8 @@ def validate_steps(
                 "form": step.get("form") or [],
                 "wait_for": step.get("wait_for") or {},
                 "review_role": step.get("review_role", ""),
+                "gate": step.get("gate") or {},
+                "split": step.get("split") or {},
                 "needs_station": requires_station,
                 "fits": [s.id for s in fits],
                 # 不需要工位的步骤：没有可承接工位不算问题

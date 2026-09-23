@@ -10,6 +10,9 @@ class AdapterHealth:
     site_interlock: bool
     last_heartbeat: datetime
     enabled: bool = True
+    # 执行器按周期主动探测的设备，心跳天然隔一个探测周期才刷新一次：
+    # 降级阈值取「全局阈值」与「探测周期 + 一个执行器轮询」中较大者，免得正常探测也报降级
+    heartbeat_interval_sec: float = 0
 
 
 def evaluate(adapters: list[AdapterHealth], now: datetime, stale_sec: int, degraded_sec: int) -> dict:
@@ -34,8 +37,8 @@ def evaluate(adapters: list[AdapterHealth], now: datetime, stale_sec: int, degra
             blocked[adapter.station_id] = f"{adapter.station_id} 适配器失联"
         elif age > stale_sec:
             blocked[adapter.station_id] = f"{adapter.station_id} 遥测数据超时 {age / 60:.0f} min"
-        elif age > degraded_sec:
-            degraded.append(f"{adapter.station_id} 心跳间隔 {age:.0f} s 超过 {degraded_sec} s 阈值")
+        elif age > (threshold := max(degraded_sec, adapter.heartbeat_interval_sec)):
+            degraded.append(f"{adapter.station_id} 心跳间隔 {age:.0f} s 超过 {threshold:.0f} s 阈值")
     return {
         "open": not reasons,
         "reasons": reasons,

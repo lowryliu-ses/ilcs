@@ -77,7 +77,7 @@ export type BatchSummary = {
 export type StepRow = {
   index: number;
   step_id: string;
-  kind: 'device' | 'manual' | 'wait' | 'review';
+  kind: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
   kind_label: string;
   /** 人工 / 等待 / 审核节点默认不占工位，除非显式声明 */
   needs_station: boolean;
@@ -339,7 +339,7 @@ export type RecipeDetail = RecipeSummary & {
     等待看 wait_for，审核看 review_role。step_id 稳定不复用。 */
 export type RecipeStep = {
   step_id?: string;
-  kind?: 'device' | 'manual' | 'wait' | 'review';
+  kind?: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
   name: string;
   cap: string;
   params: Record<string, number | ''>;
@@ -353,6 +353,19 @@ export type RecipeStep = {
   consumes_materials?: boolean;
   resource?: { station?: string; capability?: string; holds_station?: boolean };
   qualification?: { sop?: string; safety?: string };
+  /** 质检关卡：读测量来源步骤回执里的 field，按 min/max 判定 */
+  gate?: {
+    source_step_id?: string;
+    field?: string;
+    min?: number | null;
+    max?: number | null;
+    scope?: 'batch' | 'sample';
+    on_fail?: 'rework' | 'scrap' | 'hold';
+    rework_to?: string;
+    max_rework?: number;
+  };
+  /** 样本拆分：每个样本拆出 count 个子样本 */
+  split?: { count?: number; child_type?: string };
 };
 
 export type PlanSummary = {
@@ -399,6 +412,11 @@ export type PlanDetail = PlanSummary & {
   conditions: { group: string; levels: (number | string)[]; label: string; is_control: boolean }[];
   layout_preview: { well: string; group: string; repeat: number; label: string; is_control: boolean }[];
   target_options?: FactorTargetOption[];
+  /** 闭环：显式设计点（非空时条件就是这些点）、设计空间、来源方案与轮次 */
+  design_points: (number | string)[][];
+  design_space: DesignSpace;
+  parent_plan_id: string;
+  round_no: number;
   checks: Check[];
   lockable: boolean;
   materials: {
@@ -433,6 +451,8 @@ export type StationRow = {
   status: string;
   cal_due: string;
   positions: number;
+  /** 并行通道数：同一时刻能同时承接几个批次（如充放电柜通道）；样品位是单个批次的容量 */
+  channels: number;
   clean: boolean;
   limits: Record<string, Record<string, [number, number]>>;
   retired: boolean;
@@ -1046,7 +1066,7 @@ export type StepRunRow = {
   step_id: string;
   step_index: number;
   step_name: string;
-  kind: 'device' | 'manual' | 'wait' | 'review';
+  kind: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
   kind_label: string;
   attempt: number;
   state: string;
@@ -1411,4 +1431,24 @@ export type MaintenanceOrderRow = {
   result: '' | 'pass' | 'fail';
   record: string;
   row_version: number;
+};
+
+export type DesignSpace = {
+  bounds?: Record<string, { min?: number | null; max?: number | null }>;
+  forbidden?: Record<string, number | string>[];
+  max_points?: number;
+};
+
+export type ProposalRow = {
+  id: string;
+  plan_id: string;
+  proposal_id: string;
+  source: string;
+  model_version: string;
+  rationale: string;
+  points: Record<string, number | string>[];
+  state: 'accepted' | 'rejected';
+  issues: string[];
+  created_plan_id: string;
+  created_at: string;
 };

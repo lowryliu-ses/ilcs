@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .steps import DEVICE, MANUAL, REVIEW, WAIT, kind_of
+from .steps import DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, kind_of
 
 PENDING = "pending"
 READY = "ready"
@@ -17,14 +17,17 @@ COMPLETED = "completed"
 FAILED = "failed"
 UNKNOWN = "unknown"
 CANCELLED = "cancelled"
+# 被质检返工作废的一次执行：物理上做过，但结论不再算数，流程会重新做这一步
+SUPERSEDED = "superseded"
 
-STATES = (PENDING, READY, RUNNING, WAITING, COMPLETED, FAILED, UNKNOWN, CANCELLED)
+STATES = (PENDING, READY, RUNNING, WAITING, COMPLETED, FAILED, UNKNOWN, CANCELLED, SUPERSEDED)
 OPEN_STATES = {PENDING, READY, RUNNING, WAITING}
-TERMINAL_STATES = {COMPLETED, FAILED, CANCELLED}
+TERMINAL_STATES = {COMPLETED, FAILED, CANCELLED, SUPERSEDED}
 
 STATE_LABEL = {
     PENDING: "待开始", READY: "待办", RUNNING: "执行中", WAITING: "等待中",
     COMPLETED: "已完成", FAILED: "失败", UNKNOWN: "结果未知", CANCELLED: "已取消",
+    SUPERSEDED: "已被返工取代",
 }
 
 # 每类步骤允许的转换。任意 PATCH 目标状态的入口不存在，只能通过对应事件。
@@ -48,9 +51,28 @@ ALLOWED: dict[str, dict[str, set[str]]] = {
         PENDING: {READY, CANCELLED},
         READY: {COMPLETED, FAILED, CANCELLED},
     },
+    GATE: {
+        PENDING: {READY, CANCELLED},
+        READY: {COMPLETED, FAILED, CANCELLED},
+    },
+    SPLIT: {
+        PENDING: {READY, CANCELLED},
+        READY: {COMPLETED, CANCELLED},
+    },
 }
 
-INITIAL = {DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY}
+INITIAL = {DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY, GATE: READY, SPLIT: READY}
+
+
+def judge(value, minimum=None, maximum=None) -> bool | None:
+    """阈值判定。取不到数值返回 None：无法判定不等于合格。"""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if isinstance(minimum, (int, float)) and value < minimum:
+        return False
+    if isinstance(maximum, (int, float)) and value > maximum:
+        return False
+    return True
 
 
 def initial_state(step: dict) -> str:

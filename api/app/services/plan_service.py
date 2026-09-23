@@ -64,7 +64,7 @@ class PlanService:
             ]
         return [
             {"group": c.group, "levels": c.levels, "label": c.label, "is_control": c.is_control}
-            for c in matrix.conditions(plan.factors or [], plan.control)
+            for c in matrix.conditions(plan.factors or [], plan.control, plan.design_points or None)
         ]
 
     def sample_total(self, plan: Plan) -> int:
@@ -84,7 +84,8 @@ class PlanService:
                 "label": a.label, "is_control": a.is_control,
             }
             for a in matrix.layout(
-                plan.factors or [], plan.control, plan.repeats, recipe.plate, plan.layout, plan.seed
+                plan.factors or [], plan.control, plan.repeats, recipe.plate, plan.layout, plan.seed,
+                plan.design_points or None,
             )
         ]
 
@@ -100,7 +101,8 @@ class PlanService:
 
     def _matrix_checks(self, plan: Plan, plate: int) -> list[dict]:
         factors = plan.factors or []
-        conditions = matrix.conditions(factors, plan.control)
+        points = plan.design_points or []
+        conditions = matrix.conditions(factors, plan.control, points or None)
         total = len(conditions) * max(plan.repeats, 0) if factors else 0
         control_detail, control_ok = "未设对照（允许）", True
         if plan.control and plan.control.get("cond"):
@@ -115,8 +117,11 @@ class PlanService:
                 "detail": "、".join(
                     f"{f.get('name')} {len(f.get('levels') or [])} 水平" for f in factors
                 ) or "未定义因子",
-                "ok": bool(factors) and all(len(f.get("levels") or []) >= 2 for f in factors),
+                "ok": bool(factors) and (
+                    bool(points) or all(len(f.get("levels") or []) >= 2 for f in factors)
+                ),
             },
+            self._design_space_check(plan),
             {
                 "key": "capacity", "label": "条件 × 重复 不超过方法样品位",
                 "detail": f"{len(conditions)} × {plan.repeats} = {total}；方法每批 {plate} 位",
@@ -132,6 +137,22 @@ class PlanService:
             self._targets_check(plan),
             self._metrics_check(plan),
         ]
+
+    def _design_space_check(self, plan: Plan) -> dict:
+        """显式设计点必须落在设计空间内；没有设计点的全因子方案，设计空间只约束以后的提案。"""
+        points = plan.design_points or []
+        if not points:
+            return {
+                "key": "design_space", "label": "设计点在设计空间内",
+                "detail": "全因子方案；设计空间只约束后续提案" if plan.design_space else "未设置设计空间",
+                "ok": True,
+            }
+        issues = matrix.point_issues(plan.factors or [], points, plan.design_space or {})
+        return {
+            "key": "design_space", "label": "设计点在设计空间内",
+            "detail": "；".join(issues[:6]) or f"{len(points)} 个设计点均在设计空间内",
+            "ok": not issues,
+        }
 
     def _target_options(self, plan: Plan) -> list[dict]:
         """因子可以作用的设备参数：方法里每个设备步骤及其能力声明的参数。"""
@@ -255,7 +276,7 @@ class PlanService:
         recipe = self.recipes.require(plan.recipe_id, "方法不存在")
         demands = [{"factor": "方法 BOM", **item} for item in (recipe.bom or [])]
         if plan.plan_type == MATRIX:
-            demands += matrix.material_demand(plan.factors or [], plan.repeats)
+            demands += matrix.material_demand(plan.factors or [], plan.repeats, plan.design_points or None)
         rows = []
         for demand in demands:
             material, unit = demand.get("material"), demand.get("unit")
@@ -337,6 +358,10 @@ class PlanService:
             payload |= {
                 "factors": plan.factors,
                 "control": plan.control,
+                "design_points": plan.design_points or [],
+                "design_space": plan.design_space or {},
+                "parent_plan_id": plan.parent_plan_id,
+                "round_no": plan.round_no,
                 "conditions": conditions,
                 "layout_preview": self.layout(plan),
                 "checks": checks,
@@ -402,6 +427,8 @@ class PlanService:
             seed=payload.get("seed", 1),
             factors=payload.get("factors") or [],
             control=payload.get("control"),
+            design_space=payload.get("design_space") or {},
+            design_points=payload.get("design_points") or [],
             sample_count=payload.get("sample_count", 0),
             sample_ids=payload.get("sample_ids") or [],
             required_metrics=payload.get("required_metrics") or [],
@@ -604,6 +631,7 @@ class PlanService:
                 "id": plan.id, "name": plan.name, "plan_type": plan.plan_type,
                 "version": plan.version, "goal": plan.goal, "repeats": plan.repeats,
                 "layout": plan.layout, "seed": plan.seed, "factors": plan.factors,
+                "design_points": plan.design_points or [], "design_space": plan.design_space or {},
                 "control": plan.control, "sample_count": plan.sample_count,
                 "sample_ids": plan.sample_ids, "required_metrics": plan.required_metrics,
                 "resource_requirements": plan.resource_requirements,

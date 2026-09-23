@@ -89,7 +89,7 @@ STATIONS = [
     dict(id="ST-06", island=5, name="手套箱组装线", model="GB-ASSY-8", status="idle",
          cal_due="2027-03-17", positions=8, clean=True,
          limits={"cap.assemble": {"electrolyte": [10, 200]}}),
-    dict(id="ST-07", island=6, name="充放电测试柜", model="CYCLER-32", status="idle",
+    dict(id="ST-07", island=6, name="充放电测试柜", model="CYCLER-32", status="idle", channels=8,
          cal_due="2027-02-10", positions=32, clean=True,
          limits={"cap.test": {"rate": [0.01, 10], "vmax": [2.0, 5.0]}}),
     dict(id="AGV-01", island=0, name="AGV-01", model="MiR-250", status="idle",

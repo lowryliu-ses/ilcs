@@ -36,9 +36,13 @@ def well_grid(plate: int) -> list[str]:
     return [f"{COLUMN_LETTERS[index // cols]}{index % cols + 1}" for index in range(plate)]
 
 
-def conditions(factors: list[dict], control: dict | None) -> list[Condition]:
+def conditions(factors: list[dict], control: dict | None, points: list | None = None) -> list[Condition]:
+    """条件组。给了显式设计点就用这些点（闭环提案），否则做全因子组合。"""
     level_sets = [factor.get("levels") or [] for factor in factors]
-    combos = list(itertools.product(*level_sets)) if level_sets and all(level_sets) else [()]
+    if points:
+        combos = [tuple(point) for point in points]
+    else:
+        combos = list(itertools.product(*level_sets)) if level_sets and all(level_sets) else [()]
     control_levels = (control or {}).get("cond") or []
     rows = []
     for index, combo in enumerate(combos):
@@ -53,10 +57,13 @@ def conditions(factors: list[dict], control: dict | None) -> list[Condition]:
     return rows
 
 
-def layout(factors: list[dict], control: dict | None, repeats: int, plate: int, style: str, seed: int) -> list[WellAssignment]:
+def layout(
+    factors: list[dict], control: dict | None, repeats: int, plate: int, style: str, seed: int,
+    points: list | None = None,
+) -> list[WellAssignment]:
     items = [
         (condition, repeat + 1)
-        for condition in conditions(factors, control)
+        for condition in conditions(factors, control, points)
         for repeat in range(max(1, repeats))
     ]
     wells = well_grid(plate)
@@ -74,7 +81,7 @@ def layout(factors: list[dict], control: dict | None, repeats: int, plate: int, 
     return sorted(assignments, key=lambda a: wells.index(a.well))
 
 
-def material_demand(factors: list[dict], repeats: int) -> list[dict]:
+def material_demand(factors: list[dict], repeats: int, points: list | None = None) -> list[dict]:
     """因子水平换算到物料需求，用于计划页的物料预览。
 
     全因子矩阵里，一个因子的每个水平会出现在「其他因子水平数之积」个条件里：
@@ -87,14 +94,18 @@ def material_demand(factors: list[dict], repeats: int) -> list[dict]:
         if not material:
             continue
         per = float(material.get("per", 0) or 0)
-        others = 1
-        for index, count in enumerate(level_counts):
-            if index != position and count:
-                others *= count
-        total = (
-            sum(float(level) * per for level in factor.get("levels") or [])
-            * others * max(1, repeats)
-        )
+        if points:
+            # 显式设计点：逐点累加该因子的水平
+            total = sum(float(point[position]) * per for point in points if position < len(point)) * max(1, repeats)
+        else:
+            others = 1
+            for index, count in enumerate(level_counts):
+                if index != position and count:
+                    others *= count
+            total = (
+                sum(float(level) * per for level in factor.get("levels") or [])
+                * others * max(1, repeats)
+            )
         rows.append(
             {
                 "factor": factor.get("name"),
@@ -166,3 +177,41 @@ def condition_params(factors: list[dict], rows: list[dict]) -> dict[str, dict[st
                 continue
             result.setdefault(step_id, {}).setdefault(row["well"], {})[param] = levels[position]
     return result
+
+
+def point_issues(factors: list[dict], points: list, design_space: dict) -> list[str]:
+    """外部提案里的设计点是否落在已批准的设计空间内。逐点给出原因，不合格的点不会悄悄丢掉。"""
+    names = [factor.get("name") for factor in factors]
+    bounds = (design_space or {}).get("bounds") or {}
+    forbidden = (design_space or {}).get("forbidden") or []
+    limit = (design_space or {}).get("max_points")
+    issues: list[str] = []
+    if not points:
+        return ["提案没有任何设计点"]
+    if isinstance(limit, int) and len(points) > limit:
+        issues.append(f"提案 {len(points)} 个点超过设计空间允许的 {limit} 个")
+    seen: set[tuple] = set()
+    for number, point in enumerate(points, start=1):
+        if len(point) != len(names):
+            issues.append(f"第 {number} 个点有 {len(point)} 个水平，方案有 {len(names)} 个因子")
+            continue
+        key = tuple(point)
+        if key in seen:
+            issues.append(f"第 {number} 个点与前面的点重复")
+        seen.add(key)
+        for name, value in zip(names, point):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                issues.append(f"第 {number} 个点的 {name} = {value!r} 不是数值")
+                continue
+            bound = bounds.get(name) or {}
+            low, high = bound.get("min"), bound.get("max")
+            if isinstance(low, (int, float)) and value < low:
+                issues.append(f"第 {number} 个点的 {name} = {value} 低于设计空间下限 {low}")
+            if isinstance(high, (int, float)) and value > high:
+                issues.append(f"第 {number} 个点的 {name} = {value} 高于设计空间上限 {high}")
+        values = dict(zip(names, point))
+        for rule in forbidden:
+            if rule and all(values.get(name) == expected for name, expected in rule.items()):
+                combo = "、".join(f"{name}={expected}" for name, expected in rule.items())
+                issues.append(f"第 {number} 个点命中禁止组合（{combo}）")
+    return issues

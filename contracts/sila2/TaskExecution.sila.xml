@@ -1,0 +1,153 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="ilcs" FeatureVersion="1.0" MaturityLevel="Draft" Originator="ai.ses" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>TaskExecution</Identifier>
+  <DisplayName>Task Execution</DisplayName>
+  <Description>ILCS device task contract in SiLA 2 form. Actions are submitted and then polled by the ILCS CommandId; the device never needs to know about batches or workflows. Submit returns as soon as the device has accepted (or rejected) the task; long-running work is observed through QueryTask.</Description>
+  <Command>
+    <Identifier>SubmitTask</Identifier>
+    <DisplayName>Submit Task</DisplayName>
+    <Description>Submit an action. Returns state accepted/running when the device has taken the task, done when it finished synchronously.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>CommandId</Identifier>
+      <DisplayName>Command Id</DisplayName>
+      <Description>Stable command identifier issued by ILCS. A device that implements de-duplication MUST return the existing task for a repeated CommandId instead of acting twice.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>TaskType</Identifier>
+      <DisplayName>Task Type</DisplayName>
+      <Description>dispatch | resume | retry.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Capability</Identifier>
+      <DisplayName>Capability</DisplayName>
+      <Description>ILCS capability identifier, e.g. cap.assemble.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>ParametersJson</Identifier>
+      <DisplayName>Parameters Json</DisplayName>
+      <Description>JSON object of step parameters. Matrix plans add params.wells = {well: {param: value}}.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>ContextJson</Identifier>
+      <DisplayName>Context Json</DisplayName>
+      <Description>JSON object: batch_id, step_index, step_id, target_command_id.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ResultJson</Identifier>
+      <DisplayName>Result Json</DisplayName>
+      <Description>JSON receipt: command_id (echo), state (accepted|running|done|failed|unknown|not_found), device_ts (ISO-8601 with offset), quality (good|bad|uncertain), delivered (object; delivered.materials lists actual material consumption), telemetry (list of {metric, value, setpoint}), error (string).</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+    <DefinedExecutionErrors>
+      <Identifier>InvalidParameters</Identifier>
+      <Identifier>Interlocked</Identifier>
+      <Identifier>DeviceBusy</Identifier>
+    </DefinedExecutionErrors>
+  </Command>
+  <Command>
+    <Identifier>QueryTask</Identifier>
+    <DisplayName>Query Task</DisplayName>
+    <Description>Return the current receipt of a task by the ILCS CommandId; state not_found if the device never saw it.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>CommandId</Identifier>
+      <DisplayName>Command Id</DisplayName>
+      <Description>Stable command identifier issued by ILCS. A device that implements de-duplication MUST return the existing task for a repeated CommandId instead of acting twice.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ResultJson</Identifier>
+      <DisplayName>Result Json</DisplayName>
+      <Description>JSON receipt: command_id (echo), state (accepted|running|done|failed|unknown|not_found), device_ts (ISO-8601 with offset), quality (good|bad|uncertain), delivered (object; delivered.materials lists actual material consumption), telemetry (list of {metric, value, setpoint}), error (string).</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+  </Command>
+  <Command>
+    <Identifier>HoldTask</Identifier>
+    <DisplayName>Hold Task</DisplayName>
+    <Description>Hold the in-flight action named by TargetCommandId.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>CommandId</Identifier>
+      <DisplayName>Command Id</DisplayName>
+      <Description>Stable command identifier issued by ILCS. A device that implements de-duplication MUST return the existing task for a repeated CommandId instead of acting twice.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>TargetCommandId</Identifier>
+      <DisplayName>Target Command Id</DisplayName>
+      <Description>The in-flight action command this control request applies to.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ResultJson</Identifier>
+      <DisplayName>Result Json</DisplayName>
+      <Description>JSON receipt: command_id (echo), state (accepted|running|done|failed|unknown|not_found), device_ts (ISO-8601 with offset), quality (good|bad|uncertain), delivered (object; delivered.materials lists actual material consumption), telemetry (list of {metric, value, setpoint}), error (string).</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+    <DefinedExecutionErrors>
+      <Identifier>InvalidParameters</Identifier>
+      <Identifier>NotSupported</Identifier>
+    </DefinedExecutionErrors>
+  </Command>
+  <Command>
+    <Identifier>AbortTask</Identifier>
+    <DisplayName>Abort Task</DisplayName>
+    <Description>Abort the in-flight action named by TargetCommandId and bring the device to a safe state.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>CommandId</Identifier>
+      <DisplayName>Command Id</DisplayName>
+      <Description>Stable command identifier issued by ILCS. A device that implements de-duplication MUST return the existing task for a repeated CommandId instead of acting twice.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>TargetCommandId</Identifier>
+      <DisplayName>Target Command Id</DisplayName>
+      <Description>The in-flight action command this control request applies to.</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Parameter>
+    <Response>
+      <Identifier>ResultJson</Identifier>
+      <DisplayName>Result Json</DisplayName>
+      <Description>JSON receipt: command_id (echo), state (accepted|running|done|failed|unknown|not_found), device_ts (ISO-8601 with offset), quality (good|bad|uncertain), delivered (object; delivered.materials lists actual material consumption), telemetry (list of {metric, value, setpoint}), error (string).</Description>
+      <DataType><Basic>String</Basic></DataType>
+    </Response>
+    <DefinedExecutionErrors>
+      <Identifier>InvalidParameters</Identifier>
+      <Identifier>NotSupported</Identifier>
+    </DefinedExecutionErrors>
+  </Command>
+  <Property>
+    <Identifier>DeviceIdentity</Identifier>
+    <DisplayName>Device Identity</DisplayName>
+    <Description>JSON object: device_id, model, serial, firmware, simulator (true only for simulated devices), interlock (bool), accepts_commands (bool), device_ts.</Description>
+    <Observable>No</Observable>
+    <DataType><Basic>String</Basic></DataType>
+  </Property>
+  <DefinedExecutionError>
+    <Identifier>InvalidParameters</Identifier>
+    <DisplayName>Invalid Parameters</DisplayName>
+    <Description>Parameters are outside the device limits or malformed. The device did not act.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>Interlocked</Identifier>
+    <DisplayName>Interlocked</DisplayName>
+    <Description>A safety interlock is active. The device did not act.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>DeviceBusy</Identifier>
+    <DisplayName>Device Busy</DisplayName>
+    <Description>No free channel or slot. The device did not act.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>NotSupported</Identifier>
+    <DisplayName>Not Supported</DisplayName>
+    <Description>The device does not support this control.</Description>
+  </DefinedExecutionError>
+</Feature>

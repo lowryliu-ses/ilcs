@@ -76,6 +76,41 @@ class Plan(Base):
     method_version: Mapped[str] = mapped_column(String, default="")
     reject_reason: Mapped[str] = mapped_column(Text, default="")
     row_version: Mapped[int] = mapped_column(Integer, default=1)
+    # 显式设计点：每项是与 factors 对齐的一组水平。非空时条件就是这些点，不再做全因子组合——
+    # 优化器提出的下一轮配方是一组离散的点，不是网格
+    design_points: Mapped[list] = mapped_column(JSON, default=list)
+    # 设计空间：{"bounds": {因子名: {"min", "max"}}, "forbidden": [{因子名: 水平}], "max_points": N}。
+    # 随方案审批冻结；外部提案超出它一律拒绝
+    design_space: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 闭环实验活动：由哪一轮提案生成、第几轮
+    parent_plan_id: Mapped[str] = mapped_column(String, default="")
+    round_no: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class PlanProposal(Base):
+    """外部优化器（或研究员）提交的下一轮实验提案。
+
+    提案本身不直接变成可执行的实验：校验通过只生成方案草稿，仍需锁定、提交并由 QA 批准。
+    被拒绝的提案也留档——为什么拒、拒了哪些点，是闭环调参要看的东西。
+    """
+
+    __tablename__ = "plan_proposals"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    plan_id: Mapped[str] = mapped_column(String, index=True)
+    proposal_key: Mapped[str] = mapped_column(String)
+    digest: Mapped[str] = mapped_column(String, default="")
+    source: Mapped[str] = mapped_column(String, default="")
+    model_version: Mapped[str] = mapped_column(String, default="")
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    points: Mapped[list] = mapped_column(JSON, default=list)
+    # accepted | rejected
+    state: Mapped[str] = mapped_column(String, default="accepted")
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    created_plan_id: Mapped[str] = mapped_column(String, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("org_id", "plan_id", "proposal_key", name="uq_plan_proposal_key"),)
 
 
 class PlanVersion(Base):

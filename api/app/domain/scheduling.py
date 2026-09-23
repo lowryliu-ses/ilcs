@@ -56,14 +56,29 @@ class SchedulingError(Exception):
         self.step_index = step_index
 
 
+def _channels(context: SchedulingContext, station_id: str) -> int:
+    """工位并行通道数：同一时刻能同时承接几个批次（充放电柜按通道）。默认 1。
+
+    不是样品位——样品位是一个批次最多放几个样本，和能不能同时跑两个批次无关。
+    """
+    spec = next((s for s in context.stations if s.id == station_id), None)
+    return max(1, int(spec.channels)) if spec is not None and spec.channels else 1
+
+
 def _station_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
+    """工位上同时进行的时间窗少于并行容量的最早时刻。
+
+    重叠数按落在窗口里的区间直接计数，是并发量的上界：宁可多等，也不把通道排超。
+    """
+    channels = _channels(context, station_id)
+    intervals = sorted(context.busy.get(station_id, []), key=lambda i: i.start)
     cursor = not_before
-    for interval in sorted(context.busy.get(station_id, []), key=lambda i: i.start):
-        if cursor + duration <= interval.start:
-            break
-        if interval.end > cursor:
-            cursor = interval.end
-    return cursor
+    for _ in range(10_000):
+        overlapping = [i for i in intervals if i.start < cursor + duration and i.end > cursor]
+        if len(overlapping) < channels:
+            return cursor
+        cursor = min(i.end for i in overlapping)
+    raise SchedulingError(f"{station_id} 在可见时间范围内没有空闲通道", -1)
 
 
 def _asset_load(context: SchedulingContext, asset_id: str, station_id: str, window: Interval):

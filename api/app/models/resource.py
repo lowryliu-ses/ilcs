@@ -98,6 +98,8 @@ class Station(Base):
     status: Mapped[str] = mapped_column(String, default="idle")
     cal_due: Mapped[str] = mapped_column(String, default="")
     positions: Mapped[int] = mapped_column(Integer, default=1)
+    # 并行通道数（如 8 通道充放电柜）。排程按它允许同一工位的时间窗重叠
+    channels: Mapped[int] = mapped_column(Integer, default=1)
     clean: Mapped[bool] = mapped_column(Boolean, default=True)
     limits: Mapped[dict] = mapped_column(JSON, default=dict)  # {capability: {param: [lo, hi]}}
     # 退役工位不参与排程匹配，但历史分配与检查点仍指向它，所以不删行

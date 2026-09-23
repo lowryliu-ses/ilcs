@@ -23,7 +23,7 @@ class StationRepository(ScopedRepository[Station]):
         return [
             StationSpec(
                 id=s.id, status=s.status, clean=s.clean, cal_due=s.cal_due,
-                positions=s.positions, limits=s.limits or {}, retired=s.retired,
+                positions=s.positions, channels=s.channels or 1, limits=s.limits or {}, retired=s.retired,
                 asset_id=s.asset_id or "",
             )
             for s in self.list()
@@ -148,13 +148,18 @@ class AdapterRepository(Repository[Adapter]):
         return list(self.db.query(Adapter).order_by(Adapter.station_id).all())
 
     def health(self) -> list[AdapterHealth]:
-        return [
-            AdapterHealth(
+        from ..adapters.registry import probe_interval
+        from ..core.config import settings
+
+        rows = []
+        for a in self.list():
+            interval = probe_interval(a)
+            rows.append(AdapterHealth(
                 station_id=a.station_id, connected=a.connected, site_interlock=a.site_interlock,
                 last_heartbeat=a.last_heartbeat, enabled=bool(a.enabled),
-            )
-            for a in self.list()
-        ]
+                heartbeat_interval_sec=interval + settings.advance_poll_sec if interval else 0,
+            ))
+        return rows
 
 
 class IslandRepository(Repository[Island]):

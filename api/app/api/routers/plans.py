@@ -1,7 +1,10 @@
 from fastapi import APIRouter
 
-from ...schemas import DecisionIn, PlanCreateIn, PlanPatchIn
+from fastapi.responses import Response
+
+from ...schemas import DecisionIn, PlanCreateIn, PlanPatchIn, ProposalIn
 from ...services.plan_service import PlanService
+from ...services.proposal_service import ProposalService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
 
 router = APIRouter(prefix="/plans", tags=["plan"])
@@ -71,3 +74,27 @@ def decide_plan(
 def revise_plan(plan_id: str, db: DbSession, user: CurrentUser, ctx=require("plan.edit")):
     """修订已批准方案，生成新版本。原批准版本快照保留。"""
     return PlanService(db, ctx).revise(plan_id, user)
+
+
+@router.get("/{plan_id}/proposals")
+def list_proposals(plan_id: str, db: DbSession, ctx: Ctx):
+    """这个方案收到过的提案，含被拒绝的与拒绝原因。"""
+    return ProposalService(db, ctx).list(plan_id)
+
+
+@router.post("/{plan_id}/proposals", status_code=201)
+def submit_proposal(
+    plan_id: str, payload: ProposalIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit"),
+):
+    """研究员提交下一轮提案。校验通过只生成方案草稿，仍需锁定、提交并由 QA 批准。"""
+    return ProposalService(db, ctx).submit(plan_id, payload.model_dump(), user)
+
+
+@router.get("/{plan_id}/dataset.csv")
+def export_dataset(plan_id: str, db: DbSession, ctx: Ctx):
+    """整个实验活动（各轮方案）的训练数据：只含复核通过、质量有效的当前结果版本。"""
+    content = ProposalService(db, ctx).dataset_csv(plan_id)
+    return Response(
+        content="\ufeff" + content, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{plan_id}-dataset.csv"'},
+    )
