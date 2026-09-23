@@ -14,7 +14,7 @@ from ..repositories.people import PersonRepository, QualificationRepository
 from ..repositories.recipes import RecipeRepository
 from ..repositories.sops import SopAckRepository, SopRepository, SopVersionRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, admin_self_approval
 
 STATES = ("draft", "review", "published", "retired")
 STATE_LABEL = {"draft": "草稿", "review": "评审中", "published": "已发布", "retired": "已退役"}
@@ -241,7 +241,9 @@ class SopService:
         conclusion = payload.get("conclusion")
         if conclusion not in {"approved", "rejected"}:
             raise ValidationFailed("结论只能是 approved 或 rejected")
-        if same_person(version.author_id, user.id):
+        if same_person(version.author_id, user.id) and not admin_self_approval(
+            self.db, self.ctx, user, version.id, "批准本人编写的 SOP 版本",
+        ):
             raise PermissionDenied(
                 "不能批准本人编写的 SOP 版本（职责分离）", code="self_approval_denied"
             )

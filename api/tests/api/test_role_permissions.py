@@ -131,3 +131,57 @@ def test_account_roles_are_validated_and_self_lockout_blocked(admin):
     assert empty.status_code == 422
     demote = admin.patch(f"/api/admin/accounts/{me['id']}", {"roles": ["qa"], "row_version": me["row_version"]})
     assert demote.status_code == 409, "不能改自己当前会话的角色，也不能降级最后一个管理员"
+
+
+@pytest.fixture()
+def self_approval_on(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys.modules["app.core.config"].settings, "admin_self_approval", True)
+
+
+def _submitted_recipe(session, name):
+    draft = session.post("/api/recipes", {"name": name, "plate": 24, "copy_from": "R-201"})
+    assert draft.status_code == 201, draft.text
+    recipe_id = draft.json()["id"]
+    assert session.post(f"/api/recipes/{recipe_id}/submit").status_code == 200
+    return recipe_id
+
+
+def test_admin_self_approval_only_when_switch_on(admin, self_approval_on):
+    recipe_id = _submitted_recipe(admin, "管理员自审验证")
+    assert admin.get("/api/auth/me").json()["admin_self_approval"] is True
+    approved = admin.post(f"/api/recipes/{recipe_id}/transition", {
+        "target_state": "approved", "signature_id": admin.sign_recipe("批准方法", recipe_id),
+    })
+    assert approved.status_code == 200, approved.text
+    audit = admin.get(f"/api/audit?target={recipe_id}").json()
+    assert any(row["action"] == "测试环境管理员自审" for row in audit), "每次自审都留痕"
+
+
+def test_admin_self_approval_denied_by_default(admin):
+    recipe_id = _submitted_recipe(admin, "默认职责分离")
+    assert admin.get("/api/auth/me").json()["admin_self_approval"] is False
+    denied = admin.post(f"/api/recipes/{recipe_id}/transition", {
+        "target_state": "approved", "signature_id": admin.sign_recipe("批准方法", recipe_id),
+    })
+    assert denied.status_code == 403
+
+
+def test_switch_does_not_extend_to_other_roles(admin, researcher, roles_restored, self_approval_on):
+    account = _account(admin, "researcher")
+    admin.patch(f"/api/admin/accounts/{account['id']}", {
+        "roles": ["researcher", "qa"], "row_version": account["row_version"],
+    })
+    recipe_id = _submitted_recipe(researcher, "开关只放行管理员")
+    denied = researcher.post(f"/api/recipes/{recipe_id}/transition", {
+        "target_state": "approved", "signature_id": researcher.sign_recipe("批准方法", recipe_id),
+    })
+    assert denied.status_code == 403
+
+
+def test_switch_is_a_production_configuration_error():
+    from app.core.config import Settings
+
+    issues = Settings(environment="production", admin_self_approval=True).production_issues()
+    assert any("ILCS_ADMIN_SELF_APPROVAL" in issue for issue in issues)

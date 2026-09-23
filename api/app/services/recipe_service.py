@@ -17,7 +17,7 @@ from ..repositories.recipes import PlanRepository, RecipeRepository
 from ..repositories.resources import CapabilityRepository, StationRepository
 from ..repositories.sops import SopVersionRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService, user_may
+from .identity_service import IdentityService, admin_self_approval, user_may
 
 STATE_LABEL = {
     "draft": "草稿", "review": "评审中", "approved": "已批准", "released": "已发布", "retired": "已退役",
@@ -271,7 +271,7 @@ class RecipeService:
             raise StateConflict("能力校验未通过，已阻止")
         if target_state == "approved" and (
             same_person(recipe.author_user_id, user.id) or same_person(recipe.submitted_by, user.id)
-        ):
+        ) and not admin_self_approval(self.db, self.ctx, user, recipe.id, "批准本人编写或提交的方法"):
             # 管理员也不例外：同一个人编写、提交又批准，审批就只剩形式
             raise PermissionDenied(
                 "不能批准本人编写或提交的方法（职责分离）", code="self_approval_denied",

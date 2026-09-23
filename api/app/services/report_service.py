@@ -28,7 +28,7 @@ from ..repositories.samples import PhysicalSampleRepository
 from ..repositories.workflow import StepRunRepository
 from .audit_service import AuditService
 from .file_service import FileService, FileStore
-from .identity_service import IdentityService
+from .identity_service import IdentityService, admin_self_approval
 from .inventory_service import InventoryService
 
 ALGORITHM_VERSION = "stats-1.0"
@@ -554,7 +554,9 @@ class ReportService:
         conclusion = payload.get("conclusion")
         if conclusion not in {"approved", "rejected"}:
             raise ValidationFailed("结论只能是 approved 或 rejected")
-        if same_person(version.author_id, user.id):
+        if same_person(version.author_id, user.id) and not admin_self_approval(
+            self.db, self.ctx, user, version.id, "批准本人编写的报告",
+        ):
             raise PermissionDenied(
                 "不能批准本人编写的报告（职责分离）", code="self_approval_denied"
             )

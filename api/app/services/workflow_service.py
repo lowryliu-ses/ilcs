@@ -37,7 +37,7 @@ from ..repositories.workflow import (
     StepAdvanceRepository, StepRunRepository, WorkflowEventRepository,
 )
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, admin_self_approval
 
 
 class WorkflowService:
@@ -202,7 +202,9 @@ class WorkflowService:
             row for row in self.runs.for_batch(run.batch_id)
             if row.step_index < run.step_index and row.submitted_by
         ]
-        if any(same_person(row.submitted_by, user.id) for row in previous):
+        if any(same_person(row.submitted_by, user.id) for row in previous) and not admin_self_approval(
+            self.db, self.ctx, user, run.id, "审核本人提交的上游人工记录",
+        ):
             raise PermissionDenied(
                 "不能审核本人提交的上游人工记录（职责分离）", code="self_review_denied"
             )

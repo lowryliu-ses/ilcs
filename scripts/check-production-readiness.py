@@ -143,6 +143,8 @@ def inspect(values: dict[str, str], initial_seed: bool = False) -> tuple[list[st
         warnings.append("CORS 中存在非 HTTPS 来源；仅允许它位于受控内网并由上游网关终止 TLS")
     if values.get("ILCS_EXECUTOR_SIMULATE_HEARTBEAT", "0").strip().lower() in {"1", "true", "yes", "on"}:
         errors.append("正式环境不允许模拟心跳：ILCS_EXECUTOR_SIMULATE_HEARTBEAT 必须为 0 或删除")
+    if values.get("ILCS_ADMIN_SELF_APPROVAL", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        errors.append("正式环境不允许管理员自审：ILCS_ADMIN_SELF_APPROVAL 必须为 0 或删除")
 
     stale = values.get("ILCS_EXECUTOR_STALE_SEC", "60").strip()
     try:

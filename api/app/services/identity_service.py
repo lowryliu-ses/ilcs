@@ -36,6 +36,21 @@ def user_may(ctx: AccessContext | None, user: User, permission: str) -> bool:
     return permission in effective_permissions(roles_of(user))
 
 
+def admin_self_approval(db: Session, ctx: AccessContext | None, user: User, target: str, action: str) -> bool:
+    """测试环境里系统管理员能否审批本人的内容。放行时写一条审计，事后能分辨出哪些是自审。
+
+    只在 ILCS_ADMIN_SELF_APPROVAL 开启、非正式环境、且账号有系统管理员角色时成立；
+    其他角色（包括挂了多个角色的人）照常受职责分离约束。
+    """
+    if not (settings.admin_self_approval and settings.environment != "production" and ADMIN in roles_of(user)):
+        return False
+    AuditService(db, ctx).record(
+        user, "测试环境管理员自审", target,
+        detail=f"{action}：ILCS_ADMIN_SELF_APPROVAL 已开启，职责分离对系统管理员放行；正式环境不可开启",
+    )
+    return True
+
+
 class IdentityService:
     def __init__(self, db: Session, ctx: AccessContext | None = None):
         self.db = db
@@ -135,6 +150,10 @@ class IdentityService:
             "restricted_projects": bool(context.restricted_projects) if context else False,
             "project_ids": sorted(context.project_ids) if context else [],
             "must_change_password": bool(user.must_change_password),
+            # 测试环境开关：系统管理员可审批本人内容（界面据此提示）
+            "admin_self_approval": bool(
+                settings.admin_self_approval and settings.environment != "production" and ADMIN in roles_of(user)
+            ),
             "password_changed_at": (
                 user.password_changed_at.isoformat(timespec="seconds")
                 if user.password_changed_at else None

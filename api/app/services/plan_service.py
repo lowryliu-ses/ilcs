@@ -25,7 +25,7 @@ from ..repositories.metrics import MetricRepository
 from ..repositories.recipes import ExperimentTaskRepository, PlanRepository, PlanVersionRepository, RecipeRepository
 from ..repositories.samples import PhysicalSampleRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, admin_self_approval
 from .inventory_service import InventoryService
 
 MATRIX = "matrix"
@@ -557,7 +557,9 @@ class PlanService:
         version = self.versions.find(plan.id, plan.version)
         if version is None:
             raise StateConflict("找不到待审版本记录")
-        if same_person(version.author_id, user.id):
+        if same_person(version.author_id, user.id) and not admin_self_approval(
+            self.db, self.ctx, user, plan.id, "批准本人编写的方案",
+        ):
             raise PermissionDenied(
                 "不能批准本人编写的方案（职责分离）", code="self_approval_denied"
             )

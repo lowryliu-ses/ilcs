@@ -17,6 +17,8 @@ export type User = {
   project_ids: string[];
   must_change_password: boolean;
   password_changed_at: string | null;
+  /** 测试环境开关：系统管理员可审批本人内容 */
+  admin_self_approval?: boolean;
 };
 
 /** 执行门：`open`/`reasons` 是全站（联锁、执行器）；`blocked_stations` 是单台设备的失联 / 心跳超时，只挡用到它的批次。 */

@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ILCS_")
     app_name: str = "ILCS 实验室平台 API"
     environment: Literal["development", "test", "production"] = "development"
+    # 仅测试 / 演示：允许系统管理员审批、复核自己提交或录入的内容，每次放行都留审计。
+    # 正式环境开启即判配置不合格，服务不进入健康状态
+    admin_self_approval: bool = False
     secret_key: str = "ilcs-dev-change-me"
     # 口令摘要的 pepper 与 JWT 密钥分离；轮换令牌密钥不应使全部账号口令失效。
     # 为空时仅为兼容已有开发库而回落到 secret_key。
@@ -150,6 +153,8 @@ class Settings(BaseSettings):
             or self.adapter_allowed_host_set <= {"127.0.0.1", "localhost", "::1"}
         ):
             issues.append("ILCS_ADAPTER_ALLOWED_HOSTS 必须显式列出允许连接的设备网关主机")
+        if self.admin_self_approval:
+            issues.append("production 模式不允许 ILCS_ADMIN_SELF_APPROVAL=1；职责分离必须对所有人强制")
         if self.executor_simulate_heartbeat:
             issues.append("production 模式不允许 ILCS_EXECUTOR_SIMULATE_HEARTBEAT=1；设备在线状态必须由设备上报")
         if self.executor_stale_sec <= 0:

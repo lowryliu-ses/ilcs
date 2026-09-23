@@ -541,6 +541,11 @@ function RolePermissionsPanel() {
           </span>
         ) : null}
       </div>
+      {user?.admin_self_approval ? (
+        <div className="note warn">
+          测试环境已开启 ILCS_ADMIN_SELF_APPROVAL：系统管理员可以审批、复核本人提交或录入的内容，每次都记一条「测试环境管理员自审」审计。其他角色不受影响；正式环境不能开启。
+        </div>
+      ) : null}
       <ListState loading={data.loading && !body} error={data.error} empty={false} emptyText="" />
       {save.error ? <div className="note bad">{save.error.message}</div> : null}
       {body ? (

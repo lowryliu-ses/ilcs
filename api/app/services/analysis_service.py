@@ -32,7 +32,7 @@ from ..repositories.metrics import (
 )
 from ..repositories.samples import PhysicalSampleRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, admin_self_approval
 
 TASK_STATES = ("pending", "collecting", "collected", "cancelled")
 TASK_STATE_LABEL = {
@@ -509,7 +509,9 @@ class AnalysisService:
             raise ValidationFailed("退回必须写明理由")
         if quality in {"suspect", "invalid"} and not reason:
             raise ValidationFailed("判定为可疑或无效必须写明理由")
-        if same_person(value.entered_by, user.id):
+        if same_person(value.entered_by, user.id) and not admin_self_approval(
+            self.db, self.ctx, user, value.id, "复核本人录入的结果",
+        ):
             raise PermissionDenied(
                 "不能审核本人录入的记录（职责分离）", code="self_review_denied"
             )
