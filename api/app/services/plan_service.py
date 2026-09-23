@@ -129,8 +129,54 @@ class PlanService:
                 "ok": True,
             },
             {"key": "control", "label": "对照条件在矩阵内", "detail": control_detail, "ok": control_ok},
+            self._targets_check(plan),
             self._metrics_check(plan),
         ]
+
+    def _target_options(self, plan: Plan) -> list[dict]:
+        """因子可以作用的设备参数：方法里每个设备步骤及其能力声明的参数。"""
+        from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
+        from ..repositories.resources import CapabilityRepository
+
+        recipe = self.recipes.get(plan.recipe_id)
+        capabilities = CapabilityRepository(self.db).specs()
+        options = []
+        for index, step in enumerate(normalize(recipe.steps if recipe else [])):
+            if kind_of(step) != DEVICE:
+                continue
+            declared = (capabilities.get(step.get("cap", "")) or {}).get("params") or {}
+            params = sorted(set(declared) | set(step.get("params") or {}))
+            options.append({
+                "step_id": step_id_of(step, index), "step_name": step.get("name") or f"第 {index + 1} 步",
+                "capability": step.get("cap", ""),
+                "params": [{"name": name, "unit": declared.get(name, "")} for name in params],
+            })
+        return options
+
+    def _targets_check(self, plan: Plan) -> dict:
+        """因子作用参数：声明了就必须能真的下发；没声明时如实说明条件只影响样本标签。"""
+        from ..domain.steps import normalize
+        from ..repositories.resources import StationRepository
+
+        factors = plan.factors or []
+        declared = [f for f in factors if f.get("target")]
+        if not declared:
+            return {
+                "key": "targets", "label": "因子作用的设备参数",
+                "detail": "未声明作用参数：条件只区分样本，设备按方法里的固定参数执行",
+                "ok": True,
+            }
+        recipe = self.recipes.get(plan.recipe_id)
+        issues = matrix.target_issues(
+            factors, normalize(recipe.steps if recipe else []), StationRepository(self.db, self.ctx).specs(),
+        )
+        return {
+            "key": "targets", "label": "因子作用的设备参数",
+            "detail": "；".join(issues) or "、".join(
+                f"{f.get('name')} → {f['target'].get('step_id')}.{f['target'].get('param')}" for f in declared
+            ),
+            "ok": not issues,
+        }
 
     def _single_checks(self, plan: Plan, plate: int) -> list[dict]:
         total = self.sample_total(plan)
@@ -296,6 +342,7 @@ class PlanService:
                 "checks": checks,
                 "lockable": all(c["ok"] for c in checks),
                 "materials": self.material_preview(plan),
+                "target_options": self._target_options(plan),
                 "versions": [self.version_out(row) for row in versions],
                 "metrics": [
                     {

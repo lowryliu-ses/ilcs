@@ -715,3 +715,63 @@ class StationService:
         )
         self.db.commit()
         return {"command_id": command.id, "state": command.state, "replayed": False}
+
+    def ingest_telemetry(self, station_id: str, payload: dict) -> dict:
+        """设备遥测入库。
+
+        来源由服务认证确定；同一 (工位, event_id, 指标) 只入库一次，重发回放计数。设备时间
+        超前服务器 5 分钟以上视为时钟错误整批拒收——带着错时钟的数据进了曲线就再也分不清。
+        """
+        from datetime import timedelta
+
+        from sqlalchemy.dialects.postgresql import insert
+
+        from ..core.clock import as_utc
+        from ..core.config import settings
+        from ..models import Batch, Command, Telemetry
+        from ..models.base import uid
+
+        self.authorize_device(station_id)
+        adapter = self.adapters.get(station_id)
+        if adapter is None:
+            raise NotFound("适配器未登记")
+        points = payload.get("points") or []
+        if len(points) > settings.telemetry_max_points_per_request:
+            raise ValidationFailed(
+                f"单次最多上报 {settings.telemetry_max_points_per_request} 个点，请分批", code="too_many_points",
+            )
+        moment = now()
+        future = [p for p in points if as_utc(p["device_ts"]) > moment + timedelta(minutes=5)]
+        if future:
+            raise ValidationFailed(
+                f"{len(future)} 个点的设备时间超前服务器 5 分钟以上，请先校准设备时钟", code="device_clock_skew",
+            )
+        command_id = payload.get("command_id") or adapter.current_command_id or ""
+        batch_id = ""
+        if command_id:
+            command = self.db.get(Command, command_id)
+            if command is not None and command.station_id == station_id:
+                batch = self.db.get(Batch, command.batch_id)
+                batch_id = batch.id if batch is not None else ""
+        origin = f"real:{adapter.driver}" if adapter.kind == "real" else "simulation"
+        rows = [
+            {
+                "id": uid(),
+                "station_id": station_id, "batch_id": batch_id, "metric": point["metric"],
+                "setpoint": point.get("setpoint"), "value": point["value"],
+                "quality": point.get("quality") or "good", "origin": origin,
+                "device_ts": as_utc(point["device_ts"]), "event_id": payload["event_id"],
+                "received_at": moment,
+            }
+            for point in points
+        ]
+        statement = insert(Telemetry).values(rows).on_conflict_do_nothing(
+            index_elements=["station_id", "event_id", "metric"],
+            index_where=Telemetry.event_id != "",
+        )
+        accepted = self.db.execute(statement).rowcount or 0
+        self.db.commit()
+        return {
+            "event_id": payload["event_id"], "accepted": accepted,
+            "duplicates": len(rows) - accepted, "batch_id": batch_id,
+        }

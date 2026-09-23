@@ -182,7 +182,8 @@ def test_statistics_exclude_non_valid_samples():
     assert round(groups[0]["cv_pct"], 3) == round(statistics.cv_percent([200, 210]), 3)
 
 
-def test_stale_heartbeat_closes_gate():
+def test_stale_heartbeat_blocks_only_that_station():
+    """单台设备心跳超时只挡用到它的批次，不把全站停摆。"""
     adapters = [
         AdapterHealth("ST-01-A", connected=True, site_interlock=False, last_heartbeat=NOW),
         AdapterHealth("ST-03", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(minutes=7)),
@@ -190,5 +191,5 @@ def test_stale_heartbeat_closes_gate():
 
     state = evaluate_gate(adapters, NOW, stale_sec=300, degraded_sec=5)
 
-    assert not state["open"]
-    assert "ST-03 遥测数据超时 7 min" in state["reasons"]
+    assert state["open"], "全站门只由联锁与执行器决定"
+    assert state["blocked_stations"] == {"ST-03": "ST-03 遥测数据超时 7 min"}

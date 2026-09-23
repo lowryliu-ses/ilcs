@@ -40,6 +40,13 @@ class SchedulingContext:
     clean_min: int = 10
     prefer_station_id: str | None = None
     allow_unclean: bool = False
+    # 执行门判定不可用的工位（失联、心跳超时）→ 原因
+    unavailable_station_ids: dict[str, str] = field(default_factory=dict)
+    # 资产级约束：多个工位映射同一台资产时共享容量；维护 / 校准 / 人工预约占用资产
+    station_asset: dict[str, str] = field(default_factory=dict)
+    asset_capacity: dict[str, int] = field(default_factory=dict)
+    # 资产上的预约：(区间, 占用份数)。维护与校准占满整台资产
+    asset_bookings: dict[str, list[tuple[Interval, int]]] = field(default_factory=dict)
 
 
 class SchedulingError(Exception):
@@ -49,7 +56,7 @@ class SchedulingError(Exception):
         self.step_index = step_index
 
 
-def earliest_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
+def _station_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
     cursor = not_before
     for interval in sorted(context.busy.get(station_id, []), key=lambda i: i.start):
         if cursor + duration <= interval.start:
@@ -57,6 +64,43 @@ def earliest_free(context: SchedulingContext, station_id: str, not_before: datet
         if interval.end > cursor:
             cursor = interval.end
     return cursor
+
+
+def _asset_load(context: SchedulingContext, asset_id: str, station_id: str, window: Interval):
+    """窗口内压在这台资产上的占用：预约 + 同资产其他工位的时间窗。返回 (份数, 最早结束时刻)。
+
+    份数按重叠区间直接相加，是并发量的上界：宁可多等一会儿，也不把容量排超。
+    """
+    load = 0
+    ends: list[datetime] = []
+    for interval, units in context.asset_bookings.get(asset_id, []):
+        if interval.start < window.end and interval.end > window.start:
+            load += units
+            ends.append(interval.end)
+    for other, mapped in context.station_asset.items():
+        if mapped != asset_id or other == station_id:
+            continue
+        for interval in context.busy.get(other, []):
+            if interval.start < window.end and interval.end > window.start:
+                load += 1
+                ends.append(interval.end)
+    return load, (min(ends) if ends else None)
+
+
+def earliest_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
+    """工位本身空闲，且所属资产在整段时间内还有余量的最早开工时刻。"""
+    cursor = not_before
+    asset_id = context.station_asset.get(station_id)
+    for _ in range(1000):
+        cursor = _station_free(context, station_id, cursor, duration)
+        if not asset_id:
+            return cursor
+        capacity = max(1, context.asset_capacity.get(asset_id, 1))
+        load, first_end = _asset_load(context, asset_id, station_id, Interval(cursor, cursor + duration))
+        if load + 1 <= capacity or first_end is None:
+            return cursor
+        cursor = max(first_end, cursor + timedelta(seconds=1))
+    raise SchedulingError(f"{station_id} 所属资产在可见时间范围内没有余量", -1)
 
 
 def _occupy(context: SchedulingContext, allocation: PlannedAllocation) -> None:
@@ -69,12 +113,19 @@ def _candidates(context: SchedulingContext, step: dict[str, Any], index: int) ->
     able = [s for s in context.stations if station_fits(s, step)]
     if not able:
         raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」没有可承接工位", index)
-    usable = [s for s in able if s.healthy and (context.allow_unclean or s.clean) and s.id not in context.held_station_ids]
+    usable = [
+        s for s in able
+        if s.healthy and (context.allow_unclean or s.clean)
+        and s.id not in context.held_station_ids and s.id not in context.unavailable_station_ids
+    ]
     if not usable:
+        unavailable = [context.unavailable_station_ids[s.id] for s in able if s.id in context.unavailable_station_ids]
         held = [s.id for s in able if s.id in context.held_station_ids]
         faulty = [f"{s.id}{'离线' if s.status == 'offline' else ''}" for s in able if not s.healthy]
         unclean = [s.id for s in able if not s.clean]
-        if held:
+        if unavailable and len(unavailable) == len(able):
+            why = "；".join(unavailable)
+        elif held:
             why = f"{'、'.join(held)} 正在保持，释放时间未知"
         elif faulty:
             why = f"{'、'.join(faulty)} 故障"

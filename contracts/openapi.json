@@ -1673,6 +1673,97 @@
         "title": "LotScrapIn",
         "type": "object"
       },
+      "MaintenanceCancelIn": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "MaintenanceCancelIn",
+        "type": "object"
+      },
+      "MaintenanceCompleteIn": {
+        "properties": {
+          "record": {
+            "title": "Record",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "pass",
+              "fail"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id",
+          "result",
+          "record"
+        ],
+        "title": "MaintenanceCompleteIn",
+        "type": "object"
+      },
+      "MaintenanceOrderIn": {
+        "properties": {
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "string"
+          },
+          "assignee_user_id": {
+            "default": "",
+            "title": "Assignee User Id",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "default": "preventive",
+            "enum": [
+              "preventive",
+              "corrective",
+              "inspection"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "planned_end": {
+            "format": "date-time",
+            "title": "Planned End",
+            "type": "string"
+          },
+          "planned_start": {
+            "format": "date-time",
+            "title": "Planned Start",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "title",
+          "planned_start",
+          "planned_end"
+        ],
+        "title": "MaintenanceOrderIn",
+        "type": "object"
+      },
       "ManualResultIn": {
         "properties": {
           "collected_at": {
@@ -4115,6 +4206,83 @@
           "plan_id"
         ],
         "title": "TaskCreateIn",
+        "type": "object"
+      },
+      "TelemetryIn": {
+        "description": "设备遥测上报。同一 event_id 重发只入库一次；command_id 可选，用于归到批次。",
+        "properties": {
+          "command_id": {
+            "default": "",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/TelemetryPointIn"
+            },
+            "minItems": 1,
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_id",
+          "points"
+        ],
+        "title": "TelemetryIn",
+        "type": "object"
+      },
+      "TelemetryPointIn": {
+        "properties": {
+          "device_ts": {
+            "format": "date-time",
+            "title": "Device Ts",
+            "type": "string"
+          },
+          "metric": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Metric",
+            "type": "string"
+          },
+          "quality": {
+            "default": "good",
+            "enum": [
+              "good",
+              "bad",
+              "uncertain"
+            ],
+            "title": "Quality",
+            "type": "string"
+          },
+          "setpoint": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setpoint"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "metric",
+          "value",
+          "device_ts"
+        ],
+        "title": "TelemetryPointIn",
         "type": "object"
       },
       "ValidationError": {
@@ -9858,6 +10026,349 @@
         ]
       }
     },
+    "/api/maintenance-orders": {
+      "get": {
+        "description": "某台资产的全部工单；不指定资产时列出未结束的工单。",
+        "operationId": "list_orders_api_maintenance_orders_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "asset_id",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Orders",
+        "tags": [
+          "resource"
+        ]
+      },
+      "post": {
+        "description": "建单同时登记维护占用；工单与占用在同一个事务里提交。",
+        "operationId": "create_order_api_maintenance_orders_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceOrderIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Order",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/maintenance-orders/{order_id}/cancel": {
+      "post": {
+        "operationId": "cancel_order_api_maintenance_orders__order_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceCancelIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Cancel Order",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/maintenance-orders/{order_id}/complete": {
+      "post": {
+        "operationId": "complete_order_api_maintenance_orders__order_id__complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceCompleteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Complete Order",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/maintenance-orders/{order_id}/start": {
+      "post": {
+        "operationId": "start_order_api_maintenance_orders__order_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "title": "Order Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Start Order",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
     "/api/materials": {
       "get": {
         "operationId": "list_materials_api_materials_get",
@@ -13874,6 +14385,89 @@
           }
         },
         "summary": "Heartbeat",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/stations/{station_id}/telemetry": {
+      "post": {
+        "description": "设备遥测上报。同一 event_id 重发只入库一次；超前服务器时钟的整批拒收。",
+        "operationId": "telemetry_api_runtime_stations__station_id__telemetry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Telemetry",
         "tags": [
           "runtime"
         ]

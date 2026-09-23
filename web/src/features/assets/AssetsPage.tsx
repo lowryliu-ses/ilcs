@@ -4,7 +4,10 @@ import { api, pageQuery } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { AssetRow, BookingRow, CapabilityRow, Paged, StationRow } from '../../shared/types';
+import { useSignature } from '../../shared/signature';
+import type {
+  AssetRow, BookingRow, CapabilityRow, MaintenanceOrderRow, Paged, StationRow,
+} from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, FileUpload, ListState, Modal, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -367,6 +370,8 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
               <Empty>没有关联工位（无适配器的仪器或手工工作台可以这样）</Empty>
             )}
           </Panel>
+
+          <MaintenancePanel asset={asset} />
 
           <Panel title="占用记录" flush>
             {asset.bookings?.length ? (
@@ -812,6 +817,240 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </Field>
       )}
       {create.error ? <div className="note bad">{create.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+/* 维护工单：建单即登记维护占用（排程绕开），开工资产转入维护状态（开跑检查拦截），
+   完工写记录并签名；不合格时资产保持维护状态，不回到可用。 */
+function MaintenancePanel({ asset }: { asset: AssetRow }) {
+  const { can } = useSession();
+  const { sign } = useSignature();
+  const toast = useToast();
+  const key = `maintenance:${asset.id}`;
+  const orders = useQuery<MaintenanceOrderRow[]>(key, () =>
+    api.get<MaintenanceOrderRow[]>(`/maintenance-orders?asset_id=${encodeURIComponent(asset.id)}`),
+  );
+  const invalidates = [key, `assets:${asset.id}`, 'assets', 'schedule', 'batches', 'audit'];
+  const [creating, setCreating] = useState(false);
+  const [completing, setCompleting] = useState<MaintenanceOrderRow | null>(null);
+  const act = useMutation(
+    (payload: { id: string; action: 'start' | 'cancel'; reason?: string }) =>
+      api.post(`/maintenance-orders/${payload.id}/${payload.action}`, payload.reason ? { reason: payload.reason } : {}),
+    { invalidates, onSuccess: () => toast.push('工单已更新') },
+  );
+  const editable = can('maintenance.edit');
+
+  return (
+    <Panel
+      title="维护工单"
+      flush
+      aside={
+        editable && asset.state !== 'retired' ? (
+          <button className="btn sm" onClick={() => setCreating(true)}>
+            新建工单
+          </button>
+        ) : null
+      }
+    >
+      {orders.data?.length ? (
+        <table>
+          <tbody>
+            {orders.data.map((order) => (
+              <tr key={order.id}>
+                <td>
+                  <span className="tag">{order.kind_label}</span> {order.title}
+                  {order.record ? <div className="tiny muted">{order.record}</div> : null}
+                </td>
+                <td className="small">
+                  {clock(order.planned_start)} → {clock(order.planned_end)}
+                </td>
+                <td>
+                  <Pill state={order.state === 'done' && order.result === 'fail' ? 'failed' : order.state} label={
+                    order.state === 'done' ? (order.result === 'pass' ? '完工·合格' : '完工·不合格') : order.state_label
+                  } />
+                </td>
+                <td className="row-end">
+                  {editable && order.state === 'planned' ? (
+                    <button className="btn sm" onClick={() => act.run({ id: order.id, action: 'start' }).catch((e) => toast.push(e.message))}>
+                      开工
+                    </button>
+                  ) : null}
+                  {editable && order.state === 'in_progress' ? (
+                    <button className="btn sm primary" onClick={() => setCompleting(order)}>
+                      完工
+                    </button>
+                  ) : null}
+                  {editable && ['planned', 'in_progress'].includes(order.state) ? (
+                    <button
+                      className="btn sm"
+                      onClick={() => {
+                        const reason = window.prompt('取消原因');
+                        if (reason) act.run({ id: order.id, action: 'cancel', reason }).catch((e) => toast.push(e.message));
+                      }}
+                    >
+                      取消
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <Empty>没有维护工单</Empty>
+      )}
+
+      {creating ? <MaintenanceCreateDialog asset={asset} invalidates={invalidates} onClose={() => setCreating(false)} /> : null}
+      {completing ? (
+        <MaintenanceCompleteDialog
+          order={completing}
+          invalidates={invalidates}
+          sign={sign}
+          onClose={() => setCompleting(null)}
+        />
+      ) : null}
+    </Panel>
+  );
+}
+
+function MaintenanceCreateDialog({
+  asset,
+  invalidates,
+  onClose,
+}: {
+  asset: AssetRow;
+  invalidates: string[];
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [form, setForm] = useState({ kind: 'preventive', title: '', detail: '' });
+  const [starts, setStarts] = useState('');
+  const [ends, setEnds] = useState('');
+  const create = useMutation(
+    () =>
+      api.post<{ impacted?: unknown[] }>(
+        '/maintenance-orders',
+        {
+          ...form,
+          asset_id: asset.id,
+          planned_start: new Date(starts).toISOString(),
+          planned_end: new Date(ends).toISOString(),
+        },
+        true,
+      ),
+    {
+      invalidates,
+      onSuccess: (result) => {
+        toast.push(
+          result.impacted?.length
+            ? `工单已建；${result.impacted.length} 个已排程工步与维护时段重叠，需重排`
+            : '工单已建，维护时段已从排程中让出',
+        );
+        onClose();
+      },
+    },
+  );
+  return (
+    <Modal
+      title={`新建维护工单 · ${asset.asset_no}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            disabled={!form.title.trim() || !starts || !ends || create.pending}
+            onClick={() => create.run().catch(() => undefined)}
+          >
+            建单
+          </button>
+        </>
+      }
+    >
+      <Field label="类型">
+        <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
+          <option value="preventive">预防性维护</option>
+          <option value="corrective">故障维修</option>
+          <option value="inspection">点检</option>
+        </select>
+      </Field>
+      <Field label="标题">
+        <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} />
+      </Field>
+      <Field label="内容">
+        <textarea rows={2} value={form.detail} onChange={(event) => setForm({ ...form, detail: event.target.value })} />
+      </Field>
+      <div className="grid cols-2">
+        <Field label="计划开始">
+          <input type="datetime-local" value={starts} onChange={(event) => setStarts(event.target.value)} />
+        </Field>
+        <Field label="计划结束">
+          <input type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} />
+        </Field>
+      </div>
+      {create.error ? <div className="note bad">{create.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+function MaintenanceCompleteDialog({
+  order,
+  invalidates,
+  sign,
+  onClose,
+}: {
+  order: MaintenanceOrderRow;
+  invalidates: string[];
+  sign: ReturnType<typeof useSignature>['sign'];
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [result, setResult] = useState<'pass' | 'fail'>('pass');
+  const [record, setRecord] = useState('');
+  const complete = useMutation(
+    (signatureId: string) =>
+      api.post(`/maintenance-orders/${order.id}/complete`, { result, record, signature_id: signatureId }),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push(result === 'pass' ? '已完工，资产恢复可用' : '已完工（不合格），资产保持维护状态');
+        onClose();
+      },
+    },
+  );
+  const submit = async () => {
+    const signatureId = await sign('维护工单完工', order.id, ['维护完成且记录属实']);
+    if (!signatureId) return;
+    await complete.run(signatureId).catch(() => undefined);
+  };
+  return (
+    <Modal
+      title={`完工 · ${order.title}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={!record.trim() || complete.pending} onClick={submit}>
+            签名并完工
+          </button>
+        </>
+      }
+    >
+      <Field label="结论" hint="不合格时资产保持维护状态，不回到可用">
+        <select value={result} onChange={(event) => setResult(event.target.value as 'pass' | 'fail')}>
+          <option value="pass">合格</option>
+          <option value="fail">不合格</option>
+        </select>
+      </Field>
+      <Field label="维护记录（必填）">
+        <textarea rows={3} value={record} onChange={(event) => setRecord(event.target.value)} />
+      </Field>
+      {complete.error ? <div className="note bad">{complete.error.message}</div> : null}
     </Modal>
   );
 }

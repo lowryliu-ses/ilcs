@@ -88,6 +88,10 @@ class ExecutionService:
         if blocker:
             self._refuse(batch, command, blocker)
             return True
+        if command.not_before is not None and now() < command.not_before:
+            # 按时开工：还没到排程时间窗，留在队列里；此时保持 / 终止仍可撤回它
+            self.db.commit()
+            return False
         if command.type in DISPATCHING and not GateService(self.db).status()["open"]:
             # 全站执行门关闭：动作指令留在队列里，门打开后再投；此时保持 / 终止仍可撤回它
             self.db.commit()
@@ -366,15 +370,28 @@ class ExecutionService:
         command.checkpoint_id = checkpoint.id
         command.state = "done"
         command.updated_at = now()
+        from .schedule_service import ScheduleService
+
+        ScheduleService(self.db, self.ctx).release_unused(batch, command.step_index, now())
 
         self.record_telemetry(batch, command, step, result)
+        from .consumption_service import ConsumptionService
+
+        consumption = ConsumptionService(self.db, self.ctx).book(
+            batch, command, result.delivered or {}, step_run_id=command.step_run_id,
+        )
         self.audit.record(
             None, "步骤检查点", batch.id,
             before=f"步骤 {command.step_index + 1} 执行中", after="已完成",
             command_id=command.id, checkpoint_id=checkpoint.id,
             detail=(
                 f"{step.get('name')} @ {command.station_id}；来源 {result.origin}；"
-                f"实际投料需由库存事件入账，不按步骤比例推算"
+                + (
+                    f"设备回报消耗入账 {consumption['booked']} 项"
+                    + (f"、被拒 {consumption['rejected']} 项" if consumption["rejected"] else "")
+                    if consumption["booked"] or consumption["rejected"]
+                    else "设备未回报实际消耗；实际投料需由库存事件入账，不按步骤比例推算"
+                )
             ),
         )
         # 回执只产生事件；状态转换与下一节点由推进器在自己的短事务里做
@@ -509,12 +526,14 @@ class ExecutorLoop:
         self.db.commit()
         advanced = self.advance()
         files_cleaned = self.cleanup_orphan_files() if cleanup_files else 0
+        telemetry_purged = self.purge_telemetry() if cleanup_files else 0
         return {
             "executed": executed,
             "polled": polled,
             "reconciled": mismatches,
             "advanced": advanced,
             "files_cleaned": files_cleaned,
+            "telemetry_purged": telemetry_purged,
             "overdue": overdue["overdue"],
             "timed_out": overdue["timed_out"],
             "alarms_raised": stations["raised"] + assets["raised"],
@@ -579,6 +598,20 @@ class ExecutorLoop:
                 overdue += 1
         self.db.commit()
         return {"overdue": overdue, "timed_out": timed_out}
+
+    def purge_telemetry(self, batch_size: int = 50_000) -> int:
+        """删除超过保留期的遥测点。分批删，避免一次长事务锁住遥测表。"""
+        from sqlalchemy import delete, select
+
+        cutoff = now() - timedelta(days=max(1, settings.telemetry_retention_days))
+        removed = 0
+        while True:
+            ids = select(Telemetry.id).where(Telemetry.device_ts < cutoff).limit(batch_size)
+            result = self.db.execute(delete(Telemetry).where(Telemetry.id.in_(ids)))
+            self.db.commit()
+            removed += result.rowcount or 0
+            if (result.rowcount or 0) < batch_size:
+                return removed
 
     def cleanup_orphan_files(self) -> int:
         """按组织清理过期暂存文件；系统身份仍受组织仓储过滤，不能跨域误删。"""

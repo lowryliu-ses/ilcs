@@ -140,3 +140,38 @@ class Adapter(Base):
     supports_abort: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_query: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_dedup: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class MaintenanceOrder(Base):
+    """维护 / 点检工单。计划 → 执行 → 完成，完成要写记录并签名。
+
+    建单即登记一条维护占用（排程据此让路）；开工把资产转入维护状态（开跑检查据此拦截）；
+    完成或取消恢复资产原状态并结束占用。
+    """
+
+    __tablename__ = "maintenance_orders"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    asset_id: Mapped[str] = mapped_column(String, index=True)
+    # preventive 预防性维护 | corrective 故障维修 | inspection 点检
+    kind: Mapped[str] = mapped_column(String, default="preventive")
+    title: Mapped[str] = mapped_column(String)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    planned_start: Mapped[datetime] = mapped_column(DateTime)
+    planned_end: Mapped[datetime] = mapped_column(DateTime)
+    # planned | in_progress | done | cancelled
+    state: Mapped[str] = mapped_column(String, default="planned")
+    booking_id: Mapped[str] = mapped_column(String, default="")
+    assignee_user_id: Mapped[str] = mapped_column(String, default="")
+    asset_state_before: Mapped[str] = mapped_column(String, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_by: Mapped[str] = mapped_column(String, default="")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_by: Mapped[str] = mapped_column(String, default="")
+    # pass 合格 | fail 不合格（资产保持维护状态，不回到可用）
+    result: Mapped[str] = mapped_column(String, default="")
+    record: Mapped[str] = mapped_column(Text, default="")
+    signature_id: Mapped[str] = mapped_column(String, default="")
+    row_version: Mapped[int] = mapped_column(Integer, default=1)

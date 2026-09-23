@@ -5,7 +5,7 @@
 """
 from fastapi import APIRouter
 
-from ...schemas import CommandEventIn, HeartbeatIn
+from ...schemas import CommandEventIn, HeartbeatIn, TelemetryIn
 from ...services.station_service import StationService
 from ..deps import DbSession, ServiceCtx
 
@@ -19,6 +19,12 @@ def heartbeat(station_id: str, payload: HeartbeatIn, db: DbSession, ctx: Service
         station_id, payload.connected, payload.site_interlock, payload.accepts_commands,
         payload.instrument_serial,
     )
+
+
+@router.post("/stations/{station_id}/telemetry")
+def telemetry(station_id: str, payload: TelemetryIn, db: DbSession, ctx: ServiceCtx):
+    """设备遥测上报。同一 event_id 重发只入库一次；超前服务器时钟的整批拒收。"""
+    return StationService(db, ctx).ingest_telemetry(station_id, payload.model_dump())
 
 
 @router.post("/commands/{command_id}/events")

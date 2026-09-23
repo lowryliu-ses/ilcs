@@ -171,6 +171,25 @@ class StationLinkIn(BaseModel):
     station_id: str
 
 
+class MaintenanceOrderIn(BaseModel):
+    asset_id: str
+    kind: Literal["preventive", "corrective", "inspection"] = "preventive"
+    title: str = Field(min_length=1)
+    detail: str = ""
+    planned_start: datetime
+    planned_end: datetime
+    assignee_user_id: str = ""
+
+
+class MaintenanceCompleteIn(Signed):
+    result: Literal["pass", "fail"]
+    record: str
+
+
+class MaintenanceCancelIn(BaseModel):
+    reason: str
+
+
 class BookingIn(BaseModel):
     asset_id: str
     station_id: str = ""
@@ -757,6 +776,22 @@ class HeartbeatIn(BaseModel):
     accepts_commands: bool = True
     # 业务数据，用于与资产档案核对；不能代替来源认证
     instrument_serial: str = ""
+
+
+class TelemetryPointIn(BaseModel):
+    metric: str = Field(min_length=1, max_length=64)
+    value: float
+    setpoint: float | None = None
+    device_ts: datetime
+    quality: Literal["good", "bad", "uncertain"] = "good"
+
+
+class TelemetryIn(BaseModel):
+    """设备遥测上报。同一 event_id 重发只入库一次；command_id 可选，用于归到批次。"""
+
+    event_id: str = Field(min_length=1, max_length=128)
+    command_id: str = ""
+    points: list[TelemetryPointIn] = Field(min_length=1)
 
 
 class CommandEventIn(BaseModel):

@@ -107,6 +107,27 @@ class BatchService:
             raise NotFound("批次不存在")
         return batch
 
+    @staticmethod
+    def _planned_start(steps: list[dict], first_work) -> datetime | None:
+        """批次的计划开始：首个设备时间窗往前推掉它之前不占工位步骤的时长。
+
+        流程以人工备料开头时，批次在首个设备时间窗之前就该开始，不能拿设备时间窗当开跑时刻。
+        """
+        if first_work is None:
+            return None
+        lead = sum(
+            float(step.get("dur") or 0) for step in steps[: first_work.step_index]
+            if not needs_station(step)
+        )
+        return first_work.starts_at - timedelta(minutes=lead)
+
+    def _station_ids(self, batch: Batch, from_step: int = 0) -> set[str]:
+        """本批次（自某一步起）占用的设备工位。执行门按它们判定单台设备的失联 / 超时。"""
+        return {
+            a.station_id for a in self.allocations.for_batch(batch.id)
+            if a.step_index >= from_step and a.kind == WORK
+        }
+
     def _withdraw_queued(self, batch: Batch, reason: str) -> int:
         """撤回尚未交给适配器的指令。保持 / 终止之后，队列里的动作不能再发出去。"""
         from .execution_service import ExecutionService
@@ -463,7 +484,14 @@ class BatchService:
         bom = batch.recipe_snapshot.get("bom") or []
         if bom:
             self.materials.reserve_for_batch(batch.id, bom, user)
-        self._generate_samples(batch, plan)
+        rows = self._generate_samples(batch, plan)
+        if plan.plan_type == "matrix":
+            from ..domain.matrix import condition_params
+
+            # 按孔位冻结因子作用参数：之后方案怎么改，这个批次的设备参数都不变
+            expanded = condition_params(plan.factors or [], rows)
+            if expanded:
+                batch.plan_snapshot = {**batch.plan_snapshot, "condition_params": expanded}
         self.plans.link_batch(plan.id, batch.id)
         if task is None:
             task = task_service.ensure_task_for_batch(batch.id, plan.id, user)
@@ -506,7 +534,7 @@ class BatchService:
             }
         )
 
-    def _generate_samples(self, batch: Batch, plan) -> None:
+    def _generate_samples(self, batch: Batch, plan) -> list[dict]:
         """生成运行分配。
 
         矩阵方案按孔位布局生成；单条件与委托方案按样本清单或样本数生成。
@@ -584,6 +612,7 @@ class BatchService:
             self.samples.add(assignment)
             # 在途孔位占用：唯一约束挡住两个样本占同一个孔
             sample_service.occupy_slot(container_id, row["well"], physical_id, assignment.id)
+        return rows
 
     # ---------- 排程 ----------
 
@@ -751,10 +780,11 @@ class BatchService:
                 bool(station and self.alarms.active_on_station(station.id))
                 or bool(self.alarms.unresolved_for_batch(batch.id))
             ),
-            gate_reasons=self.gate.status()["reasons"],
-            planned_start=first_work.starts_at if first_work else None,
+            gate_reasons=self.gate.reasons_for(self._station_ids(batch)),
+            planned_start=self._planned_start(steps, first_work),
             now=now(),
             expiry_min=settings.schedule_expiry_min,
+            early_tolerance_min=settings.early_start_tolerance_min,
             has_control_permission=self.ctx.has("batch.control"),
             role_name=ROLE_NAMES.get(user.role, user.role),
             manual_review_done=manual_review,
@@ -780,7 +810,7 @@ class BatchService:
         batch = self._require_locked(batch_id)
         if batch.state != "scheduled":
             raise StateConflict("只有已排程批次可下发")
-        self.gate.require_open()
+        self.gate.require_open(self._station_ids(batch))
         simulated = self._simulation_blockers(batch)
         if simulated:
             raise StateConflict(
@@ -825,17 +855,29 @@ class BatchService:
         steps = self.steps_of(batch)
         step = steps[step_index] if step_index < len(steps) else {}
         allocation = self.allocations.work_step(batch.id, step_index)
+        not_before = None
+        if command_type == "dispatch" and allocation is not None:
+            # 按时开工：晚了就把本批下游顺延（与别的批次冲突则报警，不挤占）；
+            # 早了就让执行器等到时间窗开始前的允许提前量再投递
+            self.schedule.realign(batch, step_index, now())
+            not_before = allocation.starts_at - timedelta(minutes=settings.early_start_tolerance_min)
+        params = dict(step.get("params") or {})
+        wells = (batch.plan_snapshot or {}).get("condition_params", {}).get(step_id_of(step, step_index)) if step else None
+        if wells and command_type in DISPATCHING:
+            # 矩阵条件：一条指令带全部孔位的参数，设备按孔位执行；步骤里的固定参数是未覆盖孔位的缺省值
+            params["wells"] = wells
         command = Command(
             org_id=batch.org_id or self.ctx.org_id,
             batch_id=batch.id,
             step_run_id=step_run_id,
             station_id=allocation.station_id if allocation else "",
             capability=step.get("cap", ""),
-            params=step.get("params") or {},
+            params=params,
             type=command_type,
             state="sent",
             delivery_state="queued",
             step_index=step_index,
+            not_before=not_before,
         )
         self.db.add(command)
         self.db.flush()
@@ -1008,7 +1050,7 @@ class BatchService:
             raise StateConflict("必须勾选已核实实际量与设备状态")
         if strategy != recovery.ABORT:
             # 续跑与重试会重新驱动设备，要过执行门；安全终止不受执行门限制
-            self.gate.require_open()
+            self.gate.require_open(self._station_ids(batch, from_step=batch.current_step))
 
         evaluation = self.recovery_options(batch_id)
         option = next((o for o in evaluation["options"] if o["id"] == strategy), None)

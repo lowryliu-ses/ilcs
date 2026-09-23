@@ -1,5 +1,6 @@
 from . import (
-    admin, alarms, analysis, assets, auth, batches, files, governance, materials, metrics, people,
+    admin, alarms, analysis, assets, auth, batches, files, governance, maintenance, materials, metrics,
+    people,
     plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, tasks,
 )
 
@@ -9,6 +10,7 @@ ROUTERS = [
     governance.router,
     people.router,
     assets.router,
+    maintenance.router,
     recipes.router,
     plans.router,
     tasks.router,

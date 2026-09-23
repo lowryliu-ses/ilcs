@@ -34,7 +34,14 @@ class Settings(BaseSettings):
     heartbeat_degraded_sec: int = 5
     heartbeat_stale_sec: int = 300
     schedule_expiry_min: int = 30
+    # 按时开工：设备动作最多比排程时间窗提前这么多分钟投递
+    early_start_tolerance_min: float = 15
+    # 实际开工晚于计划超过这个分钟数，本批下游时间窗整体顺延
+    realign_grace_min: float = 1
     telemetry_points_per_step: int = 12
+    # 设备遥测保留期；执行器每小时清理更早的点
+    telemetry_retention_days: int = 365
+    telemetry_max_points_per_request: int = 1000
 
     # ---------- 文件 ----------
     # 受控目录，放持久卷；不要指向前端静态目录
@@ -85,6 +92,10 @@ class Settings(BaseSettings):
     command_timeout_grace_min: float = 5.0
     # 保持 / 终止这类安全指令没有步骤时长可参照，用固定上限
     control_command_timeout_min: float = 10.0
+
+    # ---------- 设备回传的物料消耗 ----------
+    # 设备回报的实际消耗与计划量偏差超过这个百分比时报警并标记待复核（仍按实际量入账）
+    consumption_deviation_pct: float = 5.0
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -170,6 +170,7 @@ export function PlanDetailPage() {
               <tr>
                 <th>因子</th>
                 <th>水平</th>
+                <th>作用于设备参数</th>
                 <th>物料换算</th>
               </tr>
             </thead>
@@ -181,6 +182,11 @@ export function PlanDetailPage() {
                     {factor.levels.join('、')}
                     {factor.unit}
                   </td>
+                  <td className="small mono">
+                    {factor.target
+                      ? `${data.target_options?.find((o) => o.step_id === factor.target?.step_id)?.step_name ?? factor.target.step_id}.${factor.target.param}`
+                      : <span className="muted">仅区分样本</span>}
+                  </td>
                   <td className="small muted">
                     {factor.material ? `${factor.material.name} ${factor.material.per}${factor.material.unit}/单位` : '—'}
                   </td>
@@ -188,7 +194,7 @@ export function PlanDetailPage() {
               ))}
               {data.factors.length === 0 ? (
                 <tr>
-                  <td colSpan={3} className="muted">
+                  <td colSpan={4} className="muted">
                     未定义因子
                   </td>
                 </tr>
@@ -558,6 +564,29 @@ function FactorEditor({
                     添加水平
                   </button>
                 </div>
+              </Field>
+
+              <Field
+                label="作用于设备参数（可选）"
+                hint="选了就按孔位把该因子的水平写进这一步的设备指令；不选则条件只区分样本，设备按方法固定参数执行"
+              >
+                <select
+                  value={factor.target ? `${factor.target.step_id}|${factor.target.param}` : ''}
+                  onChange={(event) => {
+                    const [stepId, param] = event.target.value.split('|');
+                    update(index, { target: event.target.value ? { step_id: stepId, param } : undefined });
+                  }}
+                >
+                  <option value="">不作用于设备（仅区分样本）</option>
+                  {(plan.target_options ?? []).map((option) =>
+                    option.params.map((param) => (
+                      <option key={`${option.step_id}|${param.name}`} value={`${option.step_id}|${param.name}`}>
+                        {option.step_name} · {param.name}
+                        {param.unit ? `（${param.unit}）` : ''}
+                      </option>
+                    )),
+                  )}
+                </select>
               </Field>
 
               <div className="grid cols-3">

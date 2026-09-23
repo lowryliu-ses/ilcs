@@ -104,3 +104,65 @@ def material_demand(factors: list[dict], repeats: int) -> list[dict]:
             }
         )
     return rows
+
+
+def target_issues(factors: list[dict], steps: list[dict], stations) -> list[str]:
+    """因子声明的「作用参数」能否真的下发到设备。
+
+    因子可以写 `target: {"step_id": "s03", "param": "electrolyte"}`：这个因子的水平会按孔位
+    覆盖该设备步骤的参数。这里逐项核对步骤存在且是设备步骤、同一参数不被两个因子争用、
+    每个水平都在至少一个可承接工位的参数范围内——否则批次开跑后才会被设备拒绝。
+    """
+    from .capability import station_fits
+    from .steps import DEVICE, kind_of, step_id_of
+
+    by_id = {step_id_of(step, index): step for index, step in enumerate(steps)}
+    issues: list[str] = []
+    claimed: dict[tuple[str, str], str] = {}
+    for factor in factors:
+        target = factor.get("target") or {}
+        if not target:
+            continue
+        name = factor.get("name") or "未命名因子"
+        step_id, param = str(target.get("step_id") or ""), str(target.get("param") or "")
+        step = by_id.get(step_id)
+        if step is None:
+            issues.append(f"因子「{name}」作用的步骤 {step_id or '未选择'} 不在方法里")
+            continue
+        if kind_of(step) != DEVICE:
+            issues.append(f"因子「{name}」作用的步骤「{step.get('name')}」不是设备步骤，参数无法下发")
+            continue
+        if not param:
+            issues.append(f"因子「{name}」没有选择作用的参数")
+            continue
+        key = (step_id, param)
+        if key in claimed:
+            issues.append(f"因子「{name}」与「{claimed[key]}」作用于同一参数 {step.get('name')}.{param}")
+            continue
+        claimed[key] = name
+        for level in factor.get("levels") or []:
+            if not isinstance(level, (int, float)) or isinstance(level, bool):
+                issues.append(f"因子「{name}」的水平 {level!r} 不是数值，不能作为设备参数")
+                continue
+            trial = {**step, "params": {**(step.get("params") or {}), param: level}}
+            if not any(station_fits(station, trial) for station in stations):
+                issues.append(
+                    f"因子「{name}」的水平 {level} 超出所有可承接「{step.get('name')}」工位的 {param} 范围"
+                )
+    return issues
+
+
+def condition_params(factors: list[dict], rows: list[dict]) -> dict[str, dict[str, dict]]:
+    """按孔位展开作用参数：{step_id: {孔位: {参数: 水平}}}。建批次时冻结进快照。"""
+    result: dict[str, dict[str, dict]] = {}
+    for position, factor in enumerate(factors):
+        target = factor.get("target") or {}
+        step_id, param = target.get("step_id"), target.get("param")
+        if not step_id or not param:
+            continue
+        for row in rows:
+            levels = row.get("levels") or []
+            if position >= len(levels):
+                continue
+            result.setdefault(step_id, {}).setdefault(row["well"], {})[param] = levels[position]
+    return result

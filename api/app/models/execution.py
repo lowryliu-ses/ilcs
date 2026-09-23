@@ -36,6 +36,8 @@ class Command(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 已发出超时报警的时刻；同一条指令只报一次
     overdue_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 按时开工：执行器在这个时刻之前不投递（排程时间窗开始减允许提前量）
+    not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ExecutorHeartbeat(Base):
@@ -87,3 +89,6 @@ class Telemetry(Base):
     quality: Mapped[str] = mapped_column(String, default="good")
     origin: Mapped[str] = mapped_column(String, default="simulation")
     device_ts: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # 设备上报批次的稳定 ID；同一 (工位, 事件, 指标) 只入库一次
+    event_id: Mapped[str] = mapped_column(String, default="")
+    received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

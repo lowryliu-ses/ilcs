@@ -34,6 +34,8 @@ class PreflightContext:
     planned_start: datetime | None = None
     now: datetime | None = None
     expiry_min: int = 30
+    # 允许比计划开始提前下发的分钟数；再早就会占用别的批次预约的设备
+    early_tolerance_min: float = 15
     has_control_permission: bool = False
     role_name: str = ""
     manual_review_done: bool = False
@@ -196,8 +198,16 @@ def evaluate(context: PreflightContext) -> list[Check]:
         )
         detail = context.planned_start.isoformat(timespec="minutes")
         schedule_ok = expired_min is None or expired_min <= context.expiry_min
+        early = expired_min is not None and -expired_min > context.early_tolerance_min
         if not schedule_ok:
             detail += f"，已过期 {expired_min:.0f} min，需重排"
+        elif early:
+            # 提前下发会占用别的批次预约在这段时间里的设备
+            schedule_ok = False
+            detail += (
+                f"，比计划提前 {-expired_min:.0f} min，超过允许的 {context.early_tolerance_min:.0f} min；"
+                f"请到点再下发或先重排"
+            )
         checks.append(Check("schedule", "计划开始时间", _state(schedule_ok), detail))
 
     # ---------- 8 人员资质 ----------

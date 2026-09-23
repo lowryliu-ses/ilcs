@@ -17,7 +17,14 @@ export type User = {
   password_changed_at: string | null;
 };
 
-export type Gate = { open: boolean; reasons: string[]; degraded: string[]; checked_at: string };
+/** 执行门：`open`/`reasons` 是全站（联锁、执行器）；`blocked_stations` 是单台设备的失联 / 心跳超时，只挡用到它的批次。 */
+export type Gate = {
+  open: boolean;
+  reasons: string[];
+  blocked_stations?: Record<string, string>;
+  degraded: string[];
+  checked_at: string;
+};
 
 /** 开跑检查项。`state` 区分通过、阻塞与不适用；`ok` 表示「不挡下发」。 */
 export type Check = {
@@ -259,6 +266,15 @@ export type Factor = {
   unit: string;
   levels: (number | string)[];
   material?: { name: string; unit: string; per: number };
+  /** 作用的设备参数：水平按孔位覆盖该设备步骤的参数，随指令下发 */
+  target?: { step_id: string; param: string };
+};
+
+export type FactorTargetOption = {
+  step_id: string;
+  step_name: string;
+  capability: string;
+  params: { name: string; unit: string }[];
 };
 
 export type RecipeSummary = {
@@ -382,6 +398,7 @@ export type PlanDetail = PlanSummary & {
   control: { label: string; cond: (number | string)[] } | null;
   conditions: { group: string; levels: (number | string)[]; label: string; is_control: boolean }[];
   layout_preview: { well: string; group: string; repeat: number; label: string; is_control: boolean }[];
+  target_options?: FactorTargetOption[];
   checks: Check[];
   lockable: boolean;
   materials: {
@@ -1374,4 +1391,24 @@ export type FileRow = {
   uploaded_by: string;
   created_at: string;
   downloadable: boolean;
+};
+
+export type MaintenanceOrderRow = {
+  id: string;
+  asset_id: string;
+  asset_label: string;
+  kind: 'preventive' | 'corrective' | 'inspection';
+  kind_label: string;
+  title: string;
+  detail: string;
+  planned_start: string;
+  planned_end: string;
+  state: 'planned' | 'in_progress' | 'done' | 'cancelled';
+  state_label: string;
+  booking_id: string;
+  started_at: string | null;
+  completed_at: string | null;
+  result: '' | 'pass' | 'fail';
+  record: string;
+  row_version: number;
 };

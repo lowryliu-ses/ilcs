@@ -119,12 +119,13 @@ class InventoryService:
             batch_id=batch_id, step_run_id=step_run_id, command_id=command_id, reason=reason,
             created_by=user.id if user else self.ctx.subject_id,
         )
-        self.db.add(event)
         try:
-            self.db.flush()
+            # 保存点：并发重传撞唯一键只撤销这一行，不连带回滚调用方事务里的检查点与审计
+            with self.db.begin_nested():
+                self.db.add(event)
+                self.db.flush()
         except IntegrityError:
             # 并发重传：另一个请求刚插进去，回放它的结果
-            self.db.rollback()
             existing = self.events.find_event(source, event_id)
             if existing is None:
                 raise

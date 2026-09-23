@@ -184,6 +184,16 @@ class AllocationRepository(Repository[Allocation]):
         )
         return [row[0] for row in rows]
 
+    def shift_all_from_step(self, batch_id: str, step_index: int, delta) -> int:
+        """把第 step_index 步起的全部时间窗（含转运、清洗）整体后移。"""
+        moved = 0
+        for allocation in self.for_batch(batch_id):
+            if allocation.step_index >= step_index:
+                allocation.starts_at = allocation.starts_at + delta
+                allocation.ends_at = allocation.ends_at + delta
+                moved += 1
+        return moved
+
     def shift_from_step(self, batch_id: str, step_index: int, minutes: float) -> None:
         from datetime import timedelta
 

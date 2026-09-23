@@ -75,12 +75,46 @@ class ScheduleService:
             stations=self.stations.specs(),
             busy=self.allocations.busy_timeline(exclude_batch_ids),
             held_station_ids=self.held_station_ids(),
+            # 失联 / 心跳超时的设备、处于维护或已退役资产上的工位不承接新排程
+            unavailable_station_ids=self._unavailable_stations(),
+            **self._asset_constraints(),
             transfer_station_ids=self.stations.transfer_station_ids(),
             transfer_min=settings.transfer_min,
             clean_min=settings.clean_min,
             prefer_station_id=prefer,
             allow_unclean=allow_unclean,
         )
+
+    def _unavailable_stations(self) -> dict[str, str]:
+        from ..models import Asset
+
+        blocked = dict(self.gate.status().get("blocked_stations") or {})
+        for station in self.stations.list():
+            if not station.asset_id or station.id in blocked:
+                continue
+            asset = self.db.get(Asset, station.asset_id)
+            if asset is not None and asset.state in {"maintenance", "retired"}:
+                label = "处于维护状态" if asset.state == "maintenance" else "已退役"
+                blocked[station.id] = f"{station.id} 所属资产 {asset.asset_no} {label}"
+        return blocked
+
+    def _asset_constraints(self) -> dict:
+        """资产容量与预约。维护 / 校准占满整台资产；人工预约占一份；排程占用由时间窗本身表达。"""
+        from ..models import Asset
+        from ..repositories.resources import BookingRepository
+
+        station_asset = {s.id: s.asset_id for s in self.stations.list() if s.asset_id}
+        capacity: dict[str, int] = {}
+        for asset_id in set(station_asset.values()):
+            asset = self.db.get(Asset, asset_id)
+            capacity[asset_id] = max(1, asset.capacity if asset else 1)
+        bookings: dict[str, list[tuple[Interval, int]]] = {}
+        for row in BookingRepository(self.db, self.ctx).live():
+            if row.kind == "schedule" or row.asset_id not in capacity:
+                continue
+            units = capacity[row.asset_id] if row.kind in {"maintenance", "calibration"} else 1
+            bookings.setdefault(row.asset_id, []).append((Interval(row.starts_at, row.ends_at), units))
+        return {"station_asset": station_asset, "asset_capacity": capacity, "asset_bookings": bookings}
 
     # ---------- 写 ----------
 
@@ -435,6 +469,83 @@ class ScheduleService:
             "protected_steps": sorted({a.step_index for a in protected}),
             "replanned": [self._planned_out(item, tail) for item in planned],
         }
+
+    def _cross_batch_overlaps(self, batch_id: str) -> list[dict]:
+        return [
+            row for row in self._overlaps()
+            if batch_id in {row["a"]["batch_id"], row["b"]["batch_id"]}
+            and row["a"]["batch_id"] != row["b"]["batch_id"]
+        ]
+
+    def realign(self, batch: Batch, step_index: int, actual_start: datetime) -> dict:
+        """按实际进度对齐本批自这一步起的时间窗。
+
+        - 前面做得快：试着把剩余时间窗整体提前到现在；与别的批次冲突就不提前，
+          指令等到原时间窗前的允许提前量再投递——不占用别人预约的设备。
+        - 前面做得慢：剩余时间窗整体后移。后移后与别的批次重叠时只报警，不自动挤占
+          对方——谁让路是调度决定，不是算法决定。
+        """
+        work = self.allocations.work_step(batch.id, step_index)
+        if work is None:
+            return {"shifted_min": 0, "conflicts": []}
+        # 与指令的最早投递时刻用同一个基准：设备工作时间窗的开始
+        delay = actual_start - work.starts_at
+        if -timedelta(minutes=settings.early_start_tolerance_min) <= delay <= timedelta(
+            minutes=settings.realign_grace_min
+        ):
+            return {"shifted_min": 0, "conflicts": []}
+        lock_schedule(self.db)
+        self.allocations.shift_all_from_step(batch.id, step_index, delay)
+        self.db.flush()
+        conflicts = self._cross_batch_overlaps(batch.id)
+        minutes = delay.total_seconds() / 60
+        if delay < timedelta():
+            if conflicts:
+                self.allocations.shift_all_from_step(batch.id, step_index, -delay)
+                self.db.flush()
+                return {"shifted_min": 0, "conflicts": [], "waiting": True}
+            self.audit.record(
+                None, "按实际进度提前", batch.id, before=f"第 {step_index + 1} 步计划开工",
+                after=f"提前 {-minutes:.0f} min",
+                detail=f"上游提前完成，第 {step_index + 1} 步起的时间窗整体提前；未与其他批次重叠",
+            )
+            return {"shifted_min": round(minutes), "conflicts": []}
+        self.audit.record(
+            None, "按实际进度顺延", batch.id, before=f"第 {step_index + 1} 步计划开工",
+            after=f"后移 {minutes:.0f} min",
+            detail=(
+                f"第 {step_index + 1} 步起的时间窗整体后移"
+                + (f"；与 {len(conflicts)} 处其他批次占用重叠，已报警" if conflicts else "")
+            ),
+        )
+        if conflicts:
+            from .alarm_service import AlarmService
+
+            others = sorted({
+                row["b"]["batch_id"] if row["a"]["batch_id"] == batch.id else row["a"]["batch_id"]
+                for row in conflicts
+            })
+            AlarmService(self.db, self.ctx).raise_alarm(
+                severity=2, source_type="batch", source_id=batch.id,
+                message=(
+                    f"{batch.id} 顺延 {minutes:.0f} min 后与 {'、'.join(others)} 的工位时间窗重叠"
+                ),
+                response="在排程页决定哪一方让路（重排其一）；系统不自动挤占其他批次的预约。",
+                owner="调度", origin="system", condition_key=f"batch:{batch.id}:schedule_conflict",
+            )
+        return {"shifted_min": round(minutes), "conflicts": conflicts}
+
+    def release_unused(self, batch: Batch, step_index: int, finished_at: datetime) -> None:
+        """设备提前完成：把这一步没用完的时间窗还回去，清洗缓冲跟着前移。"""
+        for allocation in self.allocations.for_batch(batch.id):
+            if allocation.step_index != step_index:
+                continue
+            if allocation.kind == WORK and allocation.starts_at < finished_at < allocation.ends_at:
+                allocation.ends_at = finished_at
+            elif allocation.kind == CLEAN and allocation.starts_at > finished_at:
+                duration = allocation.ends_at - allocation.starts_at
+                allocation.starts_at = finished_at
+                allocation.ends_at = finished_at + duration
 
     def _tail_anchor(
         self, batch: Batch, steps: list[dict], from_step: int, protected: list[Allocation],

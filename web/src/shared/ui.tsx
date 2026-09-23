@@ -236,14 +236,23 @@ export function Empty({ children }: { children: ReactNode }) {
 }
 
 export function GateBanner({ gate }: { gate?: Gate }) {
-  if (!gate || gate.open) {
-    return gate?.degraded.length ? <div className="banner warn">适配器降级：{gate.degraded.join('；')}</div> : null;
+  if (!gate) return null;
+  if (!gate.open) {
+    return (
+      <div className="banner bad">
+        全局执行门已关闭，排程 / 下发 / 续跑被禁用，保持与终止仍可执行：{gate.reasons.join('；')}
+      </div>
+    );
   }
-  return (
-    <div className="banner bad">
-      全局执行门已关闭，排程 / 下发 / 续跑被禁用，保持与终止仍可执行：{gate.reasons.join('；')}
-    </div>
-  );
+  const blocked = Object.values(gate.blocked_stations ?? {});
+  if (blocked.length) {
+    return (
+      <div className="banner warn">
+        以下设备不可用，用到它们的批次不能下发或续跑（其他批次不受影响）：{blocked.join('；')}
+      </div>
+    );
+  }
+  return gate.degraded.length ? <div className="banner warn">适配器降级：{gate.degraded.join('；')}</div> : null;
 }
 
 export function Modal({

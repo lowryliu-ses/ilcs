@@ -40,6 +40,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "station.edit": ["admin"],
     "asset.edit": ["admin"],
     "booking.edit": ["operator", "admin"],
+    "maintenance.edit": ["operator", "admin"],
     # ---------- 人员与资质 ----------
     "person.edit": ["admin"],
     "qualification.edit": ["admin", "ehs"],
