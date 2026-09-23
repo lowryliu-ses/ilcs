@@ -9,6 +9,7 @@
 from typing import Any
 
 from .capability import StationSpec, out_of_range, stations_for_step
+from .graph import ancestors, critical_path_min, graph_issues, graph_mode
 from .steps import (
     DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, REVIEW, SPLIT, WAIT, consumes_materials, gate_issues, kind_of,
     split_issues,
@@ -97,13 +98,19 @@ def validate_steps(
 ) -> list[dict]:
     rows = []
     seen_ids: dict[str, int] = {}
+    dependency = graph_issues(steps or [])
+    ids = [step_id_of(item, position) for position, item in enumerate(steps or [])]
     for index, step in enumerate(steps or []):
         kind = kind_of(step)
         step_id = step_id_of(step, index)
         issues = step_issues(step, capabilities)
+        issues.extend(dependency.get(index, []))
         if kind == GATE:
             # 关卡要看前后步骤，只能在整条流程上校验
             issues.extend(gate_issues(step, steps, index))
+            target = ((step.get("gate") or {}).get("rework_to") or "")
+            if graph_mode(steps) and target in ids and ids.index(target) not in ancestors(steps, index):
+                issues.append("返工目标必须是本关卡的上游步骤（依赖链上的前驱）")
         if step_id in seen_ids:
             issues.append(f"步骤标识 {step_id} 与第 {seen_ids[step_id] + 1} 步重复")
         seen_ids[step_id] = index
@@ -131,6 +138,7 @@ def validate_steps(
                 "review_role": step.get("review_role", ""),
                 "gate": step.get("gate") or {},
                 "split": step.get("split") or {},
+                "after": step.get("after") if "after" in step else None,
                 "needs_station": requires_station,
                 "fits": [s.id for s in fits],
                 # 不需要工位的步骤：没有可承接工位不算问题
@@ -156,6 +164,8 @@ def recipe_checks(
     ]
     incomplete = [row["index"] + 1 for row in validation if row["issues"]]
     total = sum(float(step.get("dur") or 0) for step in recipe_steps or [])
+    parallel = graph_mode(recipe_steps or [])
+    critical = critical_path_min(recipe_steps or [])
     hard_steps = [s for s in recipe_steps or [] if s.get("hard")]
     hard_ok = all(str((s.get("hard") or {}).get("from") or "").strip() for s in hard_steps)
     demand = resource_demand(recipe_steps or [])
@@ -168,7 +178,9 @@ def recipe_checks(
             "ok": bool(recipe_steps),
             "detail": (
                 f"{demand['total']} 步（设备 {demand['device']}、人工 {demand['manual']}、"
-                f"等待 {demand['wait']}、审核 {demand['review']}），总时长 {total:g} min"
+                f"等待 {demand['wait']}、审核 {demand['review']}），"
+                + (f"关键路径 {critical:g} min（各步合计 {total:g} min，含并行分支）" if parallel
+                   else f"总时长 {total:g} min")
             ),
         },
         {

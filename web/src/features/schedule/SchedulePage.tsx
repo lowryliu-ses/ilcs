@@ -285,9 +285,21 @@ export function SchedulePage() {
           }
         >
           <div className="note">
-            枚举 {preview.evaluated} 个候选顺序，取总跨度最小者。方案只在确认后写入，
-            下发仍需逐批次开跑检查与电子签名。
+            {preview.method === 'local_search'
+              ? `迭代局部搜索评估了 ${preview.evaluated} 个候选顺序（${preview.elapsed_ms ?? 0} ms）`
+              : `穷举全部 ${preview.evaluated} 个候选顺序`}
+            ，先比总跨度、再比按优先级加权的完成时间。每个候选都由同一个排程器生成时间窗，约束（通道、预约、转运、
+            硬时限、依赖）与单批排程完全一致。方案只在确认后写入，下发仍需逐批次开跑检查与电子签名。
           </div>
+          {preview.solver ? (
+            <div className="small muted">
+              {preview.solver.status === 'unavailable'
+                ? `CP-SAT：${preview.solver.reason}`
+                : `CP-SAT 求解器（${preview.solver.status}${
+                    preview.solver.gap_pct !== null && preview.solver.gap_pct !== undefined ? `，距已证明最优 ${preview.solver.gap_pct}%` : ''
+                  }，${preview.solver.wall_ms ?? 0} ms）的顺序已作为候选参与比较。${preview.solver.note ?? ''}`}
+            </div>
+          ) : null}
           <table>
             <thead>
               <tr>

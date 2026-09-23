@@ -187,6 +187,8 @@ export type BatchDetail = BatchSummary & {
   step_runs: StepRunRow[];
   workflow_events: WorkflowEventRow[];
   commands: CommandRow[];
+  /** 绑定的载具；未绑定时为空，此时不做位置追踪与转运 */
+  labware: LabwareRow | null;
   checkpoints: { id: string; step_index: number; state: string; created_at: string; payload: Record<string, unknown> }[];
   alarms: { id: string; severity: number; state: string; message: string; condition_active: boolean }[];
   audit: AuditRow[];
@@ -244,6 +246,8 @@ export type CommandRow = {
   error: string;
   created_at: string;
   updated_at?: string;
+  /** 前置指令（转运）；它完成前本指令不投递 */
+  after_command_id?: string;
 };
 
 export type RecoveryOption = { id: string; label: string; allowed: boolean; reason: string; impact: string };
@@ -370,6 +374,8 @@ export type RecipeStep = {
   };
   /** 样本拆分：每个样本拆出 count 个子样本 */
   split?: { count?: number; child_type?: string };
+  /** 前驱步骤（依赖图）。任何一步声明了它，流程按依赖图推进；未声明的步骤依赖上一行 */
+  after?: string[];
 };
 
 export type PlanSummary = {
@@ -708,10 +714,15 @@ export type QueueRow = {
 };
 
 export type OptimizePreview = {
-  baseline: { ok: boolean; order: string[]; span_min?: number; finish_at?: string; reason: string };
-  best: { ok: boolean; order: string[]; span_min: number; finish_at: string };
+  baseline: { ok: boolean; order: string[]; span_min?: number | null; weighted_min?: number | null; finish_at?: string; reason: string };
+  best: { ok: boolean; order: string[]; span_min: number; weighted_min?: number; finish_at: string };
   improvement_min: number | null;
   evaluated: number;
+  /** exhaustive：穷举全部顺序；local_search：迭代局部搜索 */
+  method?: 'exhaustive' | 'local_search';
+  elapsed_ms?: number;
+  /** 装了 OR-Tools 时 CP-SAT 给出的候选；status 为 unavailable 表示未安装 */
+  solver?: { status: string; order?: string[]; span_min?: number | null; gap_pct?: number | null; wall_ms?: number; note?: string; reason?: string } | null;
 };
 
 export type Dashboard = {
@@ -1470,4 +1481,98 @@ export type ProposalRow = {
   issues: string[];
   created_plan_id: string;
   created_at: string;
+};
+
+/* ---------- 载具、位置与现场总览 ---------- */
+
+export type LabwareBrief = { id: string; barcode: string; batch_id: string; state: string };
+
+export type FloorSlot = {
+  id: string;
+  name: string;
+  kind: string;
+  active: boolean;
+  position: number;
+  labware: LabwareBrief | null;
+  incoming: { command_id: string; state: string; barcode: string } | null;
+};
+
+export type FloorCommand = {
+  id: string;
+  type: string;
+  state: string;
+  batch_id: string;
+  step_index: number;
+  motion: boolean;
+  since: string;
+};
+
+export type FloorStation = {
+  id: string;
+  name: string;
+  island: number;
+  status: string;
+  retired: boolean;
+  channels: number;
+  capabilities: string[];
+  adapter: {
+    connected: boolean;
+    enabled: boolean;
+    interlock: boolean;
+    accepts_commands: boolean;
+    kind: string;
+    heartbeat_age_sec: number | null;
+    current_command_id: string;
+  } | null;
+  commands: FloorCommand[];
+  nests: FloorSlot[];
+};
+
+export type FloorTransfer = {
+  id: string;
+  state: string;
+  carrier: string;
+  batch_id: string;
+  barcode: string;
+  from: string;
+  to: string;
+  since: string;
+};
+
+export type Floor = {
+  now: string;
+  tracking: boolean;
+  stations: FloorStation[];
+  storage: { group: string; slots: FloorSlot[] }[];
+  transfers: FloorTransfer[];
+  lost: { id: string; barcode: string; batch_id: string }[];
+};
+
+export type LabwareRow = {
+  id: string;
+  barcode: string;
+  type_id: string;
+  type_name: string;
+  rows: number;
+  cols: number;
+  batch_id: string;
+  batch_active: boolean;
+  location_id: string;
+  state: string;
+  in_transit: { command_id: string; state: string; carrier: string; to: string } | null;
+  row_version: number;
+};
+
+export type LabwareType = { id: string; name: string; kind: string; rows: number; cols: number; active: boolean };
+
+export type LocationRow = {
+  id: string;
+  name: string;
+  kind: string;
+  station_id: string;
+  group: string;
+  position: number;
+  accepts: string[];
+  active: boolean;
+  occupant: string;
 };

@@ -42,7 +42,7 @@ class StepRunRepository(ScopedRepository[StepRun]):
     def due_waits(self, at: datetime | None = None) -> list[StepRun]:
         moment = at or now()
         return list(
-            self.db.query(StepRun)
+            self.query()
             .filter(
                 StepRun.kind == "wait",
                 StepRun.state == "waiting",
@@ -90,8 +90,10 @@ class WorkflowEventRepository(ScopedRepository[WorkflowEvent]):
         同一个短事务里做。
         """
         moment = at or now()
+        # 按组织领取：推进器逐组织运行，步骤实例查找也按组织过滤。跨组织领到的事件
+        # 在本组织上下文里找不到步骤实例，会被误判为 rejected 永久丢掉。
         query = (
-            self.db.query(WorkflowEvent)
+            self.query()
             .filter(
                 WorkflowEvent.state == "pending",
                 WorkflowEvent.available_at <= moment,
@@ -104,7 +106,7 @@ class WorkflowEventRepository(ScopedRepository[WorkflowEvent]):
 
     def stale_processing(self, before: datetime) -> list[WorkflowEvent]:
         return list(
-            self.db.query(WorkflowEvent)
+            self.query()
             .filter(WorkflowEvent.state == "processing", WorkflowEvent.claimed_at < before)
             .all()
         )

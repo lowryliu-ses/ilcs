@@ -22,7 +22,7 @@ from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
 from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from ..repositories.execution import (
-    DISPATCHING, AdapterExecutionRepository, CheckpointRepository, CommandRepository,
+    DISPATCHING, MOTION, AdapterExecutionRepository, CheckpointRepository, CommandRepository,
 )
 from ..repositories.materials import ReservationRepository
 from ..repositories.resources import AdapterRepository, CapabilityRepository
@@ -70,7 +70,7 @@ class ExecutionService:
         self.db.refresh(command)
         if command.state != "sent" or command.delivery_state != "queued":
             return False  # 已被撤回，或已被另一轮领走
-        if command.type in DISPATCHING and batch.state != "running":
+        if command.type in MOTION and batch.state != "running":
             self.withdraw(command, f"批次处于 {batch.state}，动作指令未投递")
             self.db.commit()
             return True
@@ -92,8 +92,12 @@ class ExecutionService:
             # 按时开工：还没到排程时间窗，留在队列里；此时保持 / 终止仍可撤回它
             self.db.commit()
             return False
-        if command.type in DISPATCHING and not GateService(self.db).status()["open"]:
+        if command.type in MOTION and not GateService(self.db).status()["open"]:
             # 全站执行门关闭：动作指令留在队列里，门打开后再投；此时保持 / 终止仍可撤回它
+            self.db.commit()
+            return False
+        if command.type in MOTION and self._station_busy(command, record):
+            # 单通道工位（AGV、机械臂）上一条动作还没结论：排队等，不同时塞给它两条
             self.db.commit()
             return False
         try:
@@ -125,7 +129,7 @@ class ExecutionService:
             command_id=command.id, station_id=command.station_id, state="accepted"
         )
         self.db.add(ledger)
-        if command.type in DISPATCHING:
+        if command.type in MOTION:
             # 工位上的「当前指令」只属于动作指令；保持 / 终止不能把它覆盖掉，
             # 否则下一轮对账会把仍在执行的原指令判成不一致
             record.current_command_id = command.id
@@ -147,6 +151,16 @@ class ExecutionService:
         ledger.updated_at = now()
         return True
 
+    def _station_busy(self, command: Command, record) -> bool:
+        station = self.db.get(Station, command.station_id)
+        if station is not None and (station.channels or 1) > 1:
+            return False
+        current = record.current_command_id
+        if not current or current == command.id:
+            return False
+        other = self.db.get(Command, current)
+        return other is not None and other.state in {"accepted", "running"}
+
     @staticmethod
     def delivery_blocker(command: Command, record) -> str:
         """投递前的工位条件。保持 / 终止是安全动作，只要求设备可达。"""
@@ -154,7 +168,7 @@ class ExecutionService:
             return "适配器已停用；指令未投递，不自动重试"
         if not record.connected:
             return "适配器失联；指令未投递，不自动重试"
-        if command.type not in DISPATCHING:
+        if command.type not in MOTION:
             return ""
         if record.site_interlock:
             return "安全联锁触发；动作指令未投递，不自动重试"
@@ -201,7 +215,10 @@ class ExecutionService:
     ) -> None:
         target = ""
         if command.type in {"hold", "abort"}:
-            acting = self.commands.in_flight_for_batch(batch.id, DISPATCHING)
+            acting = [
+                c for c in self.commands.in_flight_for_batch(batch.id, MOTION)
+                if c.station_id == command.station_id
+            ]
             target = acting[0].id if acting else ""
         request = CommandRequest(
             command_id=command.id, station_id=command.station_id, capability=command.capability,
@@ -286,19 +303,39 @@ class ExecutionService:
         if command.type in DISPATCHING:
             self.complete_device_step(batch, command, result)
             return
+        if command.type == "transfer":
+            self._complete_transfer(batch, command, record)
+            return
         command.state = "done"
         command.updated_at = now()
         if command.type == "abort":
             self._confirm_abort(batch, command, record)
 
+    def _complete_transfer(self, batch: Batch, command: Command, record) -> None:
+        """转运回执确认完成：板的位置按回执更新，等着它的设备动作这时才进候选。"""
+        from .transfer_service import TransferService
+
+        mismatch = TransferService(self.db, self.ctx).complete(command)
+        if mismatch:
+            self.fault(batch, command, f"{mismatch}；载具位置已标为未知，需扫码重新定位", delivery="delivered")
+            return
+        command.state = "done"
+        command.updated_at = now()
+
     def _confirm_abort(self, batch: Batch, command: Command, record) -> None:
+        from ..models import Adapter
+        from .transfer_service import TransferService
+
         batch.state = "aborted"
         superseded = 0
-        for acting in self.commands.in_flight_for_batch(batch.id, DISPATCHING):
+        for acting in self.commands.in_flight_for_batch(batch.id, MOTION):
             acting.state = "cancelled"
             acting.error = f"设备确认终止（{command.id}）"
             acting.updated_at = now()
-            self._release(record, acting)
+            self._release(self.db.get(Adapter, acting.station_id) or record, acting)
+            if acting.type == "transfer":
+                # 搬到一半停下：板不在起点也不在终点，位置不可信
+                TransferService(self.db, self.ctx).lost_by_command(acting, "转运途中终止，载具位置未知")
             superseded += 1
         self.audit.record(
             None, "设备确认终止", batch.id, before="终止中", after="已终止",
@@ -329,10 +366,28 @@ class ExecutionService:
         hard = (steps[command.step_index] or {}).get("hard") or {}
         if "maxGapMin" not in hard:
             return None
-        previous = self.checkpoints.latest_for_step(batch.id, command.step_index - 1)
-        if not previous:
-            return "缺少前一步检查点，无法验证硬时限"
-        deadline = previous.created_at + timedelta(minutes=float(hard["maxGapMin"]))
+        from ..domain import graph
+
+        if graph.graph_mode(steps):
+            # 依赖图：从最晚结束的前驱起算（设备前驱看检查点，其余看步骤实例的结束时刻）
+            anchors = []
+            for parent in graph.predecessors(steps)[command.step_index]:
+                checkpoint = self.checkpoints.latest_for_step(batch.id, parent)
+                if checkpoint is not None:
+                    anchors.append(checkpoint.created_at)
+                    continue
+                ended = self.runs.latest(batch.id, step_id_of(steps[parent], parent))
+                if ended is not None and ended.state == workflow.COMPLETED and ended.ended_at:
+                    anchors.append(ended.ended_at)
+            if not anchors:
+                return "缺少前驱步骤的完成记录，无法验证硬时限"
+            anchor = max(anchors)
+        else:
+            previous = self.checkpoints.latest_for_step(batch.id, command.step_index - 1)
+            if not previous:
+                return "缺少前一步检查点，无法验证硬时限"
+            anchor = previous.created_at
+        deadline = anchor + timedelta(minutes=float(hard["maxGapMin"]))
         if now() > deadline:
             overrun = (now() - deadline).total_seconds() / 60
             return f"硬时限 {hard['maxGapMin']} min 已被触碰（超出 {overrun:.0f} min），批次挂起"
@@ -466,9 +521,16 @@ class ExecutionService:
             # 已结束的批次不被迟到的回执改回故障；指令本身仍记为结果未知并报警
             batch.state = "fault"
             batch.failure_reason = reason
+            # 并行分支时恢复评估针对出问题的这一步，不是列表里最靠前的那一步
+            if command.type not in {"hold", "abort"}:
+                batch.current_step = command.step_index
             if not batch.held_at:
                 batch.held_at = now()
-        run = self._run_for(command, batch)
+        for dependent in self.commands.dependents_of(command.id):
+            # 前置转运没成：等着它的设备动作不会再有投递的机会，撤回（恢复时重新生成）
+            self.withdraw(dependent, f"前置指令 {command.id[:8]} 结果为 {command.state}，设备动作未投递")
+        # 转运失败不改步骤实例：步骤本身还没开始，恢复时重新生成转运与动作
+        run = self._run_for(command, batch) if command.type != "transfer" else None
         if run is not None and run.state in {"ready", "running", "pending"}:
             run.state = "unknown"
             run.reason = reason
@@ -519,12 +581,7 @@ class ExecutorLoop:
         mismatches = self.reconcile()
         polled = self.poll_running()
         overdue = self.check_timeouts()
-        executed = 0
-        for command in self.commands.pending(limit):
-            service = ExecutionService(self.db, system_context(command.org_id, "执行器"))
-            if service.execute(command):
-                executed += 1
-        self.db.commit()
+        executed = self.execute_pending(limit)
         advanced = self.advance()
         files_cleaned = self.cleanup_orphan_files() if cleanup_files else 0
         telemetry_purged = self.purge_telemetry() if cleanup_files else 0
@@ -542,7 +599,74 @@ class ExecutorLoop:
             "at": now().isoformat(timespec="seconds"),
         }
 
-    def check_timeouts(self) -> dict:
+    def execute_pending(
+        self, limit: int = 50, station_id: str | None = None, dispatch_open: bool | None = None,
+    ) -> int:
+        """投递已到点的队列指令。执行门只算一次：门关着时动作指令不进候选。"""
+        if dispatch_open is None:
+            dispatch_open = bool(GateService(self.db).status()["open"])
+        executed = 0
+        for command in self.commands.pending(limit, dispatch_open=dispatch_open, station_id=station_id):
+            service = ExecutionService(self.db, system_context(command.org_id, "执行器"))
+            if service.execute(command):
+                executed += 1
+        self.db.commit()
+        return executed
+
+    def station_pass(self, station_id: str, *, limit: int = 50, dispatch_open: bool | None = None) -> dict:
+        """一台工位的一轮设备侧工作：探测、对账、轮询、超时、投递。
+
+        涉及设备 I/O 的步骤都在这里，并发执行器按工位把它们分给不同线程：一台设备的网关
+        卡住只拖住它自己的线程，不拖慢其他工位，也不拖慢执行器心跳（心跳在控制回路里写）。
+        同一工位同一时刻只有一个线程在处理，工位内的指令仍按原顺序串行。
+        """
+        probed = self.probe_devices(station_id=station_id)
+        self.db.commit()
+        reconciled = self.reconcile(station_id=station_id)
+        polled = self.poll_running(station_id=station_id)
+        overdue = self.check_timeouts(station_id=station_id)
+        executed = self.execute_pending(limit, station_id=station_id, dispatch_open=dispatch_open)
+        return {
+            "probed": probed, "reconciled": reconciled, "polled": polled, "executed": executed,
+            "overdue": overdue["overdue"], "timed_out": overdue["timed_out"],
+        }
+
+    def control_pass(self, *, simulate_heartbeat: bool = True, monitor_assets: bool = False) -> dict:
+        """不碰设备网络的控制回路：执行器心跳、模拟心跳、设备监控报警。每轮必跑且很快。"""
+        from .monitoring_service import DeviceMonitor, ExecutorLiveness
+
+        ExecutorLiveness(self.db).beat()
+        if simulate_heartbeat:
+            self.heartbeat_simulated()
+        self.db.commit()
+        monitor = DeviceMonitor(self.db)
+        stations = monitor.stations()
+        assets = monitor.calibrations() if monitor_assets else {"raised": 0, "cleared": 0}
+        self.db.commit()
+        return {
+            "alarms_raised": stations["raised"] + assets["raised"],
+            "alarms_cleared": stations["cleared"] + assets["cleared"],
+        }
+
+    def stations_needing_work(self) -> set[str]:
+        """本轮要派活的工位：有指令要处理的，加上到了探测周期的主动探测设备。"""
+        from ..adapters.registry import probe_interval
+
+        wanted = self.commands.stations_with_open_work()
+        moment = now()
+        for record in self.adapters.list():
+            interval = probe_interval(record) if record.enabled else None
+            if interval is None:
+                continue
+            fresh = (
+                record.connected and record.last_heartbeat
+                and (moment - record.last_heartbeat).total_seconds() < interval
+            )
+            if not fresh:
+                wanted.add(record.station_id)
+        return wanted
+
+    def check_timeouts(self, station_id: str | None = None) -> dict:
         """在途指令的超时。
 
         设备卡死时轮询只会一直返回「执行中」，不支持查询的设备连这个都没有。按步骤预计时长
@@ -551,7 +675,7 @@ class ExecutorLoop:
         """
         overdue = timed_out = 0
         moment = now()
-        for command in self.commands.in_flight():
+        for command in self.commands.in_flight(station_id):
             if command.started_at is None:
                 continue
             batch = self.db.get(Batch, command.batch_id)
@@ -560,7 +684,12 @@ class ExecutorLoop:
             service = ExecutionService(self.db, system_context(command.org_id, "执行器超时检查"))
             steps = normalize(batch.recipe_snapshot.get("steps") or [])
             step = steps[command.step_index] if command.step_index < len(steps) else {}
-            if command.type in DISPATCHING:
+            if command.type == "transfer":
+                expected = float(settings.transfer_min)
+                grace = settings.command_timeout_grace_min
+                warn_after = expected * settings.command_overdue_factor + grace
+                hard_after = expected * settings.command_hard_limit_factor + grace
+            elif command.type in DISPATCHING:
                 expected = float(step.get("dur") or 0)
                 grace = settings.command_timeout_grace_min
                 warn_after = expected * settings.command_overdue_factor + grace
@@ -632,10 +761,10 @@ class ExecutorLoop:
             removed += result["count"]
         return removed
 
-    def poll_running(self) -> int:
+    def poll_running(self, station_id: str | None = None) -> int:
         """轮询已被真实设备接受的长任务；新命令在下一轮才查，避免紧密自旋。"""
         completed = 0
-        for command in self.commands.in_flight():
+        for command in self.commands.in_flight(station_id):
             if command.delivery_state != "delivered":
                 continue
             record = self.adapters.get(command.station_id)
@@ -674,7 +803,7 @@ class ExecutorLoop:
         self.db.commit()
         return completed
 
-    def probe_devices(self) -> int:
+    def probe_devices(self, station_id: str | None = None) -> int:
         """主动探测真实设备的在线状态。
 
         SiLA 设备不会往系统推心跳：由执行器按周期读取设备身份，读到了才算在线，并同步设备
@@ -686,6 +815,8 @@ class ExecutorLoop:
         probed = 0
         moment = now()
         for record in self.adapters.list():
+            if station_id is not None and record.station_id != station_id:
+                continue
             interval = probe_interval(record) if record.enabled else None
             if interval is None:
                 continue
@@ -718,14 +849,14 @@ class ExecutorLoop:
             if record.kind == "simulation" and record.connected:
                 record.last_heartbeat = timestamp
 
-    def reconcile(self) -> int:
+    def reconcile(self, station_id: str | None = None) -> int:
         """重启对账。
 
         对可能已发出但未确认的命令，先按原 command_id 问设备侧；能确认就按确认的结论走，
         不能可靠查询就留在结果未知并转人工核查——不生成新命令盲目重试。
         """
         mismatches = 0
-        for command in self.commands.maybe_sent():
+        for command in self.commands.maybe_sent(station_id):
             record = self.adapters.get(command.station_id)
             service = ExecutionService(self.db, system_context(command.org_id, "执行器对账"))
             batch = self.db.get(Batch, command.batch_id)
@@ -768,8 +899,8 @@ class ExecutorLoop:
             if found.state not in {"accepted", "running", "done"}:
                 mismatches += 1
         # 在途命令与设备侧当前命令不一致同样挂起
-        for command in self.commands.in_flight():
-            if command.type not in DISPATCHING:
+        for command in self.commands.in_flight(station_id):
+            if command.type not in MOTION:
                 continue  # 保持 / 终止不占用工位的「当前指令」
             station = self.db.get(Station, command.station_id)
             if station is not None and (station.channels or 1) > 1:

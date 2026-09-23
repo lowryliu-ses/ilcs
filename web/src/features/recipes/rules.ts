@@ -180,6 +180,62 @@ function splitIssues(step: RecipeStep): string[] {
   return issues;
 }
 
+/* ---------- 依赖图，对应后端 domain/graph.py ---------- */
+
+/** 任何一步声明了 after 就是依赖图模式；否则是顺序流程。 */
+export function graphMode(steps: RecipeStep[]): boolean {
+  return steps.some((step) => step.after !== undefined);
+}
+
+/** 每一步的前驱下标。未声明 after 的步骤依赖上一行；引用无效的忽略（由校验报出）。 */
+export function predecessors(steps: RecipeStep[]): number[][] {
+  const ids = steps.map(stepIdOf);
+  const linear = !graphMode(steps);
+  return steps.map((step, index) => {
+    if (linear || step.after === undefined) return index > 0 ? [index - 1] : [];
+    return [...new Set((step.after ?? []).map((ref) => ids.indexOf(ref)).filter((at) => at >= 0 && at < index))].sort(
+      (a, b) => a - b,
+    );
+  });
+}
+
+export function ancestors(steps: RecipeStep[], index: number): Set<number> {
+  const before = predecessors(steps);
+  const seen = new Set<number>();
+  const stack = [...before[index]];
+  while (stack.length) {
+    const current = stack.pop() as number;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    stack.push(...before[current]);
+  }
+  return seen;
+}
+
+export function criticalPathMin(steps: RecipeStep[]): number {
+  const before = predecessors(steps);
+  const finish: number[] = [];
+  steps.forEach((step, index) => {
+    const start = Math.max(0, ...before[index].map((parent) => finish[parent]));
+    finish.push(start + (Number(step.dur) || 0));
+  });
+  return Math.max(0, ...finish);
+}
+
+function graphIssues(steps: RecipeStep[], index: number): string[] {
+  const step = steps[index];
+  if (!graphMode(steps) || step.after === undefined) return [];
+  if (!Array.isArray(step.after)) return ['前驱步骤必须是步骤标识列表'];
+  const ids = steps.map(stepIdOf);
+  return step.after.flatMap((ref) => {
+    if (ref === ids[index]) return ['步骤不能依赖自己'];
+    const at = ids.indexOf(ref);
+    if (at < 0) return [`前驱步骤 ${ref} 不存在`];
+    if (at > index) return [`前驱步骤 ${ref}（第 ${at + 1} 步）排在本步之后：请把它移到前面`];
+    return [];
+  });
+}
+
 /** 与工位无关的完整性问题，对应后端 step_issues（关卡的跨步骤校验对应 validate_steps）。 */
 export function stepIssues(
   step: RecipeStep,
@@ -197,6 +253,11 @@ export function stepIssues(
   else if (kind === 'gate') issues.push(...gateIssues(step, steps, index));
   else if (kind === 'split') issues.push(...splitIssues(step));
   else issues.push(...reviewIssues(step));
+  issues.push(...graphIssues(steps, index));
+  if (kind === 'gate' && graphMode(steps)) {
+    const target = steps.map(stepIdOf).indexOf(step.gate?.rework_to ?? '');
+    if (target >= 0 && !ancestors(steps, index).has(target)) issues.push('返工目标必须是本关卡的上游步骤（依赖链上的前驱）');
+  }
 
   // 审核、质检关卡、样本拆分即时判定 / 登记，没有预定时长
   if (!AUTOMATIC_KINDS.includes(kind)) {
@@ -241,7 +302,9 @@ export function editorChecks(
       key: 'steps',
       label: '至少一个步骤',
       ok: steps.length > 0,
-      detail: `${steps.length} 步（${byKind}），总时长 ${total} min`,
+      detail: graphMode(steps)
+        ? `${steps.length} 步（${byKind}），关键路径 ${criticalPathMin(steps)} min（各步合计 ${total} min，含并行分支）`
+        : `${steps.length} 步（${byKind}），总时长 ${total} min`,
     },
     {
       key: 'stations',

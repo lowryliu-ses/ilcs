@@ -86,7 +86,7 @@ def test_fresh_database_migrations_do_not_create_business_data(scratch_database)
     finally:
         engine.dispose()
     assert counts == {table: 0 for table in tables}
-    assert revision == "0012_role_permissions"
+    assert revision == "0015_labware_locations"
 
 
 def test_production_configuration_rejects_placeholders():

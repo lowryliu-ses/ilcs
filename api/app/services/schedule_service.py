@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -301,7 +300,18 @@ class ScheduleService:
         return visible
 
     def _overlaps(self) -> list[dict]:
-        """全站同工位时间窗重叠。工位是跨组织共享的物理资源，守门时必须看全站。"""
+        """全站同工位时间窗超出并行通道数的重叠。工位是跨组织共享的物理资源，守门时必须看全站。
+
+        按开始时刻扫描：新区间开始时仍未结束的区间数已达工位通道数，就与这些区间逐一报重叠。
+        单通道工位等价于「任意两段重叠即冲突」；多通道工位（充放电柜）允许重叠到通道数，
+        与领域排程 `_station_free` 用同一口径，否则排程算出来的合法结果会在写入前被拒绝。
+        """
+        from ..models import Station
+
+        channels = {
+            station_id: max(1, int(count or 1))
+            for station_id, count in self.db.query(Station.id, Station.channels).all()
+        }
         rows: dict[str, list[tuple[Allocation, str]]] = {}
         for allocation, org_id in (
             self.db.query(Allocation, Batch.org_id).join(Batch, Batch.id == Allocation.batch_id)
@@ -310,75 +320,152 @@ class ScheduleService:
             rows.setdefault(allocation.station_id, []).append((allocation, org_id))
         found = []
         for station_id, pairs in rows.items():
-            pairs.sort(key=lambda pair: pair[0].starts_at)
-            for (first, first_org), (second, second_org) in zip(pairs, pairs[1:]):
-                if second.starts_at < first.ends_at:
-                    found.append(
-                        {
-                            "station_id": station_id,
-                            "a": {"batch_id": first.batch_id, "step_index": first.step_index,
-                                  "kind": first.kind, "org_id": first_org},
-                            "b": {"batch_id": second.batch_id, "step_index": second.step_index,
-                                  "kind": second.kind, "org_id": second_org},
-                            "overlap_min": round((first.ends_at - second.starts_at).total_seconds() / 60),
-                        }
-                    )
+            capacity = channels.get(station_id, 1)
+            pairs.sort(key=lambda pair: (pair[0].starts_at, pair[0].ends_at))
+            active: list[tuple[Allocation, str]] = []
+            for second, second_org in pairs:
+                active = [pair for pair in active if pair[0].ends_at > second.starts_at]
+                if len(active) >= capacity:
+                    for first, first_org in active:
+                        found.append(
+                            {
+                                "station_id": station_id,
+                                "channels": capacity,
+                                "a": {"batch_id": first.batch_id, "step_index": first.step_index,
+                                      "kind": first.kind, "org_id": first_org},
+                                "b": {"batch_id": second.batch_id, "step_index": second.step_index,
+                                      "kind": second.kind, "org_id": second_org},
+                                "overlap_min": round(
+                                    (min(first.ends_at, second.ends_at) - second.starts_at).total_seconds() / 60
+                                ),
+                            }
+                        )
+                active.append((second, second_org))
         return found
 
     def optimize_preview(self, batch_ids: list[str], start_from: datetime | None = None) -> dict:
-        """多批次优化预览：枚举候选顺序取总跨度最小者，与基线对比后由操作员确认写入。"""
-        batches = [self._require(bid) for bid in batch_ids]
+        """多批次优化预览：搜索批次投产顺序，每个候选都由同一个排程器解码并校验约束。
+
+        批次不多时穷举；多时迭代局部搜索（`domain/optimizer.py`）。装了 OR-Tools 时再用 CP-SAT
+        （`domain/cpsat.py`）给一个候选顺序一起比较。与基线（按优先级排）对比后由操作员确认写入。
+        """
+        from ..domain import cpsat, optimizer
+        from ..domain.graph import critical_path_min
+
+        batches = [self._require(bid) for bid in dict.fromkeys(batch_ids)]
         if not batches:
             raise StateConflict("未选择批次")
-        if len(batches) > 5:
-            raise StateConflict("预览最多支持 5 个批次，更多批次请使用求解服务")
+        if len(batches) > settings.scheduler_max_batches:
+            raise StateConflict(f"一次最多优化 {settings.scheduler_max_batches} 个批次")
         begin = as_utc(start_from) or (now() + timedelta(minutes=5))
-
         selected = {b.id for b in batches}
+        by_id = {b.id: b for b in batches}
+        steps_by_batch = {b.id: normalize(b.recipe_snapshot.get("steps") or []) for b in batches}
+        weight = {b.id: max(1, 4 - int(b.priority or 2)) for b in batches}
 
-        def evaluate(order: list[Batch]) -> dict:
+        def evaluate(order: tuple[str, ...]) -> optimizer.Candidate:
             """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。"""
             context = self.context(selected, allow_unclean=True)
             plans: dict[str, list[PlannedAllocation]] = {}
-            for batch in order:
+            for batch_id in order:
                 try:
-                    plans[batch.id] = plan_steps(
-                        normalize(batch.recipe_snapshot.get("steps") or []), begin, context
-                    )
+                    plans[batch_id] = plan_steps(steps_by_batch[batch_id], begin, context)
                 except SchedulingError as error:
-                    return {"ok": False, "reason": f"{batch.id}: {error.message}", "order": [b.id for b in order]}
+                    return optimizer.Candidate(order, False, reason=f"{batch_id}: {error.message}")
             work_items = [a for planned in plans.values() for a in planned if a.kind == WORK]
             if not work_items:
-                return {
-                    "ok": True, "reason": "所选批次都不占工位，无需优化顺序",
-                    "order": [b.id for b in order], "finish_at": begin.isoformat(timespec="minutes"),
-                    "span_min": 0, "plans": {},
-                }
+                return optimizer.Candidate(order, True, 0, 0, "所选批次都不占工位，无需优化顺序", {"plans": {}})
             finish = max(a.ends_at for a in work_items)
-            steps_by_batch = {b.id: normalize(b.recipe_snapshot.get("steps") or []) for b in order}
-            return {
-                "ok": True,
-                "reason": "",
-                "order": [b.id for b in order],
-                "finish_at": finish.isoformat(timespec="minutes"),
-                "span_min": round((finish - begin).total_seconds() / 60),
-                "plans": {
+            completion = {
+                batch_id: max((a.ends_at for a in planned if a.kind == WORK), default=begin)
+                for batch_id, planned in plans.items()
+            }
+            weighted = sum(weight[b] * (completion[b] - begin).total_seconds() / 60 for b in order)
+            return optimizer.Candidate(
+                order, True, round((finish - begin).total_seconds() / 60), round(weighted), "",
+                {"finish_at": finish.isoformat(timespec="minutes"), "plans": {
                     batch_id: [self._planned_out(a, steps_by_batch[batch_id]) for a in planned]
                     for batch_id, planned in plans.items()
-                },
+                }},
+            )
+
+        def out(candidate: optimizer.Candidate) -> dict:
+            return {
+                "ok": candidate.ok, "reason": candidate.reason, "order": list(candidate.order),
+                "finish_at": candidate.payload.get("finish_at", begin.isoformat(timespec="minutes")),
+                "span_min": candidate.span_min if candidate.ok else None,
+                "weighted_min": candidate.weighted_min if candidate.ok else None,
+                "plans": candidate.payload.get("plans", {}),
             }
 
-        baseline = evaluate(sorted(batches, key=lambda b: (b.priority, b.id)))
-        candidates = [evaluate(list(order)) for order in itertools.permutations(batches)]
-        feasible = [c for c in candidates if c["ok"]]
-        if not feasible:
-            raise StateConflict("所有候选顺序都无法满足约束", {"reason": candidates[0]["reason"]})
-        best = min(feasible, key=lambda c: c["span_min"])
+        ids = [b.id for b in batches]
+        priority_order = tuple(sorted(ids, key=lambda b: (by_id[b].priority, b)))
+        longest_first = tuple(sorted(ids, key=lambda b: (-critical_path_min(steps_by_batch[b]), b)))
+        seeds = [priority_order, longest_first, tuple(reversed(longest_first))]
+
+        solver_info = None
+        if settings.scheduler_backend in {"auto", "cpsat"} and cpsat.available() and len(ids) > 1:
+            solver_info = self._cpsat_order(batches, steps_by_batch, weight, selected, begin)
+            if solver_info.get("order"):
+                seeds.insert(0, tuple(solver_info["order"]))
+        elif settings.scheduler_backend == "cpsat":
+            solver_info = {"status": "unavailable", "reason": "未安装 ortools，已用内置顺序搜索"}
+
+        baseline = evaluate(priority_order)
+        report = optimizer.search(
+            ids, evaluate, seeds=seeds, budget_sec=settings.scheduler_search_budget_sec,
+        )
+        if not report.best.ok:
+            raise StateConflict("所有候选顺序都无法满足约束", {"reason": report.best.reason or baseline.reason})
         return {
-            "baseline": baseline,
-            "best": best,
-            "improvement_min": (baseline["span_min"] - best["span_min"]) if baseline["ok"] else None,
-            "evaluated": len(candidates),
+            "baseline": out(baseline),
+            "best": out(report.best),
+            "improvement_min": (baseline.span_min - report.best.span_min) if baseline.ok else None,
+            "evaluated": report.evaluated,
+            "method": report.method,
+            "elapsed_ms": report.elapsed_ms,
+            "solver": solver_info,
+        }
+
+    def _cpsat_order(self, batches, steps_by_batch, weight, selected, begin) -> dict:
+        """把批次、工位与已有占用翻译成 CP-SAT 模型求一个候选顺序。求不出来不影响内置搜索。"""
+        from ..domain import cpsat
+        from ..domain.graph import predecessors
+        from ..domain.scheduling import candidate_station_ids
+
+        context = self.context(selected, allow_unclean=True)
+        jobs = []
+        try:
+            for batch in batches:
+                steps = steps_by_batch[batch.id]
+                before = predecessors(steps)
+                specs = []
+                for index, step in enumerate(steps):
+                    stations = tuple(candidate_station_ids(context, step, index)) if needs_station(step) else ()
+                    gap = (step.get("hard") or {}).get("maxGapMin")
+                    specs.append(cpsat.StepSpec(
+                        index=index, duration=max(0, round(float(step.get("dur") or 0))), stations=stations,
+                        preds=tuple(before[index]), max_gap=round(float(gap)) if gap else None,
+                    ))
+                jobs.append(cpsat.JobSpec(batch.id, tuple(specs), weight[batch.id]))
+        except SchedulingError as error:
+            return {"status": "skipped", "reason": error.message}
+        busy = {
+            station_id: [
+                (max(0, round((i.start - begin).total_seconds() / 60)), max(0, round((i.end - begin).total_seconds() / 60)))
+                for i in intervals if i.end > begin
+            ]
+            for station_id, intervals in context.busy.items()
+        }
+        channels = {spec.id: max(1, int(spec.channels or 1)) for spec in context.stations}
+        solution = cpsat.solve(
+            jobs, channels, busy, transfer_min=settings.transfer_min,
+            time_limit_sec=settings.scheduler_cpsat_time_limit_sec,
+        )
+        return {
+            "status": solution.status, "order": solution.order, "span_min": solution.span_min,
+            "gap_pct": solution.gap_pct, "wall_ms": solution.wall_ms,
+            "note": "CP-SAT 不含承运与清洗缓冲，时间窗以排程器按该顺序生成的结果为准",
         }
 
     def apply_optimized(self, order: list[str], user: User, start_from: datetime | None = None) -> list[dict]:
@@ -386,10 +473,17 @@ class ScheduleService:
         lock_schedule(self.db)
         applied = []
         begin = as_utc(start_from) or (now() + timedelta(minutes=5))
-        for batch_id in order:
-            batch = self._require(batch_id)
+        batches = [self._require(batch_id) for batch_id in order]
+        # 与预览一致：先把所选批次的旧时间窗全部清掉，再按顺序逐个排。否则排第一个批次时
+        # 后面几个批次的旧占用还在，结果与操作员确认的预览对不上
+        for batch in batches:
+            if batch.state not in {"planned", "scheduled"}:
+                raise StateConflict(f"{batch.id} 已下发，不能参与重新优化", code="batch_not_reschedulable")
+            self.allocations.delete_for_batch(batch.id)
+        self.db.flush()
+        for batch in batches:
             rows = self.schedule(batch, begin, None, user)
-            applied.append({"batch_id": batch_id, "steps": len([r for r in rows if r.kind == WORK])})
+            applied.append({"batch_id": batch.id, "steps": len([r for r in rows if r.kind == WORK])})
         self.audit.record(user, "应用优化排程", "、".join(order), detail=f"{len(order)} 个批次按优化顺序重排")
         self.db.commit()
         return applied

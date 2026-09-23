@@ -133,6 +133,28 @@ def seed(
             db.add(Station(org_id=org_id, **row))
     db.flush()
 
+    if not master_only:
+        from ..models import LabwareType, Location
+
+        for row in data.LABWARE_TYPES:
+            if not db.get(LabwareType, row["id"]):
+                db.add(LabwareType(**row))
+        for row in data.STATIONS:
+            if "cap.transfer" in (row.get("limits") or {}):
+                continue  # 承运工位（AGV）自己不是放置目标
+            for index in range(max(1, int(row.get("channels") or 1))):
+                ident = f"{row['id']}/N{index + 1}"
+                if not db.get(Location, ident):
+                    db.add(Location(id=ident, name=f"{row['name']} 放置位 {index + 1}", kind="nest",
+                                    station_id=row["id"], group=f"岛 #{row['island']}", position=index + 1))
+        for hotel, name, slots in data.HOTELS:
+            for index in range(slots):
+                ident = f"{hotel}/S{index + 1:02d}"
+                if not db.get(Location, ident):
+                    db.add(Location(id=ident, name=f"{name} 槽位 {index + 1}", kind="hotel",
+                                    group=hotel, position=index + 1))
+        db.flush()
+
     for station_id, protocol, version, note in (
         data.ADAPTERS if not master_only else []
     ):

@@ -1,7 +1,8 @@
 from . import (
-    admin, alarms, analysis, assets, auth, batches, files, governance, maintenance, materials, metrics,
+    admin, alarms, analysis, assets, auth, batches, files, governance, labware, maintenance, materials,
+    metrics,
     people,
-    plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, tasks,
+    plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks,
 )
 
 ROUTERS = [
@@ -28,4 +29,6 @@ ROUTERS = [
     sops.router,
     reports.router,
     files.router,
+    stream.router,
+    labware.router,
 ]

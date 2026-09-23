@@ -38,6 +38,10 @@ class Command(Base):
     overdue_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 按时开工：执行器在这个时刻之前不投递（排程时间窗开始减允许提前量）
     not_before: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 前置指令：它完成（done）之前本指令不投递。设备步骤等它的转运指令把板送到位
+    after_command_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # 转运指令搬的是哪块板
+    labware_id: Mapped[str] = mapped_column(String, default="")
 
 
 class ExecutorHeartbeat(Base):
@@ -49,6 +53,8 @@ class ExecutorHeartbeat(Base):
     pid: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # 最近一轮的运行情况：耗时、并发线程数、仍在跑 / 疑似卡住的工位
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Checkpoint(Base):

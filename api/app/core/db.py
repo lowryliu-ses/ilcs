@@ -55,6 +55,11 @@ SessionLocal = sessionmaker(
     bind=engine, autoflush=False, autocommit=False, class_=ManagedSession
 )
 
+# 提交时广播变更主题（执行器唤醒、界面推送），见 core/events.py
+from .events import install as _install_change_events  # noqa: E402
+
+_install_change_events(ManagedSession)
+
 QUANTUM = Decimal("0.000001")
 
 

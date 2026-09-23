@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .capability import StationSpec, station_fits
+from .graph import predecessors
 from .steps import needs_station
 
 WORK = "work"
@@ -152,6 +153,11 @@ def _candidates(context: SchedulingContext, step: dict[str, Any], index: int) ->
     return usable
 
 
+def candidate_station_ids(context: SchedulingContext, step: dict[str, Any], index: int) -> list[str]:
+    """这一步当前可以排上去的工位（能力、参数范围、健康、清洗、保持、可用性都过了）。"""
+    return [station.id for station in _candidates(context, step, index)]
+
+
 def plan_steps(
     steps: list[dict[str, Any]], start_from: datetime, context: SchedulingContext,
     *, first_index: int = 0, previous_end: datetime | None = None,
@@ -168,14 +174,29 @@ def plan_steps(
     """
     allocations: list[PlannedAllocation] = []
     not_before = start_from
-    previous_end = previous_end or start_from
+    tail_end = previous_end or start_from
+    tail_station = previous_station
+    before = predecessors(steps)
+    # 每一步结束的时刻与结束后载具所在的工位：后继从最晚结束的那个前驱接手
+    ends: dict[int, datetime] = {}
+    where: dict[int, str | None] = {}
 
     for index, step in enumerate(steps):
         if index < first_index:
             continue
+        known = [parent for parent in before[index] if parent in ends]
+        if known:
+            anchor = max(known, key=lambda parent: (ends[parent], parent))
+            previous_end, previous_station = ends[anchor], where[anchor]
+            if len(known) < len(before[index]):
+                # 部分前驱在重排范围之前：它们的结束由调用方给出的尾段起点代表
+                previous_end = max(previous_end, tail_end)
+        else:
+            previous_end, previous_station = tail_end, tail_station
         duration = timedelta(minutes=float(step.get("dur", 0) or 0))
         if not needs_station(step):
-            previous_end = max(previous_end, not_before) + duration
+            ends[index] = max(previous_end, not_before) + duration
+            where[index] = previous_station
             continue
         candidates = _candidates(context, step, index)
 
@@ -232,8 +253,8 @@ def plan_steps(
             allocations.append(clean)
             _occupy(context, clean)
 
-        previous_end = work.ends_at
-        previous_station = station.id
+        ends[index] = work.ends_at
+        where[index] = station.id
 
     return allocations
 

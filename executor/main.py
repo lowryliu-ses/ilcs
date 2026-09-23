@@ -8,10 +8,15 @@
 
 它不再建表、不再补列、不再播种——迁移是部署的独立步骤，库版本不兼容就直接退出，
 不在一个自己看不懂的结构上读写。
+
+默认按工位并发处理设备 I/O（`app/services/executor_runtime.py`），并监听 `ilcs_queue`：
+新指令入队、新推进事件产生时立刻开始下一轮，不等满轮询周期。`ILCS_EXECUTOR_MODE=serial`
+退回逐条串行的旧回路（排障或现场只接一台设备时用）。
 """
 import json
 import logging
 import os
+import select
 import signal
 import sys
 import time
@@ -25,8 +30,10 @@ from sqlalchemy import text  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.core.db import ADVISORY_NAMESPACE, SessionLocal, engine  # noqa: E402
+from app.core.events import QUEUE_CHANNEL  # noqa: E402
 from app.core.schema import SchemaMismatch, verify  # noqa: E402
 from app.services.execution_service import ExecutorLoop  # noqa: E402
+from app.services.executor_runtime import ConcurrentExecutor  # noqa: E402
 
 POLL_SEC = float(os.environ.get("ILCS_EXECUTOR_POLL_SEC", settings.advance_poll_sec))
 # 只给模拟适配器补心跳。真实设备的在线状态必须由它自己上报，否则「在线」是我们编的。
@@ -36,6 +43,7 @@ SIMULATE_HEARTBEAT = settings.simulate_heartbeat
 
 STANDBY_POLL_SEC = 5.0
 MONITOR_ASSETS_SEC = 60 * 60
+MODE = os.environ.get("ILCS_EXECUTOR_MODE", "concurrent").strip().lower()
 
 
 class _KeyValueFormatter(logging.Formatter):
@@ -108,6 +116,54 @@ def acquire_singleton():
         time.sleep(STANDBY_POLL_SEC)
 
 
+class QueueWaiter:
+    """在 `ilcs_queue` 上等唤醒。连不上就退化成定时轮询，不影响正确性。"""
+
+    def __init__(self) -> None:
+        self.raw = None
+
+    def _connect(self):
+        raw = engine.raw_connection()
+        dbapi = raw.dbapi_connection
+        dbapi.autocommit = True
+        with dbapi.cursor() as cursor:
+            cursor.execute(f"LISTEN {QUEUE_CHANNEL}")
+        self.raw = raw
+        return dbapi
+
+    def wait(self, timeout: float) -> bool:
+        """最多等 timeout 秒；收到通知返回 True。"""
+        deadline = time.monotonic() + timeout
+        try:
+            dbapi = self.raw.dbapi_connection if self.raw is not None else self._connect()
+            while not _Stop.requested:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                readable, _, _ = select.select([dbapi], [], [], min(0.5, remaining))
+                if not readable:
+                    continue
+                dbapi.poll()
+                if dbapi.notifies:
+                    dbapi.notifies.clear()
+                    return True
+            return False
+        except Exception:
+            log.warning("队列唤醒连接中断，本轮按定时轮询", exc_info=True)
+            self.close()
+            while not _Stop.requested and time.monotonic() < deadline:
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+            return False
+
+    def close(self) -> None:
+        if self.raw is not None:
+            try:
+                self.raw.invalidate()
+            except Exception:
+                pass
+        self.raw = None
+
+
 def singleton_alive(connection) -> bool:
     if connection is None:
         return True
@@ -136,8 +192,10 @@ def main() -> int:
         return 0
     info(
         "执行器已启动", revision=revision, poll_sec=POLL_SEC, simulate_heartbeat=SIMULATE_HEARTBEAT,
-        pid=os.getpid(),
+        pid=os.getpid(), mode=MODE, workers=settings.executor_workers,
     )
+    runtime = ConcurrentExecutor(SessionLocal) if MODE != "serial" else None
+    waiter = QueueWaiter()
     last_file_cleanup: float | None = None
     last_asset_monitor: float | None = None
     failures = 0
@@ -145,37 +203,57 @@ def main() -> int:
         if not singleton_alive(singleton):
             # 持锁连接断了，锁可能已被备用副本接管；退出由容器重启后重新竞争
             log.error("执行器互斥锁连接中断，退出以免与接管的副本同时投递")
+            if runtime is not None:
+                runtime.shutdown(wait_for_stations=False)
             return 3
+        cycle_started = time.monotonic()
         try:
-            monotonic_now = time.monotonic()
             cleanup_due = (
                 last_file_cleanup is None
-                or monotonic_now - last_file_cleanup >= max(60, settings.file_cleanup_interval_sec)
+                or cycle_started - last_file_cleanup >= max(60, settings.file_cleanup_interval_sec)
             )
             assets_due = (
-                last_asset_monitor is None or monotonic_now - last_asset_monitor >= MONITOR_ASSETS_SEC
+                last_asset_monitor is None or cycle_started - last_asset_monitor >= MONITOR_ASSETS_SEC
             )
-            with SessionLocal() as db:
-                report = ExecutorLoop(db).tick(
+            if runtime is not None:
+                report = runtime.cycle(
                     simulate_heartbeat=SIMULATE_HEARTBEAT, cleanup_files=cleanup_due,
                     monitor_assets=assets_due,
                 )
+            else:
+                with SessionLocal() as db:
+                    report = ExecutorLoop(db).tick(
+                        simulate_heartbeat=SIMULATE_HEARTBEAT, cleanup_files=cleanup_due,
+                        monitor_assets=assets_due,
+                    )
             if cleanup_due:
-                last_file_cleanup = monotonic_now
+                last_file_cleanup = cycle_started
             if assets_due:
-                last_asset_monitor = monotonic_now
+                last_asset_monitor = cycle_started
             failures = 0
-            counts = {key: value for key, value in report.items() if key != "at" and value}
+            quiet = {"at", "cycle_ms", "stations_busy", "stations_dispatched"}
+            counts = {key: value for key, value in report.items() if key not in quiet and value}
             if counts:
-                info("执行器一轮", **counts)
+                info("执行器一轮", cycle_ms=report.get("cycle_ms"), **counts)
         except Exception:  # 执行器必须自愈：单次循环失败不退出进程
             failures += 1
             log.exception("执行器一轮失败", extra={"fields": {"consecutive_failures": failures}})
         # 连续失败时退避，避免数据库故障期间以轮询频率刷日志、压数据库
         delay = POLL_SEC if failures == 0 else min(60.0, POLL_SEC * (2 ** min(failures, 6)))
-        deadline = time.monotonic() + delay
-        while not _Stop.requested and time.monotonic() < deadline:
-            time.sleep(min(0.5, delay))
+        # 两轮之间至少留一点间隔：本轮自己产生的指令也会发唤醒通知，不能因此空转
+        gap = max(0.0, settings.executor_min_gap_sec - (time.monotonic() - cycle_started))
+        if gap:
+            time.sleep(gap)
+        if failures:
+            deadline = time.monotonic() + delay
+            while not _Stop.requested and time.monotonic() < deadline:
+                time.sleep(min(0.5, delay))
+        else:
+            waiter.wait(delay)
+    waiter.close()
+    if runtime is not None:
+        runtime.drain(timeout=30)
+        runtime.shutdown()
     if singleton is not None:
         singleton.close()
     info("执行器已退出")

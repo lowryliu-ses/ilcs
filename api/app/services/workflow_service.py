@@ -20,7 +20,7 @@ from ..core.context import AccessContext, system_context
 from ..core.errors import (
     DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed,
 )
-from ..domain import workflow
+from ..domain import graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
     DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize,
@@ -360,6 +360,8 @@ class WorkflowService:
             # 终止中或已结束的批次不再开下一节点；迟到的完成事件只记录步骤本身
             return {"next": None, "batch_state": batch.state, "stopped": True}
         steps = self.steps_of(batch)
+        if graph.graph_mode(steps):
+            return self._advance_graph(run, batch, steps)
         index, next_step_id = self._next_open_step(steps, batch, run.step_index)
         if index is None:
             if batch.state != "running":
@@ -383,6 +385,98 @@ class WorkflowService:
         next_run = self.open_step(batch, index)
         return self.enter(batch, next_run, index)
 
+    def _advance_graph(self, run: StepRun, batch: Batch, steps: list[dict]) -> dict:
+        """依赖图模式的推进：一步完成后，开出所有前驱都已完成、且从未尝试过的步骤。
+
+        - 分叉：一步完成可以同时开出多个后继（设备动作与人工记录、等待并行）。
+        - 汇合：后继要等它的全部前驱完成；先完成的分支到这里什么也不开，等最后一个前驱。
+        - 每个后继的开出各自经 `StepAdvance` 去重：两个前驱几乎同时完成时，汇合步骤只开一次。
+        - 全部步骤完成才结束批次，不是「最后一行完成」就结束。
+        """
+        # 两个分支在不同事务里几乎同时完成时，各自都可能看不到对方的完成而谁也不开汇合步骤。
+        # 先取批次行锁再重读步骤实例：后到的事务等前一个提交，读到的是它提交后的状态。
+        self.db.flush()
+        self.batches.lock(batch.id)
+        rows = list(
+            self.db.query(StepRun).filter(StepRun.batch_id == batch.id)
+            .order_by(StepRun.step_index, StepRun.attempt).populate_existing().all()
+        )
+        self._release_waiting_devices(batch, rows, finished=run)
+        completed = {row.step_id for row in rows if row.state == workflow.COMPLETED}
+        attempted = {
+            row.step_id for row in rows
+            if row.state not in {workflow.COMPLETED, workflow.SUPERSEDED, workflow.CANCELLED}
+        }
+        if graph.all_completed(steps, completed):
+            if batch.state != "running":
+                self.audit.record(
+                    None, "流程节点已全部完成", batch.id, before=batch.state, after=batch.state,
+                    detail="批次处于保持或故障，恢复评估确认后才结束",
+                )
+                return {"next": None, "batch_state": batch.state, "awaiting_recovery": True}
+            if not self.advances.claim(batch.id, run.step_id, run.attempt, "__end__"):
+                return {"next": None, "duplicate": True}
+            self.finish_batch(batch)
+            return {"next": None, "batch_state": "done"}
+        opened: list[dict] = []
+        for index in graph.ready_after(steps, completed, attempted):
+            step_id = step_id_of(steps[index], index)
+            # 去重键用「汇合步骤本身」而不是触发它的前驱：两个前驱同时完成也只开一次
+            if not self.advances.claim(batch.id, f"join:{step_id}", self._join_epoch(rows, step_id), step_id):
+                continue
+            next_run = self.open_step(batch, index)
+            opened.append(self.enter(batch, next_run, index))
+        self._sync_current_step(batch)
+        if not opened:
+            waiting = [
+                step_id_of(steps[index], index) for index in range(len(steps))
+                if step_id_of(steps[index], index) not in completed
+            ]
+            return {"next": None, "batch_state": batch.state, "waiting_for": waiting}
+        first = opened[0]
+        return {**first, "opened": [row.get("next") for row in opened]}
+
+    def _plate_busy(self, batch: Batch, run: StepRun, rows: list[StepRun] | None = None) -> bool:
+        """批次绑定了载具时，同一时刻只能有一个设备步骤在用它：一块板不能同时在两台设备上。"""
+        from .transfer_service import TransferService
+
+        if TransferService(self.db, self.ctx).for_batch(batch.id) is None:
+            return False
+        rows = rows if rows is not None else self.runs.for_batch(batch.id)
+        return any(
+            row.id != run.id and row.kind == DEVICE and row.state in {workflow.READY, workflow.RUNNING}
+            for row in rows
+        )
+
+    def _release_waiting_devices(self, batch: Batch, rows: list[StepRun], finished: StepRun) -> None:
+        """设备步骤结束后，把因载具被占而等着的并行设备步骤开起来（按步骤顺序一次一个）。"""
+        if finished.kind != DEVICE or batch.state != "running":
+            return
+        waiting = [row for row in rows if row.kind == DEVICE and row.state == workflow.PENDING]
+        for row in waiting:
+            if self._plate_busy(batch, row, rows):
+                break
+            row.state = workflow.READY
+            row.row_version = int(row.row_version or 0) + 1
+            from .batch_service import BatchService
+
+            BatchService(self.db, self.ctx).issue_command(batch, "dispatch", row.step_index, step_run_id=row.id)
+            self.audit.record(
+                None, "并行设备步骤开始", batch.id, detail=f"第 {row.step_index + 1} 步：载具已空出，开始投递",
+            )
+            break
+
+    @staticmethod
+    def _join_epoch(rows: list[StepRun], step_id: str) -> int:
+        """同一步第几次被开出：返工作废后重新开出时去重键要变，否则再也开不出来。"""
+        return 1 + sum(1 for row in rows if row.step_id == step_id)
+
+    def _sync_current_step(self, batch: Batch) -> None:
+        """并行时「当前步骤」取仍开着的最靠前一步；保持、恢复、界面都读它。"""
+        open_rows = self.runs.open_runs(batch.id)
+        if open_rows:
+            batch.current_step = min(row.step_index for row in open_rows)
+
     def enter(self, batch: Batch, run: StepRun, index: int) -> dict:
         """一个步骤实例开出来之后做什么。
 
@@ -398,6 +492,11 @@ class WorkflowService:
             if workflow.hold_blocks_device_action(batch.state):
                 run.state = workflow.PENDING
                 return {"next": self.run_out(run), "device_blocked": True}
+            if graph.graph_mode(self.steps_of(batch)) and self._plate_busy(batch, run):
+                # 并行分支上的另一个设备步骤正在用这块板：等它结束再投递，不把板从设备上抢走
+                run.state = workflow.PENDING
+                run.reason = "等待载具：并行分支的设备步骤正在使用"
+                return {"next": self.run_out(run), "waiting_labware": True}
             from .batch_service import BatchService
 
             command = BatchService(self.db, self.ctx).issue_command(

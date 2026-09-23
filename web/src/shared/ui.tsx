@@ -24,7 +24,7 @@ const STATE_CLASS: Record<string, string> = {
   // 故障、无效、被拒
   fault: 'fault', failed: 'fault', unknown: 'fault', invalid: 'fault', active: 'fault',
   rejected: 'fault', expired: 'fault', revoked: 'fault', unreachable: 'fault',
-  missing: 'fault', disabled: 'fault', partial: 'fault',
+  missing: 'fault', disabled: 'fault', partial: 'fault', lost: 'fault', offline: 'fault',
   // 结束、归档
   done: 'done', retired: 'done', closed: 'done', skipped: 'done', acked: 'done',
   completed: 'done', superseded: 'done', exhausted: 'done', left: 'done', split: 'done',

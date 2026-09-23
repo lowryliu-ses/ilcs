@@ -86,6 +86,30 @@ class Settings(BaseSettings):
     lot_expiry_warn_days: int = 30
     calibration_warn_days: int = 30
 
+    # ---------- 多批次优化 ----------
+    # auto：装了 ortools 就先用 CP-SAT 给一个候选顺序，再与内置顺序搜索的结果比；search：只用内置搜索
+    scheduler_backend: str = "auto"
+    scheduler_search_budget_sec: float = 3.0
+    scheduler_cpsat_time_limit_sec: float = 5.0
+    scheduler_max_batches: int = 40
+
+    # ---------- 载具与转运 ----------
+    # 下发前必须绑定载具（全自动产线打开；半自动 / 人工上下料的部署保持关闭）
+    labware_required: bool = False
+
+    # ---------- 并发执行器与变更推送 ----------
+    # 执行器按工位并发处理设备 I/O 的线程数；同一工位同一时刻只有一个线程
+    executor_workers: int = 8
+    # 每轮等工位线程的最长时间；没做完的留在后台继续做，该工位本轮不再派活
+    executor_station_wait_sec: float = 2.0
+    # 工位线程超过这个时长没返回就记一次告警日志（设备网关可能卡住）
+    executor_station_stuck_sec: float = 60.0
+    # 两轮之间的最小间隔：通知风暴时不空转
+    executor_min_gap_sec: float = 0.2
+    # 推送连接的最长存活时间：到点由服务端关闭、客户端重连并重新鉴权（令牌可能已撤销）
+    stream_max_sec: float = 300.0
+    stream_keepalive_sec: float = 15.0
+
     # ---------- 执行器存活与指令超时 ----------
     # 执行器超过这么久没有写存活记录，执行门关闭；0 表示不检查（仅限单元测试）
     executor_stale_sec: int = 60

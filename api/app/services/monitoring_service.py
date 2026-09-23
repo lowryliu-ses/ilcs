@@ -143,6 +143,15 @@ class ExecutorLiveness:
                 row.started_at = moment
             row.host, row.pid, row.last_seen = host, pid, moment
 
+    def record_cycle(self, *, cycle_ms: int, busy: list[str], stuck: list[str], workers: int) -> None:
+        row = self.db.get(ExecutorHeartbeat, EXECUTOR_ID)
+        if row is None:
+            return
+        row.detail = {
+            "cycle_ms": cycle_ms, "busy_stations": busy, "stuck_stations": stuck, "workers": workers,
+            "mode": "concurrent",
+        }
+
     def reasons(self) -> list[str]:
         if settings.executor_stale_sec <= 0:
             return []
@@ -164,4 +173,5 @@ class ExecutorLiveness:
             "started_at": row.started_at.isoformat(timespec="seconds"),
             "host": row.host,
             "pid": row.pid,
+            "detail": row.detail or {},
         }

@@ -89,6 +89,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .dot.ok { background: var(--ok); }
 .dot.bad { background: var(--sev-1); }
+.dot.warn { background: var(--s-paused); }
+.topbar .alarm-hot b { color: var(--sev-1); }
 .who { display: flex; align-items: center; gap: 10px; font-size: 12px; }
 .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 600; }
 
@@ -388,3 +390,34 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .perm-matrix tr.group-row td { background: var(--surface-2); padding-top: 10px; }
 .perm-matrix td.changed { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .perm-matrix input[type="checkbox"] { width: 16px; height: 16px; }
+
+/* ---------- 现场总览 ---------- */
+.floor .station-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; padding: 12px; }
+.station-card { border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: var(--r); padding: 10px 12px; display: grid; gap: 8px; background: var(--surface); }
+.station-card.ok { border-left-color: var(--ok); }
+.station-card.warn { border-left-color: var(--s-paused); }
+.station-card.bad { border-left-color: var(--sev-1); background: color-mix(in srgb, var(--sev-1) 5%, var(--surface)); }
+.station-card.off { opacity: 0.6; }
+.station-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.health { font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.health.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.health.warn { color: var(--s-paused); background: color-mix(in srgb, var(--s-paused) 14%, transparent); }
+.health.bad { color: var(--sev-1); background: color-mix(in srgb, var(--sev-1) 12%, transparent); }
+.health.off { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.station-work { display: grid; gap: 4px; min-height: 22px; }
+.slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); gap: 6px; }
+.slots.wide { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.slot { border: 1px dashed var(--border); border-radius: 6px; padding: 4px 6px; display: grid; gap: 1px; font-size: 11px; min-height: 44px; }
+.slot-id { color: var(--muted); font-family: var(--mono); font-size: 10px; }
+.slot-body { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot-batch { font-size: 10px; }
+.slot.full { border-style: solid; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.slot.other { border-style: solid; background: color-mix(in srgb, var(--muted) 10%, transparent); color: var(--muted); }
+.slot.incoming { border-color: var(--s-paused); background: color-mix(in srgb, var(--s-paused) 8%, transparent); }
+.slot.off { opacity: 0.45; }
+
+/* ---------- 方法编辑器：依赖图 ---------- */
+.deps { display: grid; gap: 6px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: var(--r); }
+.dep-list { display: grid; gap: 2px; max-height: 160px; overflow: auto; }
+.tag.dep { background: var(--accent-soft); color: var(--accent); }
+.tag.dep.branch { background: color-mix(in srgb, var(--s-paused) 16%, transparent); color: var(--s-paused); }

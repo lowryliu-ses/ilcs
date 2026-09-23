@@ -17,6 +17,7 @@ from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
+from ..domain import graph as dag
 from ..domain import preflight, recovery
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
@@ -30,7 +31,7 @@ from ..domain.steps import (
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
 from ..repositories.batches import AllocationRepository, BatchRepository, ResultRepository, SampleRepository
 from ..repositories.execution import (
-    DISPATCHING, CheckpointRepository, CommandRepository, TelemetryRepository,
+    DISPATCHING, MOTION, CheckpointRepository, CommandRepository, TelemetryRepository,
 )
 from ..repositories.governance import AlarmRepository
 from ..repositories.materials import ReservationRepository
@@ -291,11 +292,12 @@ class BatchService:
             "inventory_ledger": self.materials.inventory.ledger_for_batch(batch.id),
             "step_runs": self.workflow.runs_for_batch(batch.id),
             "workflow_events": self.workflow.events_for_batch(batch.id),
+            "labware": self._labware_out(batch),
             "commands": [
                 {
                     "id": c.id, "type": c.type, "state": c.state, "station_id": c.station_id,
                     "step_index": c.step_index, "step_run_id": c.step_run_id,
-                    "delivery_state": c.delivery_state,
+                    "delivery_state": c.delivery_state, "after_command_id": c.after_command_id,
                     "checkpoint_id": c.checkpoint_id, "error": c.error,
                     "created_at": c.created_at.isoformat(timespec="seconds"),
                 }
@@ -327,6 +329,13 @@ class BatchService:
             "preflight": self.preflight(batch, user, manual_review=False) if batch.state == "scheduled" else None,
             "can_control": self.ctx.has("batch.control"),
         }
+
+    def _labware_out(self, batch: Batch) -> dict | None:
+        from .transfer_service import TransferService
+
+        transfers = TransferService(self.db, self.ctx)
+        labware = transfers.for_batch(batch.id)
+        return transfers.labware_out(labware) if labware else None
 
     def telemetry_series(self, batch_id: str) -> dict:
         batch = self._require(batch_id)
@@ -821,6 +830,12 @@ class BatchService:
         result = self.preflight(batch, user, manual_review)
         if not result["ok"]:
             raise StateConflict("开跑检查未通过", {"blocked": result["blocked"]})
+        steps = self.steps_of(batch)
+        if steps and kind_of(steps[0]) == DEVICE:
+            from .transfer_service import TransferService
+
+            first = self.allocations.work_step(batch.id, 0)
+            TransferService(self.db, self.ctx).require_ready(batch, 0, first.station_id if first else "")
         signature = self.identity.consume_signature(
             signature_id, user, "下发批次执行", object_ref=batch.id, object_version=batch.row_version
         )
@@ -856,7 +871,15 @@ class BatchService:
 
     def issue_command(
         self, batch: Batch, command_type: str, step_index: int, step_run_id: str = "",
+        *, station_id: str | None = None, capability: str | None = None,
     ) -> Command:
+        """生成一条设备指令。
+
+        设备动作（dispatch / resume / retry）前，批次绑定了载具且板不在目标工位上时，先生成一条
+        转运指令并把它设为本指令的前置：板没被确认送到，设备收不到动作。转运计划不成立（位置
+        未知、放置位满、没有可用承运工位）时本指令直接判为未投递并挂起批次，原因写清楚。
+        保持 / 终止可以指定工位：在途的是转运时，要停的是承运工位而不是步骤工位。
+        """
         steps = self.steps_of(batch)
         step = steps[step_index] if step_index < len(steps) else {}
         allocation = self.allocations.work_step(batch.id, step_index)
@@ -871,12 +894,13 @@ class BatchService:
         if wells and command_type in DISPATCHING:
             # 矩阵条件：一条指令带全部孔位的参数，设备按孔位执行；步骤里的固定参数是未覆盖孔位的缺省值
             params["wells"] = wells
+        target_station = station_id if station_id is not None else (allocation.station_id if allocation else "")
         command = Command(
             org_id=batch.org_id or self.ctx.org_id,
             batch_id=batch.id,
             step_run_id=step_run_id,
-            station_id=allocation.station_id if allocation else "",
-            capability=step.get("cap", ""),
+            station_id=target_station,
+            capability=capability if capability is not None else step.get("cap", ""),
             params=params,
             type=command_type,
             state="sent",
@@ -886,7 +910,26 @@ class BatchService:
         )
         self.db.add(command)
         self.db.flush()
+        if command_type in DISPATCHING and target_station:
+            from .transfer_service import TransferService
+
+            transfer, blocker = TransferService(self.db, self.ctx).prepare(
+                batch, step_index, target_station, step_run_id,
+            )
+            if transfer is not None:
+                command.after_command_id = transfer.id
+            elif blocker:
+                self._refuse_unsent(batch, command, f"载具不能送到 {target_station}：{blocker}")
+            self.db.flush()
         return command
+
+    def _refuse_unsent(self, batch: Batch, command: Command, reason: str) -> None:
+        """指令没离开系统就判为不能投递：记入幂等台账，批次挂起报警。不提交——由调用方的事务决定。"""
+        from ..models import AdapterExecution
+        from .execution_service import ExecutionService
+
+        self.db.add(AdapterExecution(command_id=command.id, station_id=command.station_id, state="rejected"))
+        ExecutionService(self.db, self.ctx).fault(batch, command, reason, delivery="unreachable")
 
     # ---------- 保持 ----------
 
@@ -906,6 +949,13 @@ class BatchService:
                 return in_flight or [None]
             return []
 
+        moving = [c for c in self.commands.in_flight_for_batch(batch.id, {"transfer"})]
+        if moving:
+            # 板搬到一半停下既不在起点也不在终点；转运不可保持，只能等它完成或终止
+            raise StateConflict(
+                f"载具转运进行中（{moving[0].station_id}），不能保持：等转运完成后再保持，或直接终止",
+                code="transfer_in_progress",
+            )
         recovery_rules = self._recovery_rules(batch)
         if device_acting() and not recovery_rules.get("pausable", False):
             raise StateConflict(
@@ -932,8 +982,12 @@ class BatchService:
             )
             self.db.commit()
             return {**self.summary_out(batch), "device_hold_command_id": "", "withdrawn": withdrawn}
+        # 并行分支时「当前步骤」不一定是在设备上的那一步：保持发给真正在动作的指令所在步骤与工位
+        target = acting[0]
         command = self.issue_command(
-            batch, "hold", batch.current_step, step_run_id=run.id if run else ""
+            batch, "hold", target.step_index if target is not None else batch.current_step,
+            step_run_id=(target.step_run_id if target is not None else (run.id if run else "")),
+            station_id=target.station_id if target is not None else None,
         )
         self.audit.record(
             user, "请求保持", batch.id, before="运行中", after="已保持", command_id=command.id,
@@ -1083,6 +1137,13 @@ class BatchService:
             (task.assignee_user_id if task else user.id) or user.id, steps, now(), action="恢复运行",
             until=(remaining_end + timedelta(minutes=held_min_estimate(batch))) if remaining_end else None,
         )
+        if strategy != recovery.ABORT and batch.current_step < len(steps) and kind_of(steps[batch.current_step]) == DEVICE:
+            from .transfer_service import TransferService
+
+            work = self.allocations.work_step(batch.id, batch.current_step)
+            TransferService(self.db, self.ctx).require_ready(
+                batch, batch.current_step, work.station_id if work else "",
+            )
         signature = self.identity.consume_signature(
             signature_id, user, f"恢复策略：{option['label']}",
             object_ref=batch.id, object_version=batch.row_version,
@@ -1114,7 +1175,24 @@ class BatchService:
             if alarm.state == "active":
                 alarm.state = "acked"
         run = self.runs.current(batch.id)
-        if run is None and strategy != recovery.RETRY:
+        pending_current = False
+        if dag.graph_mode(steps):
+            # 并行分支：恢复针对出问题的那一步（故障时记在 current_step），不是最靠前的开着的一步
+            history = self.runs.for_batch(batch.id)
+            done_ids = {r.step_id for r in history if r.state == "completed"}
+            run = next((r for r in self.runs.open_runs(batch.id) if r.step_index == batch.current_step), None)
+            if run is None and step_id_of(steps[batch.current_step], batch.current_step) in done_ids:
+                run = self.runs.current(batch.id)
+                if run is None:
+                    ready = dag.ready_after(steps, done_ids, {
+                        r.step_id for r in history if r.state not in {"completed", "superseded", "cancelled"}
+                    })
+                    if ready:
+                        batch.current_step = ready[0]
+            pending_current = run is None and (
+                step_id_of(steps[batch.current_step], batch.current_step) not in done_ids
+            )
+        if run is None and strategy != recovery.RETRY and not pending_current:
             index, _ = self.workflow.next_open_step(steps, batch, -1)
             if index is None:
                 # 保持期间最后一步已经走完：没有要恢复的动作，确认后直接结束
@@ -1221,7 +1299,26 @@ class BatchService:
         run = execution._run_for(command, batch) if command.type in DISPATCHING else None
         outcome: dict = {"conclusion": conclusion}
 
-        if conclusion == "executed":
+        if command.type == "transfer":
+            from .transfer_service import TransferService
+
+            transfers = TransferService(self.db, self.ctx)
+            execution._release(record, command)
+            if conclusion == "executed":
+                mismatch = transfers.complete(command, source="verification", by=user.display_name, note=verdict)
+                if mismatch:
+                    raise StateConflict(f"不能按「已执行」结论记录：{mismatch}", code="transfer_mismatch")
+                ledger.state, command.state = "done", "done"
+                command.delivery_state = "delivered"
+            elif conclusion == "not_executed":
+                ledger.state, command.state = "not_executed", "not_executed"
+            else:
+                # 搬到一半：板的位置不可信，扫码重新定位后才能继续；与设备动作的部分执行不同，
+                # 转运部分执行没有改变样品的物理状态，所以不强制终止
+                ledger.state, command.state = "partial", "not_executed"
+                transfers.lost_by_command(command, f"转运部分执行：{note.strip()}", by=user.display_name)
+            command.error = verdict
+        elif conclusion == "executed":
             ledger.state = "done"
             command.delivery_state = "delivered"
             if command.type in DISPATCHING:
@@ -1326,7 +1423,8 @@ class BatchService:
             )
         else:
             withdrawn = self._withdraw_queued(batch, "批次终止，未投递的动作指令撤回")
-            if not self.commands.possibly_acting(batch.id, DISPATCHING):
+            acting_now = self.commands.possibly_acting(batch.id, MOTION)
+            if not acting_now:
                 # 设备侧没有在途或结果未知的动作：没有物理动作要确认，直接终止
                 batch.state = "aborted"
                 self.audit.record(
@@ -1343,8 +1441,11 @@ class BatchService:
                 return {**self.summary_out(batch), "pending_material_return": pending}
             batch.state = "aborting"
             run = self.runs.current(batch.id)
+            # 在动作的可能是转运（承运工位）或并行分支上的设备步骤：终止发给它所在的工位
+            target = next((c for c in acting_now if c.type == "transfer"), None) or acting_now[0]
             command = self.issue_command(
-                batch, "abort", batch.current_step, step_run_id=run.id if run else ""
+                batch, "abort", target.step_index, step_run_id=target.step_run_id or (run.id if run else ""),
+                station_id=target.station_id, capability=target.capability,
             )
             self.audit.record(
                 user, "终止批次", batch.id, sign=True, meaning=signature.meaning, before=before,

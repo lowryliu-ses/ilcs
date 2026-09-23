@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
 
 import { AlarmsPage } from '../features/alarms/AlarmsPage';
@@ -6,6 +7,7 @@ import { AuditPage } from '../features/audit/AuditPage';
 import { BatchDetailPage } from '../features/batches/BatchDetailPage';
 import { BatchesPage } from '../features/batches/BatchesPage';
 import { DashboardPage } from '../features/dashboard/DashboardPage';
+import { FloorPage } from '../features/floor/FloorPage';
 import { DataReviewPage } from '../features/data-review/DataReviewPage';
 import { MaterialsPage } from '../features/materials/MaterialsPage';
 import { MetricsPage } from '../features/metrics/MetricsPage';
@@ -26,7 +28,8 @@ import { TasksPage } from '../features/tasks/TasksPage';
 import { LoginPage } from '../features/identity/LoginPage';
 import { ChangePasswordPage } from '../features/identity/ChangePasswordPage';
 import { api } from '../shared/api';
-import { useQuery } from '../shared/query';
+import { useLive, useQuery } from '../shared/query';
+import { startStream } from '../shared/stream';
 import { useSession } from '../shared/session';
 import type { Dashboard, Gate } from '../shared/types';
 
@@ -35,7 +38,7 @@ import type { Dashboard, Gate } from '../shared/types';
 const NAV: [string, [string, string][]][] = [
   ['概览', [['/dashboard', '工作台']]],
   ['设计', [['/plans', '实验方案'], ['/recipes', '方法与配方'], ['/sops', 'SOP']]],
-  ['执行', [['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心']]],
+  ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心']]],
   ['科学数据', [['/samples', '样本中心'], ['/data-review', '数据审核'], ['/results', '结果分析'], ['/reports', '报告']]],
   ['资源', [['/assets', '仪器设备'], ['/stations', '工位与能力'], ['/materials', '试剂耗材'], ['/people', '人员与资质']]],
   ['治理', [['/metrics', '指标定义'], ['/audit', '审计记录'], ['/governance', '系统治理']]],
@@ -46,6 +49,8 @@ export function App() {
   const active = !!user && !user.must_change_password;
   const gate = useQuery<Gate>(active ? 'gate' : null, () => api.get<Gate>('/gate'), 15000);
   const counters = useQuery<Dashboard>(active ? 'dashboard:nav' : null, () => api.get<Dashboard>('/dashboard'), 20000);
+  const { live } = useLive();
+  useEffect(() => (active ? startStream() : undefined), [active]);
 
   if (!ready) return <div className="boot">加载中…</div>;
   if (!user) return <LoginPage />;
@@ -109,6 +114,13 @@ export function App() {
           <span>
             结果未知指令 <b>{counts?.unknown_commands ?? 0}</b>
           </span>
+          <span className={counts?.open_alarms ? 'alarm-hot' : ''}>
+            未确认报警 <b>{counts?.open_alarms ?? 0}</b>
+          </span>
+          <span title={live ? '服务端变更实时推送，轮询仅作兜底' : '推送未连接，按页面轮询间隔刷新'}>
+            <span className={`dot ${live ? 'ok' : 'warn'}`} />
+            {live ? '实时' : '轮询'}
+          </span>
         </div>
         <div className="who">
           <span className="avatar">{user.display_name.slice(0, 1)}</span>
@@ -136,6 +148,7 @@ export function App() {
           <Route path="/recipes/:recipeId/edit" element={<RecipeEditorPage />} />
           <Route path="/sops" element={<SopsPage />} />
           <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/floor" element={<FloorPage />} />
           <Route path="/schedule" element={<SchedulePage />} />
           <Route path="/batches" element={<BatchesPage />} />
           <Route path="/batches/:batchId" element={<BatchDetailPage />} />

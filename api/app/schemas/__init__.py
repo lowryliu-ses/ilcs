@@ -858,3 +858,38 @@ class ShelveIn(BaseModel):
 class FileAttachIn(BaseModel):
     ref_type: str
     ref_id: str
+
+
+# ---------- 载具与位置 ----------
+
+class LabwareCreateIn(BaseModel):
+    barcode: str = Field(min_length=1, max_length=80)
+    type_id: str
+    location_id: str | None = None
+    note: str = ""
+
+
+class LabwareMoveIn(BaseModel):
+    """扫码放置。`to_location_id` 为空表示从产线取下；条码必须与载具一致。"""
+
+    barcode: str
+    to_location_id: str | None = None
+    reason: str = ""
+
+
+class LabwareBindIn(BaseModel):
+    labware_id: str
+
+
+class LocationCreateIn(BaseModel):
+    id: str = Field(min_length=1, max_length=60)
+    name: str = ""
+    kind: Literal["nest", "hotel", "buffer", "storage"] = "nest"
+    station_id: str = ""
+    group: str = ""
+    position: int = 0
+    accepts: list[str] = Field(default_factory=list)
+
+
+class LocationActiveIn(BaseModel):
+    active: bool

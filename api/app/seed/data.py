@@ -405,3 +405,12 @@ SINGLE_CONDITION_PLAN = dict(
     goal="按 1.3 节建议样例贯通人工 / 设备 / 等待 / 审核四类节点；不代表已选定正式实验方法",
     metric_codes=["areal_density", "discharge_capacity"],
 )
+
+
+# ---------- 载具与位置（演示：每个工位按通道数登记放置位，外加一个 12 槽板库） ----------
+LABWARE_TYPES = [
+    dict(id="LT-PLATE-24", name="24 孔配方板", kind="plate", rows=4, cols=6),
+    dict(id="LT-PLATE-96", name="96 孔板", kind="plate", rows=8, cols=12),
+    dict(id="LT-TRAY-8", name="8 位扣电托盘", kind="tray", rows=1, cols=8),
+]
+HOTELS = [("HOTEL-01", "进样板库", 12)]

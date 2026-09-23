@@ -17,7 +17,9 @@ import {
   canSubmit,
   defaultParams,
   editorChecks,
+  graphMode,
   indexCapabilities,
+  predecessors,
   paramRange,
   stationsForStep,
   stepIssues,
@@ -284,6 +286,9 @@ export function RecipeEditorPage() {
 
   /* ---------- 画布 ---------- */
 
+  // 依赖图模式下每个节点标出它的前驱：画布仍按列表顺序排（列表就是拓扑序），分叉与汇合看标签
+  const dependencyMap = graphMode(draft.steps) ? predecessors(draft.steps) : null;
+
   const canvas = (
     <div className="fcanvas">
       <div className="fnode term">
@@ -295,6 +300,7 @@ export function RecipeEditorPage() {
           key={index}
           index={index}
           step={step}
+          deps={dependencyMap ? dependencyMap[index] : undefined}
           selected={selected === index}
           readOnly={readOnly}
           issues={stepIssues(step, capabilityIndex, draft.steps, index)}
@@ -361,8 +367,9 @@ export function RecipeEditorPage() {
         <div className="note warn">只读：{readOnlyWhy}。</div>
       ) : (
         <div className="note">
-          支持四类顺序节点：设备、人工、等待、审核。设备步骤绑定能力而不是设备，参数实时对照全部工位极限；
-          人工步骤定义结构化记录表单；等待当前只支持固定时长；审核批准才继续。
+          六类节点：设备、人工、等待、审核、质检关卡、样本拆分。设备步骤绑定能力而不是设备，参数实时对照全部工位极限；
+          人工步骤定义结构化记录表单；审核批准才继续。默认按画布顺序逐步推进；在步骤属性里勾选「前驱步骤」
+          即改为依赖图：一步可以同时开出多个后继（并行），汇合步骤等全部前驱完成。
           这里的校验是即时提示，能不能提交由服务端重算。
         </div>
       )}
@@ -524,6 +531,7 @@ function DropTarget({
 function FlowNode({
   index,
   step,
+  deps,
   selected,
   readOnly,
   issues,
@@ -535,6 +543,7 @@ function FlowNode({
 }: {
   index: number;
   step: RecipeStep;
+  deps?: number[];
   selected: boolean;
   readOnly: boolean;
   issues: string[];
@@ -590,6 +599,15 @@ function FlowNode({
             {STEP_KINDS.find(([value]) => value === kind)?.[1] ?? kind}
           </span>
           {kind === 'device' ? <span className="tag">{capabilityName}</span> : null}
+          {deps ? (
+            <span
+              className={`tag dep${
+                (index === 0 && !deps.length) || (deps.length === 1 && deps[0] === index - 1) ? '' : ' branch'
+              }`}
+            >
+              {deps.length ? `依赖 ${deps.map((at) => at + 1).join('、')}` : '起点'}
+            </span>
+          ) : null}
         </span>
         <span className="fn-title">{step.name || <span className="muted">未命名</span>}</span>
         <span className="fn-meta">
@@ -929,6 +947,8 @@ function StepProperties({
         </Field>
       ) : null}
 
+      <DependencyEditor steps={steps} index={index} readOnly={readOnly} onSet={onSet} />
+
       <label className="check">
         <input
           type="checkbox"
@@ -1267,5 +1287,64 @@ function GateFields({
         ) : null}
       </div>
     </>
+  );
+}
+
+/* 前驱步骤。勾选多个即汇合；多个步骤勾同一个前驱即分叉。只能依赖排在前面的步骤（列表即拓扑序），
+   新加的步骤保存后有了稳定标识才能被引用。 */
+function DependencyEditor({
+  steps,
+  index,
+  readOnly,
+  onSet,
+}: {
+  steps: RecipeStep[];
+  index: number;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const step = steps[index];
+  const graph = graphMode(steps);
+  const explicit = step.after !== undefined;
+  const current = predecessors(steps)[index];
+  const earlier = steps.slice(0, index);
+  return (
+    <div className="deps">
+      <div className="small">
+        <b>前驱步骤</b>{' '}
+        <span className="muted">
+          {!graph ? '顺序流程：依赖上一步' : explicit ? (current.length ? '按勾选' : '起点：不依赖任何步骤') : '未声明：依赖上一行'}
+        </span>
+      </div>
+      {earlier.length ? (
+        <div className="dep-list">
+          {earlier.map((row, at) => (
+            <label key={at} className="check" title={row.step_id ? '' : '新步骤保存后才能被引用'}>
+              <input
+                type="checkbox"
+                disabled={readOnly || !row.step_id}
+                checked={current.includes(at)}
+                onChange={(event) =>
+                  onSet((target) => {
+                    const chosen = new Set(current.map((parent) => steps[parent].step_id).filter((id): id is string => !!id));
+                    if (event.target.checked) chosen.add(row.step_id as string);
+                    else chosen.delete(row.step_id as string);
+                    target.after = earlier.map((item) => item.step_id).filter((id): id is string => !!id && chosen.has(id));
+                  })
+                }
+              />
+              {at + 1}. {row.name || '未命名'}
+            </label>
+          ))}
+        </div>
+      ) : (
+        <div className="tiny muted">第一步没有可依赖的步骤。</div>
+      )}
+      {explicit ? (
+        <button className="btn sm" disabled={readOnly} onClick={() => onSet((target) => void delete target.after)}>
+          恢复为依赖上一行
+        </button>
+      ) : null}
+    </div>
   );
 }

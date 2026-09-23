@@ -117,7 +117,7 @@ def reset_runtime():
     from app.core.clock import now
     from app.core.db import SessionLocal
     from app.models import (
-        Adapter, Alarm, Allocation, Batch, Recipe, ResourceBooking, Station, StepRun, WorkflowEvent,
+        Adapter, Alarm, Allocation, Batch, Command, Recipe, ResourceBooking, Station, StepRun, WorkflowEvent,
     )
 
     with SessionLocal() as session:
@@ -130,6 +130,10 @@ def reset_runtime():
             session.query(WorkflowEvent).filter(WorkflowEvent.batch_id == batch.id).update(
                 {"state": "rejected"}, synchronize_session=False
             )
+            # 队列里还没投递的指令一并撤回：否则下一用例的执行器一轮会先处理它们
+            session.query(Command).filter(
+                Command.batch_id == batch.id, Command.state == "sent", Command.delivery_state == "queued",
+            ).update({"state": "cancelled", "delivery_state": "not_sent"}, synchronize_session=False)
         for station in session.query(Station).all():
             station.status = "idle"
             station.clean = True

@@ -29,6 +29,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "batch.schedule": ["operator", "admin"],
     "batch.control": ["operator", "admin"],
     "batch.recover": ["operator", "admin"],
+    "labware.move": ["operator", "admin"],
     "step.submit": ["operator", "researcher", "admin"],
     "step.review": ["qa", "admin"],
     # ---------- 样本 ----------
@@ -42,6 +43,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "inventory.reverse": ["qa", "admin"],
     # ---------- 资源 ----------
     "station.edit": ["admin"],
+    "location.edit": ["admin"],
     "asset.edit": ["admin"],
     "booking.edit": ["operator", "admin"],
     "maintenance.edit": ["operator", "admin"],
@@ -108,6 +110,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("task.create", "建立实验任务"), ("task.assign", "分配任务"), ("task.accept", "接单"),
         ("task.cancel", "取消任务"), ("batch.create", "建立批次"), ("batch.schedule", "排程"),
         ("batch.control", "下发与保持 / 终止批次"), ("batch.recover", "异常恢复与现场核查"),
+        ("labware.move", "载具登记、绑定与扫码放置"),
         ("step.submit", "提交人工步骤记录"), ("step.review", "流程审核与质检判定"),
     ]),
     ("样本", [
@@ -118,7 +121,8 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("inventory.post", "库存入账"), ("inventory.reverse", "库存冲销"),
     ]),
     ("资源", [
-        ("station.edit", "维护工位与适配器"), ("asset.edit", "维护仪器设备与校准"),
+        ("station.edit", "维护工位与适配器"), ("location.edit", "维护放置位与板库"),
+        ("asset.edit", "维护仪器设备与校准"),
         ("booking.edit", "资源预约"), ("maintenance.edit", "维护工单"),
     ]),
     ("人员与资质", [("person.edit", "维护人员档案"), ("qualification.edit", "维护资质")]),

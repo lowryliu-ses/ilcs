@@ -7,7 +7,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import { useSession } from '../../shared/session';
 import type {
-  BatchDetail, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
+  BatchDetail, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
 import {
@@ -329,7 +329,10 @@ export function BatchDetailPage() {
                   <tr key={command.id}>
                     <td className="mono small">{command.id.slice(0, 8)}</td>
                     <td>
-                      第 {command.step_index + 1} 步 {command.type}
+                      第 {command.step_index + 1} 步 {command.type === 'transfer' ? '转运' : command.type}
+                      {command.after_command_id && command.state === 'sent' ? (
+                        <div className="tiny muted">等前置转运 {command.after_command_id.slice(0, 8)} 完成</div>
+                      ) : null}
                       {command.error ? <div className="tiny bad-text">{command.error}</div> : null}
                     </td>
                     <td className="mono">{command.station_id}</td>
@@ -352,6 +355,7 @@ export function BatchDetailPage() {
             <Empty>尚未下发指令</Empty>
           )}
         </Panel>
+        <LabwarePanel batchId={batchId} state={data.state} labware={data.labware} />
       </div>
 
       <div className="grid cols-2">
@@ -1290,4 +1294,76 @@ function VerifyCommandDialog({
 
 function reservationLabel(state: string): string {
   return { reserved: '预留', consumed: '已消耗', released: '已释放' }[state] ?? state;
+}
+
+/* 绑定的载具与它的位置。绑定后每个设备步骤前系统先把板送到工位（转运指令），位置只按回执或扫码更新。 */
+function LabwarePanel({ batchId, state, labware }: { batchId: string; state: string; labware: LabwareRow | null }) {
+  const { can } = useSession();
+  const toast = useToast();
+  const [choosing, setChoosing] = useState(false);
+  const editable = ['planned', 'scheduled'].includes(state) && can('labware.move');
+  const candidates = useQuery<LabwareRow[]>(choosing ? 'labware:bindable' : null, () => api.get<LabwareRow[]>('/labware'));
+  const invalidates = [`batches:${batchId}`, 'floor', 'labware'];
+  const bind = useMutation((labwareId: string) => api.post(`/batches/${batchId}/labware`, { labware_id: labwareId }), {
+    invalidates,
+    onSuccess: () => {
+      toast.push('载具已绑定');
+      setChoosing(false);
+    },
+  });
+  const unbind = useMutation(() => api.remove(`/batches/${batchId}/labware`), { invalidates, onSuccess: () => toast.push('已解绑') });
+  const usable = (candidates.data ?? []).filter((row) => !row.batch_active && !['retired', 'lost'].includes(row.state));
+  return (
+    <Panel
+      title="载具与位置"
+      aside={
+        editable ? (
+          <>
+            <button className="btn sm" onClick={() => setChoosing((open) => !open)}>
+              {labware ? '更换' : '绑定载具'}
+            </button>
+            {labware ? (
+              <button className="btn sm" onClick={() => unbind.run().catch((error) => toast.push(error.message))}>
+                解绑
+              </button>
+            ) : null}
+          </>
+        ) : null
+      }
+    >
+      {labware ? (
+        <div className="small">
+          <b className="mono">{labware.barcode}</b> · {labware.type_name}（{labware.rows}×{labware.cols}）
+          <div>
+            当前位置 <b className="mono">{labware.location_id || '未上线'}</b>{' '}
+            {labware.state === 'lost' ? <Pill state="lost" label="位置未知" /> : null}
+          </div>
+          {labware.in_transit ? (
+            <div className="tiny warn-text">
+              转运在途：{labware.in_transit.carrier} → {labware.in_transit.to}（{labware.in_transit.state}）
+            </div>
+          ) : null}
+          <div className="tiny muted">
+            每个设备步骤开始前，板不在该工位时系统先生成转运指令；设备动作在转运被确认完成后才投递。
+          </div>
+        </div>
+      ) : (
+        <div className="small muted">未绑定载具：不做位置追踪，换工位按排程时间窗处理。</div>
+      )}
+      {choosing ? (
+        usable.length ? (
+          <select defaultValue="" onChange={(event) => event.target.value && bind.run(event.target.value).catch((error) => toast.push(error.message))}>
+            <option value="">选择空闲载具…</option>
+            {usable.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.barcode} · {row.type_name} · {row.location_id || '未上线'}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <Empty>没有空闲载具：先在「现场总览」登记</Empty>
+        )
+      ) : null}
+    </Panel>
+  );
 }
