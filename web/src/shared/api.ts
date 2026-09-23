@@ -147,6 +147,7 @@ export const api = {
   post: <T>(path: string, body?: unknown, idempotent = false) =>
     request<T>(path, { method: 'POST', body: body ?? {}, idempotent }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body: body ?? {} }),
+  put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body: body ?? {} }),
   remove: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 
   /** 文件上传。multipart 不走 JSON 分支，也不加 Content-Type——浏览器要自己带 boundary。 */

@@ -15,14 +15,25 @@ from ..core.errors import (
 from ..core.security import (
     hash_password, hash_secret, issue_token, new_secret, password_needs_rehash, verify_password,
 )
-from ..domain.permissions import ROLE_NAMES, permissions_of
-from ..models import ESignature, Membership, Organization, ServiceIdentity, User
+from ..domain.permissions import (
+    ADMIN, ASSIGNABLE_ROLES, PERMISSION_CATALOG, ROLE_NAMES, default_matrix, effective_permissions,
+    normalize_matrix, roles_label,
+)
+from ..models import ESignature, Membership, Organization, RolePermissionSet, ServiceIdentity, User, roles_of
 from ..repositories.governance import SignatureRepository, UserRepository
 from ..repositories.organization import (
     MembershipRepository, OrganizationRepository, ProjectMemberRepository, ProjectRepository,
     ServiceIdentityRepository,
 )
 from .audit_service import AuditService
+
+
+def user_may(ctx: AccessContext | None, user: User, permission: str) -> bool:
+    """这个账号能不能做这个动作：请求上下文就是本人时按它的有效权限（组织矩阵 + 多角色），
+    否则按账号全部角色与出厂矩阵判断。"""
+    if ctx is not None and ctx.is_user and ctx.subject_id == user.id:
+        return ctx.has(permission)
+    return permission in effective_permissions(roles_of(user))
 
 
 class IdentityService:
@@ -102,7 +113,7 @@ class IdentityService:
             subject_kind=USER,
             subject_label=user.display_name,
             role=user.role,
-            perms=tuple(permissions_of(user.role)),
+            perms=tuple(effective_permissions(roles_of(user), self.matrix_for(membership.org_id))),
             project_ids=frozenset(self.project_members.project_ids_for(user.id)),
             restricted_projects=restricted,
         )
@@ -115,8 +126,9 @@ class IdentityService:
             "username": user.username,
             "display_name": user.display_name,
             "role": user.role,
-            "role_name": ROLE_NAMES.get(user.role, user.role),
-            "perms": permissions_of(user.role),
+            "roles": roles_of(user),
+            "role_name": roles_label(roles_of(user)),
+            "perms": list(context.perms) if context else [],
             "organization_id": context.org_id if context else "",
             "organization_name": org.name if org else "",
             "organization_timezone": org.timezone if org else "Asia/Shanghai",
@@ -181,7 +193,8 @@ class IdentityService:
                 "username": user.username,
                 "display_name": user.display_name,
                 "role": user.role,
-                "role_name": ROLE_NAMES.get(user.role, user.role),
+                "roles": roles_of(user),
+                "role_name": roles_label(roles_of(user)),
                 "account_state": user.state,
                 "membership_state": membership.state,
                 "default_lab_id": membership.default_lab_id,
@@ -196,7 +209,9 @@ class IdentityService:
 
     def create_account(
         self, actor: User, username: str, display_name: str, role: str, default_lab_id: str,
+        roles: list[str] | None = None,
     ) -> dict:
+        roles = self._clean_roles(roles or [role])
         username = username.strip().lower()
         if not re.fullmatch(r"[a-z][a-z0-9._-]{2,63}", username):
             raise ValidationFailed(
@@ -211,7 +226,8 @@ class IdentityService:
         user = User(
             username=username,
             display_name=display_name.strip(),
-            role=role,
+            role=roles[0],
+            roles=roles,
             password_hash=hash_password(temporary_password),
             state="active",
             must_change_password=True,
@@ -225,7 +241,7 @@ class IdentityService:
             granted_at=now(),
         ))
         self.audit.record(
-            actor, "创建账号", user.id, before="—", after=role,
+            actor, "创建账号", user.id, before="—", after=roles_label(roles),
             detail=f"{username}；临时口令只显示一次；首次登录必须修改",
             object_version=user.row_version,
         )
@@ -247,8 +263,8 @@ class IdentityService:
     def _ensure_admin_remains(
         self, target: User, membership: Membership, changes: dict,
     ) -> None:
-        removes_admin = target.role == "admin" and (
-            changes.get("role", target.role) != "admin"
+        removes_admin = ADMIN in roles_of(target) and (
+            ADMIN not in changes.get("roles", roles_of(target))
             or changes.get("account_state", target.state) != "active"
             or changes.get("membership_state", membership.state) != "active"
         )
@@ -257,7 +273,7 @@ class IdentityService:
         active_admins = 0
         for item in self.memberships.for_org(self.ctx.org_id):
             candidate = self.db.get(User, item.user_id)
-            if item.state == "active" and candidate and candidate.state == "active" and candidate.role == "admin":
+            if item.state == "active" and candidate and candidate.state == "active" and ADMIN in roles_of(candidate):
                 active_admins += 1
         if active_admins <= 1:
             raise StateConflict(
@@ -270,16 +286,22 @@ class IdentityService:
     ) -> dict:
         target, membership = self._scoped_account(user_id)
         self.users.check_version(target, expected_version, "账号")
+        # 旧客户端只传 role：按「只有这一个角色」处理
+        if changes.get("roles") is None and changes.get("role") is not None:
+            changes["roles"] = [changes["role"]]
+        changes.pop("role", None)
+        if "roles" in changes:
+            changes["roles"] = self._clean_roles(changes["roles"])
         if actor.id == target.id and (
             changes.get("account_state") == "disabled"
             or changes.get("membership_state") == "revoked"
-            or (changes.get("role") is not None and changes["role"] != target.role)
+            or ("roles" in changes and set(changes["roles"]) != set(roles_of(target)))
         ):
             raise StateConflict("不能停用、撤销或修改自己当前会话的角色", code="self_lockout")
         self._ensure_admin_remains(target, membership, changes)
         before = {
             "display_name": target.display_name,
-            "role": target.role,
+            "roles": roles_of(target),
             "account_state": target.state,
             "membership_state": membership.state,
         }
@@ -287,8 +309,8 @@ class IdentityService:
             if not changes["display_name"].strip():
                 raise ValidationFailed("姓名不能为空", code="display_name_required")
             target.display_name = changes["display_name"].strip()
-        if "role" in changes:
-            target.role = changes["role"]
+        if "roles" in changes:
+            target.role, target.roles = changes["roles"][0], changes["roles"]
         if "account_state" in changes:
             target.state = changes["account_state"]
         if "membership_state" in changes:
@@ -301,6 +323,84 @@ class IdentityService:
         )
         self.db.commit()
         return next(row for row in self.list_accounts() if row["id"] == target.id)
+
+    @staticmethod
+    def _clean_roles(roles: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(role for role in roles if role))
+        if not cleaned:
+            raise ValidationFailed("至少选择一个角色", code="role_required")
+        unknown = [role for role in cleaned if role not in ASSIGNABLE_ROLES]
+        if unknown:
+            raise ValidationFailed(f"未知角色 {', '.join(unknown)}", code="role_unknown")
+        return cleaned
+
+    # ---------- 角色权限矩阵 ----------
+
+    def matrix_for(self, org_id: str) -> dict[str, list[str]]:
+        """组织当前生效的矩阵。没改过的组织、以及矩阵里没有的角色，沿用出厂默认值。"""
+        row = self.db.get(RolePermissionSet, org_id)
+        return {**default_matrix(), **((row.matrix or {}) if row else {})}
+
+    def role_permissions(self) -> dict:
+        row = self.db.get(RolePermissionSet, self.ctx.org_id)
+        updater = self.db.get(User, row.updated_by) if row and row.updated_by else None
+        return {
+            "catalog": [
+                {"group": group, "permissions": [{"key": key, "label": label} for key, label in rows]}
+                for group, rows in PERMISSION_CATALOG
+            ],
+            "roles": [
+                {"key": role, "name": ROLE_NAMES[role], "locked": role == ADMIN} for role in ASSIGNABLE_ROLES
+            ],
+            "matrix": self.matrix_for(self.ctx.org_id),
+            "defaults": default_matrix(),
+            "customized": row is not None,
+            "row_version": row.row_version if row else 0,
+            "updated_by": updater.display_name if updater else "",
+            "updated_at": row.updated_at.isoformat(timespec="seconds") if row else None,
+        }
+
+    def update_role_permissions(
+        self, actor: User, raw: dict, expected_version: int, signature_id: str,
+    ) -> dict:
+        """改矩阵：管理员签名、乐观锁、逐角色记录增减。系统管理员角色不可改。"""
+        row = self.db.get(RolePermissionSet, self.ctx.org_id)
+        current_version = row.row_version if row else 0
+        if int(expected_version) != current_version:
+            raise StateConflict("权限矩阵已被他人修改，请刷新后重试", code="version_conflict")
+        matrix, issues = normalize_matrix(raw)
+        if issues:
+            raise ValidationFailed("；".join(issues), {"issues": issues}, code="role_permissions_invalid")
+        signature = self.consume_signature(
+            signature_id, actor, "修改角色权限", object_ref=f"role-permissions:{self.ctx.org_id}",
+            object_version=current_version, strict=True,
+        )
+        before = self.matrix_for(self.ctx.org_id)
+        changes = []
+        for role, perms in matrix.items():
+            added = sorted(set(perms) - set(before.get(role, [])))
+            removed = sorted(set(before.get(role, [])) - set(perms))
+            if added or removed:
+                changes.append(
+                    f"{ROLE_NAMES[role]}：" + "；".join(filter(None, [
+                        f"新增 {', '.join(added)}" if added else "", f"移除 {', '.join(removed)}" if removed else "",
+                    ]))
+                )
+        if not changes:
+            raise ValidationFailed("矩阵没有变化", code="role_permissions_unchanged")
+        if row is None:
+            row = RolePermissionSet(org_id=self.ctx.org_id, row_version=0)
+            self.db.add(row)
+        row.matrix = matrix
+        row.row_version = current_version + 1
+        row.updated_by = actor.id
+        row.updated_at = now()
+        self.audit.record(
+            actor, "修改角色权限", f"role-permissions:{self.ctx.org_id}", sign=True, meaning=signature.meaning,
+            signature_id=signature.id, object_version=row.row_version, detail="\n".join(changes)[:4000],
+        )
+        self.db.commit()
+        return self.role_permissions()
 
     def reset_account_password(self, actor: User, user_id: str) -> dict:
         target, _ = self._scoped_account(user_id)

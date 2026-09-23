@@ -82,7 +82,7 @@ def seed(
         user = db.query(User).filter(User.username == username).first()
         if not user:
             user = User(
-                username=username, display_name=display_name, role=role,
+                username=username, display_name=display_name, role=role, roles=[role],
                 password_hash=hash_password(password), state="active",
                 must_change_password=force_password_change,
             )

@@ -32,15 +32,43 @@
             "type": "string"
           },
           "role": {
-            "enum": [
-              "researcher",
-              "qa",
-              "operator",
-              "ehs",
-              "admin"
+            "anyOf": [
+              {
+                "enum": [
+                  "researcher",
+                  "qa",
+                  "operator",
+                  "ehs",
+                  "admin"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Role",
-            "type": "string"
+            "title": "Role"
+          },
+          "roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "researcher",
+                    "qa",
+                    "operator",
+                    "ehs",
+                    "admin"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roles"
           },
           "username": {
             "title": "Username",
@@ -49,8 +77,7 @@
         },
         "required": [
           "username",
-          "display_name",
-          "role"
+          "display_name"
         ],
         "title": "AccountCreateIn",
         "type": "object"
@@ -116,6 +143,27 @@
               }
             ],
             "title": "Role"
+          },
+          "roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "researcher",
+                    "qa",
+                    "operator",
+                    "ehs",
+                    "admin"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roles"
           },
           "row_version": {
             "anyOf": [
@@ -3266,6 +3314,38 @@
         "title": "RevokeIn",
         "type": "object"
       },
+      "RolePermissionsIn": {
+        "additionalProperties": false,
+        "description": "组织的角色权限矩阵。系统管理员不在矩阵里；row_version 是读到的版本（从未改过为 0）。",
+        "properties": {
+          "matrix": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Matrix",
+            "type": "object"
+          },
+          "row_version": {
+            "minimum": 0.0,
+            "title": "Row Version",
+            "type": "integer"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "matrix",
+          "row_version",
+          "signature_id"
+        ],
+        "title": "RolePermissionsIn",
+        "type": "object"
+      },
       "SampleCreateIn": {
         "properties": {
           "barcode": {
@@ -5010,6 +5090,120 @@
           }
         ],
         "summary": "Organizations",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/role-permissions": {
+      "get": {
+        "description": "当前组织的角色权限矩阵、权限目录与出厂默认值。",
+        "operationId": "role_permissions_api_admin_role_permissions_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Role Permissions",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "修改角色权限矩阵。需要管理员签名；系统管理员恒有全部权限，不在矩阵里。\n职责分离（本人不能审批本人）不受矩阵影响。",
+        "operationId": "update_role_permissions_api_admin_role_permissions_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RolePermissionsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Role Permissions",
         "tags": [
           "admin"
         ]

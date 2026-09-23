@@ -3,7 +3,7 @@ from .batch import Allocation, AnalysisTask, Batch, Result, Sample
 from .execution import AdapterExecution, Checkpoint, Command, ExecutorHeartbeat, Telemetry
 from .file import FileObject
 from .governance import AccessLog, Alarm, AuditEvent, IdempotencyKey, PlanBatchLink
-from .identity import ESignature, User
+from .identity import ESignature, RolePermissionSet, User, roles_of
 from .material import (
     InventoryEvent, InventoryLedger, Lot, Material, Reservation, WasteTank,
 )
@@ -32,4 +32,5 @@ __all__ = [
     "ResourceBooking", "Result", "ResultReview", "ResultValue", "Sample", "SampleTransfer",
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
+    "RolePermissionSet", "roles_of",
 ]

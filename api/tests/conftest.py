@@ -199,6 +199,9 @@ class Session:
     def patch(self, path: str, json: dict | None = None):
         return self.client.patch(path, json=json or {}, headers=self.headers)
 
+    def put(self, path: str, json: dict | None = None):
+        return self.client.put(path, json=json or {}, headers=self.headers)
+
     def delete(self, path: str):
         return self.client.delete(path, headers=self.headers)
 

@@ -13,12 +13,11 @@ from sqlalchemy.orm import Session
 from ..core.clock import as_utc, now
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
-from ..domain.permissions import can
 from ..models import MaintenanceOrder, ResourceBooking, User
 from ..repositories.base import ScopedRepository
 from ..repositories.resources import AssetRepository, BookingRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, user_may
 
 KINDS = {"preventive": "预防性维护", "corrective": "故障维修", "inspection": "点检"}
 STATES = {"planned": "已计划", "in_progress": "执行中", "done": "已完成", "cancelled": "已取消"}
@@ -51,7 +50,7 @@ class MaintenanceService:
         self.identity = IdentityService(db, ctx)
 
     def _require_permission(self, user: User) -> None:
-        if not can(user.role, "maintenance.edit"):
+        if not user_may(self.ctx, user, "maintenance.edit"):
             raise PermissionDenied("当前角色不能处理维护工单")
 
     def _require(self, order_id: str) -> MaintenanceOrder:

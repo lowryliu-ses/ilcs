@@ -2,7 +2,8 @@
 from fastapi import APIRouter
 
 from ...core.schema import EXPECTED_REVISION, current_revision
-from ...schemas import AccountCreateIn, AccountPatchIn
+from ...core.errors import ValidationFailed
+from ...schemas import AccountCreateIn, AccountPatchIn, RolePermissionsIn
 from ...services.identity_service import IdentityService
 from ...services.migration_report_service import MigrationReportService
 from ..deps import Ctx, CurrentUser, DbSession, require
@@ -19,8 +20,11 @@ def accounts(db: DbSession, ctx=require("org.admin")):
 def create_account(
     payload: AccountCreateIn, db: DbSession, user: CurrentUser, ctx=require("org.admin"),
 ):
+    roles = payload.roles or ([payload.role] if payload.role else [])
+    if not roles:
+        raise ValidationFailed("至少选择一个角色", code="role_required")
     return IdentityService(db, ctx).create_account(
-        user, payload.username, payload.display_name, payload.role, payload.default_lab_id,
+        user, payload.username, payload.display_name, roles[0], payload.default_lab_id, roles=roles,
     )
 
 
@@ -31,6 +35,23 @@ def update_account(
 ):
     changes = payload.model_dump(exclude_unset=True, exclude={"row_version"})
     return IdentityService(db, ctx).update_account(user, user_id, changes, payload.row_version)
+
+
+@router.get("/role-permissions")
+def role_permissions(db: DbSession, ctx=require("org.admin")):
+    """当前组织的角色权限矩阵、权限目录与出厂默认值。"""
+    return IdentityService(db, ctx).role_permissions()
+
+
+@router.put("/role-permissions")
+def update_role_permissions(
+    payload: RolePermissionsIn, db: DbSession, user: CurrentUser, ctx=require("org.admin"),
+):
+    """修改角色权限矩阵。需要管理员签名；系统管理员恒有全部权限，不在矩阵里。
+    职责分离（本人不能审批本人）不受矩阵影响。"""
+    return IdentityService(db, ctx).update_role_permissions(
+        user, payload.matrix, payload.row_version, payload.signature_id,
+    )
 
 
 @router.post("/accounts/{user_id}/reset-password")

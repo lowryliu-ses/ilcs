@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.errors import PermissionDenied, StateConflict, ValidationFailed
-from ..domain.permissions import can
 from ..models import Alarm, User
 from ..repositories.governance import AlarmRepository
 from .audit_service import AuditService
+from .identity_service import user_may
 
 STATE_LABEL = {"active": "未确认", "acked": "已确认", "shelved": "已搁置", "closed": "已关闭"}
 SEVERITY_LABEL = {1: "紧急", 2: "高", 3: "中", 4: "低"}
@@ -103,7 +103,7 @@ class AlarmService:
         """
         from .identity_service import IdentityService
 
-        if not (can(user.role, "alarm.close") or self.ctx.has("batch.recover")):
+        if not (user_may(self.ctx, user, "alarm.close") or self.ctx.has("batch.recover")):
             raise PermissionDenied("当前角色不能清除报警条件")
         alarm = self.alarms.require(alarm_id, "报警不存在")
         if alarm.origin != "system":
@@ -127,7 +127,7 @@ class AlarmService:
         return self.out(alarm)
 
     def ack(self, alarm_id: str, user: User) -> dict:
-        if not can(user.role, "alarm.ack"):
+        if not user_may(self.ctx, user, "alarm.ack"):
             raise PermissionDenied("当前角色不能确认报警")
         alarm = self.alarms.require(alarm_id, "报警不存在")
         if alarm.state != "active":
@@ -141,7 +141,7 @@ class AlarmService:
         return self.out(alarm)
 
     def shelve(self, alarm_id: str, until: str, user: User) -> dict:
-        if not can(user.role, "alarm.shelve"):
+        if not user_may(self.ctx, user, "alarm.shelve"):
             raise PermissionDenied("当前角色不能搁置报警")
         alarm = self.alarms.require(alarm_id, "报警不存在")
         if alarm.state == "closed":
@@ -156,7 +156,7 @@ class AlarmService:
         return self.out(alarm)
 
     def close(self, alarm_id: str, user: User) -> dict:
-        if not can(user.role, "alarm.close"):
+        if not user_may(self.ctx, user, "alarm.close"):
             raise PermissionDenied("当前角色不能关闭报警")
         alarm = self.alarms.require(alarm_id, "报警不存在")
         if alarm.condition_active:

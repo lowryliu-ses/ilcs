@@ -39,7 +39,9 @@ class AccountCreateIn(BaseModel):
 
     username: str
     display_name: str
-    role: Literal["researcher", "qa", "operator", "ehs", "admin"]
+    # 主角色；`roles` 给出时以它为准（第一个是主角色），账号可同时挂多个角色
+    role: Literal["researcher", "qa", "operator", "ehs", "admin"] | None = None
+    roles: list[Literal["researcher", "qa", "operator", "ehs", "admin"]] | None = None
     default_lab_id: str = ""
 
 
@@ -48,8 +50,19 @@ class AccountPatchIn(Versioned):
 
     display_name: str | None = None
     role: Literal["researcher", "qa", "operator", "ehs", "admin"] | None = None
+    roles: list[Literal["researcher", "qa", "operator", "ehs", "admin"]] | None = None
     account_state: Literal["active", "disabled"] | None = None
     membership_state: Literal["active", "revoked"] | None = None
+
+
+class RolePermissionsIn(BaseModel):
+    """组织的角色权限矩阵。系统管理员不在矩阵里；row_version 是读到的版本（从未改过为 0）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matrix: dict[str, list[str]]
+    row_version: int = Field(ge=0)
+    signature_id: str
 
 
 class SignatureIn(BaseModel):

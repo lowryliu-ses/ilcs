@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
-import type { AccountRow, AccessLogRow, SchemaState, ServiceIdentityRow } from '../../shared/types';
+import { useSession } from '../../shared/session';
+import { useSignature } from '../../shared/signature';
+import type {
+  AccountRow, AccessLogRow, RoleKey, RolePermissions, SchemaState, ServiceIdentityRow,
+} from '../../shared/types';
 import {
   ConfirmDialog, Field, ListState, Modal, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -149,6 +153,8 @@ export function GovernancePage() {
           </table>
         ) : null}
       </Panel>
+
+      <RolePermissionsPanel />
 
       <Panel
         title={`服务身份（${rows.length}）`}
@@ -371,7 +377,7 @@ function SecretModal({ result, onClose }: { result: SecretResult; onClose: () =>
   );
 }
 
-const ROLES: [AccountRow['role'], string][] = [
+const ROLES: [RoleKey, string][] = [
   ['researcher', '研究员'], ['qa', 'QA 负责人'], ['operator', '操作员'],
   ['ehs', 'EHS 专员'], ['admin', '系统管理员'],
 ];
@@ -388,18 +394,20 @@ function AccountForm({
   const toast = useToast();
   const [username, setUsername] = useState(account?.username ?? '');
   const [displayName, setDisplayName] = useState(account?.display_name ?? '');
-  const [role, setRole] = useState<AccountRow['role']>(account?.role ?? 'operator');
+  const [roles, setRoles] = useState<RoleKey[]>(account?.roles?.length ? account.roles : [account?.role ?? 'operator']);
+  const toggleRole = (value: RoleKey) =>
+    setRoles((current) => (current.includes(value) ? current.filter((r) => r !== value) : [...current, value]));
   const [accountState, setAccountState] = useState(account?.account_state ?? 'active');
   const [membershipState, setMembershipState] = useState(account?.membership_state ?? 'active');
   const save = useMutation<[], AccountRow | TemporaryPassword>(
     () => account
       ? api.patch(`/admin/accounts/${account.id}`, {
-          display_name: displayName.trim(), role,
+          display_name: displayName.trim(), roles,
           account_state: accountState, membership_state: membershipState,
           row_version: account.row_version,
         })
       : api.post('/admin/accounts', {
-          username: username.trim(), display_name: displayName.trim(), role,
+          username: username.trim(), display_name: displayName.trim(), roles,
         }),
     {
       invalidates: ['governance:accounts', 'admin:members', 'audit'],
@@ -417,7 +425,7 @@ function AccountForm({
       onClose={onClose}
       footer={<><button className="btn" onClick={onClose}>取消</button><button
         className="btn primary"
-        disabled={save.pending || !displayName.trim() || (!account && username.trim().length < 3)}
+        disabled={save.pending || !displayName.trim() || !roles.length || (!account && username.trim().length < 3)}
         onClick={() => void save.run()}
       >{save.pending ? '保存中…' : account ? '保存' : '创建并显示临时口令'}</button></>}
     >
@@ -425,9 +433,17 @@ function AccountForm({
         <input value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} placeholder="zhang.san" />
       </Field> : null}
       <Field label="显示姓名"><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></Field>
-      <Field label="角色"><select value={role} onChange={(event) => setRole(event.target.value as AccountRow['role'])}>
-        {ROLES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-      </select></Field>
+      <Field label="角色（可多选）" hint="权限取所选角色的并集；第一个勾选的是主角色，显示在审计与签名里">
+        <div className="row wrap">
+          {ROLES.map(([value, label]) => (
+            <label key={value} className="check">
+              <input type="checkbox" checked={roles.includes(value)} onChange={() => toggleRole(value)} />
+              {label}{roles[0] === value && roles.length > 1 ? <span className="tiny muted">（主）</span> : null}
+            </label>
+          ))}
+        </div>
+      </Field>
+      <div className="tiny muted">多角色不影响职责分离：同一个人仍不能批准或复核自己提交、录入的内容。</div>
       {account ? <div className="grid cols-2">
         <Field label="账号状态"><select value={accountState} onChange={(event) => setAccountState(event.target.value as 'active' | 'disabled')}>
           <option value="active">有效</option><option value="disabled">停用</option>
@@ -448,5 +464,155 @@ function PasswordModal({ result, onClose }: { result: TemporaryPassword; onClose
       <Field label="账号"><input className="mono" readOnly value={result.username} onFocus={(event) => event.currentTarget.select()} /></Field>
       <Field label="临时口令"><textarea className="mono secret-value" readOnly rows={3} value={result.temporary_password} onFocus={(event) => event.currentTarget.select()} /></Field>
     </Modal>
+  );
+}
+
+/* 角色权限矩阵：管理员按角色勾选动作权限，保存要签名。系统管理员一列恒为全选、不可改。
+   矩阵只决定「角色能不能发起这个动作」；组织范围、执行资质与「本人不能审批本人」另行校验。 */
+function RolePermissionsPanel() {
+  const toast = useToast();
+  const { sign } = useSignature();
+  const { user } = useSession();
+  const data = useQuery<RolePermissions>('governance:role-permissions', () => api.get('/admin/role-permissions'));
+  const [draft, setDraft] = useState<Record<string, string[]> | null>(null);
+  const save = useMutation(
+    (body: Record<string, unknown>) => api.put<RolePermissions>('/admin/role-permissions', body),
+    {
+      invalidates: ['governance:role-permissions', 'audit'],
+      onSuccess: () => {
+        setDraft(null);
+        toast.push('角色权限已更新；各账号下一次操作即按新权限判断');
+      },
+    },
+  );
+  const body = data.data;
+  const matrix = draft ?? body?.matrix ?? {};
+  const changed = useMemo(() => {
+    if (!draft || !body) return 0;
+    return Object.keys(draft).reduce((count, role) => {
+      const before = new Set(body.matrix[role] ?? []);
+      const after = new Set(draft[role] ?? []);
+      return count + [...after].filter((p) => !before.has(p)).length + [...before].filter((p) => !after.has(p)).length;
+    }, 0);
+  }, [draft, body]);
+
+  const toggle = (role: string, permission: string) =>
+    setDraft((current) => {
+      const base = current ?? body?.matrix ?? {};
+      const perms = new Set(base[role] ?? []);
+      if (perms.has(permission)) perms.delete(permission);
+      else perms.add(permission);
+      return { ...base, [role]: [...perms].sort() };
+    });
+
+  const commit = async () => {
+    if (!body || !draft) return;
+    const target = `role-permissions:${user?.organization_id ?? ''}`;
+    const signatureId = await sign('修改角色权限', target, ['权限变更批准'], body.row_version);
+    if (!signatureId) return;
+    await save.run({ matrix: draft, row_version: body.row_version, signature_id: signatureId });
+  };
+
+  return (
+    <Panel
+      title="角色与权限"
+      aside={
+        draft ? (
+          <div className="row">
+            <button className="btn sm" onClick={() => setDraft(null)}>取消</button>
+            <button className="btn sm" onClick={() => body && setDraft({ ...body.defaults })}>恢复出厂默认</button>
+            <button className="btn primary sm" disabled={!changed || save.pending} onClick={() => void commit()}>
+              {save.pending ? '保存中…' : `签名保存（${changed} 处变更）`}
+            </button>
+          </div>
+        ) : (
+          <button className="btn sm" disabled={!body} onClick={() => body && setDraft({ ...body.matrix })}>编辑权限</button>
+        )
+      }
+      flush
+    >
+      <div className="note">
+        勾选决定每个角色能发起哪些动作；一个账号挂多个角色时取并集，在上方「账号与成员」里分配。
+        系统管理员恒有全部权限。权限矩阵不改变职责分离（本人不能批准、复核自己提交或录入的内容）和执行资质要求。
+        {body ? (
+          <span className="tiny muted">
+            {' '}
+            {body.customized ? `当前为自定义矩阵 v${body.row_version} · ${body.updated_by} · ${clock(body.updated_at)}` : '当前为出厂默认矩阵'}
+          </span>
+        ) : null}
+      </div>
+      <ListState loading={data.loading && !body} error={data.error} empty={false} emptyText="" />
+      {save.error ? <div className="note bad">{save.error.message}</div> : null}
+      {body ? (
+        <table className="perm-matrix">
+          <thead>
+            <tr>
+              <th>权限</th>
+              {body.roles.map((role) => <th key={role.key} className="center">{role.name}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {body.catalog.map((group) => (
+              <PermissionGroup
+                key={group.group}
+                group={group}
+                roles={body.roles}
+                matrix={matrix}
+                defaults={body.defaults}
+                editing={!!draft}
+                onToggle={toggle}
+              />
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </Panel>
+  );
+}
+
+function PermissionGroup({
+  group,
+  roles,
+  matrix,
+  defaults,
+  editing,
+  onToggle,
+}: {
+  group: RolePermissions['catalog'][number];
+  roles: RolePermissions['roles'];
+  matrix: Record<string, string[]>;
+  defaults: Record<string, string[]>;
+  editing: boolean;
+  onToggle: (role: string, permission: string) => void;
+}) {
+  return (
+    <>
+      <tr className="group-row">
+        <td colSpan={roles.length + 1}><b>{group.group}</b></td>
+      </tr>
+      {group.permissions.map((permission) => (
+        <tr key={permission.key}>
+          <td>
+            {permission.label}
+            <div className="tiny mono muted">{permission.key}</div>
+          </td>
+          {roles.map((role) => {
+            const granted = role.locked || (matrix[role.key] ?? []).includes(permission.key);
+            const isDefault = role.locked || (defaults[role.key] ?? []).includes(permission.key) === granted;
+            return (
+              <td key={role.key} className={`center${isDefault ? '' : ' changed'}`}>
+                <input
+                  type="checkbox"
+                  aria-label={`${role.name} · ${permission.label}`}
+                  checked={granted}
+                  disabled={!editing || role.locked || permission.key === 'org.admin' || permission.key === 'service.manage'}
+                  onChange={() => onToggle(role.key, permission.key)}
+                />
+              </td>
+            );
+          })}
+        </tr>
+      ))}
+    </>
   );
 }

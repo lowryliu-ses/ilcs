@@ -4,7 +4,9 @@ export type User = {
   id: string;
   username: string;
   display_name: string;
+  /** 主角色；权限按 `roles`（可多个）并集计算 */
   role: string;
+  roles: string[];
   role_name: string;
   perms: string[];
   /** 当前组织由成员关系确定，不由请求体里的 organization_id 决定 */
@@ -638,11 +640,26 @@ export type SchemaState = {
   compatible: boolean;
 };
 
+export type RoleKey = 'researcher' | 'qa' | 'operator' | 'ehs' | 'admin';
+
+/** 组织的角色权限矩阵。系统管理员恒有全部权限，不在 matrix 里。 */
+export type RolePermissions = {
+  catalog: { group: string; permissions: { key: string; label: string }[] }[];
+  roles: { key: RoleKey; name: string; locked: boolean }[];
+  matrix: Record<string, string[]>;
+  defaults: Record<string, string[]>;
+  customized: boolean;
+  row_version: number;
+  updated_by: string;
+  updated_at: string | null;
+};
+
 export type AccountRow = {
   id: string;
   username: string;
   display_name: string;
-  role: 'researcher' | 'qa' | 'operator' | 'ehs' | 'admin';
+  role: RoleKey;
+  roles: RoleKey[];
   role_name: string;
   account_state: 'active' | 'disabled';
   membership_state: 'active' | 'revoked';

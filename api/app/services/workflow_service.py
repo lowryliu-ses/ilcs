@@ -26,7 +26,8 @@ from ..domain.steps import (
     DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize,
     step_id_of,
 )
-from ..models import Batch, Sample, StepRun, User, WorkflowEvent
+from ..domain.permissions import ADMIN, ROLE_NAMES
+from ..models import Batch, Sample, StepRun, User, WorkflowEvent, roles_of
 from ..repositories.batches import BatchRepository, SampleRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.governance import UserRepository
@@ -194,8 +195,8 @@ class WorkflowService:
             raise ValidationFailed("退回必须写明理由")
         step = run.step_snapshot or {}
         required_role = step.get("review_role") or "qa"
-        if user.role != required_role and user.role != "admin":
-            raise PermissionDenied(f"该审核节点要求 {required_role} 角色")
+        if required_role not in roles_of(user) and ADMIN not in roles_of(user):
+            raise PermissionDenied(f"该审核节点要求 {ROLE_NAMES.get(required_role, required_role)} 角色")
         # 审核本人录入或编写的内容必须被拒
         previous = [
             row for row in self.runs.for_batch(run.batch_id)
@@ -463,16 +464,19 @@ class WorkflowService:
 
         value = delivered.get(field)
         verdict = workflow.judge(value, low, high)
+        limits = "，".join(part for part in (
+            f"下限 {low}" if low is not None else "", f"上限 {high}" if high is not None else "",
+        ) if part)
         run.form_data = {"field": field, "min": low, "max": high, "scope": "batch", "value": value,
                          "checkpoint_id": checkpoint.id if checkpoint else ""}
         if verdict is True:
             self._close_run(run, workflow.COMPLETED, f"{field}={value} 合格")
             self.audit.record(None, "质检关卡判定", batch.id, before="待判定", after="合格",
-                              detail=f"{name}：{field}={value}（下限 {low}，上限 {high}）")
+                              detail=f"{name}：{field}={value}（{limits}）")
             return self._advance(run, batch)
         if verdict is None:
             return self._gate_hold(batch, run, f"测量来源没有 {field} 的数值，无法判定")
-        return self._gate_failed(batch, run, index, gate, f"{field}={value} 超出范围（下限 {low}，上限 {high}）")
+        return self._gate_failed(batch, run, index, gate, f"{field}={value} 超出范围（{limits}）")
 
     def _close_run(self, run: StepRun, state: str, reason: str) -> None:
         run.state = state
@@ -553,8 +557,10 @@ class WorkflowService:
             raise StateConflict("该步骤不是质检关卡")
         if run.state != workflow.READY:
             raise StateConflict(f"关卡已是 {workflow.STATE_LABEL.get(run.state, run.state)}，不需要人工判定")
-        if user.role not in {"qa", "admin"}:
-            raise PermissionDenied("质检关卡的人工判定需要 QA 角色")
+        from .identity_service import user_may
+
+        if not user_may(self.ctx, user, "step.review"):
+            raise PermissionDenied("当前账号没有质检判定权限（step.review）")
         conclusion = payload.get("conclusion")
         if conclusion not in {"approved", "rejected"}:
             raise ValidationFailed("判定结论只能是 approved 或 rejected")

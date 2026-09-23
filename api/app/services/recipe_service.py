@@ -9,7 +9,6 @@ from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain.access import same_person
 from ..domain.lifecycle import recipe_delete_blockers
-from ..domain.permissions import can
 from ..domain.recipe_rules import EDITABLE_STATES, is_valid, recipe_checks, validate_steps
 from ..domain.steps import KIND_NAMES, assign_step_ids, kind_of, normalize, resource_demand
 from ..models import Recipe, User
@@ -18,7 +17,7 @@ from ..repositories.recipes import PlanRepository, RecipeRepository
 from ..repositories.resources import CapabilityRepository, StationRepository
 from ..repositories.sops import SopVersionRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService
+from .identity_service import IdentityService, user_may
 
 STATE_LABEL = {
     "draft": "草稿", "review": "评审中", "approved": "已批准", "released": "已发布", "retired": "已退役",
@@ -264,7 +263,7 @@ class RecipeService:
         if target_state not in rules:
             raise StateConflict("不支持的目标状态")
         required_state, permission, action = rules[target_state]
-        if not can(user.role, permission):
+        if not user_may(self.ctx, user, permission):
             raise PermissionDenied(f"当前角色无权限：{permission}")
         if recipe.state != required_state:
             raise StateConflict(f"只有{STATE_LABEL[required_state]}配方可{action[:2]}")

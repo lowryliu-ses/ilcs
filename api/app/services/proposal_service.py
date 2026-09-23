@@ -17,7 +17,6 @@ from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import matrix
 from ..domain.access import service_may_propose
-from ..domain.permissions import can
 from ..domain.steps import normalize
 from ..models import (
     Batch, MetricDefinition, PhysicalSample, Plan, PlanProposal, ResultValue, Sample, User,
@@ -26,6 +25,7 @@ from ..repositories.base import ScopedRepository
 from ..repositories.recipes import PlanRepository, RecipeRepository
 from ..repositories.resources import StationRepository
 from .audit_service import AuditService
+from .identity_service import user_may
 
 
 class ProposalRepository(ScopedRepository[PlanProposal]):
@@ -72,7 +72,7 @@ class ProposalService:
             if not service_may_propose(self.ctx.scopes, plan.id):
                 raise PermissionDenied("该服务身份没有向此方案提交提案的授权")
             return f"service:{self.ctx.subject_label or self.ctx.subject_id}"
-        if user is None or not can(user.role, "plan.edit"):
+        if user is None or not user_may(self.ctx, user, "plan.edit"):
             raise PermissionDenied("当前角色不能提交实验提案")
         return user.id
 

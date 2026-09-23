@@ -382,3 +382,9 @@ input.bad, select.bad { border-color: var(--sev-1); }
 /* ---------- 筛选栏 ---------- */
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .filters input, .filters select { min-width: 140px; }
+
+/* 角色权限矩阵 */
+.perm-matrix td.center, .perm-matrix th.center { text-align: center; width: 92px; }
+.perm-matrix tr.group-row td { background: var(--surface-2); padding-top: 10px; }
+.perm-matrix td.changed { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.perm-matrix input[type="checkbox"] { width: 16px; height: 16px; }
