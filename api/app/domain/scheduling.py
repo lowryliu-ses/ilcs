@@ -1,0 +1,179 @@
+"""步骤级贪心排程器。
+
+纯函数：输入步骤、工位、现有占用，输出步骤级分配或失败原因。数据模型是步骤级的，
+将来换成 CP-SAT 求解器不需要改这个模型，只替换 `plan_steps` 的实现。
+"""
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
+
+from .capability import StationSpec, station_fits
+from .steps import needs_station
+
+WORK = "work"
+TRANSFER = "transfer"
+CLEAN = "clean"
+
+
+@dataclass(frozen=True)
+class Interval:
+    start: datetime
+    end: datetime
+
+
+@dataclass(frozen=True)
+class PlannedAllocation:
+    step_index: int
+    station_id: str
+    starts_at: datetime
+    ends_at: datetime
+    kind: str = WORK
+
+
+@dataclass
+class SchedulingContext:
+    stations: list[StationSpec]
+    busy: dict[str, list[Interval]] = field(default_factory=dict)
+    held_station_ids: set[str] = field(default_factory=set)
+    transfer_station_ids: list[str] = field(default_factory=list)
+    transfer_min: int = 10
+    clean_min: int = 10
+    prefer_station_id: str | None = None
+    allow_unclean: bool = False
+
+
+class SchedulingError(Exception):
+    def __init__(self, message: str, step_index: int):
+        super().__init__(message)
+        self.message = message
+        self.step_index = step_index
+
+
+def earliest_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
+    cursor = not_before
+    for interval in sorted(context.busy.get(station_id, []), key=lambda i: i.start):
+        if cursor + duration <= interval.start:
+            break
+        if interval.end > cursor:
+            cursor = interval.end
+    return cursor
+
+
+def _occupy(context: SchedulingContext, allocation: PlannedAllocation) -> None:
+    context.busy.setdefault(allocation.station_id, []).append(
+        Interval(allocation.starts_at, allocation.ends_at)
+    )
+
+
+def _candidates(context: SchedulingContext, step: dict[str, Any], index: int) -> list[StationSpec]:
+    able = [s for s in context.stations if station_fits(s, step)]
+    if not able:
+        raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」没有可承接工位", index)
+    usable = [s for s in able if s.healthy and (context.allow_unclean or s.clean) and s.id not in context.held_station_ids]
+    if not usable:
+        held = [s.id for s in able if s.id in context.held_station_ids]
+        faulty = [f"{s.id}{'离线' if s.status == 'offline' else ''}" for s in able if not s.healthy]
+        unclean = [s.id for s in able if not s.clean]
+        if held:
+            why = f"{'、'.join(held)} 正在保持，释放时间未知"
+        elif faulty:
+            why = f"{'、'.join(faulty)} 故障"
+        else:
+            why = f"{'、'.join(unclean)} 未完成清洗"
+        raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」无可执行工位：{why}", index)
+    if context.prefer_station_id and any(s.id == context.prefer_station_id for s in usable):
+        return [s for s in usable if s.id == context.prefer_station_id]
+    return usable
+
+
+def plan_steps(
+    steps: list[dict[str, Any]], start_from: datetime, context: SchedulingContext,
+    *, first_index: int = 0, previous_end: datetime | None = None,
+    previous_station: str | None = None,
+) -> list[PlannedAllocation]:
+    """按步骤资源需求排程。
+
+    人工、等待、审核节点不占工位（除非显式声明），但它们的时长照样往后推时间线——
+    否则下游设备步骤会被排到一个「上一步还没做完」的时刻。
+
+    只重排后半段时传 `first_index`、`previous_end`（上一步实际或计划结束时刻）与
+    `previous_station`：尾段不能早于上一步结束开工，换工位要排转运，硬时限也从上一步
+    结束起算——而不是从操作员填的「期望开始时间」起算。
+    """
+    allocations: list[PlannedAllocation] = []
+    not_before = start_from
+    previous_end = previous_end or start_from
+
+    for index, step in enumerate(steps):
+        if index < first_index:
+            continue
+        duration = timedelta(minutes=float(step.get("dur", 0) or 0))
+        if not needs_station(step):
+            previous_end = max(previous_end, not_before) + duration
+            continue
+        candidates = _candidates(context, step, index)
+
+        best: tuple[datetime, StationSpec, bool] | None = None
+        for station in candidates:
+            needs_transfer = previous_station is not None and station.id != previous_station
+            ready_at = max(
+                not_before,
+                previous_end + (timedelta(minutes=context.transfer_min) if needs_transfer else timedelta()),
+            )
+            begin = earliest_free(context, station.id, ready_at, duration)
+            if best is None or begin < best[0] or (begin == best[0] and station.id < best[1].id):
+                best = (begin, station, needs_transfer)
+
+        begin, station, needs_transfer = best  # type: ignore[misc]
+
+        if needs_transfer and context.transfer_station_ids:
+            transfer_duration = timedelta(minutes=context.transfer_min)
+            carrier = min(
+                context.transfer_station_ids,
+                key=lambda sid: (earliest_free(context, sid, previous_end, transfer_duration), sid),
+            )
+            transfer_start = earliest_free(context, carrier, previous_end, transfer_duration)
+            transfer = PlannedAllocation(index, carrier, transfer_start, transfer_start + transfer_duration, TRANSFER)
+            allocations.append(transfer)
+            _occupy(context, transfer)
+            # 设备工作开始不得早于实际转运完成：不是画面上画一个区间就算
+            if transfer.ends_at > begin:
+                begin = earliest_free(context, station.id, transfer.ends_at, duration)
+
+        # 硬时限必须在转运把开工时间往后推之后再判：先判后推会放过转运车忙导致的超时
+        hard = step.get("hard") or {}
+        if "maxGapMin" in hard:
+            gap_min = (begin - previous_end).total_seconds() / 60
+            if gap_min > float(hard["maxGapMin"]):
+                raise SchedulingError(
+                    f"第 {index + 1} 步「{step.get('name')}」硬时限 {hard['maxGapMin']} min 无法满足："
+                    f"最早可开工时间在上一步结束 {gap_min:.0f} min 后",
+                    index,
+                )
+
+        work = PlannedAllocation(index, station.id, begin, begin + duration, WORK)
+        allocations.append(work)
+        _occupy(context, work)
+
+        next_step = next(
+            (steps[i] for i in range(index + 1, len(steps)) if needs_station(steps[i])), None
+        )
+        stays = next_step is not None and station_fits(station, next_step)
+        if not stays and context.clean_min:
+            clean = PlannedAllocation(
+                index, station.id, work.ends_at, work.ends_at + timedelta(minutes=context.clean_min), CLEAN
+            )
+            allocations.append(clean)
+            _occupy(context, clean)
+
+        previous_end = work.ends_at
+        previous_station = station.id
+
+    return allocations
+
+
+def makespan(allocations: list[PlannedAllocation]) -> timedelta:
+    work = [a for a in allocations if a.kind == WORK]
+    if not work:
+        return timedelta()
+    return max(a.ends_at for a in work) - min(a.starts_at for a in work)

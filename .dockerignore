@@ -1,0 +1,11 @@
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.db
+**/.pytest_cache
+**/.playwright-cli
+web/node_modules
+web/src
+api/tests
+api/.pytest_cache
+.git

@@ -1,0 +1,598 @@
+"""流程推进。
+
+设备回执只完成对应 StepRun；下一节点由推进器决定。状态转换、事件处理标记、
+下一个待办或命令在同一个短事务里提交——否则崩在中间就会出现「步骤完成了但没有下一步」
+或者「下一步建了两遍」。
+
+并发由三层挡住：事件唯一键（同一事件只处理一次）、步骤行版本 + 行锁（同一步只转换一次）、
+下一节点创建唯一约束（不同事件也不会把同一步推进两次）。
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from ..core.clock import now
+from ..core.config import settings
+from ..core.context import AccessContext, system_context
+from ..core.errors import (
+    DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed,
+)
+from ..domain import workflow
+from ..domain.access import same_person
+from ..domain.steps import (
+    DEVICE, MANUAL, REVIEW, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize, step_id_of,
+)
+from ..models import Batch, StepRun, User, WorkflowEvent
+from ..repositories.batches import BatchRepository, SampleRepository
+from ..repositories.execution import CommandRepository
+from ..repositories.governance import UserRepository
+from ..repositories.materials import ReservationRepository
+from ..repositories.resources import CapabilityRepository
+from ..repositories.workflow import (
+    StepAdvanceRepository, StepRunRepository, WorkflowEventRepository,
+)
+from .audit_service import AuditService
+from .identity_service import IdentityService
+
+
+class WorkflowService:
+    def __init__(self, db: Session, ctx: AccessContext):
+        self.db = db
+        self.ctx = ctx
+        self.runs = StepRunRepository(db, ctx)
+        self.events = WorkflowEventRepository(db, ctx)
+        self.advances = StepAdvanceRepository(db)
+        self.batches = BatchRepository(db, ctx)
+        self.samples = SampleRepository(db, ctx)
+        self.reservations = ReservationRepository(db, ctx)
+        self.commands = CommandRepository(db, ctx)
+        self.capabilities = CapabilityRepository(db)
+        self.users = UserRepository(db)
+        self.audit = AuditService(db, ctx)
+        self.identity = IdentityService(db, ctx)
+
+    # ---------- 步骤实例 ----------
+
+    def steps_of(self, batch: Batch) -> list[dict]:
+        return normalize(batch.recipe_snapshot.get("steps") or [])
+
+    def start_first_step(self, batch: Batch, assignee_user_id: str = "") -> StepRun:
+        steps = self.steps_of(batch)
+        if not steps:
+            raise StateConflict("方法没有步骤，无法开跑")
+        return self.open_step(batch, 0, assignee_user_id)
+
+    def open_step(self, batch: Batch, index: int, assignee_user_id: str = "") -> StepRun:
+        """建立一个步骤实例。同一步的重试用 attempt 区分，旧记录保留。"""
+        steps = self.steps_of(batch)
+        step = steps[index]
+        step_id = step_id_of(step, index)
+        attempt = self.runs.attempts(batch.id, step_id) + 1
+        run = StepRun(
+            org_id=batch.org_id or self.ctx.org_id, batch_id=batch.id, step_id=step_id,
+            step_index=index, kind=kind_of(step), attempt=attempt,
+            state=workflow.initial_state(step), step_snapshot=step,
+            assignee_user_id=assignee_user_id, started_at=now(),
+        )
+        if run.kind == WAIT:
+            wait_for = step.get("wait_for") or {}
+            if (wait_for.get("mode") or "duration") == "duration":
+                run.due_at = now() + timedelta(minutes=float(step.get("dur") or 0))
+        if run.kind == MANUAL and step.get("dur"):
+            run.due_at = now() + timedelta(minutes=float(step["dur"]))
+        self.runs.add(run)
+        batch.current_step = index
+        return run
+
+    # ---------- 事件 ----------
+
+    def emit(
+        self, batch_id: str, step_run_id: str, event_type: str, event_key: str,
+        payload: dict | None = None, available_at=None, org_id: str = "",
+    ) -> WorkflowEvent:
+        """持久化一个推进事件。同 key 重复直接返回已有行，不重复处理。"""
+        existing = self.events.find_key_any_org(event_key)
+        if existing is not None:
+            return existing
+        event = WorkflowEvent(
+            org_id=org_id or self.ctx.org_id, batch_id=batch_id, step_run_id=step_run_id,
+            event_type=event_type, event_key=event_key, payload=payload or {},
+            available_at=available_at or now(),
+        )
+        try:
+            # 保存点：唯一键冲突只撤销这一行，不连带回滚调用方同一事务里的人工记录与签名
+            with self.db.begin_nested():
+                self.db.add(event)
+                self.db.flush()
+        except IntegrityError:
+            found = self.events.find_key_any_org(event_key)
+            if found is None:
+                raise
+            return found
+        return event
+
+    # ---------- 人工步骤 ----------
+
+    def submit_manual(self, step_run_id: str, payload: dict, user: User) -> dict:
+        run = self.runs.lock(step_run_id)
+        if run is None:
+            raise NotFound("步骤实例不存在")
+        if run.kind != MANUAL:
+            raise StateConflict(f"该步骤是{KIND_NAMES.get(run.kind, run.kind)}步骤，不接受人工提交")
+        if run.state in workflow.TERMINAL_STATES:
+            raise StateConflict(f"步骤已是终态 {run.state}，不能再提交")
+        self.runs.check_version(run, payload.get("row_version"), "步骤实例")
+        batch = self.batches.get(run.batch_id)
+        if batch is None:
+            raise NotFound("批次不存在")
+        if workflow.hold_blocks_device_action(batch.state) and batch.state != "paused":
+            raise StateConflict(f"批次状态为 {batch.state}，人工提交已停止")
+
+        step = run.step_snapshot or {}
+        values = payload.get("form_data") or {}
+        problems = missing_form_values(step, values)
+        # 样本与物料核对：声明了就必须勾，不能只在界面上打个对勾
+        checks = payload.get("checks") or {}
+        if step.get("requires_sample_check", True) and not checks.get("samples"):
+            problems.append("未确认样本核对")
+        needs_material = bool((batch.recipe_snapshot.get("bom") or []))
+        if needs_material and not checks.get("materials"):
+            problems.append("未确认物料核对")
+        if problems:
+            raise StateConflict(
+                "人工记录不完整，步骤未推进",
+                {"blocked": [{"key": "form", "label": p} for p in problems]},
+                code="manual_record_incomplete",
+            )
+        signature = None
+        if step.get("requires_signature"):
+            signature = self.identity.consume_signature(
+                payload.get("signature_id"), user, f"人工步骤提交：{step.get('name')}",
+                object_ref=run.id, object_version=run.row_version,
+            )
+
+        run.form_data = {"values": values, "checks": checks, "note": payload.get("note", "")}
+        run.submitted_by = user.id
+        self.runs.bump(run)
+        event = self.emit(
+            batch.id, run.id, "manual_submit",
+            f"manual:{run.id}:{run.attempt}",
+            {"submitted_by": user.id, "signature_id": signature.id if signature else ""},
+        )
+        self.audit.record(
+            user, "提交人工步骤记录", batch.id, sign=bool(signature),
+            meaning=signature.meaning if signature else "",
+            signature_id=signature.id if signature else "",
+            before=run.state, after="待推进", object_version=run.row_version,
+            detail=f"{step.get('name')}（第 {run.step_index + 1} 步，第 {run.attempt} 次）；{len(values)} 个字段",
+        )
+        self.db.commit()
+        # 立刻推进一次，不用等下一个轮询周期
+        result = self.process_event(event.id)
+        return {"step_run": self.run_out(run), "advance": result}
+
+    # ---------- 审核步骤 ----------
+
+    def decide_review(self, step_run_id: str, payload: dict, user: User) -> dict:
+        run = self.runs.lock(step_run_id)
+        if run is None:
+            raise NotFound("步骤实例不存在")
+        if run.kind != REVIEW:
+            raise StateConflict("该步骤不是审核节点")
+        if run.state in workflow.TERMINAL_STATES:
+            raise StateConflict(f"审核步骤已是终态 {run.state}")
+        self.runs.check_version(run, payload.get("row_version"), "步骤实例")
+        conclusion = payload.get("conclusion")
+        if conclusion not in {"approved", "rejected"}:
+            raise ValidationFailed("审核结论只能是 approved 或 rejected；不接受任意目标状态")
+        reason = (payload.get("reason") or "").strip()
+        if conclusion == "rejected" and not reason:
+            raise ValidationFailed("退回必须写明理由")
+        step = run.step_snapshot or {}
+        required_role = step.get("review_role") or "qa"
+        if user.role != required_role and user.role != "admin":
+            raise PermissionDenied(f"该审核节点要求 {required_role} 角色")
+        # 审核本人录入或编写的内容必须被拒
+        previous = [
+            row for row in self.runs.for_batch(run.batch_id)
+            if row.step_index < run.step_index and row.submitted_by
+        ]
+        if any(same_person(row.submitted_by, user.id) for row in previous):
+            raise PermissionDenied(
+                "不能审核本人提交的上游人工记录（职责分离）", code="self_review_denied"
+            )
+        signature = self.identity.consume_signature(
+            payload.get("signature_id"), user, f"流程审核：{conclusion}",
+            object_ref=run.id, object_version=run.row_version,
+        )
+        run.conclusion = conclusion
+        run.reason = reason
+        run.reviewed_by = user.id
+        self.runs.bump(run)
+        event = self.emit(
+            run.batch_id, run.id, "review_decision", f"review:{run.id}:{run.attempt}",
+            {"conclusion": conclusion, "reviewer": user.id, "reason": reason},
+        )
+        self.audit.record(
+            user, "流程审核决定", run.batch_id, sign=True, meaning=signature.meaning,
+            signature_id=signature.id, before="待审核",
+            after="通过" if conclusion == "approved" else "退回",
+            object_version=run.row_version, detail=f"{step.get('name')}；{reason or '无附加说明'}",
+        )
+        self.db.commit()
+        result = self.process_event(event.id)
+        return {"step_run": self.run_out(run), "advance": result}
+
+    # ---------- 设备回执 ----------
+
+    def device_ack(
+        self, batch_id: str, step_run_id: str, command_id: str, outcome: str, payload: dict,
+        org_id: str = "",
+    ) -> WorkflowEvent:
+        """设备回执入事件表。必须绑定原 command_id。"""
+        if not command_id:
+            raise ValidationFailed("设备回执必须绑定原 command_id", code="command_id_required")
+        return self.emit(
+            batch_id, step_run_id, "device_ack", f"device:{command_id}:{outcome}",
+            {"command_id": command_id, "outcome": outcome, **payload}, org_id=org_id,
+        )
+
+    # ---------- 推进器 ----------
+
+    def process_event(self, event_id: str) -> dict:
+        """处理一个事件。整体成功或整体失败，不留半条完成任务。
+
+        业务性拒绝（状态机不允许、重复事件）是确定结论，直接判为 rejected；其他错误
+        （数据库抖动、连接中断）按指数退避重排，超过次数才判失败并对批次报警——
+        一次瞬时错误不能把等待节点永久卡住。
+        """
+        event = self.db.get(WorkflowEvent, event_id)
+        if event is None:
+            return {"processed": False, "reason": "事件不存在"}
+        if event.state == "processed":
+            return {"processed": False, "reason": "事件已处理", "replayed": True}
+        run = self.runs.lock(event.step_run_id) if event.step_run_id else None
+        batch = self.db.get(Batch, event.batch_id) if event.batch_id else None
+        if run is None or batch is None:
+            event.state = "rejected"
+            event.error = "事件缺少对应的步骤实例或批次"
+            event.processed_at = now()
+            self.db.commit()
+            return {"processed": False, "reason": event.error}
+        # 取到步骤行锁后再看一次：同步调用与后台推进器可能同时拿着同一个事件
+        self.db.refresh(event)
+        if event.state == "processed":
+            return {"processed": False, "reason": "事件已处理", "replayed": True}
+
+        try:
+            # 保存点：失败只撤销推进本身，调用方同一事务里的人工记录、签名消费、审计保留
+            with self.db.begin_nested():
+                outcome = self._apply(event, run, batch)
+        except DomainError as exc:
+            return self._reject_event(event, run, batch, str(exc))
+        except Exception as exc:
+            return self._retry_event(event, run, batch, exc)
+        # 状态转换、事件标记与下一节点在同一事务里提交
+        event.state = "processed"
+        event.processed_at = now()
+        event.error = ""
+        self.db.commit()
+        return {"processed": True, **outcome}
+
+    def _reject_event(self, event: WorkflowEvent, run: StepRun, batch: Batch, reason: str) -> dict:
+        event.state = "rejected"
+        event.error = reason[:500]
+        event.processed_at = now()
+        if run.state in workflow.OPEN_STATES and batch.state not in {"done", "aborted"}:
+            # 步骤还开着却推不动：批次会停在这里，必须让人知道
+            self._stuck_alarm(batch, run, f"推进事件被拒：{reason}")
+        self.db.commit()
+        return {"processed": False, "reason": reason}
+
+    def _retry_event(self, event: WorkflowEvent, run: StepRun, batch: Batch, exc: Exception) -> dict:
+        reason = f"{exc.__class__.__name__}: {exc}"[:500]
+        attempts = int(event.attempts or 0) + 1
+        event.attempts = attempts
+        event.error = reason
+        event.claimed_at = None
+        event.claimed_by = ""
+        if attempts >= settings.advance_max_attempts:
+            return self._reject_event(event, run, batch, f"重试 {attempts} 次仍失败：{reason}")
+        delay = min(
+            settings.advance_retry_max_sec, settings.advance_retry_base_sec * (2 ** (attempts - 1))
+        )
+        event.state = "pending"
+        event.available_at = now() + timedelta(seconds=delay)
+        self.db.commit()
+        return {"processed": False, "reason": reason, "retry_in_sec": delay, "attempts": attempts}
+
+    def _stuck_alarm(self, batch: Batch, run: StepRun, message: str) -> None:
+        from .alarm_service import AlarmService
+
+        AlarmService(self.db, self.ctx).raise_alarm(
+            severity=2, source_type="batch", source_id=batch.id,
+            message=f"第 {run.step_index + 1} 步{KIND_NAMES.get(run.kind, run.kind)}节点无法推进：{message}"[:500],
+            response="核对批次事件与步骤状态；排除原因后由操作员走恢复评估。", owner="操作员",
+            origin="system", condition_key=f"step:{run.id}:stuck",
+        )
+
+    def _apply(self, event: WorkflowEvent, run: StepRun, batch: Batch) -> dict:
+        target = {
+            "manual_submit": workflow.COMPLETED,
+            "wait_due": workflow.COMPLETED,
+            "device_ack": (
+                workflow.COMPLETED if event.payload.get("outcome") == "done" else workflow.FAILED
+            ),
+            "review_decision": (
+                workflow.COMPLETED if event.payload.get("conclusion") == "approved"
+                else workflow.FAILED
+            ),
+            "cancel": workflow.CANCELLED,
+        }.get(event.event_type)
+        if target is None:
+            raise StateConflict(f"未知事件类型 {event.event_type}")
+        if not workflow.can_transition(run.kind, run.state, target):
+            # 同一步的第二个事件到这里就停：状态机不允许重复转换
+            raise StateConflict(
+                f"{KIND_NAMES.get(run.kind, run.kind)}步骤从 {run.state} 不能转到 {target}"
+            )
+        run.state = target
+        run.ended_at = now()
+        run.row_version = int(run.row_version or 0) + 1
+
+        if target == workflow.FAILED and run.kind == REVIEW:
+            return self._handle_review_rejection(run, batch)
+        if target in {workflow.FAILED, workflow.CANCELLED}:
+            batch.state = "fault" if target == workflow.FAILED else batch.state
+            batch.failure_reason = event.payload.get("reason") or "步骤失败"
+            return {"batch_state": batch.state, "next": None}
+        return self._advance(run, batch)
+
+    def _advance(self, run: StepRun, batch: Batch) -> dict:
+        if batch.state in {"aborting", "aborted", "done"}:
+            # 终止中或已结束的批次不再开下一节点；迟到的完成事件只记录步骤本身
+            return {"next": None, "batch_state": batch.state, "stopped": True}
+        steps = self.steps_of(batch)
+        index, next_step_id = self._next_open_step(steps, batch, run.step_index)
+        if index is None:
+            if batch.state != "running":
+                # 保持 / 故障中走完了最后一步：批次仍在操作员控制下，不能自己变成「已完成」，
+                # 恢复评估确认后才结束
+                batch.current_step = run.step_index
+                self.audit.record(
+                    None, "流程节点已全部完成", batch.id,
+                    before=batch.state, after=batch.state,
+                    detail="批次处于保持或故障，恢复评估确认后才结束",
+                )
+                return {"next": None, "batch_state": batch.state, "awaiting_recovery": True}
+            # 领取「结束」也要去重，否则两个事件会各写一次批次完成
+            if not self.advances.claim(batch.id, run.step_id, run.attempt, "__end__"):
+                return {"next": None, "duplicate": True}
+            batch.current_step = run.step_index
+            self.finish_batch(batch)
+            return {"next": None, "batch_state": "done"}
+        if not self.advances.claim(batch.id, run.step_id, run.attempt, next_step_id or ""):
+            return {"next": None, "duplicate": True}
+        next_run = self.open_step(batch, index)
+        # 设备步骤才下指令；人工、等待、审核不创建假适配器
+        command_id = ""
+        if next_run.kind == DEVICE:
+            if workflow.hold_blocks_device_action(batch.state):
+                next_run.state = workflow.PENDING
+                return {"next": self.run_out(next_run), "device_blocked": True}
+            from .batch_service import BatchService
+
+            command = BatchService(self.db, self.ctx).issue_command(
+                batch, "dispatch", index, step_run_id=next_run.id
+            )
+            command_id = command.id
+        return {
+            "next": self.run_out(next_run),
+            "command_id": command_id,
+            "batch_state": batch.state,
+        }
+
+    def finish_batch(self, batch: Batch, user: User | None = None, detail: str = "") -> None:
+        before = "运行中" if batch.state == "running" else batch.state
+        batch.state = "done"
+        batch.held_at = None
+        self.audit.record(
+            user, "批次完成", batch.id, before=before, after="已完成",
+            detail=detail or (
+                "运行结束；样本质量与结果审核状态不受此影响，"
+                "任务仍可处于待数据复核或待报告"
+            ),
+        )
+
+    def next_open_step(
+        self, steps: list[dict], batch: Batch, from_index: int
+    ) -> tuple[int | None, str | None]:
+        return self._next_open_step(steps, batch, from_index)
+
+    def _next_open_step(
+        self, steps: list[dict], batch: Batch, from_index: int
+    ) -> tuple[int | None, str | None]:
+        """找下一个还没完成过的步骤。
+
+        审核退回后人工记录会重做一遍；中间的设备步骤已经物理执行过，
+        跳过它们才是「不自动回退重跑已执行的物理设备步骤」。已完成的步骤不会被
+        重新开一个实例，流程直接回到没完成的那一步——通常就是那个审核节点。
+        """
+        completed = {
+            row.step_id for row in self.runs.for_batch(batch.id)
+            if row.state == workflow.COMPLETED
+        }
+        for index in range(from_index + 1, len(steps)):
+            step_id = step_id_of(steps[index], index)
+            if step_id not in completed:
+                return index, step_id
+        return None, None
+
+    def _handle_review_rejection(self, run: StepRun, batch: Batch) -> dict:
+        """审核退回。
+
+        退回形成上一个人工步骤的新尝试，旧记录保留；上游是设备步骤时不自动回退重跑——
+        物理动作已经发生，重做要走恢复评估或新建运行。
+        """
+        steps = self.steps_of(batch)
+        # 退回落在最近的人工步骤上：那是记录可以更正的地方
+        target_step_id = ""
+        index = None
+        for position in range(run.step_index - 1, -1, -1):
+            if kind_of(steps[position]) == MANUAL:
+                index, target_step_id = position, step_id_of(steps[position], position)
+                break
+        if index is None:
+            # 上游没有人工节点，只有设备步骤：物理动作已经发生，不能自动回退重跑
+            batch.state = "paused"
+            batch.held_at = now()
+            batch.failure_reason = (
+                "审核退回：上游只有设备步骤，不自动回退重跑，请走恢复评估或新建运行"
+            )
+            self.audit.record(
+                None, "审核退回后保持", batch.id, before="运行中", after="已保持",
+                detail=batch.failure_reason,
+            )
+            return {"next": None, "batch_state": batch.state, "needs_recovery": True}
+        if not self.advances.claim(batch.id, run.step_id, run.attempt, target_step_id):
+            return {"next": None, "duplicate": True}
+        new_run = self.open_step(batch, index)
+        self.audit.record(
+            None, "审核退回生成新的人工尝试", batch.id, before="审核退回",
+            after=f"第 {index + 1} 步第 {new_run.attempt} 次",
+            detail="旧记录保留，不覆盖",
+        )
+        return {"next": self.run_out(new_run), "batch_state": batch.state, "reopened": True}
+
+    def tick(self, limit: int | None = None) -> dict:
+        """后台推进一轮。无浏览器请求也能处理到期等待与回执。"""
+        claimed = 0
+        processed = 0
+        results: list[dict] = []
+        # 到期的等待步骤先产出事件；保持中可以记录，但推进时会被设备动作检查挡住
+        for run in self.runs.due_waits():
+            batch = self.db.get(Batch, run.batch_id)
+            self.emit(
+                run.batch_id, run.id, "wait_due", f"wait:{run.id}:{run.attempt}",
+                {"due_at": run.due_at.isoformat() if run.due_at else ""},
+                org_id=batch.org_id if batch else "",
+            )
+        self.db.commit()
+
+        # 领取超时的 processing 行重新排队：崩溃的进程不该永久占着事件
+        stale_before = now() - timedelta(seconds=settings.advance_claim_timeout_sec)
+        for event in self.events.stale_processing(stale_before):
+            event.state = "pending"
+            event.claimed_at = None
+            event.claimed_by = ""
+        self.db.commit()
+
+        events = self.events.claim_batch(limit or settings.advance_batch_size)
+        claimed_events: list[tuple[str, str]] = []
+        for event in events:
+            event.state = "processing"
+            event.claimed_at = now()
+            event.claimed_by = self.ctx.subject_label or "advancer"
+            claimed_events.append((event.id, event.event_key))
+        # 所有候选仍持有行锁时一次性完成领取。逐条 commit 会提前释放尚未标记的
+        # 候选行，让另一个推进器领取同一批事件。
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            claimed_events = []
+
+        claimed = len(claimed_events)
+        for event_id, event_key in claimed_events:
+            outcome = self.process_event(event_id)
+            if outcome.get("processed"):
+                processed += 1
+            results.append({"event_id": event_key, **outcome})
+        return {
+            "claimed": claimed, "processed": processed, "results": results,
+            "at": now().isoformat(timespec="seconds"),
+        }
+
+    # ---------- 取消 ----------
+
+    def cancel_open_runs(self, batch: Batch, reason: str) -> int:
+        cancelled = 0
+        for run in self.runs.open_runs(batch.id):
+            run.state = workflow.CANCELLED
+            run.ended_at = now()
+            run.reason = reason
+            run.row_version = int(run.row_version or 0) + 1
+            cancelled += 1
+        for event in self.events.for_batch(batch.id):
+            if event.state == "pending":
+                event.state = "rejected"
+                event.error = reason
+                event.processed_at = now()
+        return cancelled
+
+    # ---------- 输出 ----------
+
+    def run_out(self, run: StepRun) -> dict:
+        step = run.step_snapshot or {}
+        assignee = self.users.get(run.assignee_user_id) if run.assignee_user_id else None
+        submitter = self.users.get(run.submitted_by) if run.submitted_by else None
+        reviewer = self.users.get(run.reviewed_by) if run.reviewed_by else None
+        return {
+            "id": run.id,
+            "batch_id": run.batch_id,
+            "step_id": run.step_id,
+            "step_index": run.step_index,
+            "step_name": step.get("name") or f"第 {run.step_index + 1} 步",
+            "kind": run.kind,
+            "kind_label": KIND_NAMES.get(run.kind, run.kind),
+            "attempt": run.attempt,
+            "state": run.state,
+            "state_label": workflow.STATE_LABEL.get(run.state, run.state),
+            "station_id": run.station_id,
+            "assignee_user_id": run.assignee_user_id,
+            "assignee_name": assignee.display_name if assignee else "",
+            "due_at": run.due_at.isoformat(timespec="seconds") if run.due_at else None,
+            "started_at": run.started_at.isoformat(timespec="seconds") if run.started_at else None,
+            "ended_at": run.ended_at.isoformat(timespec="seconds") if run.ended_at else None,
+            "form": step.get("form") or [],
+            "form_data": run.form_data or {},
+            "requires_signature": bool(step.get("requires_signature")),
+            "review_role": step.get("review_role", ""),
+            "wait_for": step.get("wait_for") or {},
+            "conclusion": run.conclusion,
+            "reason": run.reason,
+            "submitted_by": run.submitted_by,
+            "submitted_by_name": submitter.display_name if submitter else "",
+            "reviewed_by": run.reviewed_by,
+            "reviewed_by_name": reviewer.display_name if reviewer else "",
+            "row_version": run.row_version,
+        }
+
+    def runs_for_batch(self, batch_id: str) -> list[dict]:
+        return [self.run_out(row) for row in self.runs.for_batch(batch_id)]
+
+    def events_for_batch(self, batch_id: str) -> list[dict]:
+        return [
+            {
+                "id": row.id, "event_key": row.event_key, "event_type": row.event_type,
+                "state": row.state, "error": row.error,
+                "available_at": row.available_at.isoformat(timespec="seconds"),
+                "processed_at": row.processed_at.isoformat(timespec="seconds") if row.processed_at else None,
+                "payload": row.payload or {},
+            }
+            for row in self.events.for_batch(batch_id)
+        ]
+
+    def my_manual_todos(self, user_id: str) -> list[dict]:
+        return [self.run_out(row) for row in self.runs.pending_manual(user_id)]
+
+    def review_todos(self) -> list[dict]:
+        return [self.run_out(row) for row in self.runs.pending_review()]
+
+
+def system_workflow(db: Session, org_id: str) -> WorkflowService:
+    """后台推进器用的受限系统上下文。组织从持久化事件确定。"""
+    return WorkflowService(db, system_context(org_id))

@@ -1,0 +1,154 @@
+name: ilcs
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# PostgreSQL + 三个应用容器 + 一个一次性迁移任务。迁移不在应用启动里做：
+# 多副本发布时那样会让两个版本各改一半结构。
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ilcs-db
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    volumes:
+      - ilcs_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend
+
+  # 迁移与核对。部署时先跑它：`docker compose run --rm migrate`
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ilcs-api:latest
+    logging: *default-logging
+    env_file: .env
+    volumes:
+      - ../data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    profiles: ["tools"]
+    command: ["python", "scripts/migrate.py", "upgrade", "--stamp-baseline", "--report", "/data/migration-report.md"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ilcs-api:latest
+    container_name: ilcs-api
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    volumes:
+      # 上传文件在宿主持久目录；PostgreSQL 数据在 ilcs_postgres 卷
+      - ../data:/data
+      - ../secrets:/run/secrets/ilcs:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs/api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      # 库版本不兼容时 /api/health 返回 schema_mismatch，容器判为不健康
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request;s=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health'));raise SystemExit(0 if s['status']=='ok' else 1)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+
+  # 后台推进器 + 设备执行器。没有它，到期的等待步骤不会被唤醒。
+  executor:
+    image: ilcs-api:latest
+    container_name: ilcs-executor
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    volumes:
+      - ../data:/data
+      - ../secrets:/run/secrets/ilcs:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "executor/main.py"]
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+
+  web:
+    image: nginx:alpine
+    container_name: ilcs-web
+    restart: unless-stopped
+    logging: *default-logging
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,uid=101,gid=101,mode=0750
+      - /var/run:size=1m,uid=101,gid=101,mode=0750
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      # 默认只对本机开放；正式内网入口需在 .env 显式设 ILCS_WEB_BIND=0.0.0.0。
+      - "${ILCS_WEB_BIND:-127.0.0.1}:8090:8080"
+    volumes:
+      - ../web/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - frontend
+
+volumes:
+  ilcs_postgres:
+
+networks:
+  frontend:
+  backend:
