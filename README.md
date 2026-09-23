@@ -196,7 +196,7 @@ cd ilcs && rsync -av --delete \
   --exclude '*.db' --exclude '*.db-shm' --exclude '*.db-wal' \
   --exclude '.pytest_cache' --exclude '.playwright-cli' --exclude '.DS_Store' \
   --exclude 'web/src' --exclude 'web/tsconfig.tsbuildinfo' --exclude 'api/tests' \
-  --exclude 'data' --exclude 'secrets' --exclude 'deploy/.env' \
+  --exclude 'data' --exclude 'secrets' --exclude 'deploy/.env' --exclude '.git' --exclude 'output' \
   ./  10.10.106.51:/opt/ilcs/
 
 # 首次部署：从样例生成配置，把密钥改掉
