@@ -287,6 +287,8 @@ cd /opt/ilcs/deploy && docker compose --profile pilot up -d sila-sim-lh sila-sim
 然后在「工位与能力」页把试点工位的适配器改成 `kind=real`、`driver=sila2_v1`，配置示例见
 [设备适配器配置模板](docs/设备适配器配置模板.md)；在线状态由执行器探测。模拟设备自报为模拟器，
 `ILCS_ENVIRONMENT=production` 时会被拒绝接入。故障注入与验收用法见 [simulators/sila_device/README.md](simulators/sila_device/README.md)。
+部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
+（方法修订 → 矩阵方案 → 排程下发 → 质检关卡 → 多通道 → 故障演练 → 闭环提案）见 [试点操作案例](docs/试点操作案例.md)。
 
 ### PostgreSQL 与附件备份恢复演练
 

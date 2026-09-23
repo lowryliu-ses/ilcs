@@ -38,7 +38,14 @@ docker compose --profile pilot up -d sila-sim-lh sila-sim-cycler
 
 ## 故障注入
 
-通过 `SimulatorControl.SetFault(Mode, Parameter)`（任一 SiLA 2 客户端均可调用）：
+通过 `SimulatorControl.SetFault(Mode, Parameter)`（任一 SiLA 2 客户端均可调用）。容器里自带命令行，沿用容器的证书与端口：
+
+```bash
+docker compose exec sila-sim-lh python simulators/sila_device/fault.py lost_receipt   # 注入
+docker compose exec sila-sim-lh python simulators/sila_device/fault.py state          # 当前故障、任务、executions
+docker compose exec sila-sim-lh python simulators/sila_device/fault.py none           # 恢复（故障持续生效，直到恢复）
+```
+
 
 | Mode | 效果 | 系统应有的反应 |
 |---|---|---|
