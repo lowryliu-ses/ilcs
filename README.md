@@ -50,9 +50,10 @@ cd ilcs && api/.venv/bin/python executor/main.py
 新指令入队经 PostgreSQL `LISTEN/NOTIFY` 立即唤醒执行器，轮询周期只是兜底；界面经 `/api/stream`
 接收变更推送，顶栏显示「实时 / 轮询」。
 
-**CP-SAT 求解器是可选的。** 装了 `ortools` 时多批次优化会多一个 CP-SAT 候选；当前 `ortools` 9.15
-要求 protobuf < 7，与 SiLA 2 驱动使用的 grpcio-tools 1.84（protobuf ≥ 7.35）冲突，所以没有写进
-`requirements.txt`。不装也完整可用：内置的顺序搜索（≤ 6 个批次穷举，更多用局部搜索）负责优化。
+**CP-SAT 求解器默认启用。** 多批次优化会把 CP-SAT 求出的顺序作为候选，与内置顺序搜索（≤ 6 个批次穷举，
+更多用局部搜索）的结果一起比较，时间窗仍由排程器生成。`ortools` 9.15 要求 protobuf < 6.34，所以
+`requirements.txt` 把 gRPC 栈固定在 1.81 / protobuf 6.33.6（同时满足 SiLA 2 驱动与 OR-Tools 的最高版本）；
+不要单独升级 grpcio 或 protobuf。`ILCS_SCHEDULER_BACKEND=search` 可关闭 CP-SAT。
 
 **执行器进程不是可选的。** 它同时承担设备执行与工作流推进：到期的等待节点由它唤醒并推进下一步。不跑它，等待节点会一直停在 `waiting`——刷新界面也没用，因为推进不是由浏览器请求触发的。
 
@@ -357,4 +358,4 @@ ssh 10.10.106.51 'sudo bash /opt/ilcs/scripts/reset-demo.sh'
 
 ## 后续演进
 
-按需求文档 FUT 段继续延后的项：NATS JetStream、Keycloak OIDC、真实工位驱动实现、TimescaleDB 遥测、CP-SAT 直接出时间窗（当前为可选候选）、AGV 车队系统对接、外部 LIMS/ERP 双向集成。PostgreSQL 的部署、迁移和双数据库回归已纳入当前基线；生产切换仍需在维护窗口执行并留存核对报告。每项的落点见 [ARCHITECTURE.md](ARCHITECTURE.md) 末节。
+按需求文档 FUT 段继续延后的项：NATS JetStream、Keycloak OIDC、真实工位驱动实现、TimescaleDB 遥测、CP-SAT 直接出时间窗（当前作为优化候选）、AGV 车队系统对接、外部 LIMS/ERP 双向集成。PostgreSQL 的部署、迁移和双数据库回归已纳入当前基线；生产切换仍需在维护窗口执行并留存核对报告。每项的落点见 [ARCHITECTURE.md](ARCHITECTURE.md) 末节。

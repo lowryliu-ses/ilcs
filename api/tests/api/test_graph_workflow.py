@@ -113,6 +113,11 @@ def test_optimize_preview_matches_what_apply_writes(operator, reset_runtime):
     assert preview.status_code == 200, preview.text
     body = preview.json()
     assert body["method"] == "exhaustive" and body["evaluated"] == 6
+    from app.domain import cpsat
+
+    if cpsat.available():
+        assert body["solver"]["status"] in {"optimal", "feasible"}, body["solver"]
+        assert sorted(body["solver"]["order"]) == sorted(ids), "CP-SAT 的顺序作为候选参与比较"
     assert body["best"]["span_min"] <= body["baseline"]["span_min"]
 
     applied = operator.post("/api/schedule/optimize/apply", {"order": body["best"]["order"]})

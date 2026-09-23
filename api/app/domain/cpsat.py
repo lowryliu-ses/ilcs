@@ -1,6 +1,7 @@
-"""可选的 CP-SAT 多批次排程模型（Google OR-Tools）。
+"""CP-SAT 多批次排程模型（Google OR-Tools）。
 
-装了 `ortools` 才启用；没装时 `available()` 为 False，服务层用内置的顺序搜索（`optimizer.py`）。
+`ortools` 在 requirements.txt 里固定版本，默认启用；`ILCS_SCHEDULER_BACKEND=search` 可关闭。环境里没有
+它时 `available()` 为 False，服务层只用内置的顺序搜索（`optimizer.py`）。
 
 模型（时间单位：分钟，整数）：
 - 每个步骤一个区间；需要工位的步骤在各候选工位上各有一个可选区间，恰好选一个。

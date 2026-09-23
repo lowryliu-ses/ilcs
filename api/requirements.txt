@@ -14,5 +14,14 @@ httpx==0.28.1
 pytest==8.3.4
 # SiLA 2 设备驱动（sila2_v1）与外部模拟设备共用；版本固定，驱动用到了客户端的调用细节
 sila2==0.14.0
+# gRPC 栈固定在 1.81：OR-Tools 9.15 要求 protobuf < 6.34，而 grpcio-tools 1.83+ 要求 protobuf ≥ 7.35。
+# 1.81 是同时满足二者的最高版本（1.82 已被 PyPI 撤回：它声明的 protobuf 范围写错，实际只支持 7.x）。
+# 升级任一项前先在隔离环境跑全量测试（含 tests/domain/test_sila2_adapter.py、tests/api/test_sila2_pilot.py、
+# tests/domain/test_cpsat.py），不要单独升级 grpcio / protobuf。
+grpcio==1.81.0
+grpcio-tools==1.81.0
+protobuf==6.33.6
+# 多批次排程的 CP-SAT 候选（domain/cpsat.py）；ILCS_SCHEDULER_BACKEND=search 可关闭
+ortools==9.15.6755
 # 模拟设备生成自签 TLS 证书（sila2[cryptography] 的可选依赖）
 cryptography==50.0.1
