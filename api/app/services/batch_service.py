@@ -3,8 +3,9 @@
 与改造前的三个区别：
 - 批次创建与实验任务绑定原子完成，不再存在「有批次没任务」的第二条数据链。
 - 开跑检查按步骤适用性算，不再要求每一步都有设备工位。
-- 下发只开第一个步骤实例；之后的每一步由流程推进器按事件决定，
+- 下发只开起点步骤实例；之后的每一步由流程推进器按事件决定，
   设备回执不再顺手下发下一条命令。
+- 子流程在建批次时展开进快照；运行时的跳过与「从指定节点重做」都要方法事先允许或签名负责。
 """
 from __future__ import annotations
 
@@ -213,10 +214,16 @@ class BatchService:
             run = self.runs.current(batch.id)
             if run is None:
                 return {"who": "执行器", "what": "执行中", "why": f"第 {batch.current_step + 1} 步"}
-            who = {"manual": "操作员", "review": "QA", "wait": "系统", "device": "执行器"}[run.kind]
+            who = {
+                "manual": "操作员", "review": "QA", "wait": "系统", "device": "执行器", "branch": "操作员",
+            }.get(run.kind, "系统")
             what = {
-                "manual": "填写人工记录", "review": "审核", "wait": "等待到期", "device": "执行中",
-            }[run.kind]
+                "manual": "填写人工记录", "review": "审核", "device": "执行中", "branch": "选择分支出口",
+                "wait": (
+                    f"等待事件 {((run.step_snapshot or {}).get('wait_for') or {}).get('event')}"
+                    if ((run.step_snapshot or {}).get("wait_for") or {}).get("mode") == "event" else "等待到期"
+                ),
+            }.get(run.kind, "处理中")
             return {
                 "who": who, "what": what,
                 "why": f"第 {run.step_index + 1} 步「{(run.step_snapshot or {}).get('name', '')}」",
@@ -242,6 +249,7 @@ class BatchService:
         runs_by_step: dict[str, list] = {}
         for run in self.runs.for_batch(batch.id):
             runs_by_step.setdefault(run.step_id, []).append(run)
+        before = dag.predecessors(steps)
 
         step_rows = []
         for index, step in enumerate(steps):
@@ -250,7 +258,9 @@ class BatchService:
             checkpoint = checkpoints.get(index)
             step_id = step_id_of(step, index)
             attempts = runs_by_step.get(step_id, [])
-            latest = attempts[-1] if attempts else None
+            # 当前结论看最新一条有效记录：作废（重做）与取消的记录只留在尝试历史里
+            live = [row for row in attempts if row.state not in {"superseded", "cancelled"}]
+            latest = live[-1] if live else (attempts[-1] if attempts else None)
             step_rows.append(
                 {
                     "index": index,
@@ -267,6 +277,12 @@ class BatchService:
                     "form": step.get("form") or [],
                     "wait_for": step.get("wait_for") or {},
                     "review_role": step.get("review_role", ""),
+                    "branch": step.get("branch") or {},
+                    "when": step.get("when") or {},
+                    "after": [steps[parent].get("step_id") for parent in before[index]],
+                    "skippable": bool(step.get("skippable")),
+                    "timeout": step.get("timeout") or None,
+                    "groups": step.get("groups") or [],
                     "recovery": recoveries.get(step.get("cap"), {}),
                     "station_id": work.station_id if work else None,
                     "planned_start": work.starts_at.isoformat(timespec="minutes") if work else None,
@@ -292,6 +308,9 @@ class BatchService:
             "inventory_ledger": self.materials.inventory.ledger_for_batch(batch.id),
             "step_runs": self.workflow.runs_for_batch(batch.id),
             "workflow_events": self.workflow.events_for_batch(batch.id),
+            "signals": self.workflow.signals_for_batch(batch.id),
+            "graph_mode": dag.graph_mode(steps),
+            "subflows": batch.recipe_snapshot.get("subflows") or [],
             "labware": self._labware_out(batch),
             "commands": [
                 {
@@ -519,14 +538,36 @@ class BatchService:
         self.db.commit()
         return self.summary_out(batch)
 
-    @staticmethod
-    def _freeze_recipe(recipe) -> dict:
+    def _freeze_recipe(self, recipe) -> dict:
+        """冻结方法快照。子流程在这里展开：之后被引用的方法怎么修订，这个批次的步骤都不变。"""
+        from ..domain.subflow import SubflowError, has_subflow, merge_bom
+        from .flow_expansion import expanded_steps
+
+        steps = normalize(recipe.steps or [])
+        bom = list(recipe.bom or [])
+        subflows: list[dict] = []
+        if has_subflow(steps):
+            try:
+                steps, extra_bom = expanded_steps(self.db, self.ctx, recipe)
+            except SubflowError as error:
+                raise StateConflict(
+                    f"子流程无法展开：{error.message}",
+                    {"blocked": [{"key": "subflow", "label": error.message}]}, code="subflow_invalid",
+                ) from error
+            bom = merge_bom(bom, extra_bom)
+            seen: set[str] = set()
+            for step in steps:
+                for group in step.get("groups") or []:
+                    if group["step_id"] not in seen:
+                        seen.add(group["step_id"])
+                        subflows.append(group)
         return copy.deepcopy(
             {
                 "id": recipe.id, "name": recipe.name, "version": recipe.version, "plate": recipe.plate,
                 "risk": recipe.risk, "design": recipe.design,
-                "steps": normalize(recipe.steps or []), "bom": recipe.bom,
+                "steps": steps, "bom": bom,
                 "sop_version_id": recipe.sop_version_id,
+                "subflows": subflows,
                 "frozen_at": now().isoformat(timespec="seconds"),
             }
         )
@@ -846,24 +887,24 @@ class BatchService:
         self.batches.bump(batch)
         self.samples.mark_all(batch.id, "running")
         task = self.tasks.get(batch.task_id) if batch.task_id else None
-        run = self.workflow.start_first_step(
-            batch, assignee_user_id=(task.assignee_user_id if task else user.id)
-        )
-        command = None
-        if run.kind == DEVICE:
-            command = self.issue_command(batch, "dispatch", 0, step_run_id=run.id)
-        elif run.kind in {"gate", "split"}:
-            # 系统自动执行的节点：开跑即判定 / 拆分，然后继续推进
-            self.workflow.enter(batch, run, 0)
+        # 起点一起开出：设备起点下指令，关卡 / 拆分 / 分支即时判定，人工与审核留待办
+        entered = self.workflow.start(batch, assignee_user_id=(task.assignee_user_id if task else user.id))
+        if not entered:
+            raise StateConflict("流程没有可开出的起点步骤")
+        run = entered[0]["run"]
+        command_id = next((row.get("command_id") for row in entered if row.get("command_id")), "")
         self.audit.record(
             user, "下发批次", batch.id, sign=True, meaning=signature.meaning, before="已排程",
             after="运行中", signature_id=signature.id,
-            command_id=command.id if command else "", object_version=batch.row_version,
+            command_id=command_id or "", object_version=batch.row_version,
             detail=(
                 f"开跑检查 {result['summary']['passed']} 项通过、"
                 f"{result['summary']['not_applicable']} 项不适用"
                 f"{'；' + reason if reason else ''}；"
-                f"首节点为{KIND_NAMES.get(run.kind, run.kind)}步骤"
+                + (
+                    f"首节点为{KIND_NAMES.get(run.kind, run.kind)}步骤" if len(entered) == 1
+                    else f"{len(entered)} 个起点同时开出"
+                )
             ),
         )
         self.db.commit()
@@ -1071,8 +1112,25 @@ class BatchService:
             for option in options:
                 if option["id"] in {recovery.RESUME, recovery.RETRY}:
                     option.update(allowed=False, reason="存在现场确认「部分执行」的指令，只能终止")
+        steps = self.steps_of(batch)
+        current = steps[batch.current_step] if batch.current_step < len(steps) else {}
+        blockers = self._blind_blockers(batch)
+        rerun_targets = [
+            {"step_id": step_id_of(steps[at], at), "index": at, "name": steps[at].get("name")}
+            for at in sorted(dag.ancestors(steps, batch.current_step) | {batch.current_step})
+        ] if steps else []
         return {
             "batch_id": batch.id,
+            "skip": {
+                "step_id": step_id_of(current, batch.current_step) if current else "",
+                "allowed": bool(current.get("skippable")) and not blockers,
+                "reason": (
+                    "" if current.get("skippable") and not blockers
+                    else "方法没有把这一步标为可跳过" if not current.get("skippable")
+                    else "存在没有结论的设备指令"
+                ),
+            },
+            "rerun_targets": rerun_targets if not blockers else [],
             "hold_reason": batch.failure_reason or batch.note,
             "held_at": batch.held_at.isoformat(timespec="seconds") if batch.held_at else None,
             "step_index": batch.current_step,
@@ -1243,6 +1301,204 @@ class BatchService:
         )
         self.db.commit()
         return self.summary_out(batch)
+
+    # ---------- 跳过与从指定节点重做 ----------
+
+    def _step_index(self, batch: Batch, step_id: str) -> int:
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, index) for index, step in enumerate(steps)]
+        if step_id not in ids:
+            raise NotFound(f"批次快照里没有步骤 {step_id}")
+        return ids.index(step_id)
+
+    def _blind_blockers(self, batch: Batch) -> list[dict]:
+        """结果未知、人工核查中、部分执行的指令：这些没有结论之前，不能在它们之上改流程。"""
+        rows = []
+        for command in self.commands.for_batch(batch.id):
+            # 没离开系统就被拒的指令（unreachable）设备从未见过，不算「结果未知」
+            unsettled = command.state == "manual" or (
+                command.state == "unknown" and command.delivery_state != "unreachable"
+            )
+            if unsettled:
+                rows.append({"key": "command", "label": f"指令 {command.id[:8]} 结果未知，先到现场核查"})
+            elif command.state == "partial":
+                rows.append({"key": "command", "label": f"指令 {command.id[:8]} 部分执行，只能终止"})
+        return rows
+
+    def skip_step(self, batch_id: str, step_id: str, reason: str, signature_id: str, user: User) -> dict:
+        """跳过一个步骤。只有方法里标了「可跳过」的步骤能跳，且要写理由并签名。
+
+        - 运行中：步骤还没动（待开始 / 待办 / 等待中），设备步骤的指令还在队列里（撤回它）；
+        - 保持或故障：步骤已明确失败（设备步骤要么明确失败、要么现场核查为「未执行」），
+          另开一条「已跳过」记录，原失败记录保留；批次回到运行中继续往下走。
+        设备已经收到指令、结果未知或部分执行时一律不能跳：物理动作可能已经发生，跳过等于假装没发生。
+        """
+        from .execution_service import ExecutionService
+
+        if not self.ctx.has("batch.recover"):
+            raise PermissionDenied("当前角色不能跳过步骤（需要异常恢复权限）")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValidationFailed("跳过步骤必须写明理由")
+        batch = self._require_locked(batch_id)
+        if batch.state not in {"running", *RECOVERABLE}:
+            raise StateConflict(f"批次处于「{STATE_LABEL.get(batch.state, batch.state)}」，不能跳过步骤")
+        index = self._step_index(batch, step_id)
+        steps = self.steps_of(batch)
+        step = steps[index]
+        if not step.get("skippable"):
+            raise StateConflict(
+                f"第 {index + 1} 步「{step.get('name')}」在方法里没有标为可跳过：关键步骤不能在运行时临时跳掉",
+                code="step_not_skippable",
+            )
+        history = [row for row in self.runs.for_batch(batch.id) if row.step_id == step_id]
+        live = next((row for row in reversed(history) if row.state not in {"superseded", "cancelled"}), None)
+        if live is None:
+            raise StateConflict("这一步还没开出：只能跳过已经开出或已失败的步骤，不能预先跳过", code="step_not_open")
+        if live.state in {"completed", "skipped", "not_taken"}:
+            raise StateConflict(f"这一步已是「{live.state}」，不需要跳过")
+        own = [c for c in self.commands.for_batch(batch.id) if c.step_run_id == live.id]
+        if live.state == "unknown" and any(c.delivery_state not in {"unreachable", "queued", "not_sent"} for c in own):
+            raise StateConflict("这一步的设备动作结果未知：先到现场核查，再决定跳过或重试", code="manual_check_required")
+        blockers = self._blind_blockers(batch)
+        if blockers:
+            raise StateConflict("存在没有结论的设备指令，不能跳过", {"blocked": blockers}, code="manual_check_required")
+        execution = ExecutionService(self.db, self.ctx)
+        for command in self.commands.for_batch(batch.id):
+            if command.step_run_id != live.id:
+                continue
+            reached_device = command.delivery_state in {"maybe_sent", "delivered"}
+            settled = command.state in {"cancelled", "not_executed"}
+            if command.state in {"accepted", "running"} or (reached_device and not settled):
+                raise StateConflict(
+                    "设备已收到这一步的指令，不能跳过：等设备给出结论或保持后走恢复", code="command_delivered",
+                )
+        withdrawn = 0
+        for command in own:
+            if command.state == "sent" and command.delivery_state == "queued":
+                withdrawn += int(execution.withdraw(command, f"第 {index + 1} 步被跳过，指令撤回"))
+            elif command.state == "unknown" and command.delivery_state == "unreachable":
+                # 没离开系统的指令：随步骤跳过结束，不再挂在「结果未知」清单里
+                command.state = "not_executed"
+                command.error = (command.error + "；" if command.error else "") + "未送达设备，随步骤跳过结束"
+        if live.state == "unknown":
+            live.state = "failed"
+            live.ended_at = now()
+            live.reason = (live.reason + "；" if live.reason else "") + "指令未送达设备"
+        signature = self.identity.consume_signature(
+            signature_id, user, f"跳过步骤：{step.get('name')}", object_ref=batch.id,
+            object_version=batch.row_version,
+        )
+        before = STATE_LABEL.get(batch.state, batch.state)
+        if live.state in {"pending", "ready", "waiting", "running"}:
+            if live.state == "running" and live.kind == DEVICE:
+                raise StateConflict("设备步骤正在执行，不能跳过", code="command_delivered")
+            live.state = "skipped"
+            live.ended_at = now()
+            live.reason = f"人工跳过：{reason}"
+            live.row_version = int(live.row_version or 0) + 1
+            skipped = live
+        else:
+            skipped = self.workflow.open_step(batch, index)
+            skipped.state = "skipped"
+            skipped.ended_at = now()
+            skipped.reason = f"人工跳过（原记录失败）：{reason}"
+        skipped.submitted_by = user.id
+        released = self.workflow.release_step_windows(batch, index)
+        if batch.state in RECOVERABLE:
+            batch.state = "running"
+            batch.held_at = None
+            batch.failure_reason = ""
+            batch.note = ""
+            for alarm in self.alarms.for_source("batch", batch.id):
+                if alarm.state == "active":
+                    alarm.state = "acked"
+        self.batches.bump(batch)
+        self.audit.record(
+            user, "跳过步骤", batch.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
+            before=before, after="已跳过", object_version=batch.row_version,
+            detail=(
+                f"第 {index + 1} 步「{step.get('name')}」：{reason}；撤回 {withdrawn} 条未投递指令，"
+                f"归还 {released} 个时间窗"
+            ),
+        )
+        self.db.flush()
+        outcome = self.workflow._advance(skipped, batch)
+        self.db.commit()
+        return {**self.summary_out(batch), "advance": outcome}
+
+    def rerun_from(self, batch_id: str, step_id: str, reason: str, signature_id: str, user: User) -> dict:
+        """从指定节点重做：这一步与它的全部下游作废（记录保留），从这一步重新开出。
+
+        只在保持或故障时可用，且批次没有在途或结果未知的设备指令——重做建立在「现场状态已知」之上。
+        会重新执行的设备步骤列在审计里：重做一次注液不是一条日志的代价，签名的人要看得见。
+        """
+        from .execution_service import ExecutionService
+
+        if not self.ctx.has("batch.recover"):
+            raise PermissionDenied("当前角色不能执行恢复")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValidationFailed("从指定节点重做必须写明理由")
+        batch = self._require_locked(batch_id)
+        if batch.state not in RECOVERABLE:
+            raise StateConflict("只有已保持或故障批次可以从指定节点重做")
+        index = self._step_index(batch, step_id)
+        steps = self.steps_of(batch)
+        scope = {index} | dag.descendants(steps, index)
+        blockers = self._blind_blockers(batch)
+        in_flight = [c for c in self.commands.for_batch(batch.id) if c.state in {"accepted", "running"}]
+        blockers += [{"key": "command", "label": f"指令 {c.id[:8]} 仍在设备上执行"} for c in in_flight]
+        if blockers:
+            raise StateConflict("存在没有结论的设备指令，不能重做", {"blocked": blockers}, code="manual_check_required")
+        self.gate.require_open(self._station_ids(batch, from_step=index))
+        signature = self.identity.consume_signature(
+            signature_id, user, f"从第 {index + 1} 步重做", object_ref=batch.id, object_version=batch.row_version,
+        )
+        execution = ExecutionService(self.db, self.ctx)
+        for command in self.commands.for_batch(batch.id):
+            if command.step_index in scope and command.state == "sent" and command.delivery_state == "queued":
+                execution.withdraw(command, f"从第 {index + 1} 步重做，未投递指令撤回")
+        voided: list[str] = []
+        rerun_devices: list[str] = []
+        for row in self.runs.for_batch(batch.id):
+            if row.step_index not in scope:
+                continue
+            if row.state in {"pending", "ready", "running", "waiting"}:
+                row.state = "cancelled"
+            elif row.state in {"completed", "skipped", "not_taken", "failed"}:
+                if row.state == "completed" and row.kind == DEVICE:
+                    rerun_devices.append(f"第 {row.step_index + 1} 步「{(row.step_snapshot or {}).get('name')}」")
+                row.state = "superseded"
+            else:
+                continue
+            row.reason = (row.reason + "；" if row.reason else "") + f"从第 {index + 1} 步重做，本次结论作废"
+            row.row_version = int(row.row_version or 0) + 1
+            voided.append(row.step_id)
+        before = STATE_LABEL.get(batch.state, batch.state)
+        batch.state = "running"
+        batch.held_at = None
+        batch.failure_reason = ""
+        batch.note = ""
+        batch.current_step = index
+        for alarm in self.alarms.for_source("batch", batch.id):
+            if alarm.state == "active":
+                alarm.state = "acked"
+        self.batches.bump(batch)
+        task = self.tasks.get(batch.task_id) if batch.task_id else None
+        run = self.workflow.open_step(batch, index, assignee_user_id=(task.assignee_user_id if task else user.id))
+        outcome = self.workflow.enter(batch, run, index)
+        self.audit.record(
+            user, "从指定节点重做", batch.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
+            before=before, after="运行中", object_version=batch.row_version,
+            command_id=outcome.get("command_id") or "",
+            detail=(
+                f"自第 {index + 1} 步「{steps[index].get('name')}」重做：{reason}；作废 {len(voided)} 条记录"
+                + (f"；将重新执行的设备步骤：{'、'.join(dict.fromkeys(rerun_devices))}" if rerun_devices else "")
+            ),
+        )
+        self.db.commit()
+        return {**self.summary_out(batch), "advance": outcome}
 
     # ---------- 结果未知指令的人工核查 ----------
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import Engine, inspect, text
 
 # 本代码要求的迁移版本。新增迁移时同步改这里，否则升级后的库会被判为「超前」。
-EXPECTED_REVISION = "0015_labware_locations"
+EXPECTED_REVISION = "0016_flow_control"
 MIGRATION_HINT = (
     "请先执行迁移：cd api && ILCS_DATABASE_URL=... .venv/bin/alembic upgrade head"
     "（已有旧库先 alembic stamp 0001_legacy_baseline）"

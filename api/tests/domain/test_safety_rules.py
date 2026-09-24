@@ -154,11 +154,15 @@ def test_matrix_material_demand_counts_every_condition():
 # ---------- 等待节点（A4） ----------
 
 
-def test_business_event_wait_is_rejected_until_an_emitter_exists():
+def test_business_event_wait_needs_an_event_name_and_a_planned_duration():
+    """业务事件由批次信号入口发出后，事件等待可用；但必须写明事件名，排程也要一个计划时长。"""
     from app.domain.steps import wait_issues
 
-    issues = wait_issues({"kind": "wait", "wait_for": {"mode": "event", "event": "lims.ready"}})
-    assert issues and "暂不支持" in issues[0]
+    assert wait_issues({"kind": "wait", "dur": 30, "wait_for": {"mode": "event", "event": "lims.ready"}}) == []
+    missing_name = wait_issues({"kind": "wait", "dur": 30, "wait_for": {"mode": "event"}})
+    assert missing_name and "事件名" in missing_name[0]
+    no_duration = wait_issues({"kind": "wait", "wait_for": {"mode": "event", "event": "lims.ready"}})
+    assert any("计划时长" in issue for issue in no_duration)
     assert wait_issues({"kind": "wait", "dur": 3, "wait_for": {"mode": "duration"}}) == []
 
 

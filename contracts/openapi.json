@@ -687,6 +687,32 @@
         "title": "BatchCreateIn",
         "type": "object"
       },
+      "BatchSignalIn": {
+        "description": "批次业务事件。`event_id` 是发送方的去重键：同一事件重发不会唤醒两个等待节点。",
+        "properties": {
+          "event_id": {
+            "default": "",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "payload": {
+            "default": {},
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "BatchSignalIn",
+        "type": "object"
+      },
       "Body_upload_file_api_files_post": {
         "properties": {
           "file": {
@@ -781,6 +807,47 @@
           "ends_at"
         ],
         "title": "BookingIn",
+        "type": "object"
+      },
+      "BranchDecisionIn": {
+        "description": "人工选择分支出口。判据缺失而保持的分支必须带签名。",
+        "properties": {
+          "case": {
+            "title": "Case",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          },
+          "signature_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Id"
+          }
+        },
+        "required": [
+          "case",
+          "reason"
+        ],
+        "title": "BranchDecisionIn",
         "type": "object"
       },
       "CalibrationIn": {
@@ -3219,6 +3286,29 @@
         "title": "ReportPatchIn",
         "type": "object"
       },
+      "RerunFromIn": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id",
+          "step_id",
+          "reason"
+        ],
+        "title": "RerunFromIn",
+        "type": "object"
+      },
       "RescheduleIn": {
         "properties": {
           "from_step": {
@@ -3972,6 +4062,29 @@
           "signature_id"
         ],
         "title": "Signed",
+        "type": "object"
+      },
+      "SkipStepIn": {
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id",
+          "step_id",
+          "reason"
+        ],
+        "title": "SkipStepIn",
         "type": "object"
       },
       "SopVersionCreateIn": {
@@ -7923,6 +8036,94 @@
         ]
       }
     },
+    "/api/batches/{batch_id}/rerun": {
+      "post": {
+        "description": "保持或故障时从指定节点重做：该步与全部下游作废（记录保留）后重新开出。",
+        "operationId": "rerun_from_api_batches__batch_id__rerun_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunFromIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rerun From",
+        "tags": [
+          "batch"
+        ]
+      }
+    },
     "/api/batches/{batch_id}/reschedule": {
       "post": {
         "description": "加急与重排。只改未执行部分，已执行与正在执行的步骤保持占用。",
@@ -8077,6 +8278,225 @@
           }
         ],
         "summary": "Schedule Batch",
+        "tags": [
+          "batch"
+        ]
+      }
+    },
+    "/api/batches/{batch_id}/signals": {
+      "get": {
+        "operationId": "list_signals_api_batches__batch_id__signals_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Signals",
+        "tags": [
+          "batch"
+        ]
+      },
+      "post": {
+        "description": "现场人员发出批次业务事件（如「样品已送达」），唤醒等着它的事件等待节点。",
+        "operationId": "send_signal_api_batches__batch_id__signals_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchSignalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Send Signal",
+        "tags": [
+          "batch"
+        ]
+      }
+    },
+    "/api/batches/{batch_id}/skip": {
+      "post": {
+        "description": "跳过方法里标为可跳过的步骤：写理由、签名；设备已收到指令或结果未知时拒绝。",
+        "operationId": "skip_step_api_batches__batch_id__skip_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkipStepIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Skip Step",
         "tags": [
           "batch"
         ]
@@ -15621,6 +16041,89 @@
         ]
       }
     },
+    "/api/runtime/batches/{batch_id}/signals": {
+      "post": {
+        "description": "外部系统（LIMS、仓储、上位机）发出批次业务事件。服务身份须在 batch_signals 范围内授权该事件名。",
+        "operationId": "batch_signal_api_runtime_batches__batch_id__signals_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchSignalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Signal",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
     "/api/runtime/commands/{command_id}/events": {
       "post": {
         "description": "设备回执。绑定原 command_id；重复回执回放原结论，不二次推进。",
@@ -18561,6 +19064,59 @@
         ]
       }
     },
+    "/api/step-runs/branches": {
+      "get": {
+        "description": "待人工选择出口的条件分支。",
+        "operationId": "branch_queue_api_step_runs_branches_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Branch Queue",
+        "tags": [
+          "workflow"
+        ]
+      }
+    },
     "/api/step-runs/mine": {
       "get": {
         "description": "我的人工待办。",
@@ -18661,6 +19217,94 @@
           }
         ],
         "summary": "Review Queue",
+        "tags": [
+          "workflow"
+        ]
+      }
+    },
+    "/api/step-runs/{step_run_id}/branch-decision": {
+      "post": {
+        "description": "人工选择分支出口。人工选择模式要 step.submit；判据缺失而保持的分支要 step.review 并签名。",
+        "operationId": "decide_branch_api_step_runs__step_run_id__branch_decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "step_run_id",
+            "required": true,
+            "schema": {
+              "title": "Step Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BranchDecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decide Branch",
         "tags": [
           "workflow"
         ]

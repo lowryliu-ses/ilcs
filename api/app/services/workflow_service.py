@@ -20,21 +20,22 @@ from ..core.context import AccessContext, system_context
 from ..core.errors import (
     DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed,
 )
+from ..models.base import uid as uid_hex
 from ..domain import graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
-    DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, kind_of, missing_form_values, normalize,
-    step_id_of,
+    BRANCH, DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
+    case_label, kind_of, match_case, missing_form_values, normalize, step_id_of,
 )
 from ..domain.permissions import ADMIN, ROLE_NAMES
-from ..models import Batch, Sample, StepRun, User, WorkflowEvent, roles_of
+from ..models import Batch, BatchSignal, Sample, StepRun, User, WorkflowEvent, roles_of
 from ..repositories.batches import BatchRepository, SampleRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.governance import UserRepository
 from ..repositories.materials import ReservationRepository
 from ..repositories.resources import CapabilityRepository
 from ..repositories.workflow import (
-    StepAdvanceRepository, StepRunRepository, WorkflowEventRepository,
+    BatchSignalRepository, StepAdvanceRepository, StepRunRepository, WorkflowEventRepository,
 )
 from .audit_service import AuditService
 from .identity_service import IdentityService, admin_self_approval
@@ -47,6 +48,7 @@ class WorkflowService:
         self.runs = StepRunRepository(db, ctx)
         self.events = WorkflowEventRepository(db, ctx)
         self.advances = StepAdvanceRepository(db)
+        self.signals = BatchSignalRepository(db, ctx)
         self.batches = BatchRepository(db, ctx)
         self.samples = SampleRepository(db, ctx)
         self.reservations = ReservationRepository(db, ctx)
@@ -61,11 +63,26 @@ class WorkflowService:
     def steps_of(self, batch: Batch) -> list[dict]:
         return normalize(batch.recipe_snapshot.get("steps") or [])
 
-    def start_first_step(self, batch: Batch, assignee_user_id: str = "") -> StepRun:
+    def start(self, batch: Batch, assignee_user_id: str = "") -> list[dict]:
+        """下发时开出起点并进入它们。
+
+        顺序流程只有第一步；依赖图里所有没有前驱的步骤都是起点，一起开出——以前只开第一行，
+        其余起点要等第一步做完才开，平白串行。设备起点照常下指令（同一块板上的并行设备步骤
+        仍按载具互斥一个一个来）。
+        """
         steps = self.steps_of(batch)
         if not steps:
             raise StateConflict("方法没有步骤，无法开跑")
-        return self.open_step(batch, 0, assignee_user_id)
+        indices = graph.frontier(steps, {}, {})[0] if graph.graph_mode(steps) else [0]
+        entered: list[dict] = []
+        for index in indices:
+            step_id = step_id_of(steps[index], index)
+            if graph.graph_mode(steps) and not self.advances.claim(batch.id, f"join:{step_id}", 1, step_id):
+                continue
+            run = self.open_step(batch, index, assignee_user_id)
+            entered.append({**self.enter(batch, run, index), "run": run})
+        self._sync_current_step(batch)
+        return entered
 
     def open_step(self, batch: Batch, index: int, assignee_user_id: str = "") -> StepRun:
         """建立一个步骤实例。同一步的重试用 attempt 区分，旧记录保留。"""
@@ -85,9 +102,23 @@ class WorkflowService:
                 run.due_at = now() + timedelta(minutes=float(step.get("dur") or 0))
         if run.kind == MANUAL and step.get("dur"):
             run.due_at = now() + timedelta(minutes=float(step["dur"]))
+        timeout = step.get("timeout") or {}
+        if isinstance(timeout, dict) and isinstance(timeout.get("minutes"), (int, float)) and timeout["minutes"] > 0:
+            run.deadline_at = now() + timedelta(minutes=float(timeout["minutes"]))
         self.runs.add(run)
         batch.current_step = index
+        if run.kind == WAIT and ((step.get("wait_for") or {}).get("mode") == "event"):
+            self._consume_early_signal(batch, run, step)
         return run
+
+    def _consume_early_signal(self, batch: Batch, run: StepRun, step: dict) -> None:
+        """事件等待开出时，先看有没有早到的同名信号：有就直接消费，不让它空等。"""
+        name = (step.get("wait_for") or {}).get("event") or ""
+        self.db.flush()
+        signal = self.signals.unconsumed(batch.id, name)
+        if signal is None:
+            return
+        self._bind_signal(batch, run, signal)
 
     # ---------- 事件 ----------
 
@@ -324,9 +355,12 @@ class WorkflowService:
         )
 
     def _apply(self, event: WorkflowEvent, run: StepRun, batch: Batch) -> dict:
+        timeout_target = {"fail": workflow.FAILED, "skip": workflow.SKIPPED}
         target = {
             "manual_submit": workflow.COMPLETED,
             "wait_due": workflow.COMPLETED,
+            "signal": workflow.COMPLETED,
+            "timeout": timeout_target.get(event.payload.get("action", "")),
             "device_ack": (
                 workflow.COMPLETED if event.payload.get("outcome") == "done" else workflow.FAILED
             ),
@@ -346,13 +380,27 @@ class WorkflowService:
         run.state = target
         run.ended_at = now()
         run.row_version = int(run.row_version or 0) + 1
+        if event.event_type == "timeout":
+            run.reason = event.payload.get("reason") or "步骤超时"
+        if run.timed_out_at is not None and event.event_type != "timeout":
+            from .alarm_service import AlarmService
+
+            AlarmService(self.db, self.ctx).resolve_condition(
+                f"step:{run.id}:timeout", f"第 {run.step_index + 1} 步已给出结论 {target}",
+            )
 
         if target == workflow.FAILED and run.kind == REVIEW:
             return self._handle_review_rejection(run, batch)
         if target in {workflow.FAILED, workflow.CANCELLED}:
             batch.state = "fault" if target == workflow.FAILED else batch.state
             batch.failure_reason = event.payload.get("reason") or "步骤失败"
+            if target == workflow.FAILED:
+                # 并行分支时恢复评估针对出问题的这一步
+                batch.current_step = run.step_index
+                batch.held_at = batch.held_at or now()
             return {"batch_state": batch.state, "next": None}
+        if target == workflow.SKIPPED:
+            self.release_step_windows(batch, run.step_index)
         return self._advance(run, batch)
 
     def _advance(self, run: StepRun, batch: Batch) -> dict:
@@ -386,40 +434,28 @@ class WorkflowService:
         return self.enter(batch, next_run, index)
 
     def _advance_graph(self, run: StepRun, batch: Batch, steps: list[dict]) -> dict:
-        """依赖图模式的推进：一步完成后，开出所有前驱都已完成、且从未尝试过的步骤。
+        """依赖图模式的推进：按「死路剪除」判定每一步（见 `domain/graph.py`）。
 
         - 分叉：一步完成可以同时开出多个后继（设备动作与人工记录、等待并行）。
-        - 汇合：后继要等它的全部前驱完成；先完成的分支到这里什么也不开，等最后一个前驱。
-        - 每个后继的开出各自经 `StepAdvance` 去重：两个前驱几乎同时完成时，汇合步骤只开一次。
-        - 全部步骤完成才结束批次，不是「最后一行完成」就结束。
+        - 汇合：后继要等它的全部入边都有结论；并行分支上的汇合等全部前驱，条件分支后的汇合
+          只等真正走到的那条路。
+        - 没走到的分支上的步骤记为「未走此分支」，它们预约的工位时间窗随即归还。
+        - 每个后继的开出（或剪除）各自经 `StepAdvance` 去重：两个前驱几乎同时完成时只处理一次。
+        - 全部步骤都有结论（完成 / 跳过 / 未走）才结束批次。
         """
         # 两个分支在不同事务里几乎同时完成时，各自都可能看不到对方的完成而谁也不开汇合步骤。
         # 先取批次行锁再重读步骤实例：后到的事务等前一个提交，读到的是它提交后的状态。
         self.db.flush()
         self.batches.lock(batch.id)
-        rows = list(
-            self.db.query(StepRun).filter(StepRun.batch_id == batch.id)
-            .order_by(StepRun.step_index, StepRun.attempt).populate_existing().all()
-        )
+        rows = self._fresh_rows(batch.id)
         self._release_waiting_devices(batch, rows, finished=run)
-        completed = {row.step_id for row in rows if row.state == workflow.COMPLETED}
-        attempted = {
-            row.step_id for row in rows
-            if row.state not in {workflow.COMPLETED, workflow.SUPERSEDED, workflow.CANCELLED}
-        }
-        if graph.all_completed(steps, completed):
-            if batch.state != "running":
-                self.audit.record(
-                    None, "流程节点已全部完成", batch.id, before=batch.state, after=batch.state,
-                    detail="批次处于保持或故障，恢复评估确认后才结束",
-                )
-                return {"next": None, "batch_state": batch.state, "awaiting_recovery": True}
-            if not self.advances.claim(batch.id, run.step_id, run.attempt, "__end__"):
-                return {"next": None, "duplicate": True}
-            self.finish_batch(batch)
-            return {"next": None, "batch_state": "done"}
+        status, chosen = self.flow_state(rows)
+        if graph.all_resolved(steps, status):
+            return self._finish_graph(run, batch)
+        to_open, to_prune = graph.frontier(steps, status, chosen)
+        pruned = self._prune(batch, steps, rows, to_prune)
         opened: list[dict] = []
-        for index in graph.ready_after(steps, completed, attempted):
+        for index in to_open:
             step_id = step_id_of(steps[index], index)
             # 去重键用「汇合步骤本身」而不是触发它的前驱：两个前驱同时完成也只开一次
             if not self.advances.claim(batch.id, f"join:{step_id}", self._join_epoch(rows, step_id), step_id):
@@ -427,14 +463,92 @@ class WorkflowService:
             next_run = self.open_step(batch, index)
             opened.append(self.enter(batch, next_run, index))
         self._sync_current_step(batch)
+        if pruned and not opened:
+            # 剪掉的是最后一段路：剩下的步骤都有了结论，批次就此结束
+            rows = self._fresh_rows(batch.id)
+            status, _ = self.flow_state(rows)
+            if graph.all_resolved(steps, status):
+                return self._finish_graph(run, batch)
         if not opened:
             waiting = [
                 step_id_of(steps[index], index) for index in range(len(steps))
-                if step_id_of(steps[index], index) not in completed
+                if status.get(step_id_of(steps[index], index)) not in graph.RESOLVED
+                and index not in to_prune
             ]
-            return {"next": None, "batch_state": batch.state, "waiting_for": waiting}
+            return {"next": None, "batch_state": batch.state, "waiting_for": waiting, "pruned": pruned}
         first = opened[0]
-        return {**first, "opened": [row.get("next") for row in opened]}
+        return {**first, "opened": [row.get("next") for row in opened], "pruned": pruned}
+
+    def _fresh_rows(self, batch_id: str) -> list[StepRun]:
+        return list(
+            self.db.query(StepRun).filter(StepRun.batch_id == batch_id)
+            .order_by(StepRun.step_index, StepRun.attempt).populate_existing().all()
+        )
+
+    @staticmethod
+    def flow_state(rows: list[StepRun]) -> tuple[dict[str, str], dict[str, str]]:
+        """每一步最新一次有效实例的状态，以及已完成分支选中的出口。作废与取消的记录不算。"""
+        latest: dict[str, StepRun] = {}
+        for row in sorted(rows, key=lambda r: (r.step_index, r.attempt)):
+            if row.state in workflow.VOID_STATES:
+                continue
+            latest[row.step_id] = row
+        status = {step_id: row.state for step_id, row in latest.items()}
+        chosen = {
+            step_id: row.conclusion for step_id, row in latest.items()
+            if row.kind == BRANCH and row.state == workflow.COMPLETED and row.conclusion
+        }
+        return status, chosen
+
+    def _finish_graph(self, run: StepRun, batch: Batch) -> dict:
+        if batch.state != "running":
+            self.audit.record(
+                None, "流程节点已全部完成", batch.id, before=batch.state, after=batch.state,
+                detail="批次处于保持或故障，恢复评估确认后才结束",
+            )
+            return {"next": None, "batch_state": batch.state, "awaiting_recovery": True}
+        if not self.advances.claim(batch.id, run.step_id, run.attempt, "__end__"):
+            return {"next": None, "duplicate": True}
+        self.finish_batch(batch)
+        return {"next": None, "batch_state": "done"}
+
+    def _prune(self, batch: Batch, steps: list[dict], rows: list[StepRun], indices: list[int]) -> list[str]:
+        """把没走到的分支上的步骤记为「未走此分支」，归还它们的工位时间窗。"""
+        pruned: list[str] = []
+        for index in indices:
+            step = steps[index]
+            step_id = step_id_of(step, index)
+            if not self.advances.claim(batch.id, f"join:{step_id}", self._join_epoch(rows, step_id), f"prune:{step_id}"):
+                continue
+            self.runs.add(StepRun(
+                org_id=batch.org_id or self.ctx.org_id, batch_id=batch.id, step_id=step_id,
+                step_index=index, kind=kind_of(step), attempt=self.runs.attempts(batch.id, step_id) + 1,
+                state=workflow.NOT_TAKEN, step_snapshot=step, started_at=now(), ended_at=now(),
+                reason="条件分支没有走到这条路径",
+            ))
+            self.release_step_windows(batch, index)
+            pruned.append(step_id)
+        if pruned:
+            self.db.flush()
+            self.audit.record(
+                None, "剪除未走分支", batch.id, after=f"{len(pruned)} 步未走",
+                detail="、".join(pruned) + "：所在路径的分支出口没有被选中，预约的工位时间窗已归还",
+            )
+        return pruned
+
+    def release_step_windows(self, batch: Batch, step_index: int) -> int:
+        """这一步不会执行了（跳过 / 未走此分支）：它还没开始的时间窗还给排程。"""
+        from ..models import Allocation
+
+        released = 0
+        for allocation in self.db.query(Allocation).filter(
+            Allocation.batch_id == batch.id, Allocation.step_index == step_index,
+        ).all():
+            if allocation.ends_at <= now():
+                continue
+            self.db.delete(allocation)
+            released += 1
+        return released
 
     def _plate_busy(self, batch: Batch, run: StepRun, rows: list[StepRun] | None = None) -> bool:
         """批次绑定了载具时，同一时刻只能有一个设备步骤在用它：一块板不能同时在两台设备上。"""
@@ -487,6 +601,8 @@ class WorkflowService:
             return self._evaluate_gate(batch, run, index)
         if run.kind == SPLIT:
             return self._split_samples(batch, run)
+        if run.kind == BRANCH:
+            return self._evaluate_branch(batch, run, index)
         command_id = ""
         if run.kind == DEVICE:
             if workflow.hold_blocks_device_action(batch.state):
@@ -696,6 +812,301 @@ class WorkflowService:
         self.db.commit()
         return {"step_run": self.run_out(run), "advance": outcome}
 
+    # ---------- 条件分支与回环 ----------
+
+    def _branch_value(self, batch: Batch, config: dict):
+        """分支判据的取值：上游设备步骤最近检查点里的测量值，或上游人工记录的字段值。"""
+        from ..repositories.execution import CheckpointRepository
+
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        source = str(config.get("source_step_id") or "")
+        field = str(config.get("field") or "")
+        if source not in ids:
+            return None, ""
+        if config.get("mode") == "measure":
+            checkpoint = CheckpointRepository(self.db).latest_for_step(batch.id, ids.index(source))
+            delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
+            return delivered.get(field), checkpoint.id if checkpoint else ""
+        runs = [
+            row for row in self.runs.for_batch(batch.id)
+            if row.step_id == source and row.state == workflow.COMPLETED
+        ]
+        if not runs:
+            return None, ""
+        latest = runs[-1]
+        return ((latest.form_data or {}).get("values") or {}).get(field), latest.id
+
+    def _evaluate_branch(self, batch: Batch, run: StepRun, index: int) -> dict:
+        """按判据选出口。人工选择的分支留作待办；判据缺失又没有默认出口时保持待人工判断。"""
+        step = run.step_snapshot or {}
+        config = branch_config(step)
+        run.started_at = run.started_at or now()
+        if config.get("mode") == "manual":
+            run.reason = "等待人工选择出口"
+            return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_choice": True}
+        value, evidence = self._branch_value(batch, config)
+        run.form_data = {"field": config.get("field"), "value": value, "evidence": evidence, "mode": config.get("mode")}
+        case = match_case(step, value)
+        if case is None:
+            reason = (
+                f"判据 {config.get('field')} 没有取值" if value is None
+                else f"{config.get('field')}={value} 不满足任何出口条件"
+            )
+            return self._branch_hold(batch, run, f"{reason}，且没有默认出口")
+        return self._take_branch(batch, run, index, case, auto=True)
+
+    def _loops_done(self, batch_id: str, step_id: str, case: str) -> int:
+        return len([
+            row for row in self.runs.for_batch(batch_id)
+            if row.step_id == step_id and row.conclusion == case
+            and row.state in {workflow.COMPLETED, workflow.SUPERSEDED}
+        ])
+
+    def _take_branch(self, batch: Batch, run: StepRun, index: int, case: str, *, auto: bool, reason: str = "") -> dict:
+        step = run.step_snapshot or {}
+        config = branch_config(step)
+        name = step.get("name") or "条件分支"
+        target = next((c for c in branch_cases(step) if str(c.get("key")) == case), {})
+        loop_to = str(target.get("loop_to") or "")
+        if loop_to:
+            done = self._loops_done(batch.id, run.step_id, case)
+            limit = int(config.get("max_loops") or 0)
+            if done >= limit:
+                if not auto:
+                    raise StateConflict(f"「{case_label(step, case)}」已回环 {done} 次，达到上限 {limit}，请选择其他出口")
+                return self._branch_hold(
+                    batch, run, f"判据落在回环出口「{case_label(step, case)}」，但已回环 {done} 次、达到上限 {limit}",
+                )
+        run.conclusion = case
+        run.form_data = {**(run.form_data or {}), "case": case, "label": case_label(step, case),
+                         "auto": auto, "decision_reason": reason}
+        self._close_run(run, workflow.COMPLETED, (
+            f"{'自动' if auto else '人工'}选择出口「{case_label(step, case)}」" + (f"：{reason}" if reason else "")
+        ))
+        if auto:
+            # 人工选择的审计由 decide_branch 带签名记录，这里只记系统自动判定
+            self.audit.record(
+                None, "条件分支选择出口", batch.id, before="待判定", after=case_label(step, case),
+                detail=f"{name}：{run.reason}；判据 {config.get('field')}={(run.form_data or {}).get('value')}",
+            )
+        if loop_to:
+            return self._loop_back(batch, run, index, loop_to, done + 1)
+        return self._advance(run, batch)
+
+    def _loop_back(self, batch: Batch, run: StepRun, index: int, target_id: str, rounds: int) -> dict:
+        """回环：回环体（目标到分支之间的上游步骤）与分支本身的记录作废，从目标重做。"""
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        target = ids.index(target_id)
+        body = graph.loop_body(steps, index, target) | {index}
+        if not self.advances.claim(batch.id, run.step_id, run.attempt, f"loop:{target_id}"):
+            return {"next": None, "duplicate": True}
+        voided = 0
+        for row in self.runs.for_batch(batch.id):
+            if row.step_index in body and row.state in {workflow.COMPLETED, workflow.SKIPPED, workflow.NOT_TAKEN}:
+                row.state = workflow.SUPERSEDED
+                row.reason = (row.reason + "；" if row.reason else "") + f"分支第 {rounds} 次回环，本次结论作废"
+                row.row_version = int(row.row_version or 0) + 1
+                self._retire_split_children(row)
+                voided += 1
+        new_run = self.open_step(batch, target)
+        self.audit.record(
+            None, "分支回环", batch.id, before=run.reason,
+            after=f"回到第 {target + 1} 步（第 {new_run.attempt} 次）",
+            detail=f"{(run.step_snapshot or {}).get('name')}：第 {rounds} 次回环；{voided} 条记录保留并标为作废",
+        )
+        return {**self.enter(batch, new_run, target), "loop": rounds}
+
+    def _branch_hold(self, batch: Batch, run: StepRun, reason: str) -> dict:
+        """判据缺失或回环到上限：分支留在待判定，批次保持，等有权限的人选出口。"""
+        from .alarm_service import AlarmService
+
+        run.reason = reason
+        run.row_version = int(run.row_version or 0) + 1
+        batch.state = "paused"
+        batch.held_at = batch.held_at or now()
+        batch.failure_reason = f"条件分支待人工选择：{reason}"
+        batch.current_step = run.step_index
+        AlarmService(self.db, self.ctx).raise_alarm(
+            severity=2, source_type="batch", source_id=batch.id, message=batch.failure_reason[:500],
+            response="在批次页为该分支选择出口并签名；选择后批次继续。", owner="QA", origin="system",
+            condition_key=f"branch:{run.id}",
+        )
+        return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_decision": True}
+
+    def decide_branch(self, step_run_id: str, payload: dict, user: User) -> dict:
+        """人工选择分支出口。人工选择模式的分支是普通待办；判据缺失而保持的分支要 QA 判定并签名。"""
+        from .alarm_service import AlarmService
+        from .identity_service import user_may
+
+        run = self.runs.lock(step_run_id)
+        if run is None:
+            raise NotFound("步骤实例不存在")
+        if run.kind != BRANCH:
+            raise StateConflict("该步骤不是条件分支")
+        if run.state != workflow.READY:
+            raise StateConflict(f"分支已是 {workflow.STATE_LABEL.get(run.state, run.state)}，不需要选择")
+        self.runs.check_version(run, payload.get("row_version"), "步骤实例")
+        batch = self.batches.lock(run.batch_id)
+        if batch is None:
+            raise NotFound("批次不存在")
+        step = run.step_snapshot or {}
+        held = batch.state == "paused" and (batch.failure_reason or "").startswith("条件分支待人工选择")
+        needed = "step.review" if held else "step.submit"
+        if not user_may(self.ctx, user, needed):
+            raise PermissionDenied(
+                "判据缺失的分支要由有质检判定权限（step.review）的人选择" if held
+                else "当前账号不能提交流程记录（step.submit）"
+            )
+        if batch.state not in {"running", "paused"} or (batch.state == "paused" and not held):
+            raise StateConflict(f"批次状态为 {batch.state}，不能选择分支出口")
+        case = str(payload.get("case") or "")
+        keys = [str(c.get("key")) for c in branch_cases(step)]
+        if case not in keys:
+            raise ValidationFailed(f"出口 {case or '（空）'} 不存在；可选：{'、'.join(keys)}")
+        reason = (payload.get("reason") or "").strip()
+        if not reason:
+            raise ValidationFailed("选择分支出口必须写明依据")
+        signature = None
+        if held or step.get("requires_signature"):
+            signature = self.identity.consume_signature(
+                payload.get("signature_id"), user, f"条件分支选择出口：{case_label(step, case)}",
+                object_ref=run.id, strict=True,
+            )
+        run.form_data = {**(run.form_data or {}), "decided_by": user.id}
+        run.reviewed_by = user.id
+        run.submitted_by = user.id
+        self.audit.record(
+            user, "人工选择分支出口", batch.id, sign=bool(signature),
+            meaning=signature.meaning if signature else "", signature_id=signature.id if signature else "",
+            before="待选择", after=case_label(step, case), detail=f"{step.get('name')}：{reason}",
+        )
+        if held:
+            AlarmService(self.db, self.ctx).resolve_condition(f"branch:{run.id}", f"人工选择出口 {case}：{reason}")
+            batch.state = "running"
+            batch.held_at = None
+            batch.failure_reason = ""
+        outcome = self._take_branch(batch, run, run.step_index, case, auto=False, reason=reason)
+        self.db.commit()
+        return {"step_run": self.run_out(run), "advance": outcome}
+
+    def branch_todos(self) -> list[dict]:
+        return [self.run_out(row) for row in self.runs.pending_branch_choices()]
+
+    # ---------- 业务信号 ----------
+
+    def signal(self, batch_id: str, name: str, payload: dict | None, event_id: str, user: User | None) -> dict:
+        """外部系统或现场人员发出的批次业务事件。唤醒等着它的事件等待节点；早到的先登记。
+
+        `event_id` 是发送方的幂等键：同一条信号重发返回第一次的结果，不会唤醒第二个等待节点。
+        服务身份只能发授权范围里的事件名（`batch_signals`）。
+        """
+        name = (name or "").strip()
+        if not name or len(name) > 64 or not all(ch.isalnum() or ch in "_-.:" for ch in name):
+            raise ValidationFailed("事件名只能包含字母、数字与 _ - . :，最长 64 个字符")
+        if self.ctx.is_service:
+            allowed = (self.ctx.scopes or {}).get("batch_signals")
+            if not (allowed == "all" or (isinstance(allowed, list) and name in allowed)):
+                raise PermissionDenied(f"服务身份未被授权发出事件 {name}（batch_signals）", code="service_scope_denied")
+        batch = self.batches.lock(batch_id)
+        if batch is None:
+            raise NotFound("批次不存在")
+        key = f"signal:{batch.id}:{(event_id or '').strip() or uid_hex()}"
+        existing = self.signals.by_key(key)
+        if existing is not None:
+            return {**self.signal_out(existing), "replayed": True}
+        if batch.state in {"done", "aborted"}:
+            raise StateConflict(f"批次已{('完成' if batch.state == 'done' else '终止')}，不再接收业务事件")
+        source = f"service:{self.ctx.subject_id}" if self.ctx.is_service else f"user:{user.id if user else ''}"
+        signal = BatchSignal(
+            org_id=batch.org_id, batch_id=batch.id, name=name, event_key=key, payload=payload or {},
+            source=source, source_label=self.ctx.subject_label or (user.display_name if user else ""),
+        )
+        try:
+            with self.db.begin_nested():
+                self.db.add(signal)
+                self.db.flush()
+        except IntegrityError:
+            found = self.signals.by_key(key)
+            if found is None:
+                raise
+            return {**self.signal_out(found), "replayed": True}
+        waiting = self.runs.waiting_for_event(batch.id, name)
+        event = None
+        if waiting:
+            event = self._bind_signal(batch, waiting[0], signal)
+        self.audit.record(
+            user, "收到批次业务事件", batch.id, after=name,
+            detail=(
+                f"来源 {signal.source_label or signal.source}；"
+                + (f"唤醒第 {waiting[0].step_index + 1} 步等待" if waiting else "暂无等待节点，已登记待消费")
+            ),
+        )
+        self.db.commit()
+        outcome = self.process_event(event.id) if event is not None else None
+        return {**self.signal_out(signal), "advance": outcome}
+
+    def _bind_signal(self, batch: Batch, run: StepRun, signal: BatchSignal) -> WorkflowEvent:
+        signal.consumed_by_run_id = run.id
+        signal.consumed_at = now()
+        run.form_data = {**(run.form_data or {}), "signal_id": signal.id, "signal": signal.name,
+                         "signal_payload": signal.payload or {}}
+        return self.emit(
+            batch.id, run.id, "signal", f"signal:{run.id}:{run.attempt}",
+            {"signal_id": signal.id, "name": signal.name}, org_id=batch.org_id,
+        )
+
+    @staticmethod
+    def signal_out(signal: BatchSignal) -> dict:
+        return {
+            "id": signal.id, "batch_id": signal.batch_id, "name": signal.name, "payload": signal.payload or {},
+            "source": signal.source, "source_label": signal.source_label,
+            "received_at": signal.received_at.isoformat(timespec="seconds") if signal.received_at else None,
+            "consumed_by_run_id": signal.consumed_by_run_id,
+            "consumed_at": signal.consumed_at.isoformat(timespec="seconds") if signal.consumed_at else None,
+        }
+
+    def signals_for_batch(self, batch_id: str) -> list[dict]:
+        return [self.signal_out(row) for row in self.signals.for_batch(batch_id)]
+
+    # ---------- 步骤级超时 ----------
+
+    def _handle_timeouts(self) -> int:
+        """到了截止时刻的步骤：报警，或按配置判失败 / 跳过（后两者经推进事件，与其他结论互斥）。"""
+        from .alarm_service import AlarmService
+
+        handled = 0
+        for run in self.runs.overdue_deadlines():
+            batch = self.db.get(Batch, run.batch_id)
+            if batch is None or batch.state in {"done", "aborted"}:
+                run.timed_out_at = now()
+                continue
+            step = run.step_snapshot or {}
+            timeout = step.get("timeout") or {}
+            action = timeout.get("action") or "alarm"
+            minutes = timeout.get("minutes")
+            name = step.get("name") or f"第 {run.step_index + 1} 步"
+            run.timed_out_at = now()
+            reason = f"「{name}」超过 {minutes} min 仍未完成（{TIMEOUT_ACTIONS.get(action, action)}）"
+            AlarmService(self.db, self.ctx).raise_alarm(
+                severity=2 if action != "alarm" else 3, source_type="batch", source_id=batch.id,
+                message=f"第 {run.step_index + 1} 步{KIND_NAMES.get(run.kind, run.kind)}节点{reason}"[:500],
+                response={
+                    "alarm": "催办执行人或到现场查看；步骤完成后条件自动复位。",
+                    "fail": "步骤已判为失败，批次进入恢复评估。",
+                    "skip": "步骤已按方法配置自动跳过，流程继续；请核对是否需要补做。",
+                }.get(action, ""),
+                owner="操作员", origin="system", condition_key=f"step:{run.id}:timeout",
+            )
+            if action in {"fail", "skip"} and not (action == "fail" and run.kind == DEVICE):
+                self.emit(
+                    batch.id, run.id, "timeout", f"timeout:{run.id}:{run.attempt}",
+                    {"action": action, "reason": reason}, org_id=batch.org_id,
+                )
+            handled += 1
+        return handled
+
     # ---------- 样本拆分 ----------
 
     def _split_samples(self, batch: Batch, run: StepRun) -> dict:
@@ -782,7 +1193,7 @@ class WorkflowService:
         """
         completed = {
             row.step_id for row in self.runs.for_batch(batch.id)
-            if row.state == workflow.COMPLETED
+            if row.state in {workflow.COMPLETED, workflow.SKIPPED}
         }
         for index in range(from_index + 1, len(steps)):
             step_id = step_id_of(steps[index], index)
@@ -831,6 +1242,8 @@ class WorkflowService:
         claimed = 0
         processed = 0
         results: list[dict] = []
+        # 步骤级超时：报警，或产出判失败 / 跳过的推进事件
+        self._handle_timeouts()
         # 到期的等待步骤先产出事件；保持中可以记录，但推进时会被设备动作检查挡住
         for run in self.runs.due_waits():
             batch = self.db.get(Batch, run.batch_id)
@@ -921,6 +1334,16 @@ class WorkflowService:
             "requires_signature": bool(step.get("requires_signature")),
             "review_role": step.get("review_role", ""),
             "wait_for": step.get("wait_for") or {},
+            "branch": step.get("branch") or {},
+            "branch_cases": [
+                {"key": str(c.get("key")), "label": c.get("label") or c.get("key"), "loop": bool(c.get("loop_to"))}
+                for c in branch_cases(step)
+            ] if run.kind == BRANCH else [],
+            "skippable": bool(step.get("skippable")),
+            "timeout": step.get("timeout") or None,
+            "deadline_at": run.deadline_at.isoformat(timespec="seconds") if run.deadline_at else None,
+            "timed_out_at": run.timed_out_at.isoformat(timespec="seconds") if run.timed_out_at else None,
+            "groups": step.get("groups") or [],
             "conclusion": run.conclusion,
             "reason": run.reason,
             "submitted_by": run.submitted_by,

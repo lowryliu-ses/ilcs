@@ -20,7 +20,7 @@ from .resource import (
 )
 from .sample import PhysicalSample, SampleTransfer, SlotOccupancy
 from .sop import Sop, SopAck, SopVersion
-from .workflow import StepAdvance, StepRun, WorkflowEvent
+from .workflow import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 
 __all__ = [
     "AccessLog", "AdapterExecution", "Adapter", "Alarm", "Allocation", "AnalysisTask", "Asset",
@@ -33,5 +33,5 @@ __all__ = [
     "ResourceBooking", "Result", "ResultReview", "ResultValue", "Sample", "SampleTransfer",
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
-    "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location",
+    "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
 ]

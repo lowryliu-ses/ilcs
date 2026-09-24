@@ -41,8 +41,35 @@ class RecipeService:
 
     def validation_of(self, recipe: Recipe) -> list[dict]:
         return validate_steps(
-            normalize(recipe.steps or []), self.stations.specs(), self.capabilities.specs()
+            normalize(recipe.steps or []), self.stations.specs(), self.capabilities.specs(),
+            self._subflow_problems(recipe),
         )
+
+    def _subflow_problems(self, recipe: Recipe) -> dict[str, list[str]]:
+        """子流程引用的问题：展开到底，不存在 / 未发布 / 循环引用 / 嵌套过深都在这里查出来。"""
+        from ..domain.steps import SUBFLOW
+        from ..domain.subflow import step_problems
+        from .flow_expansion import resolver
+
+        steps = [step for step in normalize(recipe.steps or []) if kind_of(step) == SUBFLOW]
+        if not steps:
+            return {}
+        resolve = resolver(self.db, self.ctx)
+        return {step["step_id"]: step_problems(step, resolve, recipe.id) for step in steps}
+
+    def _expanded_critical(self, recipe: Recipe) -> float | None:
+        """有子流程时按展开后的步骤算关键路径；展开失败（引用有问题）返回 None，校验会另行报出。"""
+        from ..domain.graph import critical_path_min
+        from ..domain.subflow import SubflowError, has_subflow
+        from .flow_expansion import expanded_steps
+
+        if not has_subflow(recipe.steps or []):
+            return None
+        try:
+            steps, _ = expanded_steps(self.db, self.ctx, recipe)
+        except SubflowError:
+            return None
+        return critical_path_min(steps)
 
     def to_dict(self, recipe: Recipe, *, detail: bool = False) -> dict:
         validation = self.validation_of(recipe)
@@ -66,6 +93,7 @@ class RecipeService:
             "row_version": recipe.row_version,
             "valid": is_valid(validation),
             "step_count": len(recipe.steps or []),
+            "critical_path_min": self._critical(recipe),
             "resource_demand": resource_demand(recipe.steps or []),
             "delete_blockers": self.deletable(recipe),
         }
@@ -74,6 +102,8 @@ class RecipeService:
             brief = self._sop_brief(recipe.sop_version_id) if recipe.sop_version_id else None
             payload |= {
                 "steps": recipe.steps,
+                # 编辑器在本地给新步骤分配标识（拖线建依赖要立刻能引用），必须避开用过的
+                "used_step_ids": self._step_ids_of(recipe),
                 "bom": recipe.bom,
                 "history": recipe.history,
                 "diff": recipe.diff,
@@ -83,6 +113,7 @@ class RecipeService:
                     normalize(recipe.steps or []), validation, recipe.bom or [], recipe.risk,
                     recipe.sop_version_id,
                     f"{brief['code']} {brief['title']} {brief['version']}" if brief else "",
+                    self._expanded_critical(recipe),
                 ),
                 "recovery_by_capability": {
                     step.get("cap"): recoveries.get(step.get("cap"), {}) for step in recipe.steps or []
@@ -90,6 +121,12 @@ class RecipeService:
                 "plans": [{"id": p.id, "name": p.name, "state": p.state} for p in self.plans.for_recipe(recipe.id)],
             }
         return payload
+
+    def _critical(self, recipe: Recipe) -> float:
+        from ..domain.graph import critical_path_min
+
+        expanded = self._expanded_critical(recipe)
+        return expanded if expanded is not None else critical_path_min(normalize(recipe.steps or []))
 
     def list(self) -> list[dict]:
         recipes = self.recipes.list()

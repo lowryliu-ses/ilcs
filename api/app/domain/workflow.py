@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .steps import DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, kind_of
+from .steps import BRANCH, DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, kind_of
 
 PENDING = "pending"
 READY = "ready"
@@ -17,37 +17,50 @@ COMPLETED = "completed"
 FAILED = "failed"
 UNKNOWN = "unknown"
 CANCELLED = "cancelled"
-# 被质检返工作废的一次执行：物理上做过，但结论不再算数，流程会重新做这一步
+# 被质检返工 / 分支回环 / 从指定节点重做作废的一次执行：物理上做过，但结论不再算数
 SUPERSEDED = "superseded"
+# 人为跳过（方法允许跳过、签名确认，或超时自动跳过）：对后继来说等同完成
+SKIPPED = "skipped"
+# 条件分支没走到的路径：对后继来说这条入边失效
+NOT_TAKEN = "not_taken"
 
-STATES = (PENDING, READY, RUNNING, WAITING, COMPLETED, FAILED, UNKNOWN, CANCELLED, SUPERSEDED)
+STATES = (
+    PENDING, READY, RUNNING, WAITING, COMPLETED, FAILED, UNKNOWN, CANCELLED, SUPERSEDED, SKIPPED, NOT_TAKEN,
+)
 OPEN_STATES = {PENDING, READY, RUNNING, WAITING}
-TERMINAL_STATES = {COMPLETED, FAILED, CANCELLED, SUPERSEDED}
+TERMINAL_STATES = {COMPLETED, FAILED, CANCELLED, SUPERSEDED, SKIPPED, NOT_TAKEN}
+# 不代表「这一步当前的结论」的记录：找每一步最新有效实例时跳过它们
+VOID_STATES = {SUPERSEDED, CANCELLED}
 
 STATE_LABEL = {
     PENDING: "待开始", READY: "待办", RUNNING: "执行中", WAITING: "等待中",
     COMPLETED: "已完成", FAILED: "失败", UNKNOWN: "结果未知", CANCELLED: "已取消",
-    SUPERSEDED: "已被返工取代",
+    SUPERSEDED: "已作废（重做）", SKIPPED: "已跳过", NOT_TAKEN: "未走此分支",
 }
 
 # 每类步骤允许的转换。任意 PATCH 目标状态的入口不存在，只能通过对应事件。
+# 跳过只允许从「还没动」的状态出发（待开始 / 待办 / 等待中）；失败后的跳过另开一条新记录。
 ALLOWED: dict[str, dict[str, set[str]]] = {
     DEVICE: {
-        PENDING: {READY, CANCELLED},
-        READY: {RUNNING, CANCELLED},
+        PENDING: {READY, CANCELLED, SKIPPED},
+        READY: {RUNNING, CANCELLED, SKIPPED},
         RUNNING: {COMPLETED, FAILED, UNKNOWN},
         UNKNOWN: {COMPLETED, FAILED, CANCELLED},
     },
     MANUAL: {
-        PENDING: {READY, CANCELLED},
-        READY: {RUNNING, COMPLETED, CANCELLED},
+        PENDING: {READY, CANCELLED, SKIPPED},
+        READY: {RUNNING, COMPLETED, CANCELLED, SKIPPED, FAILED},
         RUNNING: {COMPLETED, FAILED, CANCELLED},
     },
     WAIT: {
-        PENDING: {WAITING, CANCELLED},
-        WAITING: {COMPLETED, CANCELLED},
+        PENDING: {WAITING, CANCELLED, SKIPPED},
+        WAITING: {COMPLETED, CANCELLED, SKIPPED, FAILED},
     },
     REVIEW: {
+        PENDING: {READY, CANCELLED, SKIPPED},
+        READY: {COMPLETED, FAILED, CANCELLED, SKIPPED},
+    },
+    BRANCH: {
         PENDING: {READY, CANCELLED},
         READY: {COMPLETED, FAILED, CANCELLED},
     },
@@ -61,7 +74,9 @@ ALLOWED: dict[str, dict[str, set[str]]] = {
     },
 }
 
-INITIAL = {DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY, GATE: READY, SPLIT: READY}
+INITIAL = {
+    DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY, GATE: READY, SPLIT: READY, BRANCH: READY,
+}
 
 
 def judge(value, minimum=None, maximum=None) -> bool | None:

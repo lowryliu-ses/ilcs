@@ -1,9 +1,11 @@
 from fastapi import APIRouter
 
 from ...schemas import (
-    AbortIn, BatchCreateIn, DispatchIn, HoldIn, RecoverIn, RescheduleIn, ScheduleIn,
+    AbortIn, BatchCreateIn, BatchSignalIn, DispatchIn, HoldIn, RecoverIn, RerunFromIn, RescheduleIn,
+    ScheduleIn, SkipStepIn,
 )
 from ...services.batch_service import BatchService
+from ...services.workflow_service import WorkflowService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, Paging, require
 
 router = APIRouter(prefix="/batches", tags=["batch"])
@@ -164,3 +166,48 @@ def abort(
     return guard.remember(
         BatchService(db, ctx).abort(batch_id, payload.reason, payload.signature_id, user)
     )
+
+
+@router.post("/{batch_id}/skip")
+def skip_step(
+    batch_id: str, payload: SkipStepIn, db: DbSession, guard: IdempotencyGuard, user: CurrentUser,
+    ctx=require("batch.recover"),
+):
+    """跳过方法里标为可跳过的步骤：写理由、签名；设备已收到指令或结果未知时拒绝。"""
+    body = payload.model_dump()
+    guard.bind(ctx, body).required()
+    replay = guard.replay()
+    if replay is not None:
+        return replay
+    return guard.remember(
+        BatchService(db, ctx).skip_step(batch_id, payload.step_id, payload.reason, payload.signature_id, user)
+    )
+
+
+@router.post("/{batch_id}/rerun")
+def rerun_from(
+    batch_id: str, payload: RerunFromIn, db: DbSession, guard: IdempotencyGuard, user: CurrentUser,
+    ctx=require("batch.recover"),
+):
+    """保持或故障时从指定节点重做：该步与全部下游作废（记录保留）后重新开出。"""
+    body = payload.model_dump()
+    guard.bind(ctx, body).required()
+    replay = guard.replay()
+    if replay is not None:
+        return replay
+    return guard.remember(
+        BatchService(db, ctx).rerun_from(batch_id, payload.step_id, payload.reason, payload.signature_id, user)
+    )
+
+
+@router.get("/{batch_id}/signals")
+def list_signals(batch_id: str, db: DbSession, ctx: Ctx):
+    return WorkflowService(db, ctx).signals_for_batch(batch_id)
+
+
+@router.post("/{batch_id}/signals")
+def send_signal(
+    batch_id: str, payload: BatchSignalIn, db: DbSession, user: CurrentUser, ctx=require("batch.signal"),
+):
+    """现场人员发出批次业务事件（如「样品已送达」），唤醒等着它的事件等待节点。"""
+    return WorkflowService(db, ctx).signal(batch_id, payload.name, payload.payload, payload.event_id, user)

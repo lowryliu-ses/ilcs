@@ -1,8 +1,16 @@
-"""四类步骤的字段契约与校验。
+"""步骤的字段契约与校验。
 
 device 有设备命令，manual 有待办与结构化记录表单，wait 是定时或业务事件，
 review 要批准才继续。人工、等待、审核步骤不创建假适配器，也不占工位——
 除非显式声明「等待期间样本仍留在设备中」。
+
+控制流节点：
+- branch（条件分支）按上游测量值、人工记录字段或人工选择走其中一条出边，没走的路径被剪掉；
+  分支的某个出口可以声明「回到上游某一步」，就是有上限的循环。
+- subflow（子流程）引用一个已发布的方法，建批次时展开进快照；执行器与排程器只看到展开后的步骤。
+
+通用字段：`timeout`（步骤级超时：报警 / 判失败 / 跳过）、`skippable`（允许运行时跳过，
+方法作者在设计时就要同意，运行时不能临时把关键步骤跳掉）。
 """
 from __future__ import annotations
 
@@ -16,20 +24,39 @@ REVIEW = "review"
 GATE = "gate"
 # 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系
 SPLIT = "split"
-KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT)
+# 条件分支：按上游测量值 / 人工记录字段 / 人工选择走一条出边；可带有上限的回环
+BRANCH = "branch"
+# 子流程：引用一个已发布方法，建批次时展开
+SUBFLOW = "subflow"
+KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW)
 KIND_NAMES = {
     DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核", GATE: "质检关卡", SPLIT: "样本拆分",
+    BRANCH: "条件分支", SUBFLOW: "子流程",
 }
 GATE_ON_FAIL = {"rework": "返工", "scrap": "报废", "hold": "保持待人工判断"}
+# 系统即时判定 / 登记的节点：没有预定时长，也不占工位
+AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, BRANCH, SUBFLOW}
+BRANCH_MODES = {"measure": "按上游设备测量值", "form": "按上游人工记录字段", "manual": "人工选择"}
+TIMEOUT_ACTIONS = {"alarm": "只报警", "fail": "判为失败，进入恢复评估", "skip": "自动跳过"}
+# 设备步骤的超时已由指令超时守着（超过硬上限转结果未知、人工核查）：步骤级只允许加报警，
+# 不能让计时器替人判定一个物理动作「失败了」或「可以跳过」
+TIMEOUT_ACTIONS_BY_KIND = {
+    DEVICE: {"alarm"}, MANUAL: set(TIMEOUT_ACTIONS), WAIT: set(TIMEOUT_ACTIONS),
+    REVIEW: set(TIMEOUT_ACTIONS), BRANCH: {"alarm", "fail"},
+}
+SKIPPABLE_KINDS = {DEVICE, MANUAL, WAIT, REVIEW}
+MAX_LOOPS = 10
 
 # 每类步骤适用哪些字段。不适用的字段即时校验时不提示缺失，服务端也不据此阻塞。
 APPLICABLE: dict[str, set[str]] = {
-    DEVICE: {"cap", "params", "dur", "hard", "resource"},
-    MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard"},
-    WAIT: {"dur", "wait_for", "hard"},
-    REVIEW: {"review_role", "dur"},
+    DEVICE: {"cap", "params", "dur", "hard", "resource", "timeout", "skippable", "on_error"},
+    MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable"},
+    WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
+    REVIEW: {"review_role", "dur", "timeout", "skippable"},
     GATE: {"gate"},
     SPLIT: {"split"},
+    BRANCH: {"branch", "timeout", "requires_signature"},
+    SUBFLOW: {"subflow"},
 }
 
 
@@ -110,7 +137,7 @@ def consumes_materials(step: dict[str, Any]) -> bool:
     被物料项永久拦住——这正是需求 DEV-07.3 点名的误拦。方法级是否要 BOM 由
     `recipe_rules.recipe_checks` 综合 BOM 与这些声明来判断。
     """
-    if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT}:
+    if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW}:
         return False
     return bool((step or {}).get("consumes_materials", False))
 
@@ -125,6 +152,8 @@ def resource_demand(steps: list[dict[str, Any]]) -> dict[str, int]:
         "manual": len([s for s in rows if kind_of(s) == MANUAL]),
         "wait": len([s for s in rows if kind_of(s) == WAIT]),
         "review": len([s for s in rows if kind_of(s) == REVIEW]),
+        "branch": len([s for s in rows if kind_of(s) == BRANCH]),
+        "subflow": len([s for s in rows if kind_of(s) == SUBFLOW]),
     }
 
 
@@ -137,12 +166,146 @@ def wait_issues(step: dict[str, Any]) -> list[str]:
         if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
             issues.append("等待时长必须大于 0")
     elif mode == "event":
-        # 还没有任何入口会发出业务事件：这种等待节点一旦开跑就永远不会被唤醒。
-        # 在事件接口落地前一律拒绝，而不是让批次停在一个等不来的节点上。
-        issues.append("「业务事件」等待暂不支持：当前没有可发出该事件的入口，请改用固定时长")
+        # 业务事件由 `POST /batches/{id}/signals` 发出（人或授权的服务身份）；早到的事件先登记，
+        # 节点开出时直接消费。计划时长只用于排程，真正的结束由事件决定
+        name = str(wait_for.get("event") or "").strip()
+        if not name:
+            issues.append("业务事件等待必须写明事件名（如 sample_received、qc_released）")
+        elif not all(ch.isalnum() or ch in "_-.:" for ch in name) or len(name) > 64:
+            issues.append("事件名只能包含字母、数字与 _ - . :，最长 64 个字符")
+        minutes = step.get("dur")
+        if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
+            issues.append("业务事件等待也要填计划时长（排程按它预留时间）")
     else:
-        issues.append("等待方式未选择（当前只支持固定时长）")
+        issues.append("等待方式未选择：固定时长或业务事件")
     return issues
+
+
+def timeout_issues(step: dict[str, Any]) -> list[str]:
+    """步骤级超时。只校验声明了的；设备步骤只允许报警。"""
+    timeout = (step or {}).get("timeout")
+    if not timeout:
+        return []
+    if not isinstance(timeout, dict):
+        return ["超时配置格式不正确"]
+    kind = kind_of(step)
+    allowed = TIMEOUT_ACTIONS_BY_KIND.get(kind)
+    if allowed is None:
+        return [f"{KIND_NAMES.get(kind, kind)}节点由系统即时处理，不支持超时配置"]
+    issues: list[str] = []
+    minutes = timeout.get("minutes")
+    if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
+        issues.append("超时时长必须大于 0 分钟")
+    action = timeout.get("action") or "alarm"
+    if action not in TIMEOUT_ACTIONS:
+        issues.append("超时处理只能是报警、判为失败或自动跳过")
+    elif action not in allowed:
+        if kind == DEVICE:
+            issues.append("设备步骤超时只能报警：物理动作是否完成由设备回执或现场核查决定")
+        else:
+            issues.append(f"{KIND_NAMES.get(kind, kind)}节点超时不能「{TIMEOUT_ACTIONS[action]}」")
+    if action == "skip" and not step.get("skippable"):
+        issues.append("超时自动跳过要求本步骤允许跳过（skippable）")
+    if kind == WAIT and ((step.get("wait_for") or {}).get("mode") or "duration") == "duration":
+        issues.append("固定时长等待到点即结束，不需要超时；业务事件等待才需要")
+    return issues
+
+
+def skippable_issues(step: dict[str, Any]) -> list[str]:
+    if not (step or {}).get("skippable"):
+        return []
+    kind = kind_of(step)
+    if kind not in SKIPPABLE_KINDS:
+        return [f"{KIND_NAMES.get(kind, kind)}节点不能设为可跳过"]
+    return []
+
+
+def branch_config(step: dict[str, Any]) -> dict[str, Any]:
+    return (step or {}).get("branch") or {}
+
+
+def branch_cases(step: dict[str, Any]) -> list[dict[str, Any]]:
+    cases = branch_config(step).get("cases") or []
+    return [case for case in cases if isinstance(case, dict)]
+
+
+def forward_case_keys(step: dict[str, Any]) -> list[str]:
+    """分支里「往前走」的出口：不回环的那些。只有它们能出现在后继的 when 上。"""
+    return [str(case.get("key")) for case in branch_cases(step) if case.get("key") and not case.get("loop_to")]
+
+
+def loop_cases(step: dict[str, Any]) -> list[dict[str, Any]]:
+    return [case for case in branch_cases(step) if case.get("loop_to")]
+
+
+def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -> list[str]:
+    """条件分支的字段完整性。依赖图上的约束（来源是上游、回环体封闭）由 graph.branch_graph_issues 判。"""
+    config = branch_config(step)
+    issues: list[str] = []
+    mode = config.get("mode") or ""
+    if mode not in BRANCH_MODES:
+        issues.append("分支依据只能是上游测量值、上游人工记录字段或人工选择")
+    ids = [step_id_of(row, position) for position, row in enumerate(steps)]
+    if mode in {"measure", "form"}:
+        source = str(config.get("source_step_id") or "")
+        if source not in ids[:index]:
+            issues.append("分支必须指定它之前的一个步骤作为判据来源")
+        else:
+            source_kind = kind_of(steps[ids.index(source)])
+            if mode == "measure" and source_kind != DEVICE:
+                issues.append("按测量值分支时来源必须是设备步骤：只有设备回执里有测量值")
+            if mode == "form" and source_kind != MANUAL:
+                issues.append("按记录字段分支时来源必须是人工步骤")
+            if mode == "form":
+                keys = {str(f.get("key")) for f in (steps[ids.index(source)].get("form") or []) if isinstance(f, dict)}
+                if str(config.get("field") or "") not in keys:
+                    issues.append("判据字段不在来源人工步骤的记录表单里")
+        if not str(config.get("field") or "").strip():
+            issues.append("必须指定判据字段")
+    cases = branch_cases(step)
+    if len(cases) < 2:
+        issues.append("条件分支至少要有两个出口")
+    seen: set[str] = set()
+    for position, case in enumerate(cases):
+        key = str(case.get("key") or "").strip()
+        label = f"出口 {key or position + 1}"
+        if not key:
+            issues.append(f"第 {position + 1} 个出口缺少标识")
+        elif key in seen:
+            issues.append(f"出口标识 {key} 重复")
+        seen.add(key)
+        if not str(case.get("label") or "").strip():
+            issues.append(f"{label} 缺少显示名称")
+        if mode in {"measure", "form"}:
+            low, high, equals = case.get("min"), case.get("max"), case.get("equals")
+            numeric = [b for b in (low, high) if isinstance(b, (int, float)) and not isinstance(b, bool)]
+            has_equals = equals not in (None, "")
+            if not numeric and not has_equals and key != str(config.get("default") or ""):
+                issues.append(f"{label} 没有判定条件（下限 / 上限 / 等于）；兜底出口请设为默认")
+            if len(numeric) == 2 and low > high:
+                issues.append(f"{label} 下限不能大于上限")
+        target = str(case.get("loop_to") or "")
+        if target and target not in ids[:index]:
+            issues.append(f"{label} 回环目标必须是分支之前的步骤")
+    default = str(config.get("default") or "")
+    if default and default not in seen:
+        issues.append(f"默认出口 {default} 不存在")
+    if default and any(str(c.get("key")) == default and c.get("loop_to") for c in cases):
+        issues.append("默认出口不能是回环：判据缺失时不应自动重做上游步骤")
+    if loop_cases(step):
+        rounds = config.get("max_loops")
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= MAX_LOOPS:
+            issues.append(f"有回环出口时必须设置最多循环次数（1–{MAX_LOOPS}）；超过后转人工选择")
+        if not forward_case_keys(step):
+            issues.append("至少要有一个不回环的出口，否则流程永远出不了循环")
+    return issues
+
+
+def subflow_issues(step: dict[str, Any]) -> list[str]:
+    config = (step or {}).get("subflow") or {}
+    if not str(config.get("recipe_id") or "").strip():
+        return ["子流程必须选择引用的方法"]
+    return []
 
 
 def manual_issues(step: dict[str, Any]) -> list[str]:
@@ -225,6 +388,39 @@ def split_issues(step: dict[str, Any]) -> list[str]:
     if not str(split.get("child_type") or "").strip():
         issues.append("必须写明子样本类型（如 扣电、极片）")
     return issues
+
+
+def match_case(step: dict[str, Any], value: Any) -> str | None:
+    """按出口顺序取第一个满足条件的出口。值缺失返回 None：取不到判据不等于走默认以外的任何路。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    for case in branch_cases(step):
+        key = str(case.get("key") or "")
+        equals = case.get("equals")
+        if equals not in (None, ""):
+            if str(value).strip() == str(equals).strip():
+                return key
+            continue
+        low, high = case.get("min"), case.get("max")
+        bounded = any(isinstance(b, (int, float)) and not isinstance(b, bool) for b in (low, high))
+        if not bounded:
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if isinstance(low, (int, float)) and not isinstance(low, bool) and value < low:
+            continue
+        if isinstance(high, (int, float)) and not isinstance(high, bool) and value > high:
+            continue
+        return key
+    default = str(branch_config(step).get("default") or "")
+    return default or None
+
+
+def case_label(step: dict[str, Any], key: str) -> str:
+    for case in branch_cases(step):
+        if str(case.get("key")) == key:
+            return str(case.get("label") or key)
+    return key
 
 
 def missing_form_values(step: dict[str, Any], values: dict[str, Any]) -> list[str]:

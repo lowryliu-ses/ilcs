@@ -397,6 +397,32 @@ class GateDecisionIn(Signed):
     reason: str
 
 
+class BranchDecisionIn(Versioned):
+    """人工选择分支出口。判据缺失而保持的分支必须带签名。"""
+
+    case: str
+    reason: str
+    signature_id: str | None = None
+
+
+class SkipStepIn(Signed):
+    step_id: str
+    reason: str
+
+
+class RerunFromIn(Signed):
+    step_id: str
+    reason: str
+
+
+class BatchSignalIn(BaseModel):
+    """批次业务事件。`event_id` 是发送方的去重键：同一事件重发不会唤醒两个等待节点。"""
+
+    name: str = Field(min_length=1, max_length=64)
+    event_id: str = ""
+    payload: dict[str, Any] = {}
+
+
 class StepReviewIn(Versioned):
     conclusion: Literal["approved", "rejected"]
     reason: str = ""

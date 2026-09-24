@@ -5,9 +5,10 @@
 """
 from fastapi import APIRouter
 
-from ...schemas import CommandEventIn, HeartbeatIn, ProposalIn, TelemetryIn
+from ...schemas import BatchSignalIn, CommandEventIn, HeartbeatIn, ProposalIn, TelemetryIn
 from ...services.proposal_service import ProposalService
 from ...services.station_service import StationService
+from ...services.workflow_service import WorkflowService
 from ..deps import DbSession, ServiceCtx
 
 router = APIRouter(prefix="/runtime", tags=["runtime"])
@@ -58,3 +59,9 @@ def adapter_contracts(db: DbSession, ctx: ServiceCtx):
 def optimizer_proposal(plan_id: str, payload: ProposalIn, db: DbSession, ctx: ServiceCtx):
     """外部优化器提交下一轮提案。服务身份须在 plan_proposals 范围内授权该方案。"""
     return ProposalService(db, ctx).submit(plan_id, payload.model_dump())
+
+
+@router.post("/batches/{batch_id}/signals")
+def batch_signal(batch_id: str, payload: BatchSignalIn, db: DbSession, ctx: ServiceCtx):
+    """外部系统（LIMS、仓储、上位机）发出批次业务事件。服务身份须在 batch_signals 范围内授权该事件名。"""
+    return WorkflowService(db, ctx).signal(batch_id, payload.name, payload.payload, payload.event_id, None)

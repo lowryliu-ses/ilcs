@@ -32,6 +32,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "labware.move": ["operator", "admin"],
     "step.submit": ["operator", "researcher", "admin"],
     "step.review": ["qa", "admin"],
+    "batch.signal": ["operator", "researcher", "admin"],
     # ---------- 样本 ----------
     "sample.register": ["operator", "researcher", "admin"],
     "sample.transfer": ["operator", "researcher", "admin"],
@@ -112,6 +113,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("batch.control", "下发与保持 / 终止批次"), ("batch.recover", "异常恢复与现场核查"),
         ("labware.move", "载具登记、绑定与扫码放置"),
         ("step.submit", "提交人工步骤记录"), ("step.review", "流程审核与质检判定"),
+        ("batch.signal", "发出批次业务事件"),
     ]),
     ("样本", [
         ("sample.register", "登记样本"), ("sample.transfer", "样本转移"), ("sample.dispose", "样本处置"),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..core.clock import now
-from ..models import StepAdvance, StepRun, WorkflowEvent
+from ..models import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 from .base import Repository, ScopedRepository
 
 
@@ -57,6 +57,42 @@ class StepRunRepository(ScopedRepository[StepRun]):
         if assignee:
             query = query.filter(StepRun.assignee_user_id == assignee)
         return list(query.order_by(StepRun.due_at).all())
+
+    def overdue_deadlines(self, at: datetime | None = None) -> list[StepRun]:
+        """到了步骤级截止时刻、还开着、还没处理过超时的实例。"""
+        moment = at or now()
+        return list(
+            self.query()
+            .filter(
+                StepRun.deadline_at.isnot(None),
+                StepRun.deadline_at <= moment,
+                StepRun.timed_out_at.is_(None),
+                StepRun.state.in_(["pending", "ready", "running", "waiting"]),
+            )
+            .order_by(StepRun.deadline_at)
+            .all()
+        )
+
+    def pending_branch_choices(self) -> list[StepRun]:
+        return list(
+            self.query()
+            .filter(StepRun.kind == "branch", StepRun.state == "ready")
+            .order_by(StepRun.created_at)
+            .all()
+        )
+
+    def waiting_for_event(self, batch_id: str, name: str) -> list[StepRun]:
+        rows = (
+            self.query()
+            .filter(StepRun.batch_id == batch_id, StepRun.kind == "wait", StepRun.state == "waiting")
+            .order_by(StepRun.started_at, StepRun.created_at)
+            .all()
+        )
+        return [
+            row for row in rows
+            if ((row.step_snapshot or {}).get("wait_for") or {}).get("mode") == "event"
+            and ((row.step_snapshot or {}).get("wait_for") or {}).get("event") == name
+        ]
 
     def pending_review(self) -> list[StepRun]:
         return list(
@@ -117,6 +153,30 @@ class WorkflowEventRepository(ScopedRepository[WorkflowEvent]):
             .filter(WorkflowEvent.batch_id == batch_id)
             .order_by(WorkflowEvent.created_at)
             .all()
+        )
+
+
+class BatchSignalRepository(ScopedRepository[BatchSignal]):
+    model = BatchSignal
+
+    def by_key(self, event_key: str) -> BatchSignal | None:
+        return self.query().filter(BatchSignal.event_key == event_key).first()
+
+    def unconsumed(self, batch_id: str, name: str) -> BatchSignal | None:
+        return (
+            self.query()
+            .filter(
+                BatchSignal.batch_id == batch_id, BatchSignal.name == name,
+                BatchSignal.consumed_by_run_id == "",
+            )
+            .order_by(BatchSignal.received_at)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+
+    def for_batch(self, batch_id: str) -> list[BatchSignal]:
+        return list(
+            self.query().filter(BatchSignal.batch_id == batch_id).order_by(BatchSignal.received_at).all()
         )
 
 
