@@ -18,6 +18,7 @@ import { PlansPage } from '../features/plans/PlansPage';
 import { RecipeDetailPage } from '../features/recipes/RecipeDetailPage';
 import { RecipeEditorPage } from '../features/recipes/RecipeEditorPage';
 import { ExceptionsPage } from '../features/exceptions/ExceptionsPage';
+import { IntegrationsPage } from '../features/integrations/IntegrationsPage';
 import { RecipesPage } from '../features/recipes/RecipesPage';
 import { ReportsPage } from '../features/reports/ReportsPage';
 import { ResultsPage } from '../features/results/ResultsPage';
@@ -42,7 +43,7 @@ const NAV: [string, [string, string][]][] = [
   ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心'], ['/exceptions', '异常中心']]],
   ['科学数据', [['/samples', '样本中心'], ['/data-review', '数据审核'], ['/results', '结果分析'], ['/reports', '报告']]],
   ['资源', [['/assets', '仪器设备'], ['/stations', '工位与能力'], ['/materials', '试剂耗材'], ['/people', '人员与资质']]],
-  ['治理', [['/metrics', '指标定义'], ['/audit', '审计记录'], ['/governance', '系统治理']]],
+  ['治理', [['/metrics', '指标定义'], ['/audit', '审计记录'], ['/governance', '系统治理'], ['/integrations', '集成与事件']]],
 ];
 
 export function App() {
@@ -85,7 +86,7 @@ export function App() {
           {NAV.map(([group, items]) => (
             <div key={group}>
               <div className="nav-group">{group}</div>
-              {items.filter(([path]) => path !== '/governance' || user.perms.includes('service.manage')).map(([path, label]) => (
+              {items.filter(([path]) => (path !== '/governance' || user.perms.includes('service.manage')) && (path !== '/integrations' || user.perms.includes('integration.manage'))).map(([path, label]) => (
                 <NavLink key={path} to={path} className={({ isActive }) => (isActive ? 'active' : '')}>
                   {label}
                   {badges[path] ? (
@@ -155,6 +156,7 @@ export function App() {
           <Route path="/batches" element={<BatchesPage />} />
           <Route path="/batches/:batchId" element={<BatchDetailPage />} />
           <Route path="/exceptions" element={<ExceptionsPage />} />
+          <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/samples" element={<SamplesPage />} />
           <Route path="/samples/:sampleId" element={<SampleDetailPage />} />
           <Route path="/data-review" element={<DataReviewPage />} />

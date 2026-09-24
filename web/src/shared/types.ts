@@ -78,7 +78,7 @@ export type BatchSummary = {
   delete_blockers: string[];
 };
 
-export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow';
+export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
 
 /** 条件分支配置。出口按顺序匹配，第一个满足的生效；loop_to 表示回到上游某一步重做。 */
 export type BranchConfig = {
@@ -431,6 +431,8 @@ export type RecipeStep = {
   when?: Record<string, string>;
   branch?: BranchConfig;
   subflow?: { recipe_id?: string };
+  /** 消息通知节点：发一条 flow.notify 对外事件 */
+  notify?: { message?: string; channel?: string };
   timeout?: StepTimeout;
   /** 方法作者同意运行时可以跳过这一步 */
   skippable?: boolean;
@@ -1738,4 +1740,47 @@ export type ScheduleProposalRow = {
   decided_by: string;
   decided_at: string | null;
   note: string;
+};
+
+
+/** 运行驾驶舱指标（口径见 api/app/domain/kpi.py）。 */
+export type KpiReport = {
+  window: { start: string; end: string; hours: number };
+  experiments: { running: number; queued: number; paused: number; exception: number; completed: number; tasks_created: number };
+  automation: { completed: number; without_intervention: number; success_rate: number | null };
+  exceptions: { raised: number; auto_resolved: number; open: number; mttr_min: number | null };
+  utilization: {
+    overall: number | null;
+    stations: { station_id: string; name: string; channels: number; utilization: number; planned_load: number; busy_min: number }[];
+  };
+};
+
+export type WebhookRow = {
+  id: string;
+  name: string;
+  url: string;
+  topics: string[];
+  enabled: boolean;
+  created_at: string | null;
+  last_success_at: string | null;
+  last_error: string;
+  consecutive_failures: number;
+  row_version: number;
+  /** 只在新建 / 轮换的响应里出现一次 */
+  secret?: string;
+};
+
+export type WebhookDeliveryRow = {
+  id: string;
+  subscription_id: string;
+  event_id: string;
+  topic: string;
+  payload: Record<string, unknown>;
+  state: string;
+  attempts: number;
+  next_attempt_at: string | null;
+  last_error: string;
+  response_status: number;
+  created_at: string | null;
+  delivered_at: string | null;
 };

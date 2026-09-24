@@ -37,7 +37,7 @@ const STATE_CLASS: Record<string, string> = {
 /** 步骤类型的中文名。批次详情、任务中心、报告都读同一份。 */
 export const STEP_KIND_LABEL: Record<string, string> = {
   device: '设备', manual: '人工', wait: '等待', review: '审核', gate: '质检关卡', split: '样本拆分',
-  branch: '条件分支', subflow: '子流程',
+  branch: '条件分支', subflow: '子流程', notify: '消息通知',
 };
 
 /** 开跑检查的三种结论。「不适用」不是通过的近义词，颜色也不一样。 */

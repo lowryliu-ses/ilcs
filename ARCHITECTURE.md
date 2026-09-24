@@ -146,6 +146,10 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **动态重排**（`services/reschedule_service.py`）。工位不可用、指令故障（策略要求重排）、紧急插单（优先级 1 的批次按现有时间线晚于交付期）、人工请求时生成重排建议：受影响批次按任务依赖、优先级、交付期依次排，共享一份时间线；已下发批次只重排「其后全部未开出」的步骤，开出过的一步都不动。建议记下前后时间窗与每个批次完成时间的变化、换了哪些工位、谁排不下，调度确认后才写入；写入前核对时间线自生成以来没被改过、也没有新开出的步骤，否则作废（`proposal_stale`）。工位失联而没有配策略时也会生成建议——建议不写时间线，不存在「算法自动挤占」。`ILCS_AUTO_RESCHEDULE=1` 时只有全部是未下发批次、且都排得下的建议自动应用。排程模式：`optimize`（先比按优先级加权的交付期拖期，再比总跨度与加权完成时间）、`deadline`、`priority`、`fifo`，规则模式直接按规则给顺序、仍保持任务依赖。
 
+**运行指标**（`domain/kpi.py` + `DashboardService.kpi`）。设备利用率按指令被设备接受到给出结论的实际区间算（÷ 时长 × 通道），计划负荷按排程时间窗另算，两者差得多说明计划不准或设备在等；自动化成功率是窗口内完成的批次里全程没有人工介入的比例（人请求保持、恢复评估、现场核查、人工跳过、从指定节点重做、质检人工判定，或留下需人处理的异常；自动处理成功的不算）；平均恢复时长按异常从登记到恢复算。
+
+**出向事件**（`core/events.py` 的发件箱 + `services/integration_service.py`）。批次 / 步骤状态变化、异常登记与收尾、报警、重排建议、报告发布、业务信号、流程通知节点在业务事务里写进发件箱（`webhook_deliveries`），与业务写入同时提交或回滚；登记在保存点里的事件随保存点回滚作废，不会出现「外部收到了、库里其实回滚了」。执行器在线程池里投递：`X-ILCS-Signature` 为 HMAC-SHA256（对「时间戳.正文」），`X-ILCS-Event-Id` 供接收方去重，2xx 算送达，其余指数退避，超过 `ILCS_WEBHOOK_MAX_ATTEMPTS` 判死信；只向 `ILCS_WEBHOOK_ALLOWED_HOSTS` 里的主机投递，正式环境只允许 https，不跟随重定向。载荷只有「发生了什么」与定位字段，详情由接收方带服务凭据回来取。签名密钥投递时要用原文，库里存原文，接口只在签发 / 轮换时返回一次。消息通知节点（`kind: notify`）就是发一条 `flow.notify` 后立即继续。
+
 **多批次优化**（`domain/optimizer.py`，可选 `domain/cpsat.py`）。排程器对给定批次顺序是确定性的，且保证全部约束，所以优化只搜索顺序：每个候选都交给同一个排程器解码，优化器只比结果（先总跨度，再按优先级加权的完成时间），不另造一套约束。≤ 6 个批次穷举；更多用迭代局部搜索（插入邻域、首次改进、卡住随机扰动，固定随机种子）。CP-SAT 模型（OR-Tools，默认启用；`ILCS_SCHEDULER_BACKEND=search` 可关闭）（可选工位区间、按通道数的累积约束、依赖图与转运间隔、硬时限、已有占用）给出一个候选顺序与最优性差距一起参与比较；它不含承运与清洗缓冲，写进时间线的时间窗仍由排程器生成。应用优化方案时先清掉所选批次的旧时间窗再按顺序逐个排——早期实现逐个重排时其他所选批次的旧占用还在，写入结果与操作员确认的预览对不上，甚至被重叠守门拒绝。
 
 **开跑检查**（`domain/preflight.py`）。九项检查，每项三态：通过 / 阻塞 / 不适用。`dispatch` 会再算一遍，不信前端传来的结论。
@@ -223,6 +227,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0013_queue_indexes` | 指令队列部分索引、指令状态索引、遥测按批次与设备时间的索引 |
 | `0014_executor_detail` | 执行器存活记录的每轮运行情况（耗时、线程数、仍在跑与疑似卡住的工位） |
 | `0015_labware_locations` | 载具类型、位置、载具、移位记录四张表；指令的前置指令与所搬载具两列。不预置任何位置：没有登记位置的部署不启用位置追踪 |
+| `0020_webhooks` | 出向事件订阅与投递发件箱；(订阅, 事件) 唯一 |
 | `0019_schedule_proposals` | 重排建议表 |
 | `0018_exception_engine` | 异常事件表、策略库表；报警加类别列并按去重键回填。不预置策略：没有策略时异常照旧转人工 |
 | `0017_task_tree` | 实验任务的父任务编号与上游任务列表；已有任务都是顶层、无依赖 |
@@ -259,6 +264,6 @@ cd ilcs && api/.venv/bin/python scripts/smoke.py   # 端到端闭环（需 api �
 | 自绘 SVG 图表 | uPlot | `web/src/shared/chart.tsx` |
 | 贪心解码 + 顺序搜索 + CP-SAT 候选（默认启用） | CP-SAT 直接给出时间窗 | `domain/cpsat.py`、`ScheduleService.optimize_preview`。gRPC 栈固定在 1.81 / protobuf 6.33.6：`ortools` 9.15 要求 protobuf < 6.34，grpcio-tools 1.83+ 要求 ≥ 7.35（1.82 已被撤回）。升级 gRPC 或 OR-Tools 前先跑 SiLA 与 CP-SAT 回归 |
 | 承运工位走 `http_json_v1` / 专用驱动接收转运指令 | 车队系统（Open-RMF 等）对接 | 转运指令契约（`params.from/to/labware_id`）不变，新增驱动在 `adapters/registry.py` 注册 |
-| 无外部集成 | LIMS / ERP 双向 | 现有服务身份与 `event_id` 幂等已是入向契约；出向需新增 `services/integration_service.py` |
+| 出向 Webhook（发件箱 + 签名 + 退避） | LIMS / ERP 双向深度集成（字段映射、主数据同步） | 入向是服务身份 + `event_id` 幂等 + 批次信号；出向已在 `services/integration_service.py`，按对端需求加映射即可 |
 
 每一行都限定在一两个文件里，这是分层的直接收益。

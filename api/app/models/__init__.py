@@ -22,6 +22,7 @@ from .resource import (
 )
 from .sample import PhysicalSample, SampleTransfer, SlotOccupancy
 from .sop import Sop, SopAck, SopVersion
+from .integration import WebhookDelivery, WebhookSubscription
 from .workflow import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 
 __all__ = [
@@ -36,5 +37,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "ScheduleProposal",
+    "ExceptionEvent", "ExceptionRule", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

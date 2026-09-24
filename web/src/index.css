@@ -461,3 +461,5 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .case-row { display: grid; grid-template-columns: 70px 1fr 70px 70px 1fr 28px; gap: 4px; align-items: center; }
 .case-row.form { grid-template-columns: 70px 1fr 1fr 1fr 28px; }
 .case-row.manual { grid-template-columns: 70px 1fr 1fr 28px; }
+.kind.notify { border-color: color-mix(in srgb, var(--s-scheduled) 55%, var(--border)); color: var(--s-scheduled); }
+.fg-node.k-notify { border-left: 4px solid var(--s-scheduled); }

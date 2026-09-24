@@ -97,6 +97,8 @@ function blankStep(kind: Exclude<StepKind, 'device'>): RecipeStep {
       };
     case 'subflow':
       return { kind, name: '子流程', cap: '', params: {}, dur: 0, subflow: { recipe_id: '' } };
+    case 'notify':
+      return { kind, name: '消息通知', cap: '', params: {}, dur: 0, notify: { message: '' } };
     default:
       return { kind: 'review', name: '审核', cap: '', params: {}, dur: 0, review_role: 'qa' };
   }
@@ -110,6 +112,7 @@ const NON_DEVICE: [Exclude<StepKind, 'device'>, string][] = [
   ['split', '样本拆分'],
   ['branch', '条件分支'],
   ['subflow', '子流程'],
+  ['notify', '消息通知'],
 ];
 
 export function RecipeEditorPage() {
@@ -676,6 +679,8 @@ function NodeCard({
           .join(' / ')}`
       : kind === 'subflow'
       ? subflowName ? `引用 ${step.subflow?.recipe_id} ${subflowName}` : '未选择引用的方法'
+      : kind === 'notify'
+      ? step.notify?.message || '未填写通知内容'
       : `审核角色 ${step.review_role || 'qa'}`;
   return (
     <>
@@ -782,6 +787,7 @@ function StepProperties({
               if (next === 'split' && !current.split) current.split = blank?.split;
               if (next === 'branch' && !current.branch) current.branch = blank?.branch;
               if (next === 'subflow' && !current.subflow) current.subflow = { recipe_id: '' };
+              if (next === 'notify' && !current.notify) current.notify = { message: '' };
               if (!SKIPPABLE_KINDS.includes(next)) delete current.skippable;
               if (!TIMEOUT_ACTIONS_BY_KIND[next]) delete current.timeout;
             })
@@ -844,6 +850,25 @@ function StepProperties({
       {kind === 'branch' ? <BranchFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} /> : null}
       {kind === 'subflow' ? (
         <SubflowFields step={step} recipeId={recipeId} recipes={recipes} subflows={subflows} readOnly={readOnly} onSet={onSet} />
+      ) : null}
+      {kind === 'notify' ? (
+        <>
+          <Field label="通知内容" hint="发一条 flow.notify 对外事件，订阅方（如 IM 机器人、LIMS）收到后处理；节点立即完成">
+            <textarea
+              rows={3}
+              value={step.notify?.message ?? ''}
+              readOnly={readOnly}
+              onChange={(event) => onSet((current) => void (current.notify = { ...current.notify, message: event.target.value }))}
+            />
+          </Field>
+          <Field label="渠道标识（可选）" hint="原样放进事件载荷，接收方据此路由，如 qa-group">
+            <input
+              value={step.notify?.channel ?? ''}
+              readOnly={readOnly}
+              onChange={(event) => onSet((current) => void (current.notify = { ...current.notify, channel: event.target.value }))}
+            />
+          </Field>
+        </>
       ) : null}
       {kind === 'split' ? (
         <div className="grid cols-2">

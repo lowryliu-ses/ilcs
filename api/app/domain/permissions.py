@@ -73,6 +73,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "golden.set": ["qa", "admin"],
     "org.admin": ["admin"],
     "service.manage": ["admin"],
+    "integration.manage": ["admin"],
 }
 
 ADMIN = "admin"
@@ -141,7 +142,10 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("alarm.close", "关闭报警"), ("golden.set", "设定金标批次"),
         ("exception.handle", "处理异常事件"), ("exception.rules", "维护异常策略库"),
     ]),
-    ("系统治理", [("org.admin", "账号、角色与权限管理"), ("service.manage", "服务身份管理")]),
+    ("系统治理", [
+        ("org.admin", "账号、角色与权限管理"), ("service.manage", "服务身份管理"),
+        ("integration.manage", "出向事件订阅（Webhook）管理"),
+    ]),
 ]
 PERMISSION_LABELS = {key: label for _, rows in PERMISSION_CATALOG for key, label in rows}
 # 只能由系统管理员持有：放给其他角色就等于把「谁能授权」也放出去了

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useQuery } from '../../shared/query';
-import type { Dashboard } from '../../shared/types';
+import type { Dashboard, KpiReport } from '../../shared/types';
 import { Empty, GateBanner, Metric, Panel, Pill, Severity } from '../../shared/ui';
 
 export function DashboardPage() {
@@ -58,6 +58,8 @@ export function DashboardPage() {
           hint="审核通过 + 质量有效，才算可用"
         />
       </div>
+
+      <KpiSection />
 
       <div className="grid cols-2">
         <Panel title={`我的任务（${data.my_tasks.length}）`} flush>
@@ -455,5 +457,74 @@ export function DashboardPage() {
         )}
       </Panel>
     </div>
+  );
+}
+
+
+const percent = (value: number | null | undefined) => (value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`);
+
+/* 运行驾驶舱指标。利用率按设备实际执行指令的时长算，计划负荷按排程时间窗算；两者差得多说明计划不准或设备在等。 */
+function KpiSection() {
+  const kpi = useQuery<KpiReport>('dashboard:kpi', () => api.get<KpiReport>('/dashboard/kpi?window_hours=24'), 30000);
+  const data = kpi.data;
+  if (!data) return null;
+  const busiest = [...data.utilization.stations].sort((a, b) => b.utilization - a.utilization || b.planned_load - a.planned_load).slice(0, 6);
+  return (
+    <Panel title="运行指标（最近 24 小时）" aside={<Link to="/exceptions" className="small">异常中心</Link>}>
+      <div className="metrics">
+        <Metric
+          label="实验运行"
+          value={data.experiments.running}
+          hint={`排队 ${data.experiments.queued} · 暂停 ${data.experiments.paused} · 异常 ${data.experiments.exception}`}
+        />
+        <Metric label="完成" value={data.experiments.completed} hint={`新建任务 ${data.experiments.tasks_created}`} />
+        <Metric
+          label="自动化成功率"
+          value={percent(data.automation.success_rate)}
+          hint={`${data.automation.without_intervention}/${data.automation.completed} 个完成批次全程无人工介入`}
+        />
+        <Metric
+          label="异常"
+          value={data.exceptions.raised}
+          hint={`自动处理 ${data.exceptions.auto_resolved} · 待处理 ${data.exceptions.open} · 平均恢复 ${
+            data.exceptions.mttr_min === null ? '—' : `${data.exceptions.mttr_min} min`
+          }`}
+        />
+        <Metric label="设备利用率" value={percent(data.utilization.overall)} hint="实际执行时长 ÷（时长 × 通道）" />
+      </div>
+      {busiest.length ? (
+        <table>
+          <thead>
+            <tr>
+              <th>工位</th>
+              <th>实际利用率</th>
+              <th>计划负荷</th>
+            </tr>
+          </thead>
+          <tbody>
+            {busiest.map((row) => (
+              <tr key={row.station_id}>
+                <td className="small">
+                  <b className="mono">{row.station_id}</b> <span className="muted">{row.name}</span>
+                  {row.channels > 1 ? <span className="tiny muted"> · {row.channels} 通道</span> : null}
+                </td>
+                <td className="small">
+                  <div className="bar" title={`${row.busy_min} min`}>
+                    <span style={{ width: `${Math.round(row.utilization * 100)}%` }} />
+                  </div>
+                  <span className="tiny muted">{percent(row.utilization)}</span>
+                </td>
+                <td className="small">
+                  <div className="bar">
+                    <span style={{ width: `${Math.round(row.planned_load * 100)}%` }} />
+                  </div>
+                  <span className="tiny muted">{percent(row.planned_load)}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </Panel>
   );
 }

@@ -13,6 +13,12 @@ def dashboard(db: DbSession, ctx: Ctx, user: CurrentUser):
     return DashboardService(db, ctx).overview(user)
 
 
+@router.get("/dashboard/kpi")
+def dashboard_kpi(db: DbSession, ctx: Ctx, window_hours: float = 24):
+    """运行驾驶舱指标：实验运行、自动化成功率、异常与平均恢复时长、设备利用率（实际与计划）。"""
+    return DashboardService(db, ctx).kpi(window_hours)
+
+
 @router.get("/handover")
 def handover(db: DbSession, ctx: Ctx):
     return BatchService(db, ctx).handover()

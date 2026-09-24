@@ -11,7 +11,7 @@ import type { BomItem, BranchCase, CapabilityRow, Check, RecipeStep, StationRow 
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
 
-export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow';
+export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
 
 export const STEP_KINDS: [StepKind, string][] = [
   ['device', '设备'],
@@ -22,10 +22,11 @@ export const STEP_KINDS: [StepKind, string][] = [
   ['split', '样本拆分'],
   ['branch', '条件分支'],
   ['subflow', '子流程'],
+  ['notify', '消息通知'],
 ];
 
 /** 系统即时判定 / 执行的节点：没有预定时长，也不占工位。子流程的时长来自它引用的方法。 */
-export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'branch', 'subflow'];
+export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'branch', 'subflow', 'notify'];
 
 /** 被子流程引用的方法：编辑器用它校验引用、算关键路径。对应后端展开时查的那些字段。 */
 export type SubflowIndex = Record<string, { name: string; version: string; state: string; needs_revision: boolean; critical_path_min: number }>;
@@ -243,6 +244,13 @@ function branchIssues(step: RecipeStep, steps: RecipeStep[], index: number): str
     if (!forwardCaseKeys(step).length) issues.push('至少要有一个不回环的出口，否则流程永远出不了循环');
   }
   return issues;
+}
+
+function notifyIssues(step: RecipeStep): string[] {
+  const message = (step.notify?.message ?? '').trim();
+  if (!message) return ['消息通知节点必须写明通知内容'];
+  if (message.length > 500) return ['通知内容最长 500 个字符'];
+  return [];
 }
 
 function subflowIssues(step: RecipeStep, subflows: SubflowIndex | undefined, selfId: string): string[] {
@@ -531,6 +539,7 @@ export function stepIssues(
   else if (kind === 'split') issues.push(...splitIssues(step));
   else if (kind === 'branch') issues.push(...branchIssues(step, steps, index));
   else if (kind === 'subflow') issues.push(...subflowIssues(step, subflows, selfId));
+  else if (kind === 'notify') issues.push(...notifyIssues(step));
   else issues.push(...reviewIssues(step));
   issues.push(...timeoutIssues(step));
   issues.push(...skippableIssues(step));

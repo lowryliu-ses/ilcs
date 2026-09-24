@@ -33,6 +33,8 @@ from .gate_service import GateService
 log = logging.getLogger("ilcs.executor")
 
 SUMMED = ("probed", "reconciled", "polled", "executed", "overdue", "timed_out")
+# 出向事件投递在线程池里的任务名；不是工位，不进工位卡住统计
+WEBHOOK_JOB = "__webhooks__"
 
 
 @dataclass
@@ -52,6 +54,14 @@ class ConcurrentExecutor:
         self.pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="ilcs-station")
         self.running: dict[str, _Running] = {}
 
+    def _webhooks_due(self) -> bool:
+        from ..models import WebhookDelivery
+
+        with self.session_factory() as db:
+            return db.query(WebhookDelivery.id).filter(
+                WebhookDelivery.state == "pending", WebhookDelivery.next_attempt_at <= now(),
+            ).first() is not None
+
     def shutdown(self, wait_for_stations: bool = True) -> None:
         self.pool.shutdown(wait=wait_for_stations)
 
@@ -59,6 +69,19 @@ class ConcurrentExecutor:
         db = self.session_factory()
         try:
             return ExecutorLoop(db).station_pass(station_id, dispatch_open=dispatch_open)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _webhook_job(self) -> dict:
+        """出向事件投递也是网络 I/O：放进线程池，接收方卡住不拖慢控制回路。"""
+        from .integration_service import deliver_due
+
+        db = self.session_factory()
+        try:
+            return deliver_due(db)
         except Exception:
             db.rollback()
             raise
@@ -81,6 +104,7 @@ class ConcurrentExecutor:
                 continue
             for key in SUMMED:
                 report[key] += int(result.get(key) or 0)
+            report["webhooks_sent"] = report.get("webhooks_sent", 0) + int(result.get("sent") or 0)
 
     def cycle(
         self, *, simulate_heartbeat: bool = True, monitor_assets: bool = False, cleanup_files: bool = False,
@@ -105,12 +129,19 @@ class ConcurrentExecutor:
             self.running[station_id] = _Running(future=future, started=time.monotonic())
             submitted.append(future)
         report["stations_dispatched"] = len(submitted)
-        if submitted and self.station_wait_sec > 0:
-            wait(submitted, timeout=self.station_wait_sec)
+        waiting = list(submitted)
+        if WEBHOOK_JOB not in self.running and self._webhooks_due():
+            future = self.pool.submit(self._webhook_job)
+            self.running[WEBHOOK_JOB] = _Running(future=future, started=time.monotonic())
+            waiting.append(future)
+        if waiting and self.station_wait_sec > 0:
+            wait(waiting, timeout=self.station_wait_sec)
         self._reap(report)
 
         moment = time.monotonic()
         for station_id, running in self.running.items():
+            if station_id == WEBHOOK_JOB:
+                continue
             age = moment - running.started
             if age >= settings.executor_station_stuck_sec:
                 report["stations_stuck"].append(station_id)
@@ -120,7 +151,7 @@ class ConcurrentExecutor:
                         "工位回路长时间未返回，设备网关可能卡住",
                         extra={"fields": {"station_id": station_id, "age_sec": round(age)}},
                     )
-        report["stations_busy"] = len(self.running)
+        report["stations_busy"] = len([key for key in self.running if key != WEBHOOK_JOB])
 
         with self.session_factory() as db:
             loop = ExecutorLoop(db)
@@ -131,7 +162,8 @@ class ConcurrentExecutor:
 
             ExecutorLiveness(db).record_cycle(
                 cycle_ms=round((time.monotonic() - started) * 1000),
-                busy=sorted(self.running), stuck=report["stations_stuck"], workers=self.workers,
+                busy=sorted(key for key in self.running if key != WEBHOOK_JOB), stuck=report["stations_stuck"],
+                workers=self.workers,
             )
             db.commit()
         report["cycle_ms"] = round((time.monotonic() - started) * 1000)

@@ -11,7 +11,8 @@ from typing import Any
 from .capability import StationSpec, out_of_range, stations_for_step
 from .graph import ancestors, critical_path_min, graph_issues, graph_mode
 from .steps import (
-    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, REVIEW, SPLIT, SUBFLOW, WAIT, branch_issues,
+    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
+    branch_issues, notify_issues,
     consumes_materials, gate_issues, kind_of, manual_issues, needs_station, resource_demand, review_issues,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
@@ -76,6 +77,8 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(split_issues(step))
     elif kind == SUBFLOW:
         issues.extend(subflow_issues(step))
+    elif kind == NOTIFY:
+        issues.extend(notify_issues(step))
     issues.extend(timeout_issues(step))
     issues.extend(skippable_issues(step))
 

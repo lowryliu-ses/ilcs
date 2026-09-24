@@ -590,6 +590,9 @@ class ExecutorLoop:
         overdue = self.check_timeouts()
         executed = self.execute_pending(limit)
         advanced = self.advance()
+        from .integration_service import deliver_due
+
+        webhooks = deliver_due(self.db)
         files_cleaned = self.cleanup_orphan_files() if cleanup_files else 0
         telemetry_purged = self.purge_telemetry() if cleanup_files else 0
         return {
@@ -603,6 +606,7 @@ class ExecutorLoop:
             "timed_out": overdue["timed_out"],
             "alarms_raised": stations["raised"] + assets["raised"],
             "alarms_cleared": stations["cleared"] + assets["cleared"],
+            "webhooks_sent": webhooks["sent"],
             "at": now().isoformat(timespec="seconds"),
         }
 

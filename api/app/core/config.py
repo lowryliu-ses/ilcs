@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     adapter_allowed_hosts: str = "127.0.0.1,localhost"
     adapter_credential_root: str = "/run/secrets/ilcs"
 
+    # ---------- 出向事件（Webhook） ----------
+    # 只向列出的主机投递；正式环境只允许 https。不跟随重定向：重定向可以把请求带出允许清单
+    webhook_allowed_hosts: str = "127.0.0.1,localhost"
+    webhook_timeout_sec: float = 5.0
+    webhook_max_attempts: int = 8
+    webhook_retry_base_sec: float = 30.0
+
     # 只给模拟适配器补心跳。未设置时开发 / 测试默认开、正式环境默认关；
     # 正式环境显式打开会被硬门禁拒绝——那里的「在线」必须由设备自己上报。
     executor_simulate_heartbeat: bool | None = None
@@ -158,6 +165,10 @@ class Settings(BaseSettings):
     def adapter_allowed_host_set(self) -> set[str]:
         return {host.strip().lower() for host in self.adapter_allowed_hosts.split(",") if host.strip()}
 
+    @property
+    def webhook_allowed_host_set(self) -> set[str]:
+        return {host.strip().lower() for host in self.webhook_allowed_hosts.split(",") if host.strip()}
+
     def production_issues(self) -> list[str]:
         """正式环境硬门禁。示例占位符、弱密钥或通配配置不能进入健康状态。"""
         if self.environment != "production":
@@ -189,6 +200,8 @@ class Settings(BaseSettings):
             issues.append("ILCS_EXECUTOR_STALE_SEC 必须大于 0：正式环境必须检查执行器存活")
         if self.advance_max_attempts < 1:
             issues.append("ILCS_ADVANCE_MAX_ATTEMPTS 必须至少为 1")
+        if "*" in self.webhook_allowed_host_set:
+            issues.append("ILCS_WEBHOOK_ALLOWED_HOSTS 不允许通配：必须显式列出接收事件的主机")
         return issues
 
 

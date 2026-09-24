@@ -28,14 +28,16 @@ SPLIT = "split"
 BRANCH = "branch"
 # 子流程：引用一个已发布方法，建批次时展开
 SUBFLOW = "subflow"
-KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW)
+# 消息通知：发一条 flow.notify 对外事件（Webhook 订阅方收到），立即继续
+NOTIFY = "notify"
+KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY)
 KIND_NAMES = {
     DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核", GATE: "质检关卡", SPLIT: "样本拆分",
-    BRANCH: "条件分支", SUBFLOW: "子流程",
+    BRANCH: "条件分支", SUBFLOW: "子流程", NOTIFY: "消息通知",
 }
 GATE_ON_FAIL = {"rework": "返工", "scrap": "报废", "hold": "保持待人工判断"}
 # 系统即时判定 / 登记的节点：没有预定时长，也不占工位
-AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, BRANCH, SUBFLOW}
+AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY}
 BRANCH_MODES = {"measure": "按上游设备测量值", "form": "按上游人工记录字段", "manual": "人工选择"}
 TIMEOUT_ACTIONS = {"alarm": "只报警", "fail": "判为失败，进入恢复评估", "skip": "自动跳过"}
 # 设备步骤的超时已由指令超时守着（超过硬上限转结果未知、人工核查）：步骤级只允许加报警，
@@ -57,6 +59,7 @@ APPLICABLE: dict[str, set[str]] = {
     SPLIT: {"split"},
     BRANCH: {"branch", "timeout", "requires_signature"},
     SUBFLOW: {"subflow"},
+    NOTIFY: {"notify"},
 }
 
 
@@ -137,7 +140,7 @@ def consumes_materials(step: dict[str, Any]) -> bool:
     被物料项永久拦住——这正是需求 DEV-07.3 点名的误拦。方法级是否要 BOM 由
     `recipe_rules.recipe_checks` 综合 BOM 与这些声明来判断。
     """
-    if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW}:
+    if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY}:
         return False
     return bool((step or {}).get("consumes_materials", False))
 
@@ -299,6 +302,16 @@ def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int)
         if not forward_case_keys(step):
             issues.append("至少要有一个不回环的出口，否则流程永远出不了循环")
     return issues
+
+
+def notify_issues(step: dict[str, Any]) -> list[str]:
+    config = (step or {}).get("notify") or {}
+    message = str(config.get("message") or "").strip()
+    if not message:
+        return ["消息通知节点必须写明通知内容"]
+    if len(message) > 500:
+        return ["通知内容最长 500 个字符"]
+    return []
 
 
 def subflow_issues(step: dict[str, Any]) -> list[str]:

@@ -24,7 +24,7 @@ from ..models.base import uid as uid_hex
 from ..domain import graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
-    BRANCH, DEVICE, GATE, MANUAL, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
+    BRANCH, DEVICE, GATE, MANUAL, NOTIFY, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
     case_label, kind_of, match_case, missing_form_values, normalize, step_id_of,
 )
 from ..domain.permissions import ADMIN, ROLE_NAMES
@@ -603,6 +603,8 @@ class WorkflowService:
             return self._split_samples(batch, run)
         if run.kind == BRANCH:
             return self._evaluate_branch(batch, run, index)
+        if run.kind == NOTIFY:
+            return self._notify(batch, run)
         command_id = ""
         if run.kind == DEVICE:
             if workflow.hold_blocks_device_action(batch.state):
@@ -817,6 +819,21 @@ class WorkflowService:
             outcome = self._gate_scrap(batch, run, reason)
         self.db.commit()
         return {"step_run": self.run_out(run), "advance": outcome}
+
+    # ---------- 消息通知 ----------
+
+    def _notify(self, batch: Batch, run: StepRun) -> dict:
+        """发一条 flow.notify 对外事件（随本事务提交写进发件箱），立即继续。没有订阅方时只留审计。"""
+        from .integration_service import notify
+
+        step = run.step_snapshot or {}
+        message = str((step.get("notify") or {}).get("message") or "")
+        notify(self.db, batch.org_id, batch.id, step, run.step_id, message)
+        run.started_at = run.started_at or now()
+        run.form_data = {"message": message}
+        self._close_run(run, workflow.COMPLETED, f"已发出通知：{message[:60]}")
+        self.audit.record(None, "流程消息通知", batch.id, after=step.get("name") or "消息通知", detail=message)
+        return self._advance(run, batch)
 
     # ---------- 条件分支与回环 ----------
 

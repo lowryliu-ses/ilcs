@@ -471,6 +471,21 @@ class ExceptionRuleIn(BaseModel):
     row_version: int | None = None
 
 
+class WebhookIn(BaseModel):
+    name: str
+    url: str
+    topics: list[str]
+    enabled: bool = True
+
+
+class WebhookPatchIn(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    topics: list[str] | None = None
+    enabled: bool | None = None
+    row_version: int | None = None
+
+
 class StepReviewIn(Versioned):
     conclusion: Literal["approved", "rejected"]
     reason: str = ""
