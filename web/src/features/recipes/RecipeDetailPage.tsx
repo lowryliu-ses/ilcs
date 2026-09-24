@@ -7,6 +7,7 @@ import { useSession } from '../../shared/session';
 import type { RecipeDetail } from '../../shared/types';
 import { CheckList, Empty, Panel, Pill, useToast } from '../../shared/ui';
 import { useSignature } from '../../shared/signature';
+import { SimulationBadge, SimulationPanel } from './SimulationPanel';
 
 export function RecipeDetailPage() {
   const { recipeId = '' } = useParams();
@@ -49,7 +50,7 @@ export function RecipeDetailPage() {
         <div>
           <h1>
             {data.name} <Pill state={data.state} label={data.state_label} />
-            {data.needs_revision ? <Pill state="fault" label="需修订" /> : null}
+            {data.needs_revision ? <Pill state="fault" label="需修订" /> : null} <SimulationBadge recipe={data} />
           </h1>
           <div className="small muted">
             <span className="mono">
@@ -155,10 +156,12 @@ export function RecipeDetailPage() {
         <Panel title="校验">
           <CheckList checks={data.checks} />
           <div className="small muted">
-            前五项通过才能提交评审。判据由服务端计算，与图形化编辑器里的即时提示同源。
+            前五项通过才能提交评审。判据由服务端计算，与图形化编辑器里的即时提示同源；提交与批准时还会在空时间线上重跑执行前仿真，有阻断项会被拒绝。
           </div>
         </Panel>
       </div>
+
+      <SimulationPanel recipe={data} canRun={can('recipe.edit')} />
 
       <div className="grid cols-2">
         <Panel title="物料需求 BOM" flush>

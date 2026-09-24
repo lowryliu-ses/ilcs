@@ -18,6 +18,11 @@ from ..repositories.resources import CapabilityRepository, StationRepository
 from ..repositories.sops import SopVersionRepository
 from .audit_service import AuditService
 from .identity_service import IdentityService, admin_self_approval, user_may
+from .simulation_service import SimulationService, content_hash
+
+def _content_hash(recipe: Recipe) -> str:
+    return content_hash(recipe)
+
 
 STATE_LABEL = {
     "draft": "草稿", "review": "评审中", "approved": "已批准", "released": "已发布", "retired": "已退役",
@@ -104,6 +109,9 @@ class RecipeService:
                 "steps": recipe.steps,
                 # 编辑器在本地给新步骤分配标识（拖线建依赖要立刻能引用），必须避开用过的
                 "used_step_ids": self._step_ids_of(recipe),
+                "simulation": recipe.simulation or {},
+                "simulation_current": bool(recipe.simulation)
+                and (recipe.simulation or {}).get("content_hash") == _content_hash(recipe),
                 "bom": recipe.bom,
                 "history": recipe.history,
                 "diff": recipe.diff,
@@ -280,6 +288,9 @@ class RecipeService:
             raise StateConflict("能力校验未通过，已阻止提交")
         if not recipe.steps:
             raise StateConflict("方法没有步骤")
+
+        # 执行前仿真：结构、所有分支路径、可达性、能力与硬时限在空实验室里排得下
+        SimulationService(self.db, self.ctx).require_feasible(recipe, "提交评审")
         recipe.state = "review"
         recipe.submitted_by = user.id
         self.recipes.bump(recipe)
@@ -306,6 +317,10 @@ class RecipeService:
             raise StateConflict(f"只有{STATE_LABEL[required_state]}配方可{action[:2]}")
         if target_state != "retired" and not is_valid(self.validation_of(recipe)):
             raise StateConflict("能力校验未通过，已阻止")
+        if target_state == "approved":
+
+            # 批准时按当时的工位与能力再跑一次：评审期间工位退役、能力停用都可能让它排不下
+            SimulationService(self.db, self.ctx).require_feasible(recipe, "批准")
         if target_state == "approved" and (
             same_person(recipe.author_user_id, user.id) or same_person(recipe.submitted_by, user.id)
         ) and not admin_self_approval(self.db, self.ctx, user, recipe.id, "批准本人编写或提交的方法"):

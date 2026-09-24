@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ...schemas import GoldenBatchIn, RecipeCreateIn, RecipePatchIn, RecipeTransitionIn
+from ...schemas import GoldenBatchIn, RecipeCreateIn, RecipePatchIn, RecipeTransitionIn, SimulateIn
 from ...services.recipe_service import RecipeService
 from ..deps import Ctx, CurrentUser, DbSession, require
 
@@ -29,6 +29,14 @@ def patch_recipe(
 ):
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
     return RecipeService(db, ctx).patch(recipe_id, changes, user)
+
+
+@router.post("/{recipe_id}/simulate")
+def simulate_recipe(recipe_id: str, payload: SimulateIn, db: DbSession, ctx=require("recipe.edit")):
+    """执行前仿真：分支路径与可达性、回环最坏情况、能力与硬时限、当前时间线上 N 个批次、转运、物料、外部事件。"""
+    from ...services.simulation_service import SimulationService
+
+    return SimulationService(db, ctx).simulate(recipe_id, payload.concurrency, payload.start_from, payload.use_timeline)
 
 
 @router.post("/{recipe_id}/submit")

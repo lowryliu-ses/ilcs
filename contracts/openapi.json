@@ -4209,6 +4209,37 @@
         "title": "Signed",
         "type": "object"
       },
+      "SimulateIn": {
+        "description": "执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。",
+        "properties": {
+          "concurrency": {
+            "default": 1,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Concurrency",
+            "type": "integer"
+          },
+          "start_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start From"
+          },
+          "use_timeline": {
+            "default": true,
+            "title": "Use Timeline",
+            "type": "boolean"
+          }
+        },
+        "title": "SimulateIn",
+        "type": "object"
+      },
       "SkipStepIn": {
         "properties": {
           "reason": {
@@ -15262,6 +15293,78 @@
           }
         ],
         "summary": "Create Revision",
+        "tags": [
+          "recipe"
+        ]
+      }
+    },
+    "/api/recipes/{recipe_id}/simulate": {
+      "post": {
+        "description": "执行前仿真：分支路径与可达性、回环最坏情况、能力与硬时限、当前时间线上 N 个批次、转运、物料、外部事件。",
+        "operationId": "simulate_recipe_api_recipes__recipe_id__simulate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recipe_id",
+            "required": true,
+            "schema": {
+              "title": "Recipe Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Simulate Recipe",
         "tags": [
           "recipe"
         ]

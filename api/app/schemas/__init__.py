@@ -239,6 +239,14 @@ class RecipePatchIn(BaseModel):
     row_version: int | None = None
 
 
+class SimulateIn(BaseModel):
+    """执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。"""
+
+    concurrency: int = Field(default=1, ge=1, le=20)
+    start_from: datetime | None = None
+    use_timeline: bool = True
+
+
 class RecipeTransitionIn(Signed):
     target_state: Literal["approved", "released", "retired"]
 

@@ -330,6 +330,8 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .check-list li.na .check-mark { background: var(--muted); }
 .check-list li.na b { color: var(--ink-2); }
 .check-list li.na .tag { margin-left: 6px; }
+.check-list li.warn .check-mark { background: var(--sev-3); }
+.check-list li.warn b { color: var(--sev-3); }
 
 /* ---------- 列表分页 ---------- */
 .pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 10px 14px; border-top: 1px solid var(--border); }

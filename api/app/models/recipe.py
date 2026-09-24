@@ -41,6 +41,8 @@ class Recipe(Base):
     submitted_by: Mapped[str] = mapped_column(String, default="")
     # 这个方法（含派生来源）用过的全部 step_id；删掉的步骤 ID 也留在这里，永不复用
     used_step_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 最近一次执行前仿真的结论（含方法内容摘要）；内容改过就失效，提交评审与批准前会重新跑
+    simulation: Mapped[dict] = mapped_column(JSON, default=dict)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
 
 

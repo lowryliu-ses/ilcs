@@ -35,7 +35,7 @@ export type Check = {
   key: string;
   label: string;
   ok: boolean;
-  state?: 'pass' | 'blocked' | 'not_applicable';
+  state?: 'pass' | 'warn' | 'blocked' | 'not_applicable';
   detail: string;
 };
 
@@ -359,7 +359,27 @@ export type RecipeSummary = {
   submitted_by: string;
 };
 
+export type SimulationResult = {
+  recipe_id: string;
+  version: string;
+  content_hash: string;
+  at: string;
+  ok: boolean;
+  concurrency: number;
+  checks: Check[];
+  /** 每种分支走法：所选出口、执行步骤数、关键路径 */
+  paths: { choices: string[]; steps: number; duration_min: number }[];
+  /** 回环出口最坏情况下（回满上限）额外增加的时长 */
+  loops: { branch_step_id: string; case: string; label: string; max_loops: number; body_steps: string[]; extra_min_worst: number }[];
+  station_load_min: Record<string, number>;
+  summary: { blocked: number; warn: number; pass: number };
+};
+
 export type RecipeDetail = RecipeSummary & {
+  /** 最近一次仿真结论（提交评审与批准时服务端会重跑可执行性检查） */
+  simulation: SimulationResult | Record<string, never>;
+  /** 最近一次仿真是否针对当前内容（步骤与 BOM 未再改动） */
+  simulation_current: boolean;
   steps: RecipeStep[];
   /** 用过的步骤标识（含已删除的）：编辑器本地分配新标识时必须避开 */
   used_step_ids: string[];

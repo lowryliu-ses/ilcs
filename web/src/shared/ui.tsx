@@ -91,8 +91,8 @@ export function CheckList({ checks }: { checks: Check[] }) {
     <ul className="check-list">
       {checks.map((check) => {
         const state = check.state ?? (check.ok ? 'pass' : 'blocked');
-        const className = state === 'blocked' ? 'bad' : state === 'not_applicable' ? 'na' : 'ok';
-        const mark = state === 'blocked' ? '✕' : state === 'not_applicable' ? '—' : '✓';
+        const className = state === 'blocked' ? 'bad' : state === 'not_applicable' ? 'na' : state === 'warn' ? 'warn' : 'ok';
+        const mark = state === 'blocked' ? '✕' : state === 'not_applicable' ? '—' : state === 'warn' ? '!' : '✓';
         return (
           <li key={check.key} className={className}>
             <span className="check-mark">{mark}</span>
