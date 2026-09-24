@@ -416,6 +416,23 @@ export type RecipeDetail = RecipeSummary & {
 
 /** 方法步骤。字段按 kind 分支适用：设备看 cap/params，人工看 form，
     等待看 wait_for，审核看 review_role。step_id 稳定不复用。 */
+export type EnvironmentRequirement = { metric: string; min?: number | null; max?: number | null; zone?: string };
+
+export type EnvironmentReadingRow = {
+  id: string;
+  zone: string;
+  metric: string;
+  metric_label: string;
+  value: number;
+  unit: string;
+  source: string;
+  measured_at: string;
+  recorded_by: string;
+  note: string;
+  age_min: number;
+  stale: boolean;
+};
+
 export type RecipeStep = {
   step_id?: string;
   kind?: StepKindName;
@@ -456,6 +473,8 @@ export type RecipeStep = {
   /** 消息通知节点：发一条 flow.notify 对外事件 */
   notify?: { message?: string; channel?: string };
   timeout?: StepTimeout;
+  /** 环境要求：区域 × 指标的最新读数须在范围内（区域不写取这一步分到的工位） */
+  environment?: EnvironmentRequirement[];
   /** 方法作者同意运行时可以跳过这一步 */
   skippable?: boolean;
   groups?: SubflowGroup[];

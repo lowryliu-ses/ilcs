@@ -978,6 +978,7 @@ function StepProperties({
       {timeoutActions ? (
         <TimeoutFields step={step} actions={timeoutActions} readOnly={readOnly} onSet={onSet} />
       ) : null}
+      {kind === 'device' || kind === 'manual' ? <EnvironmentFields step={step} readOnly={readOnly} onSet={onSet} /> : null}
       {SKIPPABLE_KINDS.includes(kind) ? (
         <label className="check" title="方法作者在设计时同意：运行时可由有恢复权限的人签名跳过这一步">
           <input
@@ -1884,6 +1885,70 @@ function MethodField({
           </option>
         ))}
       </select>
+    </Field>
+  );
+}
+
+const ENV_METRICS: [string, string][] = [
+  ['temperature', '温度 ℃'], ['humidity', '相对湿度 %RH'], ['dew_point', '露点 ℃'], ['h2o_ppm', '水含量 ppm'],
+  ['o2_ppm', '氧含量 ppm'], ['pressure_diff', '压差 Pa'], ['particles', '洁净度 个/m³'],
+];
+
+/** 环境要求：开跑检查与每次设备投递前都按区域的最新读数核对；没有读数、读数过期、超出范围都不放行。 */
+function EnvironmentFields({
+  step,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const rows = step.environment ?? [];
+  const change = (index: number, patch: Partial<NonNullable<RecipeStep['environment']>[number]>) =>
+    onSet((current) => {
+      current.environment = (current.environment ?? []).map((row, at) => (at === index ? { ...row, ...patch } : row));
+    });
+  const toNumber = (value: string) => (value.trim() === '' ? null : Number(value));
+  return (
+    <Field label="环境要求" hint="区域不写取这一步分到的工位；人工步骤要写明区域（如 干燥间、GB-01）">
+      <div>
+        {rows.map((row, index) => (
+          <div key={index} className="filters">
+            <select value={row.metric} disabled={readOnly} onChange={(event) => change(index, { metric: event.target.value })}>
+              {ENV_METRICS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <input style={{ width: 70 }} placeholder="下限" disabled={readOnly} value={row.min ?? ''} onChange={(event) => change(index, { min: toNumber(event.target.value) })} />
+            <input style={{ width: 70 }} placeholder="上限" disabled={readOnly} value={row.max ?? ''} onChange={(event) => change(index, { max: toNumber(event.target.value) })} />
+            <input style={{ width: 110 }} placeholder="区域" disabled={readOnly} value={row.zone ?? ''} onChange={(event) => change(index, { zone: event.target.value })} />
+            {readOnly ? null : (
+              <button
+                className="btn sm"
+                onClick={() =>
+                  onSet((current) => {
+                    current.environment = (current.environment ?? []).filter((_, at) => at !== index);
+                    if (!current.environment.length) delete current.environment;
+                  })
+                }
+              >
+                删除
+              </button>
+            )}
+          </div>
+        ))}
+        {readOnly ? null : (
+          <button
+            className="btn sm"
+            onClick={() => onSet((current) => void (current.environment = [...(current.environment ?? []), { metric: 'humidity', max: 10 }]))}
+          >
+            增加环境要求
+          </button>
+        )}
+      </div>
     </Field>
   );
 }

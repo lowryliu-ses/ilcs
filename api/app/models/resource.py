@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -190,3 +190,41 @@ class MaintenanceOrder(Base):
     record: Mapped[str] = mapped_column(Text, default="")
     signature_id: Mapped[str] = mapped_column(String, default="")
     row_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class EnvironmentReading(Base):
+    """环境读数：区域（工位编号或房间 / 手套箱名）× 指标。步骤的环境要求按最新读数核对。"""
+
+    __tablename__ = "environment_readings"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    zone: Mapped[str] = mapped_column(String, index=True)
+    metric: Mapped[str] = mapped_column(String)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str] = mapped_column(String, default="")
+    # device：传感器 / 设备上报；manual：人工抄录
+    source: Mapped[str] = mapped_column(String, default="manual")
+    measured_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    recorded_by: Mapped[str] = mapped_column(String, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class PersonBooking(Base):
+    """人员预占。排程时为人工 / 审核步骤预占执行人的时间，请假、培训也登记在这里，同一时间一个人只做一件事。"""
+
+    __tablename__ = "person_bookings"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    person_id: Mapped[str] = mapped_column(String, index=True)
+    # step：批次步骤 | leave：请假 | training：培训 | duty：值守
+    kind: Mapped[str] = mapped_column(String, default="step")
+    starts_at: Mapped[datetime] = mapped_column(DateTime)
+    ends_at: Mapped[datetime] = mapped_column(DateTime)
+    batch_id: Mapped[str] = mapped_column(String, default="", index=True)
+    step_id: Mapped[str] = mapped_column(String, default="")
+    # confirmed | done | cancelled
+    state: Mapped[str] = mapped_column(String, default="confirmed")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

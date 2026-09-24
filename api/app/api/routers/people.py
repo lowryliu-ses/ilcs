@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ...schemas import PersonCreateIn, PersonPatchIn, QualificationIn, RevokeIn
+from ...schemas import PersonBookingIn, PersonCreateIn, PersonPatchIn, QualificationIn, RevokeIn
 from ...services.people_service import PeopleService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
 
@@ -61,3 +61,28 @@ def revoke_qualification(
 ):
     """撤销资质。运行中的设备不自动急停，返回里说明既定策略。"""
     return PeopleService(db, ctx).revoke(qualification_id, payload.reason, user)
+
+
+@router.get("/{person_id}/bookings")
+def person_bookings(person_id: str, db: DbSession, ctx: Ctx, include_past: bool = False):
+    """人员预占：批次人工步骤（排程生成）、请假、培训、值守。"""
+    from ...services.staffing_service import StaffingService
+
+    return StaffingService(db, ctx).list_for(person_id, include_past)
+
+
+@router.post("/{person_id}/bookings", status_code=201)
+def create_person_booking(
+    person_id: str, payload: PersonBookingIn, db: DbSession, user: CurrentUser, ctx=require("booking.edit"),
+):
+    """登记请假、培训或值守；开跑检查会据此发现执行人时间冲突。"""
+    from ...services.staffing_service import StaffingService
+
+    return StaffingService(db, ctx).create(person_id, payload.model_dump(), user)
+
+
+@router.post("/bookings/{booking_id}/cancel")
+def cancel_person_booking(booking_id: str, db: DbSession, user: CurrentUser, ctx=require("booking.edit")):
+    from ...services.staffing_service import StaffingService
+
+    return StaffingService(db, ctx).cancel(booking_id, user)

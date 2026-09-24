@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     schedule_expiry_min: int = 30
     # 按时开工：设备动作最多比排程时间窗提前这么多分钟投递
     early_start_tolerance_min: float = 15
+    # 环境读数的有效期：超过这么久没更新的读数不作为放行依据
+    environment_max_age_min: float = 30
     # 实际开工晚于计划超过这个分钟数，本批下游时间窗整体顺延
     realign_grace_min: float = 1
     telemetry_points_per_step: int = 12

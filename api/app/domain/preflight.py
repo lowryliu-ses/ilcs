@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 PASS = "pass"
+WARN = "warn"
 BLOCKED = "blocked"
 NOT_APPLICABLE = "not_applicable"
 
@@ -44,6 +45,13 @@ class PreflightContext:
     sop_snapshot: dict | None = None
     # 任务上游：None 表示任务没有声明依赖（不适用）；空列表表示依赖都已满足
     dependency_blockers: list[str] | None = None
+    # 首工位之外的其余工位：[{id, status, cal_due, interlock, alarm}]。故障、离线、校准过期、联锁、活动报警都挡下发
+    other_stations: list[dict] = field(default_factory=list)
+    # 环境要求：None 表示没有步骤声明要求（不适用）
+    environment_blockers: list[str] | None = None
+    # 人员预占：None 表示没有人工步骤（不适用）；提醒项不挡下发
+    personnel_blockers: list[str] | None = None
+    personnel_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -180,6 +188,51 @@ def evaluate(context: PreflightContext) -> list[Check]:
         )
         checks.append(Check("station", "首工位执行许可", _state(station_ok), detail))
 
+    # ---------- 5b 其余工位 ----------
+    if not context.other_stations:
+        checks.append(Check("stations", "后续工位执行许可", NOT_APPLICABLE, "没有首工位之外的工位"))
+    else:
+        today = (context.now or datetime.utcnow()).date().isoformat()
+        failing = []
+        for row in context.other_stations:
+            reasons = []
+            if row.get("status") in {"fault", "offline"}:
+                reasons.append("离线" if row.get("status") == "offline" else "故障")
+            if row.get("cal_due") not in {"", "-", None} and str(row.get("cal_due")) < today:
+                reasons.append(f"校准已于 {row.get('cal_due')} 到期")
+            if row.get("interlock"):
+                reasons.append("安全联锁触发")
+            if row.get("alarm"):
+                reasons.append("存在活动报警")
+            if reasons:
+                failing.append(f"{row['id']}：{'、'.join(reasons)}")
+        checks.append(Check(
+            "stations", "后续工位执行许可", _state(not failing),
+            "；".join(failing) or f"{len(context.other_stations)} 个后续工位在线、校准有效、无联锁与活动报警"
+            "（清洗状态到步骤开工前再核对）",
+        ))
+
+    # ---------- 5c 环境条件 ----------
+    if context.environment_blockers is None:
+        checks.append(Check("environment", "环境条件", NOT_APPLICABLE, "没有步骤声明环境要求"))
+    else:
+        checks.append(Check(
+            "environment", "环境条件", _state(not context.environment_blockers),
+            "；".join(context.environment_blockers) or "各步骤要求的环境指标都有最新读数且在范围内",
+        ))
+
+    # ---------- 5d 人员预占 ----------
+    if context.personnel_blockers is None:
+        checks.append(Check("personnel", "执行人时间预占", NOT_APPLICABLE, "流程没有人工步骤"))
+    else:
+        if context.personnel_blockers:
+            state, detail = BLOCKED, "；".join(context.personnel_blockers)
+        elif context.personnel_warnings:
+            state, detail = WARN, "提醒：" + "；".join(context.personnel_warnings[:5])
+        else:
+            state, detail = PASS, "执行人在人工步骤的时间里没有别的批次、请假或培训"
+        checks.append(Check("personnel", "执行人时间预占", state, detail))
+
     # ---------- 6 执行门 ----------
     checks.append(
         Check(
@@ -258,5 +311,6 @@ def summary(checks: list[Check]) -> dict:
         "total": len(checks),
         "passed": len([c for c in checks if c.state == PASS]),
         "blocked": len([c for c in checks if c.state == BLOCKED]),
+        "warn": len([c for c in checks if c.state == WARN]),
         "not_applicable": len([c for c in checks if c.state == NOT_APPLICABLE]),
     }

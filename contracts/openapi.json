@@ -1640,6 +1640,73 @@
         "title": "DispatchIn",
         "type": "object"
       },
+      "EnvironmentBatchIn": {
+        "properties": {
+          "readings": {
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentReadingIn"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Readings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "readings"
+        ],
+        "title": "EnvironmentBatchIn",
+        "type": "object"
+      },
+      "EnvironmentReadingIn": {
+        "properties": {
+          "measured_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured At"
+          },
+          "metric": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Metric",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "unit": {
+            "default": "",
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          },
+          "zone": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Zone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zone",
+          "metric",
+          "value"
+        ],
+        "title": "EnvironmentReadingIn",
+        "type": "object"
+      },
       "ExceptionHandleIn": {
         "properties": {
           "action": {
@@ -3080,6 +3147,41 @@
           "new_password"
         ],
         "title": "PasswordChangeIn",
+        "type": "object"
+      },
+      "PersonBookingIn": {
+        "properties": {
+          "ends_at": {
+            "format": "date-time",
+            "title": "Ends At",
+            "type": "string"
+          },
+          "kind": {
+            "default": "leave",
+            "enum": [
+              "leave",
+              "training",
+              "duty"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "starts_at": {
+            "format": "date-time",
+            "title": "Starts At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "starts_at",
+          "ends_at"
+        ],
+        "title": "PersonBookingIn",
         "type": "object"
       },
       "PersonCreateIn": {
@@ -11320,6 +11422,200 @@
         ]
       }
     },
+    "/api/environment/history": {
+      "get": {
+        "operationId": "reading_history_api_environment_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "zone",
+            "required": true,
+            "schema": {
+              "title": "Zone",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric",
+            "required": true,
+            "schema": {
+              "title": "Metric",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reading History",
+        "tags": [
+          "environment"
+        ]
+      }
+    },
+    "/api/environment/readings": {
+      "get": {
+        "description": "每个区域 × 指标的最新读数（带是否过期）。",
+        "operationId": "latest_readings_api_environment_readings_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "zone",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Zone",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Latest Readings",
+        "tags": [
+          "environment"
+        ]
+      },
+      "post": {
+        "description": "人工抄录一条读数。",
+        "operationId": "record_reading_api_environment_readings_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentReadingIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Record Reading",
+        "tags": [
+          "environment"
+        ]
+      }
+    },
     "/api/exception-rules": {
       "get": {
         "operationId": "list_rules_api_exception_rules_get",
@@ -15625,6 +15921,67 @@
         ]
       }
     },
+    "/api/people/bookings/{booking_id}/cancel": {
+      "post": {
+        "operationId": "cancel_person_booking_api_people_bookings__booking_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "booking_id",
+            "required": true,
+            "schema": {
+              "title": "Booking Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Cancel Person Booking",
+        "tags": [
+          "people"
+        ]
+      }
+    },
     "/api/people/expiring-qualifications": {
       "get": {
         "description": "到期与即将到期的资质。工作台与任务分配提示都读它。",
@@ -15875,6 +16232,148 @@
           }
         ],
         "summary": "Update Person",
+        "tags": [
+          "people"
+        ]
+      }
+    },
+    "/api/people/{person_id}/bookings": {
+      "get": {
+        "description": "人员预占：批次人工步骤（排程生成）、请假、培训、值守。",
+        "operationId": "person_bookings_api_people__person_id__bookings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "person_id",
+            "required": true,
+            "schema": {
+              "title": "Person Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_past",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Past",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Person Bookings",
+        "tags": [
+          "people"
+        ]
+      },
+      "post": {
+        "description": "登记请假、培训或值守；开跑检查会据此发现执行人时间冲突。",
+        "operationId": "create_person_booking_api_people__person_id__bookings_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "person_id",
+            "required": true,
+            "schema": {
+              "title": "Person Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonBookingIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Person Booking",
         "tags": [
           "people"
         ]
@@ -19780,6 +20279,80 @@
         "summary": "Command Event",
         "tags": [
           "runtime"
+        ]
+      }
+    },
+    "/api/runtime/environment": {
+      "post": {
+        "description": "传感器 / 设备上报。服务身份须在 environment_zones 范围内授权区域（\"all\" 表示全部）。",
+        "operationId": "device_readings_api_runtime_environment_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentBatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Device Readings",
+        "tags": [
+          "environment"
         ]
       }
     },

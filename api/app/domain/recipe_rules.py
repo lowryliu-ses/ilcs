@@ -9,6 +9,7 @@
 from typing import Any
 
 from .capability import StationSpec, out_of_range, stations_for_step
+from .environment import requirement_issues
 from .graph import ancestors, critical_path_min, graph_issues, graph_mode
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
@@ -81,6 +82,7 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(notify_issues(step))
     issues.extend(timeout_issues(step))
     issues.extend(skippable_issues(step))
+    issues.extend(requirement_issues(step, needs_zone=not needs_station(step)))
 
     # 时长：审核、质检关卡、样本拆分、条件分支是即时判定 / 登记，子流程的时长来自它引用的方法
     if kind not in AUTOMATIC_KINDS:

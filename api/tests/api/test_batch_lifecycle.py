@@ -80,8 +80,8 @@ def test_locked_but_unapproved_plan_cannot_start_a_batch(operator, researcher, r
 def test_dispatch_requires_manual_review_and_server_checks(operator, scheduled_batch):
     preflight = operator.get(f"/api/batches/{scheduled_batch}/preflight?manual_review=true").json()
     assert preflight["ok"], preflight["blocked"]
-    assert len(preflight["checks"]) == 10
-    assert {c["state"] for c in preflight["checks"]} <= {"pass", "blocked", "not_applicable"}
+    assert len(preflight["checks"]) == 13
+    assert {c["state"] for c in preflight["checks"]} <= {"pass", "warn", "blocked", "not_applicable"}
 
     without_review = operator.post(
         f"/api/batches/{scheduled_batch}/dispatch",
@@ -125,7 +125,8 @@ def test_full_run_leaves_results_unassessed_until_review(
     assert all(
         r["consumed_qty"] == "0.000000" for r in detail["reservations"]
     ), "实际消耗必须由库存事件入账，不按步骤数量均分"
-    assert all(r["state"] == "reserved" for r in detail["reservations"])
+    # 批次完成后收尾：未领用的预留余量显式释放，不再一直挂着占库存
+    assert all(r["state"] == "released" for r in detail["reservations"]), detail["reservations"]
 
     for row in detail["samples"]:
         assert row["legacy_quality"] is None, "批次完成不得自动授予质量结论"

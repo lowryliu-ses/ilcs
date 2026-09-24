@@ -29,10 +29,10 @@ def preflight_context(**overrides) -> preflight.PreflightContext:
 def test_all_checks_pass_on_a_clean_batch():
     checks = preflight.evaluate(preflight_context())
 
-    assert len(checks) == 10
+    assert len(checks) == 13
     assert not preflight.blocked(checks)
-    # 任务没有声明上游依赖：「上游任务」不适用，其余都有东西可查
-    assert preflight.summary(checks)["not_applicable"] == 1
+    # 任务没有声明上游依赖、只有一个工位、没有环境要求、没有人工步骤：这四项不适用，其余都有东西可查
+    assert preflight.summary(checks)["not_applicable"] == 4
     assert next(c for c in checks if c.key == "upstream").state == preflight.NOT_APPLICABLE
 
 

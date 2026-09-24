@@ -245,7 +245,7 @@ class ExecutionService:
             elif command.type == "abort":
                 result = adapter.abort(request)
             else:
-                violation = self.check_hard_window(batch, command)
+                violation = self.check_hard_window(batch, command) or self.check_environment(batch, command)
                 if violation:
                     ledger.state = "rejected"
                     self.fault(batch, command, violation, delivery="delivered")
@@ -328,6 +328,9 @@ class ExecutionService:
         from .transfer_service import TransferService
 
         batch.state = "aborted"
+        from .workflow_service import WorkflowService
+
+        WorkflowService(self.db, self.ctx).close_out(batch)
         superseded = 0
         for acting in self.commands.in_flight_for_batch(batch.id, MOTION):
             acting.state = "cancelled"
@@ -359,6 +362,15 @@ class ExecutionService:
         if index < len(steps):
             return step_id_of(steps[index], index)
         return ""
+
+    def check_environment(self, batch: Batch, command: Command) -> str | None:
+        """设备步骤投递前再核对一次环境要求：长批次里环境可能中途变坏。不满足就不投递、挂起报警。"""
+        if command.type not in {"dispatch", "retry", "resume"}:
+            return None
+        from .environment_service import EnvironmentService
+
+        problems = EnvironmentService(self.db, self.ctx).step_problems(batch, command.step_index)
+        return f"环境条件不满足，指令未投递：{'；'.join(problems)}" if problems else None
 
     def check_hard_window(self, batch: Batch, command: Command) -> str | None:
         if command.step_index == 0:

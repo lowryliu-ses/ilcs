@@ -50,6 +50,7 @@ PERMISSIONS: dict[str, list[str]] = {
     "asset.edit": ["admin"],
     "booking.edit": ["operator", "admin"],
     "maintenance.edit": ["operator", "admin"],
+    "environment.record": ["operator", "ehs", "admin"],
     # ---------- 人员与资质 ----------
     "person.edit": ["admin"],
     "qualification.edit": ["admin", "ehs"],
@@ -131,7 +132,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
     ("资源", [
         ("station.edit", "维护工位与适配器"), ("location.edit", "维护放置位与板库"),
         ("asset.edit", "维护仪器设备与校准"),
-        ("booking.edit", "资源预约"), ("maintenance.edit", "维护工单"),
+        ("booking.edit", "资源预约"), ("maintenance.edit", "维护工单"), ("environment.record", "录入环境读数"),
     ]),
     ("人员与资质", [("person.edit", "维护人员档案"), ("qualification.edit", "维护资质")]),
     ("数据与审核", [

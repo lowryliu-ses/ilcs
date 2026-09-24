@@ -388,6 +388,26 @@ class SopRecipeIn(BaseModel):
     plate: int = Field(default=8, ge=1, le=96)
 
 
+class EnvironmentReadingIn(BaseModel):
+    zone: str = Field(min_length=1, max_length=64)
+    metric: str = Field(min_length=1, max_length=32)
+    value: float
+    unit: str = ""
+    measured_at: datetime | None = None
+    note: str = ""
+
+
+class EnvironmentBatchIn(BaseModel):
+    readings: list[EnvironmentReadingIn] = Field(min_length=1, max_length=500)
+
+
+class PersonBookingIn(BaseModel):
+    kind: Literal["leave", "training", "duty"] = "leave"
+    starts_at: datetime
+    ends_at: datetime
+    reason: str = ""
+
+
 class SimulateIn(BaseModel):
     """执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。"""
 

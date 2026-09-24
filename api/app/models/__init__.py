@@ -19,7 +19,8 @@ from .people import Person, Qualification
 from .recipe import ExperimentTask, Plan, PlanProposal, PlanTemplate, PlanVersion, Recipe, TaskAssignment
 from .report import Report, ReportVersion
 from .resource import (
-    Adapter, Asset, CalibrationRecord, Capability, Island, MaintenanceOrder, ResourceBooking, Station,
+    Adapter, Asset, CalibrationRecord, Capability, EnvironmentReading, Island, MaintenanceOrder, PersonBooking,
+    ResourceBooking, Station,
 )
 from .sample import PhysicalSample, SampleTransfer, SlotOccupancy
 from .sop import Sop, SopAck, SopVersion
@@ -38,5 +39,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "Comment", "PlanTemplate", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
+    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "Comment", "PlanTemplate", "EnvironmentReading", "PersonBooking", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

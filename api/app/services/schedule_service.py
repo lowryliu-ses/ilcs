@@ -243,6 +243,7 @@ class ScheduleService:
                 detail=f"{demand['total']} 步全部不占工位，无需资源预约",
             )
             self.db.flush()
+            self._book_people(batch, start_from or (now() + timedelta(minutes=5)))
             return []
 
         begin = start_from or (now() + timedelta(minutes=5))
@@ -289,9 +290,16 @@ class ScheduleService:
             ),
         )
         self.db.flush()
+        self._book_people(batch, begin)
         if allow_proposals:
             self._urgent_insert(batch, max(item.ends_at for item in work) if work else None)
         return rows
+
+    def _book_people(self, batch: Batch, begin: datetime | None) -> None:
+        """排程之后按新时间窗预占执行人（人工步骤）。"""
+        from .staffing_service import StaffingService
+
+        StaffingService(self.db, self.ctx).book_batch(batch, begin)
 
     def _urgent_insert(self, batch: Batch, planned_end: datetime | None) -> None:
         """紧急插单：最高优先级批次按现有时间线赶不上交付期时，生成一份让低优先级未下发批次让路的重排建议。"""
@@ -749,6 +757,7 @@ class ScheduleService:
             )
         self.db.flush()
         self._refuse_overlaps(batch.id)
+        self._book_people(batch, None)
         self.audit.record(
             user, "重排未执行步骤", batch.id, before=f"自第 {from_step + 1} 步",
             after=start_from.isoformat(timespec="minutes"),

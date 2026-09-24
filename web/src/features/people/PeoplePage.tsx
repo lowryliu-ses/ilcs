@@ -295,7 +295,85 @@ function PersonDialog({ personId, onClose }: { personId: string; onClose: () => 
           </div>
         </ConfirmDialog>
       ) : null}
+      <BookingsPanel personId={personId} />
     </Modal>
+  );
+}
+
+type PersonBookingRow = {
+  id: string;
+  kind: string;
+  kind_label: string;
+  starts_at: string;
+  ends_at: string;
+  batch_id: string;
+  step_id: string;
+  state: string;
+  reason: string;
+};
+
+/** 人员预占：排程为人工步骤预占的时间，以及请假、培训、值守。开跑检查据此发现执行人冲突。 */
+function BookingsPanel({ personId }: { personId: string }) {
+  const toast = useToast();
+  const { can } = useSession();
+  const key = `people:${personId}:bookings`;
+  const bookings = useQuery<PersonBookingRow[]>(key, () => api.get<PersonBookingRow[]>(`/people/${personId}/bookings`));
+  const [form, setForm] = useState({ kind: 'leave', starts_at: '', ends_at: '', reason: '' });
+  const create = useMutation(
+    () => api.post(`/people/${personId}/bookings`, {
+      ...form, starts_at: new Date(form.starts_at).toISOString(), ends_at: new Date(form.ends_at).toISOString(),
+    }),
+    { invalidates: [key], onSuccess: () => toast.push('已登记') },
+  );
+  const cancel = useMutation((id: string) => api.post(`/people/bookings/${id}/cancel`), { invalidates: [key] });
+  return (
+    <Panel title="时间预占" flush>
+      {bookings.data?.length ? (
+        <table>
+          <tbody>
+            {bookings.data.map((row) => (
+              <tr key={row.id}>
+                <td className="small">{row.kind_label}</td>
+                <td className="small mono">
+                  {row.starts_at.replace('T', ' ').slice(5)} – {row.ends_at.replace('T', ' ').slice(5)}
+                </td>
+                <td className="small">{row.reason || row.batch_id}</td>
+                <td className="row-end">
+                  {row.kind !== 'step' && can('booking.edit') ? (
+                    <button className="btn sm" disabled={cancel.pending} onClick={() => cancel.run(row.id).catch((error) => toast.push(error.message))}>
+                      取消
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="panel-body small muted">没有未来的预占</div>
+      )}
+      {can('booking.edit') ? (
+        <div className="panel-body">
+          <div className="filters">
+            <select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}>
+              <option value="leave">请假</option>
+              <option value="training">培训</option>
+              <option value="duty">值守</option>
+            </select>
+            <input type="datetime-local" value={form.starts_at} onChange={(event) => setForm({ ...form, starts_at: event.target.value })} />
+            <input type="datetime-local" value={form.ends_at} onChange={(event) => setForm({ ...form, ends_at: event.target.value })} />
+            <input placeholder="说明" value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} />
+            <button
+              className="btn sm primary"
+              disabled={!form.starts_at || !form.ends_at || create.pending}
+              onClick={() => create.run().catch((error) => toast.push(error.message))}
+            >
+              登记
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </Panel>
   );
 }
 

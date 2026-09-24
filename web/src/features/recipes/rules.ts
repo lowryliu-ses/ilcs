@@ -205,6 +205,25 @@ function timeoutIssues(step: RecipeStep): string[] {
   return issues;
 }
 
+/** 环境要求（与服务端 `domain/environment.requirement_issues` 同源）。 */
+function environmentIssues(step: RecipeStep): string[] {
+  const rows = step.environment;
+  if (!rows) return [];
+  const issues: string[] = [];
+  rows.forEach((row, index) => {
+    if (!row.metric?.trim()) {
+      issues.push(`环境要求第 ${index + 1} 项没有指标`);
+      return;
+    }
+    const low = row.min ?? null;
+    const high = row.max ?? null;
+    if (low === null && high === null) issues.push(`环境要求 ${row.metric} 没有上下限`);
+    if (low !== null && high !== null && low > high) issues.push(`环境要求 ${row.metric} 下限大于上限`);
+    if (!needsStation(step) && !row.zone?.trim()) issues.push(`环境要求 ${row.metric}：不占工位的步骤要写明区域`);
+  });
+  return issues;
+}
+
 function skippableIssues(step: RecipeStep): string[] {
   if (!step.skippable) return [];
   return SKIPPABLE_KINDS.includes(kindOf(step)) ? [] : ['该类节点不能设为可跳过'];
@@ -572,6 +591,7 @@ export function stepIssues(
   else issues.push(...reviewIssues(step));
   issues.push(...timeoutIssues(step));
   issues.push(...skippableIssues(step));
+  issues.push(...environmentIssues(step));
   issues.push(...graphIssues(steps, index));
   if (kind === 'gate' && graphMode(steps)) {
     const target = steps.map(stepIdOf).indexOf(step.gate?.rework_to ?? '');

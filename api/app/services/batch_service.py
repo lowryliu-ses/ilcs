@@ -46,7 +46,9 @@ from .asset_service import AssetService
 from .audit_service import AuditService
 from .gate_service import GateService
 from .identity_service import IdentityService
+from .environment_service import EnvironmentService
 from .material_service import MaterialService
+from .staffing_service import StaffingService
 from .people_service import PeopleService
 from .sample_service import SampleService
 from .schedule_service import ScheduleService
@@ -827,6 +829,7 @@ class BatchService:
             qualification_blockers += self.sops.ack_blockers(
                 batch.sop_snapshot.get("sop_version_id", ""), executor_id
             )
+        personnel = StaffingService(self.db, self.ctx).conflicts(batch)
         context = preflight.PreflightContext(
             recipe_state=source.state if source else "",
             recipe_risk=snapshot.get("risk", ""),
@@ -865,6 +868,10 @@ class BatchService:
             qualification_blockers=qualification_blockers,
             sop_snapshot=batch.sop_snapshot or None,
             dependency_blockers=self._dependency_blockers(task),
+            other_stations=self._other_stations(work, station.id if station else ""),
+            environment_blockers=EnvironmentService(self.db, self.ctx).batch_checks(batch),
+            personnel_blockers=personnel[0] if personnel is not None else None,
+            personnel_warnings=personnel[1] if personnel is not None else [],
         )
         checks = preflight.evaluate(context)
         return {
@@ -877,6 +884,23 @@ class BatchService:
             "pallet_code": container_of(batch.id),
             "resource_checks": resource_checks,
         }
+
+    def _other_stations(self, work, first_station_id: str) -> list[dict]:
+        """首工位之外、本批次要用到的其余工位（开跑检查覆盖全部工位，不只看第一个）。"""
+        from ..models import Adapter
+
+        rows = []
+        for station_id in sorted({row.station_id for row in work if row.station_id and row.station_id != first_station_id}):
+            station = self.stations.get(station_id)
+            if station is None:
+                continue
+            adapter = self.db.get(Adapter, station_id)
+            rows.append({
+                "id": station.id, "status": station.status, "cal_due": station.cal_due,
+                "interlock": bool(adapter and adapter.site_interlock),
+                "alarm": bool(self.alarms.active_on_station(station.id)),
+            })
+        return rows
 
     def _dependency_blockers(self, task) -> list[str] | None:
         if task is None or not task.depends_on:
@@ -1718,6 +1742,7 @@ class BatchService:
             batch.state = "aborted"
             self.allocations.delete_for_batch(batch.id)
             SampleService(self.db, self.ctx).release_slots(container_of(batch.id))
+            StaffingService(self.db, self.ctx).close_batch(batch)
             self.audit.record(
                 user, "终止批次", batch.id, sign=True, meaning=signature.meaning, before=before,
                 after="已终止", signature_id=signature.id, object_version=batch.row_version,
@@ -1733,6 +1758,7 @@ class BatchService:
             if not acting_now:
                 # 设备侧没有在途或结果未知的动作：没有物理动作要确认，直接终止
                 batch.state = "aborted"
+                self.workflow.close_out(batch, user)
                 self.audit.record(
                     user, "终止批次", batch.id, sign=True, meaning=signature.meaning,
                     before=before, after="已终止", signature_id=signature.id,

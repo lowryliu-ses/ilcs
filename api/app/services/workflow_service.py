@@ -1208,6 +1208,7 @@ class WorkflowService:
         batch.state = "done"
         batch.held_at = None
         ExceptionService(self.db, self.ctx).settle_batch(batch, "批次运行完成", user)
+        self.close_out(batch, user)
         self.audit.record(
             user, "批次完成", batch.id, before=before, after="已完成",
             detail=detail or (
@@ -1215,6 +1216,50 @@ class WorkflowService:
                 "任务仍可处于待数据复核或待报告"
             ),
         )
+
+    def close_out(self, batch: Batch, user: User | None = None) -> dict:
+        """批次完成后显式释放残余：没用到的工位时间窗、未领用的物料余量、孔位占用、执行人预占。
+
+        已领用未消耗的物料不自动释放：报一条待办，归还或处置确认后才入账。
+        """
+        from ..domain.labware import container_of
+        from ..models import Allocation
+        from .alarm_service import AlarmService
+        from .inventory_service import InventoryService
+        from .sample_service import SampleService
+        from .staffing_service import StaffingService
+
+        moment = now()
+        windows = 0
+        for allocation in self.db.query(Allocation).filter(Allocation.batch_id == batch.id).all():
+            if allocation.starts_at >= moment:
+                self.db.delete(allocation)
+                windows += 1
+            elif allocation.ends_at > moment:
+                allocation.ends_at = moment
+                windows += 1
+        material = InventoryService(self.db, self.ctx).release_batch_reservations(batch.id, user, reason="批次完成：释放未领用余量")
+        slots = SampleService(self.db, self.ctx).release_slots(container_of(batch.id))
+        people = StaffingService(self.db, self.ctx).close_batch(batch)
+        pending = material.get("pending_return") or []
+        if pending:
+            AlarmService(self.db, self.ctx).raise_alarm(
+                4, "batch", batch.id,
+                f"{batch.id} 完成后仍有 {len(pending)} 项已领用未消耗的物料："
+                + "、".join(f"{row['lot_id']} {row['quantity']}{row['unit']}" for row in pending[:5]),
+                response="归还入库或登记处置后才释放预留",
+                condition_key=f"batch:{batch.id}:pending_return",
+            )
+        summary = {"windows": windows, "materials_released": material.get("released", 0),
+                   "pending_return": len(pending), "slots": slots, **{f"people_{k}": v for k, v in people.items()}}
+        if any(summary.values()):
+            self.audit.record(
+                user, "批次收尾释放", batch.id, before="已完成", after="残余已释放",
+                detail=(f"工位时间窗 {windows} 个；未领用物料 {summary['materials_released']} 项；孔位 {slots} 个；"
+                        f"执行人预占取消 {people['cancelled']}、完成 {people['done']}"
+                        + (f"；{len(pending)} 项已领用物料待归还或处置" if pending else "")),
+            )
+        return summary
 
     def next_open_step(
         self, steps: list[dict], batch: Batch, from_index: int
