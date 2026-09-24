@@ -225,7 +225,7 @@ class ExecutionService:
             params=command.params or {}, type=command.type, batch_id=batch.id,
             step_index=command.step_index,
             step_id=self._step_id(batch, command.step_index),
-            target_command_id=target,
+            target_command_id=target, method=dict(command.method or {}),
         )
         if command.type in {"hold", "abort"} and not (
             record.supports_hold if command.type == "hold" else record.supports_abort

@@ -43,6 +43,8 @@ def device_arguments(parser: argparse.ArgumentParser, *, default_port: int) -> a
     parser.add_argument("--task-seconds", type=float, default=float(env("SIM_TASK_SECONDS", "5")))
     parser.add_argument("--material-map", default=env("SIM_MATERIAL_MAP", ""),
                         help='组分 → 物料映射，如 {"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}')
+    parser.add_argument("--methods", default=env("SIM_METHODS", ""),
+                        help="自报的设备端程序，逗号分隔，如 SLURRY-MIX-A,SLURRY-MIX-B；缺省报「*」接受任意程序")
     parser.add_argument("--tick-seconds", type=float, default=float(env("SIM_TICK_SECONDS", "1")))
     return parser
 
@@ -57,6 +59,7 @@ def build_device(args: argparse.Namespace) -> SimulatedDevice:
     return SimulatedDevice(
         args.device_id, args.profile, channels=args.channels, task_seconds=args.task_seconds,
         material_map=load_material_map(args.material_map), model=args.model, telemetry_sink=sink,
+        methods=[{"program": item.strip(), "name": item.strip()} for item in (args.methods or "").split(",") if item.strip()],
     )
 
 

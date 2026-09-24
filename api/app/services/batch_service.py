@@ -22,6 +22,7 @@ from ..domain import graph as dag
 from ..domain import preflight, recovery
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
+from ..domain.methods import command_method
 from ..domain.permissions import ROLE_NAMES
 from ..domain.resources import Window, evaluate_steps
 from ..domain.scheduling import WORK
@@ -548,7 +549,7 @@ class BatchService:
     def _freeze_recipe(self, recipe) -> dict:
         """冻结方法快照。子流程在这里展开：之后被引用的方法怎么修订，这个批次的步骤都不变。"""
         from ..domain.subflow import SubflowError, has_subflow, merge_bom
-        from .flow_expansion import expanded_steps
+        from .flow_expansion import expanded_steps, resolved_steps
 
         steps = normalize(recipe.steps or [])
         bom = list(recipe.bom or [])
@@ -568,6 +569,14 @@ class BatchService:
                     if group["step_id"] not in seen:
                         seen.add(group["step_id"])
                         subflows.append(group)
+        # 设备方法引用（含子方法里的）：补缺省参数并冻结方法快照；引用失效（未发布 / 已退役 / 不一致）不建批次
+        steps, method_problems = resolved_steps(self.db, self.ctx, steps)
+        if method_problems:
+            labels = [f"{step_id}：{problem}" for step_id, rows in method_problems.items() for problem in rows]
+            raise StateConflict(
+                f"设备方法引用失效：{labels[0]}",
+                {"blocked": [{"key": "method", "label": label} for label in labels]}, code="method_invalid",
+            )
         return copy.deepcopy(
             {
                 "id": recipe.id, "name": recipe.name, "version": recipe.version, "plate": recipe.plate,
@@ -959,6 +968,8 @@ class BatchService:
             station_id=target_station,
             capability=capability if capability is not None else step.get("cap", ""),
             params=params,
+            # 转运、保持、终止不是按方法做的动作，只有设备动作带方法
+            method=command_method(step) if command_type in DISPATCHING and capability is None else {},
             type=command_type,
             state="sent",
             delivery_state="queued",

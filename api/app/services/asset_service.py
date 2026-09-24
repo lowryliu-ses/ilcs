@@ -103,7 +103,9 @@ class AssetService:
             "asset_no": asset.asset_no,
             "name": asset.name,
             "model": asset.model,
+            "vendor": asset.vendor,
             "serial": asset.serial,
+            "firmware": asset.firmware,
             "lab_id": asset.lab_id,
             "location": asset.location,
             "state": asset.state,
@@ -231,6 +233,7 @@ class AssetService:
             )
         asset = Asset(
             asset_no=asset_no, name=payload["name"], model=payload.get("model", ""),
+            vendor=payload.get("vendor", ""), firmware=payload.get("firmware", ""),
             serial=payload.get("serial", ""), lab_id=payload.get("lab_id", ""),
             owner_person_id=payload.get("owner_person_id", ""),
             location=payload.get("location", ""), state=payload.get("state", "active"),

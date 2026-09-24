@@ -76,6 +76,9 @@ class SimulatedDevice:
         model: str = "ILCS-SIM",
         serial: str = "",
         telemetry_sink: Callable[[str, list[dict]], None] | None = None,
+        methods: list[dict] | None = None,
+        vendor: str = "SES 模拟器",
+        firmware: str = "sim-1.0",
     ):
         if profile not in PROFILES:
             raise ValueError(f"未知设备类型 {profile}")
@@ -87,6 +90,10 @@ class SimulatedDevice:
         self.model = model
         self.serial = serial or device_id
         self.telemetry_sink = telemetry_sink
+        # 自报的方法目录：没配置时报「*」——模拟器接受任何设备端程序
+        self.methods = methods or [{"program": "*", "name": "任意设备端程序（模拟器）"}]
+        self.vendor = vendor
+        self.firmware = firmware
         self.fault = "none"
         self.fault_parameter = 0.0
         self.interlock = False
@@ -236,7 +243,8 @@ class SimulatedDevice:
     def identity(self) -> dict:
         return {
             "device_id": self.device_id, "model": self.model, "serial": self.serial,
-            "firmware": "sim-1.0", "simulator": True, "profile": self.profile,
+            "vendor": self.vendor, "firmware": self.firmware, "simulator": True, "profile": self.profile,
+            "methods": self.methods, "commands": ["dispatch", "resume", "retry", "hold", "abort", "query"],
             "channels": self.channels, "interlock": self.interlock,
             "accepts_commands": self.fault not in {"busy"}, "device_ts": self._ts(),
         }

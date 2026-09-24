@@ -135,6 +135,12 @@ def update_adapter(
     )
 
 
+@router.post("/stations/{station_id}/adapter/describe")
+def describe_adapter(station_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
+    """读驱动自报的厂商、固件、方法目录与指令类型。工位匹配据此判断能否按某条设备方法执行。"""
+    return StationService(db, ctx).describe_adapter(station_id, user)
+
+
 @router.post("/stations/{station_id}/adapter/test")
 def test_adapter(station_id: str, db: DbSession, ctx=require("station.edit")):
     return StationService(db, ctx).test_adapter(station_id)

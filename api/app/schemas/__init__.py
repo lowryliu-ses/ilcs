@@ -144,7 +144,9 @@ class AssetCreateIn(BaseModel):
     asset_no: str
     name: str
     model: str = ""
+    vendor: str = ""
     serial: str = ""
+    firmware: str = ""
     lab_id: str = ""
     owner_person_id: str = ""
     location: str = ""
@@ -160,7 +162,9 @@ class AssetPatchIn(Versioned):
 
     name: str | None = None
     model: str | None = None
+    vendor: str | None = None
     serial: str | None = None
+    firmware: str | None = None
     lab_id: str | None = None
     owner_person_id: str | None = None
     location: str | None = None
@@ -237,6 +241,50 @@ class RecipePatchIn(BaseModel):
     bom: list[dict[str, Any]] | None = None
     # 乐观并发：编辑器带上读到的版本，别人先改过就 409
     row_version: int | None = None
+
+
+class MethodParamRule(BaseModel):
+    default: float | None = None
+    min: float | None = None
+    max: float | None = None
+    unit: str = ""
+
+
+class MethodOutputRule(BaseModel):
+    """数据输出规则：设备这一步应该回报哪些值、单位与合理范围。越界的值入库打标，不拒收。"""
+
+    key: str
+    label: str = ""
+    unit: str = ""
+    lo: float | None = None
+    hi: float | None = None
+    required: bool = False
+
+
+class DeviceMethodIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    capability_id: str
+    instrument_models: list[str] = []
+    program: str = ""
+    params: dict[str, MethodParamRule] = {}
+    outputs: list[MethodOutputRule] = []
+    dur_min: float = Field(default=0, ge=0)
+    note: str = ""
+
+
+class DeviceMethodPatchIn(Versioned):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    capability_id: str | None = None
+    instrument_models: list[str] | None = None
+    program: str | None = None
+    params: dict[str, MethodParamRule] | None = None
+    outputs: list[MethodOutputRule] | None = None
+    dur_min: float | None = Field(default=None, ge=0)
+    note: str | None = None
 
 
 class SimulateIn(BaseModel):

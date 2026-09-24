@@ -28,6 +28,14 @@ class SimulationAdapter:
         )
         self._ledger: dict[str, CommandResult] = {}
 
+    def identity(self) -> dict:
+        # 内置模拟适配器接受任何设备端程序
+        return {
+            "vendor": "ILCS 内置模拟", "model": "", "firmware": "", "simulator": True,
+            "methods": [{"program": "*", "name": "任意设备端程序（内置模拟）"}],
+            "commands": ["dispatch", "resume", "retry", "hold", "abort", "query"],
+        }
+
     def healthcheck(self) -> dict:
         return {
             "reachable": True,

@@ -17,8 +17,8 @@ import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type F
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type {
-  BomItem, BranchCase, CapabilityRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary, SopVersionRow,
-  StationRow,
+  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary,
+  SopVersionRow, StationRow,
 } from '../../shared/types';
 import { CheckList, Field, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import {
@@ -125,6 +125,9 @@ export function RecipeEditorPage() {
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'));
   const lots = useQuery<LotRow[]>('lots', () => api.get<LotRow[]>('/lots'));
+  const methods = useQuery<DeviceMethodRow[]>('device-methods:released', () =>
+    api.get<DeviceMethodRow[]>('/device-methods?state=released'),
+  );
   const recipes = useQuery<RecipeSummary[]>('recipes', () => api.get<RecipeSummary[]>('/recipes'));
   // 只取已发布且生效的版本：草稿与已退役的 SOP 不该被新方法引用
   const sops = useQuery<SopVersionRow[]>('sops:effective', () => api.get<SopVersionRow[]>('/sops/effective'));
@@ -354,6 +357,8 @@ export function RecipeEditorPage() {
     if (!capability) return;
     setStep(id, (step) => {
       const wasDefaultName = step.name === capabilityIndex[step.cap]?.name;
+      // 换了能力，原来引用的设备方法就不适用了
+      if (step.cap !== capabilityId) delete step.method;
       step.cap = capabilityId;
       step.params = defaultParams(stations.data, capability);
       if (wasDefaultName) step.name = capability.name;
@@ -602,6 +607,7 @@ export function RecipeEditorPage() {
             capabilities={capabilities.data ?? []}
             capabilityIndex={capabilityIndex}
             stations={stations.data}
+            methods={methods.data ?? []}
             readOnly={readOnly}
             onBack={() => setSelected(null)}
             onSet={(change) => setStep(ids[selectedIndex], change)}
@@ -719,6 +725,7 @@ function StepProperties({
   capabilities,
   capabilityIndex,
   stations,
+  methods,
   readOnly,
   onBack,
   onSet,
@@ -739,6 +746,7 @@ function StepProperties({
   capabilities: CapabilityRow[];
   capabilityIndex: Record<string, CapabilityRow>;
   stations: StationRow[] | undefined;
+  methods: DeviceMethodRow[];
   readOnly: boolean;
   onBack: () => void;
   onSet: (change: (step: RecipeStep) => void) => void;
@@ -812,6 +820,10 @@ function StepProperties({
             ))}
           </select>
         </Field>
+      ) : null}
+
+      {kind === 'device' ? (
+        <MethodField step={step} methods={methods} readOnly={readOnly} onSet={onSet} />
       ) : null}
 
       {kind === 'manual' ? <ManualFields step={step} readOnly={readOnly} onSet={onSet} /> : null}
@@ -922,11 +934,15 @@ function StepProperties({
       {kind !== 'device' ? null : Object.entries(capability?.params ?? {}).map(([key, paramLabel]) => {
         const range = paramRange(stations, step.cap, key);
         const value = step.params?.[key];
-        const ok = !!range && typeof value === 'number' && value >= range[0] && value <= range[1];
+        const rule = step.method?.params?.[key];
+        const inMethod =
+          !rule || typeof value !== 'number' || ((rule.min == null || value >= rule.min) && (rule.max == null || value <= rule.max));
+        const ok = !!range && typeof value === 'number' && value >= range[0] && value <= range[1] && inMethod;
         return (
           <Field
             key={key}
             label={`${paramLabel}　${range ? `[${range[0]}, ${range[1]}]` : '无工位定义该参数'}`}
+            hint={rule ? `设备方法允许 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]${rule.unit ? ` ${rule.unit}` : ''}，缺省 ${rule.default ?? '—'}` : undefined}
           >
             <NumberInput
               value={value ?? ''}
@@ -1808,3 +1824,66 @@ function TimeoutFields({
   );
 }
 
+/** 设备方法：流程管做什么，方法管怎么做。选一条已发布的方法后，能力随方法、参数取方法缺省值，
+    只有方法适用型号、且设备报告支持该程序的工位才能承接。 */
+function MethodField({
+  step,
+  methods,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  methods: DeviceMethodRow[];
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const candidates = methods.filter((row) => !step.cap || row.capability_id === step.cap);
+  const current = step.method?.id;
+  const known = current ? methods.find((row) => row.id === current) : undefined;
+  return (
+    <Field
+      label="设备方法"
+      hint={
+        current
+          ? known
+            ? `${known.code} v${known.version} · 程序 ${known.program || '—'} · 适用型号 ${known.instrument_models.join('、') || '不限'}`
+            : `引用的方法 ${step.method?.code ?? current} v${step.method?.version ?? '?'} 已不是有效发布版本，请改选`
+          : '不引用时参数直接写在步骤上；引用后参数取方法缺省值并受方法范围约束'
+      }
+    >
+      <select
+        value={current ?? ''}
+        disabled={readOnly}
+        onChange={(event) =>
+          onSet((draft) => {
+            const picked = methods.find((row) => row.id === event.target.value);
+            if (!picked) {
+              delete draft.method;
+              return;
+            }
+            draft.method = {
+              id: picked.id, code: picked.code, version: picked.version, name: picked.name, program: picked.program,
+              instrument_models: picked.instrument_models, params: picked.params,
+            };
+            draft.cap = picked.capability_id;
+            const defaults = Object.fromEntries(
+              Object.entries(picked.params)
+                .filter(([, rule]) => rule.default != null)
+                .map(([key, rule]) => [key, Number(rule.default)]),
+            );
+            draft.params = { ...draft.params, ...defaults };
+            if (picked.dur_min) draft.dur = picked.dur_min;
+          })
+        }
+      >
+        <option value="">不引用设备方法</option>
+        {current && !known ? <option value={current}>{`${step.method?.code ?? current} v${step.method?.version ?? '?'}（失效）`}</option> : null}
+        {candidates.map((row) => (
+          <option key={row.id} value={row.id}>
+            {row.code} v{row.version} · {row.name}
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}

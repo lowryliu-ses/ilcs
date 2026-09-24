@@ -34,7 +34,7 @@ from ..models import Recipe
 from ..repositories.recipes import RecipeRepository
 from ..repositories.materials import LotRepository
 from ..repositories.resources import CapabilityRepository, StationRepository
-from .flow_expansion import expanded_steps
+from .flow_expansion import expanded_steps, resolved_steps
 from .inventory_service import InventoryService
 from .schedule_service import ScheduleService
 
@@ -96,7 +96,7 @@ class SimulationService:
         steps = normalize(recipe.steps or [])
         bom = list(recipe.bom or [])
         if not has_subflow(steps):
-            return steps, bom, ""
+            return resolved_steps(self.db, self.ctx, steps)[0], bom, ""
         try:
             expanded, extra = expanded_steps(self.db, self.ctx, recipe)
         except SubflowError as error:

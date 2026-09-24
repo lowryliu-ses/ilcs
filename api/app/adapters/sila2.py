@@ -190,7 +190,8 @@ class Sila2Adapter:
         return json.dumps({
             "batch_id": request.batch_id, "step_index": request.step_index, "step_id": request.step_id,
             "target_command_id": request.target_command_id,
-        })
+            **({"method": request.method} if request.method else {}),
+        }, ensure_ascii=False)
 
     def submit(self, request: CommandRequest) -> CommandResult:
         response = self._invoke(

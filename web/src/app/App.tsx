@@ -19,6 +19,7 @@ import { RecipeDetailPage } from '../features/recipes/RecipeDetailPage';
 import { RecipeEditorPage } from '../features/recipes/RecipeEditorPage';
 import { ExceptionsPage } from '../features/exceptions/ExceptionsPage';
 import { IntegrationsPage } from '../features/integrations/IntegrationsPage';
+import { MethodsPage } from '../features/methods/MethodsPage';
 import { RecipesPage } from '../features/recipes/RecipesPage';
 import { ReportsPage } from '../features/reports/ReportsPage';
 import { ResultsPage } from '../features/results/ResultsPage';
@@ -39,7 +40,7 @@ import type { Dashboard, Gate } from '../shared/types';
    点进去看到空页面比没有这一项更糟。 */
 const NAV: [string, [string, string][]][] = [
   ['概览', [['/dashboard', '工作台']]],
-  ['设计', [['/plans', '实验方案'], ['/recipes', '方法与配方'], ['/sops', 'SOP']]],
+  ['设计', [['/plans', '实验方案'], ['/recipes', '方法与配方'], ['/methods', '设备方法'], ['/sops', 'SOP']]],
   ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心'], ['/exceptions', '异常中心']]],
   ['科学数据', [['/samples', '样本中心'], ['/data-review', '数据审核'], ['/results', '结果分析'], ['/reports', '报告']]],
   ['资源', [['/assets', '仪器设备'], ['/stations', '工位与能力'], ['/materials', '试剂耗材'], ['/people', '人员与资质']]],
@@ -157,6 +158,7 @@ export function App() {
           <Route path="/batches/:batchId" element={<BatchDetailPage />} />
           <Route path="/exceptions" element={<ExceptionsPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
+          <Route path="/methods" element={<MethodsPage />} />
           <Route path="/samples" element={<SamplesPage />} />
           <Route path="/samples/:sampleId" element={<SampleDetailPage />} />
           <Route path="/data-review" element={<DataReviewPage />} />

@@ -18,6 +18,7 @@ from ..repositories.resources import CapabilityRepository, StationRepository
 from ..repositories.sops import SopVersionRepository
 from .audit_service import AuditService
 from .identity_service import IdentityService, admin_self_approval, user_may
+from .flow_expansion import resolved_steps
 from .simulation_service import SimulationService, content_hash
 
 def _content_hash(recipe: Recipe) -> str:
@@ -45,9 +46,11 @@ class RecipeService:
     # ---------- 读 ----------
 
     def validation_of(self, recipe: Recipe) -> list[dict]:
+        # 设备方法引用先解析：缺省参数、适用型号与程序要参与工位匹配
+        steps, method_problems = resolved_steps(self.db, self.ctx, recipe.steps or [])
         return validate_steps(
-            normalize(recipe.steps or []), self.stations.specs(), self.capabilities.specs(),
-            self._subflow_problems(recipe),
+            steps, self.stations.specs(), self.capabilities.specs(),
+            self._subflow_problems(recipe), method_problems,
         )
 
     def _subflow_problems(self, recipe: Recipe) -> dict[str, list[str]]:

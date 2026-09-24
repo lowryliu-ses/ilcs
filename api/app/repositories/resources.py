@@ -20,13 +20,22 @@ class StationRepository(ScopedRepository[Station]):
         return list(self.query().order_by(Station.island, Station.id).all())
 
     def specs(self) -> list[StationSpec]:
+        stations = self.list()
+        adapters = {
+            row.station_id: row
+            for row in self.db.query(Adapter).filter(Adapter.station_id.in_([s.id for s in stations])).all()
+        } if stations else {}
         return [
             StationSpec(
                 id=s.id, status=s.status, clean=s.clean, cal_due=s.cal_due,
                 positions=s.positions, channels=s.channels or 1, limits=s.limits or {}, retired=s.retired,
-                asset_id=s.asset_id or "",
+                asset_id=s.asset_id or "", model=s.model or "",
+                programs=tuple(
+                    str(row.get("program")) for row in (getattr(adapters.get(s.id), "methods", None) or [])
+                    if isinstance(row, dict) and row.get("program")
+                ),
             )
-            for s in self.list()
+            for s in stations
         ]
 
     def for_asset(self, asset_id: str) -> list[Station]:

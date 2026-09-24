@@ -23,6 +23,8 @@ class Command(Base):
     station_id: Mapped[str] = mapped_column(ForeignKey("stations.id"))
     capability: Mapped[str] = mapped_column(String)
     params: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 步骤引用的设备方法（快照里冻结的编号、版本、设备端程序）；驱动按 program 选设备上的程序
+    method: Mapped[dict] = mapped_column(JSON, default=dict)
     type: Mapped[str] = mapped_column(String)
     state: Mapped[str] = mapped_column(String, default="sent")
     # queued | maybe_sent | delivered | unreachable

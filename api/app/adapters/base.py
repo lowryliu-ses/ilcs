@@ -70,6 +70,8 @@ class CommandRequest:
     step_id: str = ""
     # 保持 / 终止针对的在途动作指令；设备侧据此确认要停的是哪一个动作
     target_command_id: str = ""
+    # 步骤引用的设备方法：{id, code, version, name, program}；驱动按 program 选设备端程序
+    method: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -45,12 +45,17 @@ def command_event(command_id: str, payload: CommandEventIn, db: DbSession, ctx: 
 
 @router.get("/adapters")
 def adapter_contracts(db: DbSession, ctx: ServiceCtx):
-    """适配器契约自述。界面据此禁用设备不支持的动作。"""
-    from ...adapters.registry import contract_of
+    """适配器契约自述：支持的能力、保持 / 终止 / 查询 / 去重，以及驱动自报的方法目录与指令类型。"""
+    from ...adapters.registry import catalog_of, contract_of
 
     service = StationService(db, ctx)
+    limits = {station.id: tuple((station.limits or {}).keys()) for station in service.stations.list()}
     return [
-        {"station_id": record.station_id, **contract_of(record).as_dict()}
+        {
+            "station_id": record.station_id,
+            **contract_of(record, limits.get(record.station_id, ())).as_dict(),
+            **catalog_of(record),
+        }
         for record in service.adapters.list()
     ]
 

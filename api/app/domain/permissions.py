@@ -17,6 +17,8 @@ PERMISSIONS: dict[str, list[str]] = {
     "recipe.submit": ["researcher", "admin"],
     "recipe.approve": ["qa", "admin"],
     "recipe.release": ["qa", "admin"],
+    "method.edit": ["researcher", "admin"],
+    "method.release": ["qa", "admin"],
     "plan.edit": ["researcher", "admin"],
     "plan.submit": ["researcher", "admin"],
     "plan.approve": ["qa", "admin"],
@@ -107,7 +109,8 @@ ACTION_NAMES = {
 PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
     ("方法与方案", [
         ("recipe.edit", "编辑方法"), ("recipe.submit", "提交方法评审"), ("recipe.approve", "批准方法"),
-        ("recipe.release", "发布方法"), ("plan.edit", "编辑实验方案"), ("plan.submit", "提交方案评审"),
+        ("recipe.release", "发布方法"), ("method.edit", "起草与修订设备方法"), ("method.release", "发布与退役设备方法"),
+        ("plan.edit", "编辑实验方案"), ("plan.submit", "提交方案评审"),
         ("plan.approve", "批准实验方案"),
     ]),
     ("任务与执行", [

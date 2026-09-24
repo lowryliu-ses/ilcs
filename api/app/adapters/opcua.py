@@ -260,7 +260,8 @@ class OpcUaAdapter:
         context = json.dumps({
             "batch_id": request.batch_id, "step_index": request.step_index, "step_id": request.step_id,
             "target_command_id": request.target_command_id,
-        })
+            **({"method": request.method} if request.method else {}),
+        }, ensure_ascii=False)
         response = self._invoke(
             "SubmitTask", request.command_id, request.type, request.capability,
             json.dumps(request.params or {}, ensure_ascii=False), context,

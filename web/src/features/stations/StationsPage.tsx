@@ -5,7 +5,7 @@ import { time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { AdapterRow, AdapterTestResult, CapabilityRow, CommandRow, Recovery, StationRow } from '../../shared/types';
+import type { AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, CommandRow, Recovery, StationRow } from '../../shared/types';
 import { ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 
 export function StationsPage() {
@@ -209,6 +209,11 @@ export function StationsPage() {
                     <td className="small">
                       {adapter.protocol}
                       <div className="tiny muted">v{adapter.version}</div>
+                      {adapter.catalog?.described_at ? (
+                        <div className="tiny muted">
+                          {adapter.catalog.vendor || '—'} · 固件 {adapter.catalog.firmware || '—'} · 程序 {adapter.catalog.methods.length} 个
+                        </div>
+                      ) : null}
                     </td>
                     <td>
                       <Pill
@@ -449,6 +454,14 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
       },
     },
   );
+  const describe = useMutation(
+    () => api.post<AdapterCatalog & { warning: string }>(`/stations/${station.id}/adapter/describe`),
+    {
+      invalidates: ['stations', `adapter-detail-${station.id}`, 'audit'],
+      onSuccess: (result) =>
+        toast.push(result.warning || `已读取 ${result.methods.length} 个设备端程序（${result.described_from === 'device' ? '设备自报' : '按登记配置'}）`),
+    },
+  );
   const test = useMutation(
     () => api.post<AdapterTestResult>(`/stations/${station.id}/adapter/test`),
     {
@@ -580,6 +593,9 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
           <button className="btn" disabled={test.pending} onClick={() => test.run().catch((caught) => setError(caught.message))}>
             {test.pending ? '测试中…' : '测试当前已保存配置'}
           </button>
+          <button className="btn" disabled={describe.pending} onClick={() => describe.run().catch((caught) => setError(caught.message))}>
+            {describe.pending ? '读取中…' : '读取设备方法目录'}
+          </button>
           <button className="btn primary" disabled={save.pending} onClick={submit}>签名并保存</button>
         </>
       }
@@ -647,6 +663,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
         <textarea rows={2} value={draft.note} onChange={(event) => update('note', event.target.value)} />
       </Field>
       <div className="small muted">当前配置 v{draft.config_version} · 行版本 v{draft.row_version} · 凭据{draft.credential_configured ? '已配置' : '未配置'}</div>
+      <CatalogNote catalog={detail.data?.catalog} />
       {testResult ? <div className="note">健康检查结果：<span className="mono">{JSON.stringify(testResult.health)}</span></div> : null}
       {error || test.error ? <div className="note bad">{error || test.error?.message}</div> : null}
     </Modal>
@@ -1460,5 +1477,22 @@ function commandLabel(state: string): string {
       sent: '已发送', accepted: '设备已接受', running: '执行中', done: '已完成',
       unknown: '结果未知', manual: '人工核查中', rejected: '设备拒绝',
     }[state] ?? state
+  );
+}
+
+/** 驱动自报的设备身份与方法目录。空目录不据此筛工位；「*」表示接受任意设备端程序。 */
+function CatalogNote({ catalog }: { catalog?: AdapterCatalog }) {
+  if (!catalog?.described_at) {
+    return <div className="small muted">还没读取过设备方法目录；流程引用设备方法时，这台设备按「未报目录」处理，不据程序排除。</div>;
+  }
+  return (
+    <div className="note">
+      <b>设备目录</b>（{catalog.described_from === 'device' ? '设备自报' : catalog.described_from === 'config' ? '按登记配置' : '无目录'} ·{' '}
+      {time(catalog.described_at)}）：厂商 {catalog.vendor || '—'} · 型号 {catalog.reported_model || '—'} · 固件 {catalog.firmware || '—'}
+      <div className="small">
+        程序：{catalog.methods.map((row) => (row.program === '*' ? '任意程序' : `${row.program}${row.name !== row.program ? `（${row.name}）` : ''}`)).join('、') || '无'}
+      </div>
+      <div className="small muted">指令：{catalog.commands.join(' / ') || '—'}</div>
+    </div>
   );
 }

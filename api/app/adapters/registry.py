@@ -63,18 +63,64 @@ def _close(instance: DeviceAdapter) -> None:
             pass
 
 
-def contract_of(record: Adapter) -> AdapterContract:
-    """不实例化也能回答界面「这台设备支持什么」。"""
+def contract_of(record: Adapter, capabilities: tuple[str, ...] = ()) -> AdapterContract:
+    """不实例化也能回答界面「这台设备支持什么」。能力取工位能力极限登记的能力。"""
     return AdapterContract(
         kind=record.kind,
         protocol=record.protocol,
         version=record.version,
+        capabilities=tuple(capabilities),
         supports_hold=record.supports_hold,
         supports_abort=record.supports_abort,
         supports_query=record.supports_query,
         supports_dedup=record.supports_dedup,
         note=record.note,
     )
+
+
+def catalog_of(record: Adapter) -> dict:
+    """驱动自报（或按登记配置）的设备身份与方法目录，界面与工位匹配用。"""
+    return {
+        "vendor": record.vendor or "", "firmware": record.firmware or "", "reported_model": record.reported_model or "",
+        "methods": list(record.methods or []), "commands": list(record.commands or []),
+        "described_from": record.described_from or "",
+        "described_at": record.described_at.isoformat(timespec="seconds") if record.described_at else None,
+    }
+
+
+def describe(instance: DeviceAdapter, record: Adapter) -> dict:
+    """读设备自报的身份与方法目录。
+
+    SiLA 2 / OPC UA / HTTP 网关的设备身份是一段 JSON，带了 `methods` / `commands` 就按设备自报；
+    Modbus 这类寄存器协议带不了目录，按适配器配置里登记的 `methods`（来源标 config）。
+    读身份失败照常抛异常（结果按离线处理），不返回假目录。
+    """
+    identity = getattr(instance, "identity", None)
+    raw = identity() if identity is not None else {}
+    raw = raw if isinstance(raw, dict) else {}
+    config = record.config or {}
+    reported = raw.get("methods")
+    if isinstance(reported, list):
+        methods, source = reported, "device"
+    elif isinstance(config.get("methods"), list):
+        methods, source = config["methods"], "config"
+    else:
+        methods, source = [], "none"
+    rows = []
+    for item in methods:
+        row = {"program": item} if isinstance(item, str) else dict(item) if isinstance(item, dict) else {}
+        if str(row.get("program") or "").strip():
+            rows.append({
+                "program": str(row["program"]).strip(), "name": str(row.get("name") or row["program"]),
+                "capability": str(row.get("capability") or ""),
+            })
+    commands = raw.get("commands") if isinstance(raw.get("commands"), list) else config.get("commands") or []
+    return {
+        "vendor": str(raw.get("vendor") or config.get("vendor") or ""),
+        "firmware": str(raw.get("firmware") or raw.get("version") or config.get("firmware") or ""),
+        "reported_model": str(raw.get("model") or ""),
+        "methods": rows, "commands": [str(value) for value in commands], "described_from": source,
+    }
 
 
 def reset_cache() -> None:

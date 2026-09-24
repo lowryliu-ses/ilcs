@@ -96,11 +96,27 @@ export function defaultParams(stations: StationRow[] | undefined, capability: Ca
   );
 }
 
+/** 步骤引用设备方法时，工位还要满足：型号在适用清单里、驱动自报过的程序目录包含该程序（没报过目录不筛）。
+    与服务端 `domain/methods.station_allows` 同一判据。 */
+export function methodBlocksStation(station: StationRow, step: RecipeStep): string[] {
+  const method = step.method;
+  if (!method?.id) return [];
+  const reasons: string[] = [];
+  const models = (method.instrument_models ?? []).filter((value) => value.trim());
+  if (models.length && !models.includes(station.model)) reasons.push(`型号 ${station.model || '未登记'} 不在方法适用型号内`);
+  const programs = (station.adapter?.catalog?.methods ?? []).map((row) => row.program);
+  if (method.program && programs.length && !programs.includes('*') && !programs.includes(method.program)) {
+    reasons.push(`设备未报告支持程序 ${method.program}`);
+  }
+  return reasons;
+}
+
 export function stationsForStep(stations: StationRow[] | undefined, step: RecipeStep): StationRow[] {
   if (!needsStation(step)) return [];
   return (stations ?? []).filter((station) => {
     const implemented = station.limits?.[step.cap];
     if (!implemented) return false;
+    if (methodBlocksStation(station, step).length) return false;
     return Object.entries(step.params ?? {}).every(([key, value]) => {
       const window = implemented[key];
       if (!window) return false;
@@ -125,6 +141,15 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
       if (!(key in defined)) issues.push(`参数 ${key} 不属于该能力`);
     });
   }
+  // 引用设备方法：参数必须落在方法允许的范围内（与服务端 `domain/methods.step_problems` 同源）
+  const rules = step.method?.params ?? {};
+  Object.entries(step.params ?? {}).forEach(([key, value]) => {
+    const rule = rules[key];
+    if (!rule || typeof value !== 'number') return;
+    if ((rule.min != null && value < rule.min) || (rule.max != null && value > rule.max)) {
+      issues.push(`参数 ${key}=${value} 超出设备方法允许的 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]`);
+    }
+  });
   return issues;
 }
 

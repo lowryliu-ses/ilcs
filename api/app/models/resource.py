@@ -29,7 +29,9 @@ class Asset(Base):
     asset_no: Mapped[str] = mapped_column(String)
     name: Mapped[str] = mapped_column(String)
     model: Mapped[str] = mapped_column(String, default="")
+    vendor: Mapped[str] = mapped_column(String, default="")
     serial: Mapped[str] = mapped_column(String, default="")
+    firmware: Mapped[str] = mapped_column(String, default="")
     lab_id: Mapped[str] = mapped_column(String, default="")
     owner_person_id: Mapped[str] = mapped_column(String, default="")
     location: Mapped[str] = mapped_column(String, default="")
@@ -142,6 +144,17 @@ class Adapter(Base):
     supports_abort: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_query: Mapped[bool] = mapped_column(Boolean, default=True)
     supports_dedup: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 驱动自报（或登记时声明）的设备身份与方法目录。空列表表示没报过，不据此筛工位
+    vendor: Mapped[str] = mapped_column(String, default="")
+    firmware: Mapped[str] = mapped_column(String, default="")
+    reported_model: Mapped[str] = mapped_column(String, default="")
+    # [{program, name, capability}]
+    methods: Mapped[list] = mapped_column(JSON, default=list)
+    # 设备接受的指令类型，如 dispatch / hold / abort / query / resume
+    commands: Mapped[list] = mapped_column(JSON, default=list)
+    # device：设备自报；config：驱动协议带不了方法目录，按登记配置
+    described_from: Mapped[str] = mapped_column(String, default="")
+    described_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class MaintenanceOrder(Base):

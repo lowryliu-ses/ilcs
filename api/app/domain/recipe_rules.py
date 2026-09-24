@@ -103,6 +103,7 @@ def validate_steps(
     stations: list[StationSpec],
     capabilities: CapabilitySpecs,
     subflow_problems: dict[str, list[str]] | None = None,
+    method_problems: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     """逐步校验。`subflow_problems` 是服务层展开子流程引用得到的问题（按步骤标识），
     这里不碰数据库，所以引用的方法存不存在、有没有发布由调用方查好传进来。"""
@@ -125,6 +126,7 @@ def validate_steps(
             issues.extend(branch_issues(step, steps, index))
         if kind == SUBFLOW:
             issues.extend((subflow_problems or {}).get(step_id, []))
+        issues.extend((method_problems or {}).get(step_id, []))
         if step_id in seen_ids:
             issues.append(f"步骤标识 {step_id} 与第 {seen_ids[step_id] + 1} 步重复")
         seen_ids[step_id] = index
@@ -154,6 +156,7 @@ def validate_steps(
                 "split": step.get("split") or {},
                 "branch": step.get("branch") or {},
                 "subflow": step.get("subflow") or {},
+                "method": step.get("method") or {},
                 "when": step.get("when") or {},
                 "timeout": step.get("timeout") or None,
                 "skippable": bool(step.get("skippable")),

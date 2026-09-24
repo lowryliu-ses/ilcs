@@ -256,7 +256,9 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
               <strong className="metric-value mono" style={{ fontSize: 14 }}>
                 {asset.serial || '—'}
               </strong>
-              <span className="metric-hint">设备心跳会拿它与这里核对</span>
+              <span className="metric-hint">
+                {asset.vendor || '厂商未登记'} · 固件 {asset.firmware || '—'} · 设备心跳会拿序列号与这里核对
+              </span>
             </div>
             <div className="metric">
               <span className="metric-label">责任人</span>
@@ -607,7 +609,9 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
   const [form, setForm] = useState({
     name: asset.name,
     model: asset.model,
+    vendor: asset.vendor ?? '',
     serial: asset.serial,
+    firmware: asset.firmware ?? '',
     location: asset.location,
     state: asset.state,
     capacity: asset.capacity,
@@ -658,6 +662,12 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
         </Field>
         <Field label="序列号">
           <input value={form.serial} onChange={(event) => setForm({ ...form, serial: event.target.value })} />
+        </Field>
+        <Field label="厂商">
+          <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
+        </Field>
+        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件会显示在工位页，二者不一致要核对">
+          <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>
       <Field label="位置">
@@ -738,7 +748,7 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast();
   const [form, setForm] = useState({
-    asset_no: '', name: '', model: '', serial: '', location: '', capacity: 1,
+    asset_no: '', name: '', model: '', vendor: '', serial: '', firmware: '', location: '', capacity: 1,
     calibration_applicable: true, calibration_exempt_reason: '',
   });
 
@@ -784,6 +794,12 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </Field>
         <Field label="序列号">
           <input value={form.serial} onChange={(event) => setForm({ ...form, serial: event.target.value })} />
+        </Field>
+        <Field label="厂商">
+          <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
+        </Field>
+        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件会显示在工位页，二者不一致要核对">
+          <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>
       <Field label="位置">

@@ -2,6 +2,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from .methods import station_allows
+
 
 @dataclass(frozen=True)
 class StationSpec:
@@ -16,6 +18,9 @@ class StationSpec:
     retired: bool = False
     # 一台资产可映射多个工位；容量约束按资产算，不按工位 ID 算
     asset_id: str = ""
+    # 型号与驱动自报的设备端程序目录：步骤引用设备方法时据此筛工位（空目录不筛）
+    model: str = ""
+    programs: tuple[str, ...] = ()
 
     @property
     def healthy(self) -> bool:
@@ -32,6 +37,8 @@ def station_fits(station: StationSpec, step: dict[str, Any]) -> bool:
         return False  # 已停用的工位不再参与匹配，但历史分配仍指向它
     implemented = station.limits.get(step.get("cap", ""))
     if implemented is None:
+        return False
+    if station_allows(station.model, station.programs, step):
         return False
     for name, value in step_params(step).items():
         window = implemented.get(name)
@@ -51,7 +58,7 @@ def out_of_range(station: StationSpec, step: dict[str, Any]) -> list[str]:
     implemented = station.limits.get(step.get("cap", ""))
     if implemented is None:
         return [f"{station.id} 未实现能力 {step.get('cap')}"]
-    reasons = []
+    reasons = [f"{station.id} {reason}" for reason in station_allows(station.model, station.programs, step)]
     for name, value in step_params(step).items():
         window = implemented.get(name)
         if not window:

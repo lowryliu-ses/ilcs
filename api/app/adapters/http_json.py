@@ -253,8 +253,12 @@ class HttpJsonAdapter:
             raise AdapterIndeterminate("设备网关响应必须是 JSON 对象")
         return value
 
+    def identity(self) -> dict:
+        """网关健康接口的原始回报：设备身份、厂商、固件、方法目录都在这里（有就报）。"""
+        return self._call("GET", self.paths["health"])
+
     def healthcheck(self) -> dict:
-        response = self._call("GET", self.paths["health"])
+        response = self.identity()
         if response.get("reachable") is False:
             raise AdapterError("设备网关报告设备不可达")
         if response.get("simulator") and settings.environment == "production":
@@ -278,7 +282,8 @@ class HttpJsonAdapter:
 
     @staticmethod
     def _payload(request: CommandRequest) -> dict:
-        return {
+        extra = {"method": request.method} if request.method else {}
+        return {**extra,
             "command_id": request.command_id,
             "station_id": request.station_id,
             "capability": request.capability,

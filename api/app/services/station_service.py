@@ -11,7 +11,7 @@ from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
 from ..models import Adapter, Capability, Station, User
 from ..adapters.base import AdapterError
-from ..adapters.registry import adapter_for, reset_cache
+from ..adapters.registry import adapter_for, catalog_of, describe, reset_cache
 from ..repositories.batches import AllocationRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.recipes import RecipeRepository
@@ -115,6 +115,8 @@ class StationService:
                     ("状态查询", adapter.supports_query), ("设备端去重", adapter.supports_dedup),
                 ) if not supported
             ),
+            # 驱动自报的设备身份与方法目录
+            "catalog": catalog_of(adapter),
         }
 
     def adapter_detail(self, station_id: str) -> dict:
@@ -491,6 +493,47 @@ class StationService:
             "ok": True, "station_id": station_id,
             "contract": implementation.contract.as_dict(), "health": health,
         }
+
+    def describe_adapter(self, station_id: str, user: User) -> dict:
+        """读驱动自报的厂商、固件、型号、方法目录与指令类型，存到适配器上。
+
+        工位匹配据此判断能不能按某条设备方法执行：方法的设备端程序不在目录里就不排给这台设备。
+        没报过目录（空）不据此排除。
+        """
+        self._require_station(station_id)
+        adapter = self.adapters.get(station_id)
+        if not adapter:
+            raise NotFound("适配器未登记")
+        if not adapter.enabled:
+            raise StateConflict("适配器已停用，不能读取设备目录")
+        try:
+            implementation = adapter_for(adapter)
+            reported = describe(implementation, adapter)
+        except (NotImplementedError, AdapterError) as exc:
+            raise StateConflict(
+                str(exc), {"blocked": [{"key": "driver", "label": str(exc)}]}, code="adapter_driver_unavailable",
+            ) from exc
+        except Exception as exc:
+            raise StateConflict(
+                f"读取设备身份失败：{exc}", {"blocked": [{"key": "connection", "label": str(exc)}]},
+                code="adapter_describe_failed",
+            ) from exc
+        before = f"{len(adapter.methods or [])} 个方法 · 固件 {adapter.firmware or '—'}"
+        for key, value in reported.items():
+            setattr(adapter, key, value)
+        adapter.described_at = now()
+        station = self.stations.get(station_id)
+        warning = ""
+        if station and reported["reported_model"] and station.model and reported["reported_model"] != station.model:
+            warning = f"设备自报型号 {reported['reported_model']} 与台账型号 {station.model} 不一致"
+        self.audit.record(
+            user, "读取设备方法目录", station_id, before=before,
+            after=f"{len(reported['methods'])} 个方法 · 固件 {reported['firmware'] or '—'}",
+            detail=(f"来源 {reported['described_from']}；厂商 {reported['vendor'] or '—'}"
+                    + (f"；{warning}" if warning else "")),
+        )
+        self.db.commit()
+        return {"station_id": station_id, **catalog_of(adapter), "warning": warning}
 
     def update_station(self, station_id: str, changes: dict, user: User) -> dict:
         """改台账信息（名称、型号、岛、样品位、校准到期）。能力极限走单独的签名接口。"""

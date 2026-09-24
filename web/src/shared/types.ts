@@ -451,6 +451,8 @@ export type RecipeStep = {
   when?: Record<string, string>;
   branch?: BranchConfig;
   subflow?: { recipe_id?: string };
+  /** 设备步骤引用的设备方法（流程管做什么，方法管怎么做） */
+  method?: StepMethodRef;
   /** 消息通知节点：发一条 flow.notify 对外事件 */
   notify?: { message?: string; channel?: string };
   timeout?: StepTimeout;
@@ -576,6 +578,67 @@ export type AdapterRow = {
   note: string;
   capabilities: { hold: boolean; abort: boolean; query: boolean; dedup: boolean };
   unsupported_note: string;
+  /** 驱动自报（或按登记配置）的设备身份与方法目录 */
+  catalog?: AdapterCatalog;
+};
+
+export type AdapterCatalog = {
+  vendor: string;
+  firmware: string;
+  reported_model: string;
+  /** program 为「*」表示接受任意设备端程序（模拟器） */
+  methods: { program: string; name: string; capability: string }[];
+  commands: string[];
+  /** device 设备自报；config 按登记配置；none 没有目录 */
+  described_from: '' | 'device' | 'config' | 'none';
+  described_at: string | null;
+};
+
+export type MethodParamRule = { default?: number | null; min?: number | null; max?: number | null; unit?: string };
+export type MethodOutputRule = {
+  key: string;
+  label?: string;
+  unit?: string;
+  lo?: number | null;
+  hi?: number | null;
+  required?: boolean;
+};
+
+/** 设备方法：能力 + 适用型号 + 设备端程序 + 参数范围 + 输出规则，按版本管理 */
+export type DeviceMethodRow = {
+  id: string;
+  code: string;
+  version: number;
+  name: string;
+  capability_id: string;
+  capability_name: string;
+  instrument_models: string[];
+  program: string;
+  params: Record<string, MethodParamRule>;
+  outputs: MethodOutputRule[];
+  dur_min: number;
+  state: 'draft' | 'released' | 'retired';
+  state_label: string;
+  note: string;
+  created_by: string;
+  created_at: string | null;
+  released_by: string;
+  released_at: string | null;
+  issues: string[];
+  row_version: number;
+  used_by: { id: string; name: string; version: string; state: string }[];
+  versions?: { id: string; version: number; state: string; state_label: string; released_at: string | null }[];
+};
+
+/** 设备步骤引用的方法。编辑器里存一份已发布版本的摘要（发布后不可改），服务端建批次时按编号重取并冻结 */
+export type StepMethodRef = {
+  id: string;
+  code?: string;
+  version?: number;
+  name?: string;
+  program?: string;
+  instrument_models?: string[];
+  params?: Record<string, MethodParamRule>;
 };
 
 export type AdapterTestResult = {
@@ -1034,7 +1097,9 @@ export type AssetRow = {
   asset_no: string;
   name: string;
   model: string;
+  vendor: string;
   serial: string;
+  firmware: string;
   lab_id: string;
   location: string;
   state: string;
