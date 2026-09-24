@@ -14,6 +14,14 @@ def list_reports(db: DbSession, ctx: Ctx, paging: Paging, state: str | None = No
     return paging.wrap(items, total)
 
 
+@router.get("/templates")
+def report_templates(ctx: Ctx):
+    """可选报告模板与各自包含的章节。取数只有一套，模板只决定章节与顺序。"""
+    from ...domain.report_templates import catalog
+
+    return catalog()
+
+
 @router.get("/{version_id}")
 def get_report(version_id: str, db: DbSession, ctx: Ctx):
     return ReportService(db, ctx).detail(version_id)

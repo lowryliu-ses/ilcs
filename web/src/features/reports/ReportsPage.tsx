@@ -5,7 +5,7 @@ import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { BatchSummary, Paged, ReportVersionRow } from '../../shared/types';
+import type { BatchSummary, Paged, ReportContent, ReportTemplate, ReportVersionRow } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -150,6 +150,11 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
     () => api.patch(`/reports/${versionId}`, { refresh: true, row_version: detail.data?.row_version }),
     { invalidates, onSuccess: () => toast.push('已按当前已审核结果重新取数') },
   );
+  const templates = useQuery<ReportTemplate[]>('reports:templates', () => api.get<ReportTemplate[]>('/reports/templates'));
+  const switchTemplate = useMutation(
+    (key: string) => api.patch(`/reports/${versionId}`, { template: key, row_version: detail.data?.row_version }),
+    { invalidates, onSuccess: () => toast.push('已切换模板：章节随之变化，数据不变') },
+  );
   const submit = useMutation(() => api.post(`/reports/${versionId}/submit`), {
     invalidates,
     onSuccess: () => toast.push('已提交审核'),
@@ -219,6 +224,17 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
           <div className="panel-aside" style={{ justifyContent: 'flex-end', margin: '10px 0' }}>
             {version.state === 'draft' && can('report.edit') ? (
               <>
+                <select
+                  value={content?.template?.key ?? 'standard'}
+                  disabled={switchTemplate.pending}
+                  onChange={(event) => switchTemplate.run(event.target.value).catch((error) => toast.push(error.message))}
+                >
+                  {(templates.data ?? []).map((row) => (
+                    <option key={row.key} value={row.key}>
+                      模板：{row.name} {row.version}
+                    </option>
+                  ))}
+                </select>
                 <button
                   className="btn sm"
                   disabled={refresh.pending}
@@ -426,6 +442,8 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 )}
               </Panel>
 
+              <ReportExtras content={content} />
+
               {version.publish_snapshot ? (
                 <Panel title="发布快照">
                   <div className="small mono">
@@ -469,9 +487,12 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
   const batches = useQuery<BatchSummary[]>('batches', () => api.get<BatchSummary[]>('/batches'));
   const [batchId, setBatchId] = useState('');
   const [conclusion, setConclusion] = useState('');
+  const [template, setTemplate] = useState('standard');
+  const templates = useQuery<ReportTemplate[]>('reports:templates', () => api.get<ReportTemplate[]>('/reports/templates'));
+  const chosen = templates.data?.find((row) => row.key === template);
 
   const create = useMutation(
-    () => api.post('/reports', { batch_id: batchId, conclusion }, true),
+    () => api.post('/reports', { batch_id: batchId, conclusion, template }, true),
     {
       invalidates: ['reports', 'tasks'],
       onSuccess: () => {
@@ -499,9 +520,18 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
       }
     >
       <div className="note">
-        报告按固定模板生成：方案与目的、方法 / SOP 版本、样本与来源、人员设备物料、执行与异常、
-        结果表、排除说明、统计、结论、复核与批准。只纳入审核通过且质量有效的结果。
+        取数只有一套：只纳入审核通过且质量有效的结果；模板只决定包含哪些章节、按什么顺序。
       </div>
+      <Field label="模板" hint={chosen ? `${chosen.description}` : undefined}>
+        <select value={template} onChange={(event) => setTemplate(event.target.value)}>
+          {(templates.data ?? []).map((row) => (
+            <option key={row.key} value={row.key}>
+              {row.name} {row.version}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {chosen ? <div className="tiny muted">章节：{chosen.sections.map((row) => row.title).join(' → ')}</div> : null}
       <Field label="执行批次">
         <select value={batchId} onChange={(event) => setBatchId(event.target.value)}>
           <option value="">选择已完成的批次</option>
@@ -517,5 +547,104 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
       </Field>
       {create.error ? <div className="note bad">{create.error.message}</div> : null}
     </Modal>
+  );
+}
+
+/** 模板 2.0 起的补充章节：仪器与设备方法、原始数据文件、数据质量标记、操作记录。 */
+function ReportExtras({ content }: { content: ReportContent }) {
+  const sections = content.template?.sections;
+  const show = (key: string) => !sections || sections.includes(key);
+  return (
+    <>
+      {show('instruments') && content.instruments ? (
+        <Panel title="仪器与设备方法" flush>
+          {content.instruments.length ? (
+            <table>
+              <thead>
+                <tr>
+                  <th>工位</th>
+                  <th>型号 / 厂商</th>
+                  <th>序列号 / 固件</th>
+                  <th>校准</th>
+                  <th>设备方法</th>
+                </tr>
+              </thead>
+              <tbody>
+                {content.instruments.map((row) => (
+                  <tr key={row.station_id}>
+                    <td className="small">
+                      <b className="mono">{row.station_id}</b> {row.name}
+                      <div className="tiny muted">{row.kind} · {row.driver || '—'}</div>
+                    </td>
+                    <td className="small">{row.model || '—'} / {row.vendor || '—'}</td>
+                    <td className="small mono">{row.serial || '—'} / {row.firmware || '—'}</td>
+                    <td className="small">{row.calibration}</td>
+                    <td className="small">{row.methods.join('、') || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty">没有使用设备工位</div>
+          )}
+        </Panel>
+      ) : null}
+      {show('raw_files') && content.raw_files ? (
+        <Panel title={`原始数据文件（${content.raw_files.length}）`} flush>
+          {content.raw_files.length ? (
+            <table>
+              <tbody>
+                {content.raw_files.map((row) => (
+                  <tr key={row.id}>
+                    <td className="small">{row.filename}</td>
+                    <td className="small">{row.usage.join('、')}</td>
+                    <td className="small mono">{row.size} B</td>
+                    <td className="tiny mono muted">{row.checksum.slice(0, 16)}…</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="empty">没有关联的原始数据文件</div>
+          )}
+        </Panel>
+      ) : null}
+      {show('data_flags') && content.data_flags?.length ? (
+        <Panel title={`数据质量标记（${content.data_flags.length}）`} flush>
+          <table>
+            <tbody>
+              {content.data_flags.map((row, index) => (
+                <tr key={index}>
+                  <td className="small">{row.scope}</td>
+                  <td className="small mono">{row.target}</td>
+                  <td className="small warn-text">{row.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      ) : null}
+      {show('operation_log') && content.operation_log ? (
+        <Panel title={`操作记录（${content.operation_log.length}）`} flush>
+          <div style={{ maxHeight: 280, overflow: 'auto' }}>
+            <table>
+              <tbody>
+                {content.operation_log.map((row, index) => (
+                  <tr key={index}>
+                    <td className="tiny mono">{row.time.replace('T', ' ').slice(5, 16)}</td>
+                    <td className="small">{row.user}</td>
+                    <td className="small">
+                      {row.action}
+                      {row.signed ? <span className="tag">签名</span> : null}
+                    </td>
+                    <td className="tiny muted">{row.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      ) : null}
+    </>
   );
 }

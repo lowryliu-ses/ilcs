@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 
+from ..domain.report_templates import SECTION_TITLES
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -149,7 +150,7 @@ class Page:
 
 
 def render(content: dict) -> bytes:
-    """按固定模板渲染。章节顺序与需求 DEV-14.4 一致。"""
+    """按报告模板的章节顺序渲染（`domain/report_templates.py`）。老报告没有模板信息，按原固定章节渲染。"""
     _ensure_font()
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
@@ -170,34 +171,56 @@ def render(content: dict) -> bytes:
         ),
     )
 
-    page.heading("一、方案与目的")
-    for label, key in (("方案", "plan"), ("方案版本", "plan_version"), ("实验任务", "task"),
-                       ("目的", "goal")):
+    sections = (content.get("template") or {}).get("sections") or LEGACY_SECTIONS
+    for number, key in enumerate(sections, start=1):
+        renderer = RENDERERS.get(key)
+        if renderer is None:
+            continue
+        page.heading(f"{_chinese(number)}、{SECTION_TITLES.get(key, key)}")
+        renderer(page, content)
+
+    page.finish()
+    return buffer.getvalue()
+
+
+LEGACY_SECTIONS = ["plan", "method", "samples", "resources", "execution", "results", "exclusions",
+                   "statistics", "conclusion", "approval"]
+NUMERALS = "零一二三四五六七八九"
+
+
+def _chinese(number: int) -> str:
+    if number < 10:
+        return NUMERALS[number]
+    tens, ones = divmod(number, 10)
+    return ("" if tens == 1 else NUMERALS[tens]) + "十" + (NUMERALS[ones] if ones else "")
+
+
+def _plan(page: "Page", content: dict) -> None:
+    for label, key in (("方案", "plan"), ("方案版本", "plan_version"), ("实验任务", "task"), ("目的", "goal")):
         page.field(label, str((content.get("plan_section") or {}).get(key, "") or "—"))
 
-    page.heading("二、方法与 SOP 版本")
+
+def _method(page: "Page", content: dict) -> None:
     method = content.get("method_section") or {}
-    for label, key in (("方法", "recipe"), ("方法版本", "recipe_version"),
-                       ("SOP", "sop"), ("SOP 版本", "sop_version"),
+    for label, key in (("方法", "recipe"), ("方法版本", "recipe_version"), ("SOP", "sop"), ("SOP 版本", "sop_version"),
                        ("附件摘要", "sop_checksum"), ("风险评估", "risk")):
         page.field(label, str(method.get(key, "") or "—"))
 
-    page.heading("三、样本及来源")
-    samples = content.get("samples") or []
-    if samples:
-        page.table(
-            ["样本", "条码", "来源", "类型", "位置", "状态"],
-            [
-                [s.get("id", ""), s.get("barcode", ""), s.get("source", ""),
-                 s.get("sample_type", ""), s.get("location", ""), s.get("state", "")]
-                for s in samples
-            ],
-            [22, 20, 22, 14, 14, 12],
-        )
-    else:
-        page.text("无样本记录")
 
-    page.heading("四、人员、设备与物料")
+def _samples(page: "Page", content: dict) -> None:
+    samples = content.get("samples") or []
+    if not samples:
+        page.text("无样本记录")
+        return
+    page.table(
+        ["样本", "条码", "来源", "类型", "位置", "状态"],
+        [[s.get("id", ""), s.get("barcode", ""), s.get("source", ""), s.get("sample_type", ""),
+          s.get("location", ""), s.get("state", "")] for s in samples],
+        [22, 20, 22, 14, 14, 12],
+    )
+
+
+def _resources(page: "Page", content: dict) -> None:
     resources = content.get("resources") or {}
     page.field("负责人", resources.get("owner", "—"))
     page.field("执行人", resources.get("assignee", "—"))
@@ -207,17 +230,31 @@ def render(content: dict) -> bytes:
     if materials:
         page.table(
             ["批号", "物料", "授权预留", "实际消耗", "损耗", "单位"],
-            [
-                [m.get("lot_id", ""), m.get("material", ""), m.get("qty", ""),
-                 m.get("consumed", ""), m.get("loss", ""), m.get("unit", "")]
-                for m in materials
-            ],
+            [[m.get("lot_id", ""), m.get("material", ""), m.get("qty", ""), m.get("consumed", ""),
+              m.get("loss", ""), m.get("unit", "")] for m in materials],
             [24, 26, 14, 14, 12, 10],
         )
     else:
         page.text("本方法无物料需求")
 
-    page.heading("五、执行与异常")
+
+def _instruments(page: "Page", content: dict) -> None:
+    rows = content.get("instruments") or []
+    if not rows:
+        page.text("本批次没有使用设备工位")
+        return
+    for row in rows:
+        page.text(f"{row.get('station_id', '')} {row.get('name', '')}（{row.get('kind', '')}）", size=9.5)
+        page.field("型号 / 厂商", f"{row.get('model') or '—'} / {row.get('vendor') or '—'}")
+        page.field("资产号 / 序列号", f"{row.get('asset_no') or '—'} / {row.get('serial') or '—'}")
+        page.field("固件 / 驱动", f"{row.get('firmware') or '—'} / {row.get('driver') or '—'}")
+        page.field("校准", row.get("calibration") or "—")
+        if row.get("methods"):
+            page.field("设备方法", "、".join(row["methods"]))
+        page.field("执行步骤", "、".join(row.get("steps") or []) or "—")
+
+
+def _execution(page: "Page", content: dict) -> None:
     for row in content.get("execution") or []:
         page.text(
             f"{BULLET} 第 {row.get('step_index', 0) + 1} 步（{row.get('kind_label', '')}）"
@@ -229,54 +266,88 @@ def render(content: dict) -> bytes:
     if not (content.get("execution") or content.get("exceptions")):
         page.text("无执行记录")
 
-    page.heading("六、结果表")
+
+def _operation_log(page: "Page", content: dict) -> None:
+    rows = content.get("operation_log") or []
+    if not rows:
+        page.text("无操作记录")
+        return
+    page.table(
+        ["时间", "操作人", "动作", "变更", "说明"],
+        [[row.get("time", "").replace("T", " ")[5:16], row.get("user", ""),
+          row.get("action", "") + ("（签名）" if row.get("signed") else ""),
+          f"{row.get('before') or ''} → {row.get('after') or ''}" if (row.get("before") or row.get("after")) else "",
+          row.get("detail", "")] for row in rows],
+        [14, 14, 20, 20, 32],
+    )
+
+
+def _results(page: "Page", content: dict) -> None:
     for block in content.get("results") or []:
         page.text(f"{block.get('metric_name', '')}（{block.get('unit', '')}）", size=9.5)
         rows = [
             [r.get("assignment_id", ""), r.get("condition_label", ""), str(r.get("round_no", "")),
-             f"v{r.get('result_version', '')}", str(r.get("value", "")),
-             r.get("quality_label", ""), r.get("review_label", "")]
+             f"v{r.get('result_version', '')}", str(r.get("value", "")), r.get("quality_label", ""),
+             r.get("review_label", "")]
             for r in block.get("rows") or []
         ]
         if rows:
-            page.table(
-                ["样本", "条件", "轮次", "版本", "数值", "质量", "审核"],
-                rows, [22, 26, 10, 10, 16, 12, 12],
-            )
+            page.table(["样本", "条件", "轮次", "版本", "数值", "质量", "审核"], rows, [22, 26, 10, 10, 16, 12, 12])
         else:
             page.text("该指标没有纳入正式统计的记录", indent=4 * mm)
 
-    page.heading("七、排除说明")
-    exclusions = content.get("exclusions") or []
-    if exclusions:
-        page.table(
-            ["样本", "指标", "版本", "排除原因", "质量", "审核"],
-            [
-                [e.get("assignment_id", ""), e.get("metric_name", ""),
-                 f"v{e.get('result_version', '')}", e.get("reason_label", ""),
-                 e.get("quality", ""), e.get("review_state", "")]
-                for e in exclusions
-            ],
-            [22, 24, 10, 30, 12, 12],
-        )
-        page.text(
-            "以上记录已列为被排除记录并说明原因，不进入正式统计结论。", size=8.5
-        )
-    else:
-        page.text("无被排除记录")
 
-    page.heading("八、统计")
+def _exclusions(page: "Page", content: dict) -> None:
+    exclusions = content.get("exclusions") or []
+    if not exclusions:
+        page.text("无被排除记录")
+        return
+    page.table(
+        ["样本", "指标", "版本", "排除原因", "质量", "审核"],
+        [[e.get("assignment_id", ""), e.get("metric_name", ""), f"v{e.get('result_version', '')}",
+          e.get("reason_label", ""), e.get("quality", ""), e.get("review_state", "")] for e in exclusions],
+        [22, 24, 10, 30, 12, 12],
+    )
+    page.text("以上记录已列为被排除记录并说明原因，不进入正式统计结论。", size=8.5)
+
+
+def _data_flags(page: "Page", content: dict) -> None:
+    rows = content.get("data_flags") or []
+    if not rows:
+        page.text("没有自动打标的数据")
+        return
+    page.table(
+        ["范围", "对象", "标记", "说明"],
+        [[row.get("scope", ""), row.get("target", ""), row.get("code", ""), row.get("message", "")] for row in rows],
+        [12, 28, 14, 46],
+    )
+    page.text("自动打标不改变数值；是否纳入统计以审核结论为准。", size=8.5)
+
+
+def _raw_files(page: "Page", content: dict) -> None:
+    rows = content.get("raw_files") or []
+    if not rows:
+        page.text("没有关联的原始数据文件")
+        return
+    page.table(
+        ["文件", "用途", "大小", "SHA-256 摘要"],
+        [[row.get("filename", ""), "、".join(row.get("usage") or []), f"{row.get('size', 0)} B",
+          (row.get("checksum") or "")[:24] + ("…" if len(row.get("checksum") or "") > 24 else "")] for row in rows],
+        [28, 30, 12, 30],
+    )
+    page.text("原件保存在系统文件库，可按摘要核对未被替换。", size=8.5)
+
+
+def _statistics(page: "Page", content: dict) -> None:
     for block in content.get("statistics") or []:
         page.text(
-            f"{block.get('metric_name', '')}：纳入 {block.get('included', 0)} 条、"
-            f"排除 {block.get('excluded', 0)} 条；均值 {block.get('mean', '—')}"
-            f"，SD {block.get('sd', '—')}，CV {block.get('cv_pct', '—')}%"
+            f"{block.get('metric_name', '')}：纳入 {block.get('included', 0)} 条、排除 {block.get('excluded', 0)} 条；"
+            f"均值 {block.get('mean', '—')}，SD {block.get('sd', '—')}，CV {block.get('cv_pct', '—')}%"
         )
         for group in block.get("groups") or []:
             page.text(
-                f"{BULLET} {group.get('group', '')} {group.get('label', '')}："
-                f"n={group.get('n_included', 0)}，均值 {group.get('mean', '—')}，"
-                f"CV {group.get('cv_pct', '—')}%",
+                f"{BULLET} {group.get('group', '')} {group.get('label', '')}：n={group.get('n_included', 0)}，"
+                f"均值 {group.get('mean', '—')}，CV {group.get('cv_pct', '—')}%",
                 size=8.5, indent=4 * mm,
             )
         for effect in block.get("effects") or []:
@@ -286,18 +357,22 @@ def render(content: dict) -> bytes:
             )
             page.text(f"{BULLET} 主效应 {effect.get('factor')}：{levels}", size=8.5, indent=4 * mm)
 
-    page.heading("九、结论")
+
+def _conclusion(page: "Page", content: dict) -> None:
     page.text(content.get("conclusion") or "—")
 
-    page.heading("十、复核与批准")
-    approval = content.get("approval") or {}
-    page.field("编写", approval.get("author", "—"))
-    page.field("批准", approval.get("approver", "—"))
-    page.field("签名含义", approval.get("signature_meaning", "—"))
-    page.field("发布时间", approval.get("published_at", "—"))
-    page.field("模板版本", approval.get("template_version", "—"))
-    page.field("算法版本", approval.get("algorithm_version", "—"))
-    page.field("结果版本快照", approval.get("result_versions", "—"))
 
-    page.finish()
-    return buffer.getvalue()
+def _approval(page: "Page", content: dict) -> None:
+    approval = content.get("approval") or {}
+    for label, key in (("编写", "author"), ("批准", "approver"), ("签名含义", "signature_meaning"),
+                       ("发布时间", "published_at"), ("模板版本", "template_version"),
+                       ("算法版本", "algorithm_version"), ("结果版本快照", "result_versions")):
+        page.field(label, approval.get(key, "—"))
+
+
+RENDERERS = {
+    "plan": _plan, "method": _method, "samples": _samples, "resources": _resources, "instruments": _instruments,
+    "execution": _execution, "operation_log": _operation_log, "results": _results, "exclusions": _exclusions,
+    "data_flags": _data_flags, "raw_files": _raw_files, "statistics": _statistics, "conclusion": _conclusion,
+    "approval": _approval,
+}

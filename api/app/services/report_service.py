@@ -12,7 +12,7 @@ from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.db import dec
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
-from ..domain import statistics
+from ..domain import report_templates, statistics
 from ..domain.access import same_person
 from ..domain.statistics import EXCLUSION_REASONS, Observation, build_dataset
 from ..domain.steps import KIND_NAMES
@@ -32,7 +32,8 @@ from .identity_service import IdentityService, admin_self_approval
 from .inventory_service import InventoryService
 
 ALGORITHM_VERSION = "stats-1.0"
-TEMPLATE_VERSION = "fixed-1.0"
+TEMPLATE_VERSION = report_templates.template_version(report_templates.DEFAULT)
+OPERATION_LOG_LIMIT = 300
 STATE_LABEL = {
     "draft": "草稿", "review": "评审中", "approved": "已批准", "published": "已发布",
     "superseded": "已被替代",
@@ -329,8 +330,8 @@ class ReportService:
     def versions_of(self, report_id: str) -> list[dict]:
         return [self.out(row) for row in self.versions.for_report(report_id)]
 
-    def build_content(self, batch_id: str, conclusion: str = "") -> dict:
-        """按固定模板组装报告内容。"""
+    def build_content(self, batch_id: str, conclusion: str = "", template_key: str | None = None) -> dict:
+        """组装报告内容。取数只有这一套；模板只决定渲染哪些章节、按什么顺序。"""
         batch = self.batches.get(batch_id)
         if not batch:
             raise NotFound("批次不存在")
@@ -422,6 +423,10 @@ class ReportService:
                 }
             )
 
+        instruments = self._instruments(batch, runs)
+        raw_files, data_flags = self._raw_files_and_flags(batch_id, runs)
+        operation_log = self._operation_log(batch, runs)
+
         owner = self.users.get(task.owner_user_id) if task and task.owner_user_id else None
         assignee = self.users.get(task.assignee_user_id) if task and task.assignee_user_id else None
         reviewer = self.users.get(task.reviewer_user_id) if task and task.reviewer_user_id else None
@@ -452,13 +457,132 @@ class ReportService:
             },
             "execution": execution,
             "exceptions": exceptions,
+            "instruments": instruments,
+            "operation_log": operation_log,
+            "raw_files": raw_files,
+            "data_flags": data_flags,
             "results": results,
             "exclusions": exclusions,
             "statistics": stats,
             "conclusion": conclusion,
             "plan_type": view["plan_type"],
             "batch_id": batch_id,
+            "template": report_templates.template(template_key),
         }
+
+    # ---------- 报告补充章节 ----------
+
+    def _instruments(self, batch, runs) -> list[dict]:
+        """执行用到的工位：台账（型号、厂商、序列号、固件）、校准许可、驱动与设备自报、按哪版设备方法执行。"""
+        from ..domain.resources import governing_calibration
+        from ..models import Adapter, Station
+        from .asset_service import AssetService
+
+        assets = AssetService(self.db, self.ctx)
+        methods_by_station: dict[str, set[str]] = {}
+        steps_by_station: dict[str, list[str]] = {}
+        for run in runs:
+            if not run.station_id:
+                continue
+            snapshot = run.step_snapshot or {}
+            method = snapshot.get("method") or {}
+            if method.get("code"):
+                methods_by_station.setdefault(run.station_id, set()).add(
+                    f"{method['code']} v{method.get('version', '')}（程序 {method.get('program') or '—'}）"
+                )
+            steps_by_station.setdefault(run.station_id, []).append(snapshot.get("name") or f"第 {run.step_index + 1} 步")
+        rows = []
+        for station_id in sorted(steps_by_station):
+            station = self.db.get(Station, station_id)
+            adapter = self.db.get(Adapter, station_id)
+            asset = assets.assets.get(station.asset_id) if station is not None and station.asset_id else None
+            calibration = "—"
+            if asset is not None:
+                governing = governing_calibration(assets.spec_for(asset), "", batch.created_at or now())
+                if governing is not None:
+                    calibration = (
+                        f"{'合格' if governing.result == 'pass' else '不合格'}，"
+                        f"有效期至 {governing.expires_at:%Y-%m-%d}" if governing.expires_at else
+                        f"{'合格' if governing.result == 'pass' else '不合格'}"
+                    )
+                elif not asset.calibration_applicable:
+                    calibration = f"不适用：{asset.calibration_exempt_reason}"
+            rows.append({
+                "station_id": station_id,
+                "name": station.name if station is not None else station_id,
+                "model": (station.model if station is not None else "") or (asset.model if asset else ""),
+                "asset_no": asset.asset_no if asset else "",
+                "vendor": (asset.vendor if asset else "") or (adapter.vendor if adapter else ""),
+                "serial": asset.serial if asset else "",
+                "firmware": (adapter.firmware if adapter and adapter.firmware else "") or (asset.firmware if asset else ""),
+                "driver": f"{adapter.protocol} {adapter.version}".strip() if adapter else "",
+                "kind": ("真实设备" if adapter.kind == "real" else "模拟器") if adapter else "",
+                "calibration": calibration,
+                "methods": sorted(methods_by_station.get(station_id, set())),
+                "steps": steps_by_station[station_id],
+            })
+        return rows
+
+    def _raw_files_and_flags(self, batch_id: str, runs) -> tuple[list[dict], list[dict]]:
+        """原始数据文件（带摘要，可据此核对原件未被替换）与自动打标（越界、逻辑冲突、设备输出不符）。"""
+        files: dict[str, dict] = {}
+
+        def attach(file_id: str, usage: str) -> None:
+            if not file_id:
+                return
+            if file_id not in files:
+                record = self.files.get(file_id)
+                if record is None:
+                    return
+                files[file_id] = {
+                    "id": record.id, "filename": record.filename, "media_type": record.media_type,
+                    "size": int(record.byte_size or 0), "checksum": record.checksum, "usage": [],
+                }
+            if usage not in files[file_id]["usage"]:
+                files[file_id]["usage"].append(usage)
+
+        flags: list[dict] = []
+        for record in self.files.for_ref("batch", batch_id):
+            attach(record.id, "批次附件")
+        # 检测任务的取数口径与统计（observations）一致：本批次的检测任务
+        for task in self.analysis.for_batch(batch_id):
+            for record in self.files.for_ref("analysis_task", task.id):
+                attach(record.id, f"检测任务 {task.id[:8]} 附件")
+            for value in self.values.for_task(task.id):
+                if value.superseded_by_id:
+                    continue
+                definition = self.metrics.get(value.metric_definition_id)
+                code = definition.code if definition else value.metric_definition_id
+                attach(value.raw_file_id, f"{code} v{value.result_version} 原始数据")
+                for flag in value.flags or []:
+                    flags.append({
+                        "scope": "结果", "target": f"{value.assignment_id or task.physical_sample_id} · {code} v{value.result_version}",
+                        "code": flag.get("code", ""), "message": flag.get("message", ""),
+                        "quality": value.quality, "review_state": value.review_state,
+                    })
+        for run in runs:
+            for flag in run.flags or []:
+                flags.append({
+                    "scope": "设备回报",
+                    "target": f"第 {run.step_index + 1} 步 {(run.step_snapshot or {}).get('name', '')}",
+                    "code": flag.get("code", ""), "message": flag.get("message", ""),
+                    "quality": "", "review_state": "",
+                })
+        return sorted(files.values(), key=lambda row: row["filename"]), flags
+
+    def _operation_log(self, batch, runs) -> list[dict]:
+        """操作记录：批次与各步骤执行上的审计事件，按时间排序（签名事件标明含义）。"""
+        targets = [batch.id, *{run.id for run in runs}]
+        events = [event for target in targets for event in self.audit.for_target(target)]
+        events.sort(key=lambda event: event.time)
+        return [
+            {
+                "time": event.time.isoformat(timespec="seconds"), "user": event.user, "action": event.action,
+                "before": event.before, "after": event.after, "detail": (event.detail or "")[:200],
+                "signed": bool(event.sign), "meaning": event.meaning,
+            }
+            for event in events[-OPERATION_LOG_LIMIT:]
+        ]
 
     def create(self, payload: dict, user: User) -> dict:
         batch_id = payload.get("batch_id") or ""
@@ -470,7 +594,8 @@ class ReportService:
             raise ValidationFailed("报告必须绑定一个执行批次")
         if task is None:
             task = self.tasks.by_batch(batch_id)
-        content = self.build_content(batch_id, payload.get("conclusion", ""))
+        template = report_templates.template(payload.get("template"))
+        content = self.build_content(batch_id, payload.get("conclusion", ""), template["key"])
         report = Report(
             org_id=self.ctx.org_id, code=self.reports.next_code(),
             title=payload.get("title") or content["title"],
@@ -481,13 +606,13 @@ class ReportService:
         self.reports.add(report)
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=report.id, version=1, state="draft",
-            template_version=TEMPLATE_VERSION, algorithm_version=ALGORITHM_VERSION,
+            template_version=report_templates.template_version(template["key"]), algorithm_version=ALGORITHM_VERSION,
             author_id=user.id, content=content,
         )
         self.versions.add(version)
         self.audit.record(
             user, "生成报告草稿", version.id, before="—", after="草稿",
-            detail=f"{report.code}；批次 {batch_id}；模板 {TEMPLATE_VERSION}",
+            detail=f"{report.code}；批次 {batch_id}；模板 {template['name']} {version.template_version}",
             object_version=version.row_version,
         )
         self.db.commit()
@@ -509,9 +634,15 @@ class ReportService:
             content["conclusion"] = payload["conclusion"]
         if payload.get("refresh"):
             refreshed = self.build_content(
-                content.get("batch_id", ""), content.get("conclusion", "")
+                content.get("batch_id", ""), content.get("conclusion", ""),
+                payload.get("template") or (content.get("template") or {}).get("key"),
             )
             content = refreshed
+            version.template_version = report_templates.template_version(content["template"]["key"])
+        elif payload.get("template"):
+            # 换模板不重新取数：只换章节选择
+            content["template"] = report_templates.template(payload["template"])
+            version.template_version = report_templates.template_version(content["template"]["key"])
         version.content = content
         self.versions.bump(version)
         self.audit.record(
@@ -708,10 +839,12 @@ class ReportService:
         content = self.build_content(
             (published.content or {}).get("batch_id", ""),
             (published.content or {}).get("conclusion", ""),
+            ((published.content or {}).get("template") or {}).get("key"),
         )
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=published.report_id,
-            version=published.version + 1, state="draft", template_version=TEMPLATE_VERSION,
+            version=published.version + 1, state="draft",
+            template_version=report_templates.template_version(content["template"]["key"]),
             algorithm_version=ALGORITHM_VERSION, author_id=user.id, content=content,
             supersedes_id=published.id,
         )

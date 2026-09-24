@@ -887,11 +887,14 @@ class ReportCreateIn(BaseModel):
     plan_id: str = ""
     title: str = ""
     conclusion: str = ""
+    # 报告模板：standard 完整实验报告 / summary 结果摘要 / audit 质量审计报告
+    template: Literal["standard", "summary", "audit"] = "standard"
 
 
 class ReportPatchIn(Versioned):
     conclusion: str | None = None
     refresh: bool = False
+    template: Literal["standard", "summary", "audit"] | None = None
 
 
 class PublishIn(Signed):

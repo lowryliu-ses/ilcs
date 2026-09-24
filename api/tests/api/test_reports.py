@@ -437,3 +437,33 @@ def test_effective_sops_are_listed_when_no_capability_is_given(researcher, reset
     )
     unrelated = researcher.get("/api/sops/effective?capability_id=cap.不存在").json()
     assert all(not row["capability_scope"] for row in unrelated)
+
+
+def test_report_templates_add_instruments_operation_log_and_raw_files(admin, operator, reviewed_batch):
+    """报告补原始数据文件、操作记录、仪器详情；模板决定章节与顺序，取数只有一套。"""
+    from app.services.report_pdf import render
+
+    batch_id = reviewed_batch["batch_id"]
+    uploaded = operator.upload("/api/files", "curve.csv", b"t,v\n0,1\n", "text/csv", ref_type="batch", ref_id=batch_id)
+    assert uploaded.status_code in {200, 201}, uploaded.text
+    templates = {row["key"]: row for row in admin.get("/api/reports/templates").json()}
+    assert {"standard", "summary", "audit"} <= set(templates)
+
+    created = admin.post("/api/reports", {"batch_id": batch_id, "template": "audit"})
+    assert created.status_code == 201, created.text
+    report = created.json()
+    content = report["content"]
+    assert content["template"]["key"] == "audit" and report["template_version"] == "audit-1.0"
+    assert "operation_log" in content["template"]["sections"] and "results" not in content["template"]["sections"]
+    stations = {row["station_id"] for row in content["instruments"]}
+    assert stations and all(row["calibration"] for row in content["instruments"])
+    assert any(row["action"] == "批次完成" for row in content["operation_log"])
+    raw = next(row for row in content["raw_files"] if row["filename"] == "curve.csv")
+    assert raw["checksum"] and "批次附件" in raw["usage"]
+    assert render(content).startswith(b"%PDF")
+
+    switched = admin.patch(f"/api/reports/{report['id']}", {"template": "summary", "row_version": report["row_version"]})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["content"]["template"]["key"] == "summary"
+    assert switched.json()["template_version"] == "summary-1.0"
+    assert render(switched.json()["content"]).startswith(b"%PDF")

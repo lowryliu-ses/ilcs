@@ -3919,6 +3919,16 @@
             "title": "Task Id",
             "type": "string"
           },
+          "template": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "summary",
+              "audit"
+            ],
+            "title": "Template",
+            "type": "string"
+          },
           "title": {
             "default": "",
             "title": "Title",
@@ -3956,6 +3966,22 @@
               }
             ],
             "title": "Row Version"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "enum": [
+                  "standard",
+                  "summary",
+                  "audit"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
           }
         },
         "title": "ReportPatchIn",
@@ -17076,6 +17102,59 @@
           }
         ],
         "summary": "Create Report",
+        "tags": [
+          "report"
+        ]
+      }
+    },
+    "/api/reports/templates": {
+      "get": {
+        "description": "可选报告模板与各自包含的章节。取数只有一套，模板只决定章节与顺序。",
+        "operationId": "report_templates_api_reports_templates_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Report Templates",
         "tags": [
           "report"
         ]

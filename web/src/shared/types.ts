@@ -1511,6 +1511,35 @@ export type ReportContent = {
   statistics: Record<string, unknown>[];
   conclusion: string;
   batch_id: string;
+  /** 以下章节在报告模板 2.0 起提供；老报告没有 */
+  instruments?: ReportInstrument[];
+  operation_log?: { time: string; user: string; action: string; before: string; after: string; detail: string; signed: boolean; meaning: string }[];
+  raw_files?: { id: string; filename: string; media_type: string; size: number; checksum: string; usage: string[] }[];
+  data_flags?: { scope: string; target: string; code: string; message: string; quality: string; review_state: string }[];
+  template?: { key: string; name: string; version: string; sections: string[] };
+};
+
+export type ReportInstrument = {
+  station_id: string;
+  name: string;
+  model: string;
+  asset_no: string;
+  vendor: string;
+  serial: string;
+  firmware: string;
+  driver: string;
+  kind: string;
+  calibration: string;
+  methods: string[];
+  steps: string[];
+};
+
+export type ReportTemplate = {
+  key: string;
+  name: string;
+  version: string;
+  description: string;
+  sections: { key: string; title: string }[];
 };
 
 /* ---------- 正式统计 ---------- */
