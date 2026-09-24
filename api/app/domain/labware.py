@@ -137,3 +137,35 @@ def manual_move_blockers(
     if occupied_by:
         blocked.append(f"{destination.id} 上已有载具 {occupied_by}")
     return blocked
+
+
+def container_of(batch_id: str) -> str:
+    """批次的虚拟板号：孔位占用按它登记；绑定实体载具后，占用再指向那块载具（`labware_id`）。"""
+    return f"PL-{batch_id.replace('B-', '')}"
+
+
+def well_fits(rows: int, cols: int, well: str) -> bool:
+    """孔位名（A1、H12）是否落在载具的行列里。"""
+    import re
+
+    match = re.fullmatch(r"([A-Z]+)(\d+)", (well or "").strip().upper())
+    if not match:
+        return False
+    letters, number = match.groups()
+    row = 0
+    for char in letters:
+        row = row * 26 + (ord(char) - 64)
+    return 1 <= row <= max(1, rows) and 1 <= int(number) <= max(1, cols)
+
+
+def physical_wells(rows: int, cols: int, logical: list[str]) -> dict[str, str]:
+    """批次布局的孔位（逻辑位）→ 实体载具上的孔位。
+
+    布局全部落在载具行列里就原样对应；否则（如 2×4 的布局放进 1×8 的托盘）按布局顺序逐行填进载具。
+    调用方已保证载具位数够用。
+    """
+    if all(well_fits(rows, cols, well) for well in logical):
+        return {well: well for well in logical}
+    letters = [chr(65 + index) for index in range(max(1, rows))]
+    slots = [f"{letter}{col}" for letter in letters for col in range(1, max(1, cols) + 1)]
+    return {well: slots[index] for index, well in enumerate(logical) if index < len(slots)}

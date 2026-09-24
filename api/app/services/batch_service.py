@@ -20,6 +20,7 @@ from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import graph as dag
 from ..domain import preflight, recovery
+from ..domain.labware import container_of
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
 from ..domain.methods import command_method
@@ -612,7 +613,7 @@ class BatchService:
         每个分配都指向一个物理样本——清单里给了就用它，否则登记一个新的。
         """
         sample_service = SampleService(self.db, self.ctx)
-        container_id = f"PL-{batch.id.replace('B-', '')}"
+        container_id = container_of(batch.id)
         plan_type = plan.plan_type
         digits = batch.id.replace("B-", "").replace("-", "")
 
@@ -756,7 +757,7 @@ class BatchService:
                 removable_physical.append(physical)
         allocations = len(self.allocations.for_batch(batch.id))
         reservations = len(self.materials.list_reservations(batch.id))
-        sample_service.release_slots(f"PL-{batch.id.replace('B-', '')}")
+        sample_service.release_slots(container_of(batch.id))
         # 任务要跟着解绑，否则它会一直指向一个已经不存在的批次，
         # 也会挡住同一任务重新建批次
         task = self.tasks.by_batch(batch.id)
@@ -873,7 +874,7 @@ class BatchService:
             "summary": preflight.summary(checks),
             "first_station_id": first_work.station_id if first_work else None,
             "sample_count": len(self.samples.for_batch(batch.id)),
-            "pallet_code": f"PL-{batch.id.replace('B-', '')}",
+            "pallet_code": container_of(batch.id),
             "resource_checks": resource_checks,
         }
 
@@ -1716,7 +1717,7 @@ class BatchService:
         if batch.state in UNDISPATCHED:
             batch.state = "aborted"
             self.allocations.delete_for_batch(batch.id)
-            SampleService(self.db, self.ctx).release_slots(f"PL-{batch.id.replace('B-', '')}")
+            SampleService(self.db, self.ctx).release_slots(container_of(batch.id))
             self.audit.record(
                 user, "终止批次", batch.id, sign=True, meaning=signature.meaning, before=before,
                 after="已终止", signature_id=signature.id, object_version=batch.row_version,

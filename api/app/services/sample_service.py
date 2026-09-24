@@ -15,7 +15,7 @@ from ..core.context import AccessContext
 from ..core.db import dec
 from ..core.errors import NotFound, StateConflict, ValidationFailed
 from ..domain import inventory
-from ..models import PhysicalSample, SampleTransfer, SlotOccupancy, User
+from ..models import Labware, LabwareType, Location, PhysicalSample, SampleTransfer, SlotOccupancy, User
 from ..repositories.batches import AnalysisTaskRepository, SampleRepository
 from ..repositories.files import FileRepository
 from ..repositories.organization import ProjectRepository
@@ -64,6 +64,7 @@ class SampleService:
             "unit": sample.unit,
             "storage_condition": sample.storage_condition,
             "current_location": sample.current_location,
+            "location": self.location_of(sample),
             "location_note": sample.location_note,
             "custodian": sample.custodian,
             "lifecycle_state": sample.lifecycle_state,
@@ -76,13 +77,47 @@ class SampleService:
             "assignment_count": len(self.assignments.for_physical(sample.id)),
         }
 
+    def location_of(self, sample: PhysicalSample) -> dict:
+        """结构化位置。在载具上时，位置 = 载具当前所在的位置 + 孔位；否则是登记过的库位 / 放置位；
+        都没有时只有文本位置（历史数据、外部交接）。"""
+        labware = self.db.get(Labware, sample.labware_id) if sample.labware_id else None
+        place_id = (labware.location_id if labware is not None else None) or sample.location_id
+        place = self.db.get(Location, place_id) if place_id else None
+        kind = self.db.get(LabwareType, labware.type_id) if labware is not None else None
+        text = sample.current_location
+        if labware is not None:
+            text = f"{labware.barcode} · {sample.well or '—'}" + (f" @ {place.name}" if place else "（载具未上线）")
+        elif place is not None:
+            text = place.name
+        return {
+            "kind": "labware" if labware is not None else "location" if place is not None else "text" if text else "none",
+            "labware": {"id": labware.id, "barcode": labware.barcode, "type_name": kind.name if kind else labware.type_id,
+                        "state": labware.state} if labware is not None else None,
+            "well": sample.well if labware is not None else "",
+            "place": {"id": place.id, "name": place.name, "kind": place.kind, "station_id": place.station_id}
+            if place is not None else None,
+            "text": text,
+        }
+
+    def find(self, code: str) -> PhysicalSample | None:
+        """按样本号或条码（扫码）找样本。"""
+        return self.samples.get(code) or self.samples.by_barcode(code)
+
+    def qr(self, code: str) -> dict:
+        sample = self.find(code)
+        if sample is None:
+            raise NotFound("样本不存在")
+        content = sample.barcode or sample.id
+        return {"id": sample.id, "content": content, "svg": qr_svg(content),
+                "label": [sample.id, sample.sample_type, sample.source][:3]}
+
     def page(self, offset: int, limit: int, keyword: str = "", state: str | None = None,
              project_id: str = ""):
         rows, total = self.samples.page(offset, limit, keyword, state, project_id)
         return [self.out(row) for row in rows], total
 
     def detail(self, sample_id: str) -> dict:
-        sample = self.samples.get(sample_id)
+        sample = self.find(sample_id)
         if not sample:
             raise NotFound("样本不存在")
         assignments = self.assignments.for_physical(sample.id)
@@ -104,7 +139,7 @@ class SampleService:
             "transfers": [self.transfer_out(row) for row in self.transfers.for_sample(sample.id)],
             "slots": [
                 {
-                    "container_id": row.container_id, "well": row.well,
+                    "container_id": row.container_id, "well": row.well, "labware_id": row.labware_id or "",
                     "occupied_at": row.occupied_at.isoformat(timespec="seconds"),
                     "released_at": row.released_at.isoformat(timespec="seconds") if row.released_at else None,
                 }
@@ -245,7 +280,26 @@ class SampleService:
                 "transfer": self.transfer_out(existing),
                 "hint": "该交接事件已记录，未重复写入",
             }
+        place = None
+        if payload.get("to_location_id"):
+            place = self.db.get(Location, payload["to_location_id"])
+            if place is None or not place.active:
+                raise NotFound(f"位置 {payload['to_location_id']} 不存在或已停用")
+            if sample.labware_id and kind in {"store", "move", "handover"}:
+                labware = self.db.get(Labware, sample.labware_id)
+                raise StateConflict(
+                    f"样本还在载具 {labware.barcode if labware else sample.labware_id} 的孔位 {sample.well} 上；"
+                    "先把它从载具取出（结束批次或释放孔位），再登记去向",
+                    code="sample_on_labware",
+                )
+            payload = {**payload, "to_location": payload.get("to_location") or place.name}
         transfer = self._write_transfer(sample, kind, payload, user, event_key)
+        if place is not None:
+            transfer.to_location_id = place.id
+            sample.location_id = place.id
+        elif payload.get("to_location") and kind in {"store", "move", "handover"}:
+            # 去向写成自由文本：结构化位置作废，免得界面上两处位置对不上
+            sample.location_id = None
         before = sample.lifecycle_state
         if kind == "store":
             sample.lifecycle_state = "stored"
@@ -436,3 +490,55 @@ class SampleService:
             row.released_at = now()
             released += 1
         return released
+
+    def link_labware(self, container_id: str, labware: Labware | None) -> int:
+        """批次绑定（或解绑）实体载具：在途孔位占用与样本的结构化位置指向这块载具。
+
+        载具上原来的样本（上一次使用留下的关联）先解开：一块板同一时刻只装一批样本。
+        """
+        from ..domain.labware import physical_wells
+        from ..models import Sample
+
+        live = self.slots.query().filter_by(container_id=container_id, released_at=None).all()
+        mine = {row.physical_sample_id for row in live}
+        linked = 0
+        # 布局孔位（逻辑位）按布局顺序对到载具的实体孔位
+        mapping: dict[str, str] = {}
+        if labware is not None:
+            kind = self.db.get(LabwareType, labware.type_id)
+            order = {row.id: row.position for row in self.db.query(Sample).filter(
+                Sample.id.in_([row.assignment_id for row in live if row.assignment_id] or [""]),
+            ).all()}
+            logical = [row.well for row in sorted(live, key=lambda row: (order.get(row.assignment_id, 0), row.well))]
+            mapping = physical_wells(kind.rows if kind else 1, kind.cols if kind else len(logical), logical)
+        if labware is not None:
+            for stale in self.db.query(PhysicalSample).filter(
+                PhysicalSample.labware_id == labware.id, PhysicalSample.id.notin_(mine or {""}),
+            ).all():
+                stale.labware_id = None
+                stale.well = ""
+        for row in live:
+            row.labware_id = labware.id if labware is not None else None
+            sample = self.db.get(PhysicalSample, row.physical_sample_id)
+            if sample is None:
+                continue
+            if labware is not None:
+                sample.labware_id = labware.id
+                sample.well = mapping.get(row.well, row.well)
+                sample.location_id = None
+                linked += 1
+            elif sample.labware_id:
+                sample.labware_id = None
+                sample.well = ""
+        return linked
+
+
+def qr_svg(content: str) -> str:
+    """标签二维码（SVG）。内容就是样本号 / 条码，扫码后走同一个查找入口。"""
+    import io
+
+    import segno
+
+    buffer = io.BytesIO()
+    segno.make(content, error="m").save(buffer, kind="svg", scale=4, border=2, xmldecl=False, svgns=True)
+    return buffer.getvalue().decode()

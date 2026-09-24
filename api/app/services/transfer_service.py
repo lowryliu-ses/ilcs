@@ -364,13 +364,18 @@ class TransferService:
         samples = self.db.query(Sample).filter(Sample.batch_id == batch.id).count()
         if kind is not None and kind.rows * kind.cols < samples:
             raise ValidationFailed(f"{kind.name} 只有 {kind.rows * kind.cols} 个位，批次有 {samples} 个样本")
+        from ..domain.labware import container_of
+        from .sample_service import SampleService
+
         previous = self.for_batch(batch.id)
         if previous is not None and previous.id != labware.id:
             previous.batch_id = ""
         labware.batch_id = batch.id
+        # 样本的孔位占用与结构化位置指向这块实体载具
+        linked = SampleService(self.db, self.ctx).link_labware(container_of(batch.id), labware)
         labware.row_version = int(labware.row_version or 0) + 1
         self.audit.record(user, "绑定载具", batch.id, after=labware.barcode,
-                          detail=f"当前位置 {labware.location_id or '未上线'}")
+                          detail=f"当前位置 {labware.location_id or '未上线'}；{linked} 个样本的位置指向该载具孔位")
         self.db.commit()
         return self.labware_out(labware)
 
@@ -385,7 +390,11 @@ class TransferService:
         labware = self.for_batch(batch.id)
         if labware is None:
             return {"unbound": False}
+        from ..domain.labware import container_of
+        from .sample_service import SampleService
+
         labware.batch_id = ""
+        SampleService(self.db, self.ctx).link_labware(container_of(batch.id), None)
         self.audit.record(user, "解绑载具", batch.id, before=labware.barcode)
         self.db.commit()
         return {"unbound": True}
@@ -428,6 +437,34 @@ class TransferService:
         return self.location_out(location, occupied)
 
     # ---------- 输出 ----------
+
+    def labware_qr(self, code: str) -> dict:
+        """载具标签二维码：内容是条码，扫码放置 / 绑定走同一个条码查找。"""
+        from .sample_service import qr_svg
+
+        labware = self.labware.get(code) or self.labware.query().filter(Labware.barcode == code).first()
+        if labware is None:
+            raise NotFound("载具不存在")
+        kind = self.db.get(LabwareType, labware.type_id)
+        return {"id": labware.id, "content": labware.barcode, "svg": qr_svg(labware.barcode),
+                "label": [labware.barcode, kind.name if kind else labware.type_id]}
+
+    def labware_samples(self, code: str) -> dict:
+        """一块载具上现在装着哪些样本（按孔位）。"""
+        from ..models import PhysicalSample
+
+        labware = self.labware.get(code) or self.labware.query().filter(Labware.barcode == code).first()
+        if labware is None:
+            raise NotFound("载具不存在")
+        rows = self.db.query(PhysicalSample).filter(PhysicalSample.labware_id == labware.id).all()
+        return {
+            **self.labware_out(labware),
+            "samples": sorted(
+                ({"id": row.id, "barcode": row.barcode, "well": row.well, "sample_type": row.sample_type,
+                  "lifecycle_state": row.lifecycle_state} for row in rows),
+                key=lambda row: (len(row["well"]), row["well"]),
+            ),
+        }
 
     def labware_out(self, labware: Labware) -> dict:
         kind = self.db.get(LabwareType, labware.type_id)

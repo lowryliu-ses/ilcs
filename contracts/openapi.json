@@ -4552,6 +4552,11 @@
             "title": "To Location",
             "type": "string"
           },
+          "to_location_id": {
+            "default": "",
+            "title": "To Location Id",
+            "type": "string"
+          },
           "to_party": {
             "default": "",
             "title": "To Party",
@@ -12926,6 +12931,130 @@
         ]
       }
     },
+    "/api/labware/{labware_id}/qr": {
+      "get": {
+        "description": "标签二维码（SVG 文本）。内容是载具条码。",
+        "operationId": "labware_qr_api_labware__labware_id__qr_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "labware_id",
+            "required": true,
+            "schema": {
+              "title": "Labware Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Labware Qr",
+        "tags": [
+          "labware"
+        ]
+      }
+    },
+    "/api/labware/{labware_id}/samples": {
+      "get": {
+        "description": "载具上现在的样本（按孔位）；按编号或条码都能查。",
+        "operationId": "labware_samples_api_labware__labware_id__samples_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "labware_id",
+            "required": true,
+            "schema": {
+              "title": "Labware Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Labware Samples",
+        "tags": [
+          "labware"
+        ]
+      }
+    },
     "/api/locations": {
       "get": {
         "operationId": "locations_api_locations_get",
@@ -19021,7 +19150,7 @@
     },
     "/api/samples/{sample_id}": {
       "get": {
-        "description": "样本详情：来源谱系、运行分配、流转、检测任务与附件分开呈现。",
+        "description": "样本详情：来源谱系、运行分配、流转、检测任务与附件分开呈现。按样本号或条码（扫码）都能查。",
         "operationId": "get_sample_api_samples__sample_id__get",
         "parameters": [
           {
@@ -19221,6 +19350,68 @@
         "summary": "Flag Sample",
         "tags": [
           "result"
+        ]
+      }
+    },
+    "/api/samples/{sample_id}/qr": {
+      "get": {
+        "description": "标签二维码（SVG 文本）。内容是条码（没有条码时是样本号），扫码后走同一个查找入口。",
+        "operationId": "sample_qr_api_samples__sample_id__qr_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sample_id",
+            "required": true,
+            "schema": {
+              "title": "Sample Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Sample Qr",
+        "tags": [
+          "sample"
         ]
       }
     },

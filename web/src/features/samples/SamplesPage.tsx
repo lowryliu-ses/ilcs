@@ -5,7 +5,8 @@ import { api, pageQuery } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { Paged, SampleDetail, SampleRow } from '../../shared/types';
+import { QrLabel } from '../../shared/labels';
+import type { LocationRow, Paged, SampleDetail, SampleLocation, SampleRow } from '../../shared/types';
 import {
   ConfirmDialog, Empty, Field, ListState, Modal, NumberInput, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -33,6 +34,7 @@ export function SamplesPage() {
   const [state, setState] = useState('');
   const [registering, setRegistering] = useState(false);
   const [scan, setScan] = useState('');
+  const [lookup, setLookup] = useState('');
 
   const query = pageQuery({ page, page_size: 20, keyword, state });
   const samples = useQuery<Paged<SampleRow>>(
@@ -88,6 +90,18 @@ export function SamplesPage() {
           </button>
         </form>
         {receive.error ? <div className="note bad">{receive.error.message}</div> : null}
+        <form
+          className="filters"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (lookup.trim()) navigate(`/samples/${encodeURIComponent(lookup.trim())}`);
+          }}
+        >
+          <input placeholder="扫码查找：样本条码或编号后回车" value={lookup} onChange={(event) => setLookup(event.target.value)} />
+          <button className="btn sm" type="submit" disabled={!lookup.trim()}>
+            打开
+          </button>
+        </form>
       </Panel>
 
       <Panel
@@ -158,7 +172,7 @@ export function SamplesPage() {
                     {row.quantity ? `${row.quantity} ${row.unit}` : '未录'}
                   </td>
                   <td className="small">
-                    {row.current_location || row.location_note || '—'}
+                    {row.location?.text || row.current_location || row.location_note || '—'}
                     <div className="tiny muted">保管 {row.custodian || '—'}</div>
                   </td>
                   <td>
@@ -249,6 +263,15 @@ export function SampleDetailPage() {
       </div>
 
       {sample.location_note ? <div className="banner warn">{sample.location_note}</div> : null}
+
+      <div className="grid cols-2">
+        <Panel title="当前位置">
+          <LocationView location={sample.location} fallback={sample.current_location} />
+        </Panel>
+        <Panel title="标签">
+          <QrLabel path={`/samples/${sample.id}/qr`} cacheKey={`samples:${sample.id}:qr`} />
+        </Panel>
+      </div>
 
       <div className="split">
         <div className="stack">
@@ -630,11 +653,38 @@ function SplitDialog({ sample, onClose }: { sample: SampleDetail; onClose: () =>
   );
 }
 
+function LocationView({ location, fallback }: { location?: SampleLocation; fallback: string }) {
+  if (!location || location.kind === 'none') return <div className="small muted">{fallback || '位置未登记'}</div>;
+  if (location.kind === 'labware' && location.labware) {
+    return (
+      <div className="small">
+        <div>
+          载具 <b className="mono">{location.labware.barcode}</b>（{location.labware.type_name}）孔位 <b className="mono">{location.well || '—'}</b>
+        </div>
+        <div className="muted">
+          载具在 {location.place ? `${location.place.name}${location.place.station_id ? ` · ${location.place.station_id}` : ''}` : '未上线（未扫码放置）'}
+          {location.labware.state === 'lost' ? ' · 载具位置未知，需扫码重新定位' : ''}
+        </div>
+      </div>
+    );
+  }
+  if (location.kind === 'location' && location.place) {
+    return (
+      <div className="small">
+        登记位置 <b>{location.place.name}</b> <span className="tiny muted mono">{location.place.id}</span>
+      </div>
+    );
+  }
+  return <div className="small">{location.text}<div className="tiny muted">自由文本位置（未对应登记位置）</div></div>;
+}
+
 function TransferDialog({ sample, onClose }: { sample: SampleDetail; onClose: () => void }) {
   const toast = useToast();
+  const locations = useQuery<LocationRow[]>('locations', () => api.get<LocationRow[]>('/locations'));
   const [form, setForm] = useState({
     kind: 'handover',
     to_location: '',
+    to_location_id: '',
     to_party: '',
     note: '',
     confirm_method: 'barcode',
@@ -685,8 +735,20 @@ function TransferDialog({ sample, onClose }: { sample: SampleDetail; onClose: ()
       <Field label="源位置">
         <input readOnly value={sample.current_location || '—'} />
       </Field>
-      <Field label="目标位置">
-        <input value={form.to_location} onChange={(event) => setForm({ ...form, to_location: event.target.value })} />
+      <Field label="目标位置" hint="选登记过的库位 / 放置位，样本的结构化位置随之更新；也可以写自由文本（外部交接）">
+        <div className="filters">
+          <select value={form.to_location_id} onChange={(event) => setForm({ ...form, to_location_id: event.target.value })}>
+            <option value="">不选登记位置</option>
+            {(locations.data ?? []).filter((row) => row.active).map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name}（{row.id}）
+              </option>
+            ))}
+          </select>
+          {form.to_location_id ? null : (
+            <input placeholder="自由文本位置" value={form.to_location} onChange={(event) => setForm({ ...form, to_location: event.target.value })} />
+          )}
+        </div>
       </Field>
       <Field label="接收人">
         <input value={form.to_party} onChange={(event) => setForm({ ...form, to_party: event.target.value })} />

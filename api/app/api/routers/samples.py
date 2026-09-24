@@ -20,8 +20,14 @@ def list_samples(
 
 @router.get("/{sample_id}")
 def get_sample(sample_id: str, db: DbSession, ctx: Ctx):
-    """样本详情：来源谱系、运行分配、流转、检测任务与附件分开呈现。"""
+    """样本详情：来源谱系、运行分配、流转、检测任务与附件分开呈现。按样本号或条码（扫码）都能查。"""
     return SampleService(db, ctx).detail(sample_id)
+
+
+@router.get("/{sample_id}/qr")
+def sample_qr(sample_id: str, db: DbSession, ctx: Ctx):
+    """标签二维码（SVG 文本）。内容是条码（没有条码时是样本号），扫码后走同一个查找入口。"""
+    return SampleService(db, ctx).qr(sample_id)
 
 
 @router.post("", status_code=201)

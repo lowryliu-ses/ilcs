@@ -618,6 +618,8 @@ class SampleTransferIn(BaseModel):
     kind: Literal["handover", "store", "dispose", "move"] = "handover"
     from_location: str = ""
     to_location: str = ""
+    # 去向是登记过的库位 / 放置位时填编号：样本的结构化位置随之更新
+    to_location_id: str = ""
     from_party: str = ""
     to_party: str = ""
     quantity: Quantity | None = None

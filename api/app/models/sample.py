@@ -27,6 +27,10 @@ class PhysicalSample(Base):
     unit: Mapped[str] = mapped_column(String, default="")
     storage_condition: Mapped[str] = mapped_column(String, default="")
     current_location: Mapped[str] = mapped_column(String, default="")
+    # 结构化位置：在载具的哪个孔位上（载具自己在哪由载具的位置给出），或放在哪个库位 / 放置位
+    labware_id: Mapped[str | None] = mapped_column(ForeignKey("labware.id"), nullable=True, index=True)
+    well: Mapped[str] = mapped_column(String, default="")
+    location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
     # 历史数据没有实际位置记录时写这一句，不能拿计划工位冒充实际位置
     location_note: Mapped[str] = mapped_column(String, default="")
     custodian: Mapped[str] = mapped_column(String, default="")
@@ -52,6 +56,8 @@ class SlotOccupancy(Base):
     well: Mapped[str] = mapped_column(String)
     physical_sample_id: Mapped[str] = mapped_column(ForeignKey("physical_samples.id"))
     assignment_id: Mapped[str] = mapped_column(String, default="")
+    # 绑定了实体载具后指向它；container_id 仍是批次的虚拟板号
+    labware_id: Mapped[str | None] = mapped_column(ForeignKey("labware.id"), nullable=True)
     occupied_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 部分唯一索引：只约束「在途」的占用。用完整唯一约束不管用——两种后端都不让
@@ -76,6 +82,8 @@ class SampleTransfer(Base):
     kind: Mapped[str] = mapped_column(String, default="handover")
     from_location: Mapped[str] = mapped_column(String, default="")
     to_location: Mapped[str] = mapped_column(String, default="")
+    # 去向是登记过的库位 / 放置位时记它的编号（结构化位置）；自由文本去向为空
+    to_location_id: Mapped[str] = mapped_column(String, default="")
     from_party: Mapped[str] = mapped_column(String, default="")
     to_party: Mapped[str] = mapped_column(String, default="")
     quantity: Mapped[object | None] = mapped_column(Quantity, nullable=True)

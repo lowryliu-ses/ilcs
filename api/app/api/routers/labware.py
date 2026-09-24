@@ -79,6 +79,18 @@ def move_labware(
     return guard.remember(TransferService(db, ctx).move(labware_id, body, user))
 
 
+@router.get("/labware/{labware_id}/qr")
+def labware_qr(labware_id: str, db: DbSession, ctx: Ctx):
+    """标签二维码（SVG 文本）。内容是载具条码。"""
+    return TransferService(db, ctx).labware_qr(labware_id)
+
+
+@router.get("/labware/{labware_id}/samples")
+def labware_samples(labware_id: str, db: DbSession, ctx: Ctx):
+    """载具上现在的样本（按孔位）；按编号或条码都能查。"""
+    return TransferService(db, ctx).labware_samples(labware_id)
+
+
 @router.get("/labware/{labware_id}/moves")
 def labware_moves(labware_id: str, db: DbSession, ctx: Ctx):
     return TransferService(db, ctx).moves(labware_id)

@@ -5,6 +5,7 @@ import { ApiError, api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useLive, useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
+import { QrLabel } from '../../shared/labels';
 import type { Floor, FloorSlot, FloorStation, LabwareRow, LabwareType, LocationRow } from '../../shared/types';
 import { Blocked, Empty, Field, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
@@ -113,6 +114,7 @@ export function FloorPage() {
   const floor = useQuery<Floor>('floor', () => api.get<Floor>('/floor'), 10000);
   const [scanning, setScanning] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
   const data = floor.data;
 
   const islands = useMemo(() => {
@@ -143,6 +145,9 @@ export function FloorPage() {
           <b>{tally.transfers}</b> · {live ? '实时推送' : '轮询刷新'} · 数据时间 {data ? clock(data.now) : '—'}
         </span>
         <div className="row-end">
+          <button className="btn" onClick={() => setInspecting(true)}>
+            载具与标签
+          </button>
           {can('labware.move') ? (
             <>
               <button className="btn" onClick={() => setRegistering(true)}>
@@ -224,6 +229,7 @@ export function FloorPage() {
 
       {scanning ? <ScanDialog onClose={() => setScanning(false)} /> : null}
       {registering ? <RegisterDialog onClose={() => setRegistering(false)} /> : null}
+      {inspecting ? <LabwareDialog onClose={() => setInspecting(false)} /> : null}
     </div>
   );
 }
@@ -375,6 +381,77 @@ function RegisterDialog({ onClose }: { onClose: () => void }) {
         </select>
       </Field>
       {error ? <Blocked reasons={error.blocked.length ? error.blocked.map((b) => b.label) : [error.message]} /> : null}
+    </Modal>
+  );
+}
+
+type LabwareSamples = LabwareRow & {
+  samples: { id: string; barcode: string; well: string; sample_type: string; lifecycle_state: string }[];
+};
+
+/** 扫一块载具：看它装着哪些样本（按实体孔位）、打印载具标签。 */
+function LabwareDialog({ onClose }: { onClose: () => void }) {
+  const [code, setCode] = useState('');
+  const [found, setFound] = useState<LabwareSamples | null>(null);
+  const [error, setError] = useState('');
+  const lookup = async () => {
+    setError('');
+    try {
+      setFound(await api.get<LabwareSamples>(`/labware/${encodeURIComponent(code.trim())}/samples`));
+    } catch (caught) {
+      setFound(null);
+      setError(caught instanceof ApiError ? caught.message : String(caught));
+    }
+  };
+  return (
+    <Modal title="载具与标签" wide onClose={onClose}>
+      <form
+        className="filters"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (code.trim()) void lookup();
+        }}
+      >
+        <input autoFocus placeholder="扫描或输入载具条码后回车" value={code} onChange={(event) => setCode(event.target.value)} />
+        <button className="btn sm" type="submit" disabled={!code.trim()}>
+          查找
+        </button>
+      </form>
+      {error ? <div className="note bad">{error}</div> : null}
+      {found ? (
+        <>
+          <div className="small">
+            <b className="mono">{found.barcode}</b> · {found.type_name}（{found.rows}×{found.cols}）· 位置 {found.location_id || '未上线'}
+            {found.batch_id ? <> · 批次 <Link to={`/batches/${found.batch_id}`}>{found.batch_id}</Link></> : null}
+          </div>
+          <QrLabel path={`/labware/${found.id}/qr`} cacheKey={`labware:${found.id}:qr`} />
+          {found.samples.length ? (
+            <table>
+              <thead>
+                <tr>
+                  <th>孔位</th>
+                  <th>样本</th>
+                  <th>类型</th>
+                </tr>
+              </thead>
+              <tbody>
+                {found.samples.map((row) => (
+                  <tr key={row.id}>
+                    <td className="mono">{row.well}</td>
+                    <td>
+                      <Link to={`/samples/${row.id}`}>{row.id}</Link>
+                      {row.barcode ? <div className="tiny muted">{row.barcode}</div> : null}
+                    </td>
+                    <td className="small">{row.sample_type}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <Empty>载具上没有登记样本</Empty>
+          )}
+        </>
+      ) : null}
     </Modal>
   );
 }

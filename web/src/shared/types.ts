@@ -1138,6 +1138,14 @@ export type TransferRow = {
   occurred_at: string;
 };
 
+export type SampleLocation = {
+  kind: 'labware' | 'location' | 'text' | 'none';
+  labware: { id: string; barcode: string; type_name: string; state: string } | null;
+  well: string;
+  place: { id: string; name: string; kind: string; station_id: string } | null;
+  text: string;
+};
+
 export type SampleRow = {
   id: string;
   barcode: string;
@@ -1149,6 +1157,8 @@ export type SampleRow = {
   unit: string;
   storage_condition: string;
   current_location: string;
+  /** 结构化位置：在哪块载具的哪个孔位（载具在哪），或放在哪个登记位置；都没有时只有文本 */
+  location?: SampleLocation;
   location_note: string;
   custodian: string;
   lifecycle_state: string;
