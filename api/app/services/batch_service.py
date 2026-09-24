@@ -492,6 +492,13 @@ class BatchService:
                     f"该任务已绑定批次 {task.batch_id}，同一任务不产生重复批次",
                     code="task_already_has_batch",
                 )
+            if self.tasks.children(task.id):
+                # 先于物料预留判：父任务不直接执行，不该为它占一份物料再回滚
+                raise StateConflict(
+                    "父任务不直接执行：请在它的子任务上建批次",
+                    {"blocked": [{"key": "task", "label": "任务已拆成子任务，状态由子任务汇总"}]},
+                    code="task_has_children",
+                )
 
         version = self.plan_versions.latest_approved(plan.id)
         batch = Batch(
@@ -512,7 +519,7 @@ class BatchService:
         bom = batch.recipe_snapshot.get("bom") or []
         if bom:
             self.materials.reserve_for_batch(batch.id, bom, user)
-        rows = self._generate_samples(batch, plan)
+        rows = self._generate_samples(batch, plan, task.sample_ids if task is not None else None)
         if plan.plan_type == "matrix":
             from ..domain.matrix import condition_params
 
@@ -585,10 +592,11 @@ class BatchService:
             }
         )
 
-    def _generate_samples(self, batch: Batch, plan) -> list[dict]:
+    def _generate_samples(self, batch: Batch, plan, task_samples: list[str] | None = None) -> list[dict]:
         """生成运行分配。
 
-        矩阵方案按孔位布局生成；单条件与委托方案按样本清单或样本数生成。
+        矩阵方案按孔位布局生成；单条件与委托方案按样本清单或样本数生成——任务自己带了样本清单
+        （例如拆分出来的子任务）就用任务的，否则用方案的。
         每个分配都指向一个物理样本——清单里给了就用它，否则登记一个新的。
         """
         sample_service = SampleService(self.db, self.ctx)
@@ -610,7 +618,7 @@ class BatchService:
                 for a in assignments
             ]
         else:
-            listed = list(plan.sample_ids or [])
+            listed = list(task_samples or plan.sample_ids or [])
             count = len(listed) or plan.sample_count
             from ..domain.matrix import well_grid
 
@@ -843,6 +851,7 @@ class BatchService:
             qualification_required=self.people.requires_qualification(steps),
             qualification_blockers=qualification_blockers,
             sop_snapshot=batch.sop_snapshot or None,
+            dependency_blockers=self._dependency_blockers(task),
         )
         checks = preflight.evaluate(context)
         return {
@@ -855,6 +864,13 @@ class BatchService:
             "pallet_code": f"PL-{batch.id.replace('B-', '')}",
             "resource_checks": resource_checks,
         }
+
+    def _dependency_blockers(self, task) -> list[str] | None:
+        if task is None or not task.depends_on:
+            return None
+        from .task_service import TaskService
+
+        return [row["label"] for row in TaskService(self.db, self.ctx).dependency_blockers(task)]
 
     def dispatch(self, batch_id: str, manual_review: bool, reason: str, signature_id: str, user: User) -> dict:
         if not self.ctx.has("batch.control"):

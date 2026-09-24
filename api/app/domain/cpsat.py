@@ -9,6 +9,7 @@
   作为固定区间计入。
 - 依赖图：后继开始 ≥ 前驱结束；前后两个设备步骤落在不同工位时再加转运时长。
 - 硬时限：开始 − 最晚前驱结束 ≤ maxGapMin。
+- 任务依赖：上游批次全部结束后，下游批次的步骤才能开始；所选之外的上游给出下游的最早开工时刻。
 - 目标：总跨度 × 批次数 + 各批次按优先级加权的完成时刻。
 
 刻意的边界：承运工位（AGV）的占用与清洗缓冲不进模型——它们由确定性排程器在落地时精确
@@ -64,12 +65,15 @@ def solve(
     transfer_min: int = 10,
     time_limit_sec: float = 5.0,
     workers: int = 4,
+    precedence: list[tuple[str, str]] | None = None,
+    release: dict[str, int] | None = None,
 ) -> Solution:
     from ortools.sat.python import cp_model
 
     model = cp_model.CpModel()
     horizon = sum(step.duration + transfer_min for job in jobs for step in job.steps)
     horizon += max((end for rows in busy.values() for _, end in rows), default=0) + 1
+    horizon += max((release or {}).values(), default=0)
     starts: dict[tuple[str, int], cp_model.IntVar] = {}
     ends: dict[tuple[str, int], cp_model.IntVar] = {}
     choice: dict[tuple[str, int], dict[str, cp_model.IntVar]] = {}
@@ -130,6 +134,16 @@ def solve(
         completion = model.NewIntVar(0, horizon, f"done_{job.batch_id}")
         model.AddMaxEquality(completion, [ends[(job.batch_id, step.index)] for step in job.steps])
         completions.append((job, completion))
+
+    done = {job.batch_id: completion for job, completion in completions}
+    for before, after in precedence or []:
+        if before in done and after in done:
+            for step in next(job for job in jobs if job.batch_id == after).steps:
+                model.Add(starts[(after, step.index)] >= done[before])
+    for batch_id, floor in (release or {}).items():
+        job = next((row for row in jobs if row.batch_id == batch_id), None)
+        for step in job.steps if job else ():
+            model.Add(starts[(batch_id, step.index)] >= floor)
 
     span = model.NewIntVar(0, horizon, "span")
     model.AddMaxEquality(span, [completion for _, completion in completions])

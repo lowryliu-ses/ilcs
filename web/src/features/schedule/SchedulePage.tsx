@@ -115,14 +115,19 @@ export function SchedulePage() {
     onSuccess: () => toast.push('已取消排程，工位时间窗已归还'),
   });
 
-  const applyOptimized = useMutation((order: string[]) => api.post('/schedule/optimize/apply', { order }), {
-    invalidates: ['schedule', 'batches', 'dashboard'],
-    onSuccess: () => {
-      toast.push('优化方案已写入');
-      setPreview(null);
-      setSelected([]);
+  // 带回预览用的起点：预览与写入用同一个「现在」，写进去的时间窗和操作员看到的一致
+  const applyOptimized = useMutation(
+    ({ order, startFrom }: { order: string[]; startFrom?: string }) =>
+      api.post('/schedule/optimize/apply', { order, start_from: startFrom }),
+    {
+      invalidates: ['schedule', 'batches', 'dashboard'],
+      onSuccess: () => {
+        toast.push('优化方案已写入');
+        setPreview(null);
+        setSelected([]);
+      },
     },
-  });
+  );
 
   const origin = useMemo(() => {
     const starts = (board.data?.stations ?? []).flatMap((lane) => lane.items.map((item) => item.starts_at));
@@ -277,7 +282,9 @@ export function SchedulePage() {
               <button
                 className="btn primary"
                 disabled={applyOptimized.pending}
-                onClick={() => applyOptimized.run(preview.best.order).catch((error) => toast.push(error.message))}
+                onClick={() =>
+                  applyOptimized.run({ order: preview.best.order, startFrom: preview.start_from }).catch((error) => toast.push(error.message))
+                }
               >
                 确认写入
               </button>

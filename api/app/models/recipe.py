@@ -133,10 +133,14 @@ class PlanVersion(Base):
 
 
 class ExperimentTask(Base):
-    """一次实验工作。首期每个任务对应一个执行批次，不与 Batch 竞争执行真相。
+    """一次实验工作。叶子任务对应一个执行批次，不与 Batch 竞争执行真相。
 
     执行阶段从 Batch / StepRun 派生，数据与报告阶段从相应对象派生，
     所以没有「把状态 PATCH 成完成」的入口。
+
+    任务可以组成树（`parent_id`）：父任务是订单 / 实验活动这一层的容器，不绑定批次，
+    状态由子任务汇总；子任务各自对应一个批次。任务之间可以声明先后（`depends_on`）：
+    上游任务的批次运行结束之前，下游任务的批次不能下发，排程也不会把它排到上游结束之前。
     """
 
     __tablename__ = "experiment_tasks"
@@ -150,6 +154,10 @@ class ExperimentTask(Base):
     assignee_user_id: Mapped[str] = mapped_column(String, default="")
     reviewer_user_id: Mapped[str] = mapped_column(String, default="")
     batch_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # 任务树：父任务编号；空串表示顶层任务
+    parent_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # 上游任务编号：它们的批次运行结束后本任务才能下发（完成—开始约束）
+    depends_on: Mapped[list] = mapped_column(JSON, default=list)
     sample_ids: Mapped[list] = mapped_column(JSON, default=list)
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=2)

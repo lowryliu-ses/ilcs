@@ -80,7 +80,7 @@ def test_locked_but_unapproved_plan_cannot_start_a_batch(operator, researcher, r
 def test_dispatch_requires_manual_review_and_server_checks(operator, scheduled_batch):
     preflight = operator.get(f"/api/batches/{scheduled_batch}/preflight?manual_review=true").json()
     assert preflight["ok"], preflight["blocked"]
-    assert len(preflight["checks"]) == 9
+    assert len(preflight["checks"]) == 10
     assert {c["state"] for c in preflight["checks"]} <= {"pass", "blocked", "not_applicable"}
 
     without_review = operator.post(

@@ -42,6 +42,8 @@ class PreflightContext:
     qualification_blockers: list[str] = field(default_factory=list)
     qualification_required: bool = True
     sop_snapshot: dict | None = None
+    # 任务上游：None 表示任务没有声明依赖（不适用）；空列表表示依赖都已满足
+    dependency_blockers: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -224,7 +226,18 @@ def evaluate(context: PreflightContext) -> list[Check]:
             )
         )
 
-    # ---------- 9 操作者权限与人工核对 ----------
+    # ---------- 9 上游任务 ----------
+    if context.dependency_blockers is None:
+        checks.append(Check("upstream", "上游任务", NOT_APPLICABLE, "任务没有声明上游依赖"))
+    else:
+        checks.append(
+            Check(
+                "upstream", "上游任务", _state(not context.dependency_blockers),
+                "；".join(context.dependency_blockers) or "上游任务的批次都已运行结束",
+            )
+        )
+
+    # ---------- 10 操作者权限与人工核对 ----------
     checks.append(
         Check(
             "authority", "操作者权限与人工复核",

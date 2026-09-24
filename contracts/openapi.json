@@ -4632,6 +4632,14 @@
       },
       "TaskCreateIn": {
         "properties": {
+          "depends_on": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
           "due_at": {
             "anyOf": [
               {
@@ -4652,6 +4660,11 @@
           "owner_user_id": {
             "default": "",
             "title": "Owner User Id",
+            "type": "string"
+          },
+          "parent_id": {
+            "default": "",
+            "title": "Parent Id",
             "type": "string"
           },
           "plan_id": {
@@ -4688,6 +4701,58 @@
           "plan_id"
         ],
         "title": "TaskCreateIn",
+        "type": "object"
+      },
+      "TaskDecomposeIn": {
+        "description": "拆分任务：按样本每份 chunk_size 个（缺省按方法样品位），或拆成 parts 份；sequential 时后一份依赖前一份。",
+        "properties": {
+          "chunk_size": {
+            "anyOf": [
+              {
+                "maximum": 96.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "parts": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 2.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parts"
+          },
+          "sequential": {
+            "default": false,
+            "title": "Sequential",
+            "type": "boolean"
+          }
+        },
+        "title": "TaskDecomposeIn",
+        "type": "object"
+      },
+      "TaskDependenciesIn": {
+        "properties": {
+          "depends_on": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          }
+        },
+        "title": "TaskDependenciesIn",
         "type": "object"
       },
       "TelemetryIn": {
@@ -9709,6 +9774,166 @@
           }
         ],
         "summary": "Cancel Task",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/decompose": {
+      "post": {
+        "description": "拆成子任务。父任务不绑定批次，状态由子任务汇总；每个子任务各建一个批次。",
+        "operationId": "decompose_task_api_experiment_tasks__task_id__decompose_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskDecomposeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decompose Task",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/dependencies": {
+      "put": {
+        "description": "设置上游任务（完成—开始）。成环、依赖自己的子任务、已下发批次再加上游都拒绝。",
+        "operationId": "set_task_dependencies_api_experiment_tasks__task_id__dependencies_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskDependenciesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Task Dependencies",
         "tags": [
           "task"
         ]

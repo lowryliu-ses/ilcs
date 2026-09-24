@@ -103,6 +103,18 @@ class ExperimentTaskRepository(ScopedRepository[ExperimentTask]):
     def by_batch(self, batch_id: str) -> ExperimentTask | None:
         return self.query().filter(ExperimentTask.batch_id == batch_id).first()
 
+    def children(self, parent_id: str) -> list[ExperimentTask]:
+        return list(
+            self.query().filter(ExperimentTask.parent_id == parent_id).order_by(ExperimentTask.id).all()
+        )
+
+    def dependents(self, task_id: str) -> list[ExperimentTask]:
+        """声明依赖本任务的下游任务。依赖存在 JSON 数组里，量不大，按组织取出后过滤。"""
+        return [row for row in self.query().all() if task_id in (row.depends_on or [])]
+
+    def edges(self) -> dict[str, list[str]]:
+        return {row.id: list(row.depends_on or []) for row in self.query().all() if row.depends_on}
+
     def open_for_assignee(self, user_id: str) -> list[ExperimentTask]:
         return list(
             self.query()

@@ -120,7 +120,9 @@ def test_optimize_preview_matches_what_apply_writes(operator, reset_runtime):
         assert sorted(body["solver"]["order"]) == sorted(ids), "CP-SAT 的顺序作为候选参与比较"
     assert body["best"]["span_min"] <= body["baseline"]["span_min"]
 
-    applied = operator.post("/api/schedule/optimize/apply", {"order": body["best"]["order"]})
+    applied = operator.post(
+        "/api/schedule/optimize/apply", {"order": body["best"]["order"], "start_from": body["start_from"]},
+    )
     assert applied.status_code == 200, applied.text
     first = body["best"]["order"][0]
     planned = [row for row in body["best"]["plans"][first] if row["kind"] == "work"]

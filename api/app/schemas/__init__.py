@@ -321,6 +321,21 @@ class TaskCreateIn(BaseModel):
     due_at: datetime | None = None
     priority: int = Field(default=2, ge=1, le=5)
     note: str = ""
+    # 任务树与依赖：挂在哪个父任务下、依赖哪些上游任务
+    parent_id: str = ""
+    depends_on: list[str] = []
+
+
+class TaskDecomposeIn(BaseModel):
+    """拆分任务：按样本每份 chunk_size 个（缺省按方法样品位），或拆成 parts 份；sequential 时后一份依赖前一份。"""
+
+    chunk_size: int | None = Field(default=None, ge=1, le=96)
+    parts: int | None = Field(default=None, ge=2, le=50)
+    sequential: bool = False
+
+
+class TaskDependenciesIn(BaseModel):
+    depends_on: list[str] = []
 
 
 class TaskAssignIn(Versioned):

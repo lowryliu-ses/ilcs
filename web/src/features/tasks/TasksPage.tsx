@@ -7,7 +7,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type { Paged, PersonRow, PlanRow, StepRunRow, TaskDetail, TaskRow } from '../../shared/types';
 import {
-  Blocked, ConfirmDialog, Empty, Field, ListState, Modal, Pager, Panel, Pill, useToast,
+  Blocked, ConfirmDialog, Empty, Field, ListState, Modal, NumberInput, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
 
 const STATES: [string, string][] = [
@@ -103,8 +103,14 @@ export function TasksPage() {
                 {rows.map((row) => (
                   <tr key={row.id} className="clickable" onClick={() => setDetailId(row.id)}>
                     <td>
-                      <b className="mono">{row.id}</b>
+                      <b className="mono">{row.parent_id ? '↳ ' : ''}{row.id}</b>
                       <div className="tiny muted">{row.title}</div>
+                      {row.children.length ? <div className="tiny muted">{row.children.length} 个子任务</div> : null}
+                      {row.depends_on.length ? (
+                        <div className={`tiny ${row.blocked_by.length ? 'warn-text' : 'muted'}`}>
+                          依赖 {row.depends_on.join('、')}{row.blocked_by.length ? '（未满足）' : ''}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="small">
                       {row.plan_id}
@@ -124,7 +130,9 @@ export function TasksPage() {
                       <Pill state={row.state} label={row.state_label} />
                     </td>
                     <td className="small mono">
-                      {row.batch_id ? (
+                      {row.children.length ? (
+                        <span className="muted">由子任务执行</span>
+                      ) : row.batch_id ? (
                         <button
                           className="btn sm"
                           onClick={(event) => {
@@ -207,12 +215,12 @@ export function TasksPage() {
       </div>
 
       {creating ? <CreateDialog onClose={() => setCreating(false)} /> : null}
-      {detailId ? <TaskDialog taskId={detailId} onClose={() => setDetailId(null)} /> : null}
+      {detailId ? <TaskDialog taskId={detailId} onOpen={setDetailId} onClose={() => setDetailId(null)} /> : null}
     </div>
   );
 }
 
-function TaskDialog({ taskId, onClose }: { taskId: string; onClose: () => void }) {
+function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () => void; onOpen: (id: string) => void }) {
   const { user, can } = useSession();
   const toast = useToast();
   const navigate = useNavigate();
@@ -287,6 +295,8 @@ function TaskDialog({ taskId, onClose }: { taskId: string; onClose: () => void }
           </div>
 
           {task.cancel_reason ? <div className="note warn">取消原因：{task.cancel_reason}</div> : null}
+
+          <TaskStructure task={task} onOpen={onOpen} />
 
           <Panel title="分配与转派留痕" flush>
             {task.history.length ? (
@@ -517,5 +527,160 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
       </Field>
       {create.error ? <div className="note bad">{create.error.message}</div> : null}
     </Modal>
+  );
+}
+
+
+/* 任务树与依赖：父任务是容器，状态由子任务汇总；上游任务的批次运行结束后本任务才能下发。 */
+function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string) => void }) {
+  const { can } = useSession();
+  const toast = useToast();
+  const [splitting, setSplitting] = useState(false);
+  const [chunk, setChunk] = useState<number | ''>('');
+  const [parts, setParts] = useState<number | ''>(2);
+  const [sequential, setSequential] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [deps, setDeps] = useState<string[]>(task.depends_on);
+  const candidates = useQuery<Paged<TaskRow>>('tasks:all', () => api.get<Paged<TaskRow>>('/experiment-tasks?page_size=200'));
+  const invalidates = ['tasks', 'dashboard', 'batches', 'schedule'];
+  const decompose = useMutation(
+    () =>
+      api.post(
+        `/experiment-tasks/${task.id}/decompose`,
+        task.sample_ids.length || task.plan_type !== 'matrix'
+          ? { chunk_size: chunk === '' ? null : chunk, parts: chunk === '' && parts !== '' ? parts : null, sequential }
+          : { parts: parts === '' ? null : parts, sequential },
+        true,
+      ),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push('已拆分为子任务');
+        setSplitting(false);
+      },
+    },
+  );
+  const saveDeps = useMutation(() => api.put(`/experiment-tasks/${task.id}/dependencies`, { depends_on: deps }), {
+    invalidates,
+    onSuccess: () => {
+      toast.push('依赖已更新');
+      setEditing(false);
+    },
+  });
+  const others = (candidates.data?.items ?? []).filter((row) => row.id !== task.id && row.state !== 'cancelled');
+  const canSplit = can('task.create') && !task.batch_id && !task.children.length && task.state !== 'cancelled';
+
+  return (
+    <Panel title="任务树与依赖" flush>
+      <div className="panel-body stack">
+        {task.parent_id ? (
+          <div className="small">
+            父任务：<button className="btn sm" onClick={() => onOpen(task.parent_id)}>{task.parent_id}</button>
+          </div>
+        ) : null}
+        {task.children.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>子任务</th>
+                <th>批次</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {task.children.map((child) => (
+                <tr key={child.id} className="clickable" onClick={() => onOpen(child.id)}>
+                  <td className="small">
+                    <b className="mono">{child.id}</b> <span className="muted">{child.title}</span>
+                  </td>
+                  <td className="small mono">{child.batch_id || '—'}</td>
+                  <td>
+                    <Pill state={child.state} label={child.state_label} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        <div className="small">
+          <b>上游任务：</b>
+          {task.depends_on.length ? task.depends_on.join('、') : '无'}
+          {task.blocked_by.length ? (
+            <ul className="tiny warn-text">
+              {task.blocked_by.map((row) => (
+                <li key={row.task_id}>{row.label}</li>
+              ))}
+            </ul>
+          ) : task.depends_on.length ? (
+            <span className="tiny ok-text">（已满足）</span>
+          ) : null}
+        </div>
+        <div className="row">
+          {can('task.assign') ? (
+            <button className="btn sm" onClick={() => { setDeps(task.depends_on); setEditing(!editing); }}>
+              {editing ? '收起' : '编辑依赖'}
+            </button>
+          ) : null}
+          {canSplit ? (
+            <button className="btn sm" onClick={() => setSplitting(!splitting)}>
+              {splitting ? '收起' : '拆分为子任务'}
+            </button>
+          ) : null}
+        </div>
+        {editing ? (
+          <div className="deps">
+            <div className="tiny muted">完成—开始：勾选的任务的批次运行结束后，本任务的批次才能下发；排程也会排在它们之后。</div>
+            <div className="dep-list">
+              {others.map((row) => (
+                <label key={row.id} className="check">
+                  <input
+                    type="checkbox"
+                    checked={deps.includes(row.id)}
+                    onChange={(event) =>
+                      setDeps(event.target.checked ? [...deps, row.id] : deps.filter((value) => value !== row.id))
+                    }
+                  />
+                  <span className="mono">{row.id}</span> {row.title} <Pill state={row.state} label={row.state_label} />
+                </label>
+              ))}
+            </div>
+            <div className="row">
+              <button className="btn sm primary" disabled={saveDeps.pending} onClick={() => saveDeps.run().catch(() => undefined)}>
+                保存依赖
+              </button>
+              {saveDeps.error ? <span className="small bad-text">{saveDeps.error.message}</span> : null}
+            </div>
+          </div>
+        ) : null}
+        {splitting ? (
+          <div className="deps">
+            <div className="tiny muted">
+              有样本清单时按每份样本数拆（留空按方法的样品位）；矩阵方案或没有样本清单时按份数拆，每份按方案整体执行一次。
+              父任务不绑定批次，状态由子任务汇总。
+            </div>
+            <div className="row">
+              {task.sample_ids.length || task.plan_type !== 'matrix' ? (
+                <Field label="每份样本数">
+                  <NumberInput value={chunk} ariaLabel="每份样本数" onChange={setChunk} />
+                </Field>
+              ) : null}
+              <Field label="份数">
+                <NumberInput value={parts} ariaLabel="份数" onChange={setParts} />
+              </Field>
+              <label className="check">
+                <input type="checkbox" checked={sequential} onChange={(event) => setSequential(event.target.checked)} />
+                顺序执行（后一份依赖前一份）
+              </label>
+            </div>
+            <div className="row">
+              <button className="btn sm primary" disabled={decompose.pending} onClick={() => decompose.run().catch(() => undefined)}>
+                拆分
+              </button>
+              {decompose.error ? <span className="small bad-text">{decompose.error.message}</span> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </Panel>
   );
 }

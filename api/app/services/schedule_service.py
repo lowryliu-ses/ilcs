@@ -115,6 +115,104 @@ class ScheduleService:
             bookings.setdefault(row.asset_id, []).append((Interval(row.starts_at, row.ends_at), units))
         return {"station_asset": station_asset, "asset_capacity": capacity, "asset_bookings": bookings}
 
+    # ---------- 任务依赖 ----------
+
+    def _task_of(self, batch: Batch):
+        from ..repositories.recipes import ExperimentTaskRepository
+
+        return ExperimentTaskRepository(self.db, self.ctx).get(batch.task_id) if batch.task_id else None
+
+    def batch_end(self, batch: Batch) -> datetime | None:
+        """批次结束（或计划结束）的时刻：已完成看最后一步的实际结束，其余看设备时间窗的计划结束。"""
+        if batch.state == "done":
+            from ..models import StepRun
+
+            ended = [
+                row.ended_at for row in self.db.query(StepRun).filter(StepRun.batch_id == batch.id).all()
+                if row.ended_at
+            ]
+            return max(ended) if ended else now()
+        work = [a for a in self.allocations.for_batch(batch.id) if a.kind == WORK]
+        return max((a.ends_at for a in work), default=None)
+
+    def dependency_floor(self, batch: Batch, skip: set[str] | None = None) -> tuple[datetime | None, list[str]]:
+        """任务上游决定的最早开工时刻，以及还定不下来的上游（没排程、没建批次、已终止）。
+
+        `skip` 是同一次多批次优化里一起排的上游批次：它们的结束由优化器按候选顺序算，不看库里的旧占用。
+        """
+        from .task_service import TaskService
+
+        task = self._task_of(batch)
+        if task is None or not task.depends_on:
+            return None, []
+        floor: datetime | None = None
+        missing: list[str] = []
+        for upstream, upstream_batch in TaskService(self.db, self.ctx).upstream_batches(task):
+            if upstream_batch is None:
+                missing.append(f"上游任务 {upstream.id} 还没有建批次")
+                continue
+            if upstream_batch.state == "aborted":
+                missing.append(f"上游任务 {upstream.id} 的批次 {upstream_batch.id} 已终止")
+                continue
+            if upstream_batch.id in (skip or set()):
+                continue
+            end = self.batch_end(upstream_batch)
+            if end is None:
+                missing.append(f"上游任务 {upstream.id} 的批次 {upstream_batch.id} 还没排程，定不下本批次的开工时间")
+                continue
+            floor = end if floor is None or end > floor else floor
+        return floor, missing
+
+    def upstream_batch_ids(self, batch: Batch) -> list[str]:
+        from .task_service import TaskService
+
+        task = self._task_of(batch)
+        if task is None or not task.depends_on:
+            return []
+        return [row.id for _, row in TaskService(self.db, self.ctx).upstream_batches(task) if row is not None]
+
+    def dependency_conflicts(self, batch: Batch) -> list[str]:
+        """本批次（的任务）被下游依赖，而下游已排的开工早于本批次现在的结束：依赖被打破。"""
+        from ..repositories.recipes import ExperimentTaskRepository
+        from .task_service import TaskService
+
+        task = self._task_of(batch)
+        if task is None:
+            return []
+        tasks = ExperimentTaskRepository(self.db, self.ctx)
+        end = self.batch_end(batch)
+        if end is None:
+            return []
+        found: list[str] = []
+        service = TaskService(self.db, self.ctx)
+        # 依赖可以挂在本任务上，也可以挂在它的任意一层父任务上
+        roots = [task.id, *(row.id for row in service.ancestors(task))]
+        for root in roots:
+            for downstream in tasks.dependents(root):
+                for leaf, leaf_batch in service.leaf_batches([downstream.id]):
+                    if leaf_batch is None or leaf_batch.state not in {"scheduled", "planned"}:
+                        continue
+                    work = [a for a in self.allocations.for_batch(leaf_batch.id) if a.kind == WORK]
+                    start = min((a.starts_at for a in work), default=None)
+                    if start is not None and start < end:
+                        found.append(
+                            f"下游任务 {leaf.id} 的批次 {leaf_batch.id} 计划 {start:%m-%d %H:%M} 开工，"
+                            f"早于上游 {batch.id} 现在的结束 {end:%m-%d %H:%M}"
+                        )
+        return found
+
+    def _raise_dependency_alarm(self, batch: Batch, conflicts: list[str]) -> None:
+        from .alarm_service import AlarmService
+
+        if not conflicts:
+            return
+        AlarmService(self.db, self.ctx).raise_alarm(
+            severity=2, source_type="batch", source_id=batch.id,
+            message=("任务依赖被打破：" + "；".join(conflicts))[:500],
+            response="在排程页重排下游批次（或推迟上游）；下游开跑检查会挡住上游没结束的下发。",
+            owner="调度", origin="system", condition_key=f"batch:{batch.id}:dependency_conflict",
+        )
+
     # ---------- 写 ----------
 
     def schedule(self, batch: Batch, start_from: datetime | None, prefer: str | None, user: User) -> list[Allocation]:
@@ -144,6 +242,16 @@ class ScheduleService:
             return []
 
         begin = start_from or (now() + timedelta(minutes=5))
+        floor, missing = self.dependency_floor(batch)
+        if missing:
+            raise StateConflict(
+                "上游任务还定不下来，无法排程",
+                {"blocked": [{"key": "dependency", "label": text} for text in missing]},
+                code="dependency_unscheduled",
+            )
+        if floor is not None and floor > begin:
+            # 完成—开始：上游计划（或实际）结束之前不开工
+            begin = floor
         try:
             planned = plan_steps(steps, begin, self.context({batch.id}, prefer))
         except SchedulingError as error:
@@ -173,6 +281,7 @@ class ScheduleService:
                 f"{len(work)}/{demand['needs_station']} 个需占用步骤已预约，"
                 f"{work[0].starts_at:%m-%d %H:%M} 起，跨度 "
                 f"{makespan(planned).total_seconds() / 60:.0f} min"
+                + (f"；上游任务结束于 {floor:%m-%d %H:%M}，不早于它开工" if floor is not None else "")
             ),
         )
         self.db.flush()
@@ -362,14 +471,36 @@ class ScheduleService:
         by_id = {b.id: b for b in batches}
         steps_by_batch = {b.id: normalize(b.recipe_snapshot.get("steps") or []) for b in batches}
         weight = {b.id: max(1, 4 - int(b.priority or 2)) for b in batches}
+        # 任务依赖：所选批次之间的先后必须保持；所选之外的上游给出固定的最早开工时刻
+        from ..domain import tasks as task_rules
+
+        upstream = {b.id: [ref for ref in self.upstream_batch_ids(b) if ref in selected] for b in batches}
+        external_floor: dict[str, datetime] = {}
+        for b in batches:
+            outside = [ref for ref in self.upstream_batch_ids(b) if ref not in selected]
+            if not outside:
+                continue
+            floor, missing = self.dependency_floor(b, skip=selected)
+            if missing:
+                raise StateConflict(
+                    f"{b.id} 的上游任务还定不下来", {"blocked": [{"key": "dependency", "label": t} for t in missing]},
+                    code="dependency_unscheduled",
+                )
+            if floor is not None:
+                external_floor[b.id] = floor
 
         def evaluate(order: tuple[str, ...]) -> optimizer.Candidate:
             """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。"""
+            if not task_rules.respects(order, upstream):
+                return optimizer.Candidate(order, False, reason="违反任务依赖：下游批次排在了上游之前")
             context = self.context(selected, allow_unclean=True)
             plans: dict[str, list[PlannedAllocation]] = {}
             for batch_id in order:
+                start_at = max([begin, *([external_floor[batch_id]] if batch_id in external_floor else []),
+                                *[max((a.ends_at for a in plans[ref] if a.kind == WORK), default=begin)
+                                  for ref in upstream[batch_id] if ref in plans]])
                 try:
-                    plans[batch_id] = plan_steps(steps_by_batch[batch_id], begin, context)
+                    plans[batch_id] = plan_steps(steps_by_batch[batch_id], start_at, context)
                 except SchedulingError as error:
                     return optimizer.Candidate(order, False, reason=f"{batch_id}: {error.message}")
             work_items = [a for planned in plans.values() for a in planned if a.kind == WORK]
@@ -399,15 +530,18 @@ class ScheduleService:
             }
 
         ids = [b.id for b in batches]
-        priority_order = tuple(sorted(ids, key=lambda b: (by_id[b].priority, b)))
-        longest_first = tuple(sorted(ids, key=lambda b: (-critical_path_min(steps_by_batch[b]), b)))
-        seeds = [priority_order, longest_first, tuple(reversed(longest_first))]
+        valid = lambda order: tuple(task_rules.topo_order(list(order), upstream))  # noqa: E731
+        priority_order = valid(sorted(ids, key=lambda b: (by_id[b].priority, b)))
+        longest_first = valid(sorted(ids, key=lambda b: (-critical_path_min(steps_by_batch[b]), b)))
+        seeds = [priority_order, longest_first, valid(reversed(longest_first))]
 
         solver_info = None
         if settings.scheduler_backend in {"auto", "cpsat"} and cpsat.available() and len(ids) > 1:
-            solver_info = self._cpsat_order(batches, steps_by_batch, weight, selected, begin)
+            solver_info = self._cpsat_order(
+                batches, steps_by_batch, weight, selected, begin, upstream=upstream, floors=external_floor,
+            )
             if solver_info.get("order"):
-                seeds.insert(0, tuple(solver_info["order"]))
+                seeds.insert(0, valid(solver_info["order"]))
         elif settings.scheduler_backend == "cpsat":
             solver_info = {"status": "unavailable", "reason": "未安装 ortools，已用内置顺序搜索"}
 
@@ -418,6 +552,8 @@ class ScheduleService:
         if not report.best.ok:
             raise StateConflict("所有候选顺序都无法满足约束", {"reason": report.best.reason or baseline.reason})
         return {
+            # 应用时带回这个起点：预览与写入用同一个「现在」，分钟翻页不会让时间窗错开
+            "start_from": begin.isoformat(timespec="seconds"),
             "baseline": out(baseline),
             "best": out(report.best),
             "improvement_min": (baseline.span_min - report.best.span_min) if baseline.ok else None,
@@ -427,7 +563,7 @@ class ScheduleService:
             "solver": solver_info,
         }
 
-    def _cpsat_order(self, batches, steps_by_batch, weight, selected, begin) -> dict:
+    def _cpsat_order(self, batches, steps_by_batch, weight, selected, begin, *, upstream=None, floors=None) -> dict:
         """把批次、工位与已有占用翻译成 CP-SAT 模型求一个候选顺序。求不出来不影响内置搜索。"""
         from ..domain import cpsat
         from ..domain.graph import predecessors
@@ -461,6 +597,11 @@ class ScheduleService:
         solution = cpsat.solve(
             jobs, channels, busy, transfer_min=settings.transfer_min,
             time_limit_sec=settings.scheduler_cpsat_time_limit_sec,
+            precedence=[(before, after) for after, refs in (upstream or {}).items() for before in refs],
+            release={
+                batch_id: max(0, round((floor - begin).total_seconds() / 60))
+                for batch_id, floor in (floors or {}).items()
+            },
         )
         return {
             "status": solution.status, "order": solution.order, "span_min": solution.span_min,
@@ -612,6 +753,7 @@ class ScheduleService:
                 + (f"；与 {len(conflicts)} 处其他批次占用重叠，已报警" if conflicts else "")
             ),
         )
+        self._raise_dependency_alarm(batch, self.dependency_conflicts(batch))
         if conflicts:
             from .alarm_service import AlarmService
 

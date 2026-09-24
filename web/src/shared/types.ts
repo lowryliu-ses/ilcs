@@ -773,6 +773,8 @@ export type QueueRow = {
 };
 
 export type OptimizePreview = {
+  /** 预览用的起点；应用时原样带回 */
+  start_from: string;
   baseline: { ok: boolean; order: string[]; span_min?: number | null; weighted_min?: number | null; finish_at?: string; reason: string };
   best: { ok: boolean; order: string[]; span_min: number; weighted_min?: number; finish_at: string };
   improvement_min: number | null;
@@ -1120,6 +1122,13 @@ export type TaskRow = {
   note: string;
   created_at: string;
   row_version: number;
+  /** 任务树：父任务编号，顶层为空 */
+  parent_id: string;
+  /** 上游任务：它们的批次运行结束后本任务才能下发 */
+  depends_on: string[];
+  children: { id: string; title: string; batch_id: string; state: string; state_label: string }[];
+  /** 还没满足的上游 */
+  blocked_by: { task_id: string; label: string }[];
 };
 
 export type TaskDetail = TaskRow & {

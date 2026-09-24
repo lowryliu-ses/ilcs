@@ -29,9 +29,19 @@ def preflight_context(**overrides) -> preflight.PreflightContext:
 def test_all_checks_pass_on_a_clean_batch():
     checks = preflight.evaluate(preflight_context())
 
-    assert len(checks) == 9
+    assert len(checks) == 10
     assert not preflight.blocked(checks)
-    assert preflight.summary(checks)["not_applicable"] == 0
+    # 任务没有声明上游依赖：「上游任务」不适用，其余都有东西可查
+    assert preflight.summary(checks)["not_applicable"] == 1
+    assert next(c for c in checks if c.key == "upstream").state == preflight.NOT_APPLICABLE
+
+
+def test_unfinished_upstream_task_blocks_dispatch():
+    checks = preflight.evaluate(preflight_context(dependency_blockers=["上游任务 ET-1 执行中"]))
+    upstream = next(c for c in checks if c.key == "upstream")
+    assert upstream.state == preflight.BLOCKED and "ET-1" in upstream.detail
+    satisfied = preflight.evaluate(preflight_context(dependency_blockers=[]))
+    assert next(c for c in satisfied if c.key == "upstream").state == preflight.PASS
 
 
 def test_pure_manual_flow_marks_device_checks_not_applicable():
