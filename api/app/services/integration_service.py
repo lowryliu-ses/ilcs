@@ -394,7 +394,8 @@ def _send_mail(recipients: list[str], subject: str, text: str) -> None:
     from email.message import EmailMessage
 
     message = EmailMessage()
-    message["Subject"] = subject
+    # 标题来自报警文字 / 通知名，可能带换行；邮件头里不能有 CR / LF
+    message["Subject"] = " ".join(subject.split())
     message["From"] = settings.smtp_from or settings.smtp_user or "ilcs@localhost"
     message["To"] = ", ".join(recipients)
     message.set_content(text)

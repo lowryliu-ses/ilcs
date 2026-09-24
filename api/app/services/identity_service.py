@@ -16,7 +16,8 @@ from ..core.security import (
     hash_password, hash_secret, issue_token, new_secret, password_needs_rehash, verify_password,
 )
 from ..domain.permissions import (
-    ADMIN, ASSIGNABLE_ROLES, PERMISSION_CATALOG, ROLE_NAMES, default_matrix, effective_permissions,
+    ADMIN, ASSIGNABLE_ROLES, PERMISSION_CATALOG, PERMISSIONS, ROLE_NAMES, default_matrix, effective_permissions,
+    merge_saved_matrix,
     normalize_matrix, roles_label,
 )
 from ..models import ESignature, Membership, Organization, RolePermissionSet, ServiceIdentity, User, roles_of
@@ -358,7 +359,9 @@ class IdentityService:
     def matrix_for(self, org_id: str) -> dict[str, list[str]]:
         """组织当前生效的矩阵。没改过的组织、以及矩阵里没有的角色，沿用出厂默认值。"""
         row = self.db.get(RolePermissionSet, org_id)
-        return {**default_matrix(), **((row.matrix or {}) if row else {})}
+        if row is None:
+            return default_matrix()
+        return merge_saved_matrix(row.matrix or {}, row.known_permissions or None)
 
     def role_permissions(self) -> dict:
         row = self.db.get(RolePermissionSet, self.ctx.org_id)
@@ -411,6 +414,7 @@ class IdentityService:
             row = RolePermissionSet(org_id=self.ctx.org_id, row_version=0)
             self.db.add(row)
         row.matrix = matrix
+        row.known_permissions = sorted(PERMISSIONS)
         row.row_version = current_version + 1
         row.updated_by = actor.id
         row.updated_at = now()

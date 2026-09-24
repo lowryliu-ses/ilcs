@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,12 +23,14 @@ SEVERITIES = ("flag", "reject")
 
 
 def _num(value: Any) -> float | None:
+    """转成有限数值；NaN / 无穷当作「不是数值」（传感器故障常报 NaN，比较运算对它永远为假）。"""
     if isinstance(value, bool) or value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def flag(code: str, message: str, **extra: Any) -> dict[str, Any]:

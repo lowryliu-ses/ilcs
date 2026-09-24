@@ -32,7 +32,8 @@ class CommentService:
         if spec is None:
             raise NotFound("不支持的批注对象")
         row = self.db.get(spec[0], target_id)
-        if row is None or (getattr(row, "org_id", "") or self.ctx.org_id) != self.ctx.org_id:
+        # 与 ScopedRepository 同一规则：不属于当前组织（含没有组织归属）的对象当作不存在
+        if row is None or getattr(row, "org_id", "") != self.ctx.org_id:
             raise NotFound("批注对象不存在")
         return spec, row
 

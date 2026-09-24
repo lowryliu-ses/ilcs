@@ -54,6 +54,9 @@ class RolePermissionSet(Base):
     __tablename__ = "role_permission_sets"
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), primary_key=True)
     matrix: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 保存矩阵时系统里已有的权限键。之后新增的权限键按出厂默认补给各角色——
+    # 否则存过矩阵的组织一升级就丢掉新功能的权限；管理员保存过之后就按他的选择
+    known_permissions: Mapped[list] = mapped_column(JSON, default=list)
     row_version: Mapped[int] = mapped_column(default=1)
     updated_by: Mapped[str] = mapped_column(String, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)

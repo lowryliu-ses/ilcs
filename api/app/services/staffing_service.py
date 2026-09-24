@@ -81,8 +81,11 @@ class StaffingService:
         mine = self.db.query(PersonBooking).filter(
             PersonBooking.batch_id == batch.id, PersonBooking.kind == "step", PersonBooking.state == "confirmed",
         ).all()
+        if not mine and self.executor_of(batch) is not None:
+            # 升级前排的程、或排程后才分配执行人：按当前排程补一次预占
+            mine = self.book_batch(batch)
         if not mine:
-            return ([], []) if self.executor_of(batch) is None else (["执行人的人工步骤还没有预占时间（先排程）"], [])
+            return [], []
         blocking, warning = [], []
         for row in mine:
             clashes = self.db.query(PersonBooking).filter(

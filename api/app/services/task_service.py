@@ -447,6 +447,15 @@ class TaskService:
                 action="reassign" if reassign else "assign", reason=reason, actor_id=user.id,
             )
         )
+        if task.batch_id:
+            # 已排程的批次：人工步骤的预占跟着换到新执行人
+            from ..models import Batch
+            from .staffing_service import StaffingService
+
+            batch = self.db.get(Batch, task.batch_id)
+            if batch is not None and batch.state in {"scheduled", "running", "held"}:
+                self.db.flush()
+                StaffingService(self.db, self.ctx).book_batch(batch)
         self.audit.record(
             user, "转派实验任务" if reassign else "分配实验任务", task.id,
             before=self._name(previous) or "待分配", after=assignee.display_name,

@@ -1,6 +1,7 @@
 """指标值的类型与规则校验。纯函数，回传与人工录入共用。"""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 VALUE_TYPES = ("number", "text", "enum")
@@ -35,6 +36,8 @@ def check_value(
     if value_type == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             problems.append(f"值 {value!r} 不是数值")
+        elif not math.isfinite(value):
+            problems.append(f"值 {value!r} 不是有限数值")
     elif value_type == "text":
         if not isinstance(value, str) or not value.strip():
             problems.append("文本指标的值不能为空")

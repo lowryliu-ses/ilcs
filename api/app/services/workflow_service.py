@@ -1238,14 +1238,15 @@ class WorkflowService:
             elif allocation.ends_at > moment:
                 allocation.ends_at = moment
                 windows += 1
-        material = InventoryService(self.db, self.ctx).release_batch_reservations(batch.id, user, reason="批次完成：释放未领用余量")
+        ending = "批次完成" if batch.state == "done" else "批次终止"
+        material = InventoryService(self.db, self.ctx).release_batch_reservations(batch.id, user, reason=f"{ending}：释放未领用余量")
         slots = SampleService(self.db, self.ctx).release_slots(container_of(batch.id))
         people = StaffingService(self.db, self.ctx).close_batch(batch)
         pending = material.get("pending_return") or []
         if pending:
             AlarmService(self.db, self.ctx).raise_alarm(
                 4, "batch", batch.id,
-                f"{batch.id} 完成后仍有 {len(pending)} 项已领用未消耗的物料："
+                f"{batch.id} {'完成' if batch.state == 'done' else '终止'}后仍有 {len(pending)} 项已领用未消耗的物料："
                 + "、".join(f"{row['lot_id']} {row['quantity']}{row['unit']}" for row in pending[:5]),
                 response="归还入库或登记处置后才释放预留",
                 condition_key=f"batch:{batch.id}:pending_return",
@@ -1254,7 +1255,7 @@ class WorkflowService:
                    "pending_return": len(pending), "slots": slots, **{f"people_{k}": v for k, v in people.items()}}
         if any(summary.values()):
             self.audit.record(
-                user, "批次收尾释放", batch.id, before="已完成", after="残余已释放",
+                user, "批次收尾释放", batch.id, before="已完成" if batch.state == "done" else "已终止", after="残余已释放",
                 detail=(f"工位时间窗 {windows} 个；未领用物料 {summary['materials_released']} 项；孔位 {slots} 个；"
                         f"执行人预占取消 {people['cancelled']}、完成 {people['done']}"
                         + (f"；{len(pending)} 项已领用物料待归还或处置" if pending else "")),

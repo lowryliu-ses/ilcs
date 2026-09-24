@@ -161,6 +161,24 @@ PERMISSION_LABELS = {key: label for _, rows in PERMISSION_CATALOG for key, label
 ADMIN_ONLY = frozenset({"org.admin", "service.manage"})
 
 
+# 引入「已知权限键」记录之前就有的新增权限键：老矩阵没记 known_permissions 时，这些键算作「保存时还不存在」
+ADDED_AFTER_LEGACY = frozenset({"method.edit", "method.release", "environment.record", "audit.read"})
+
+
+def merge_saved_matrix(saved: dict[str, list[str]], known: list[str] | None) -> dict[str, list[str]]:
+    """组织存过的矩阵 + 出厂默认：矩阵里没有的角色取默认；保存时还不存在的权限键按默认补上。"""
+    defaults = default_matrix()
+    known_keys = set(known) if known else set(PERMISSIONS) - ADDED_AFTER_LEGACY
+    new_keys = set(PERMISSIONS) - known_keys
+    merged = {}
+    for role, grants in defaults.items():
+        if role not in saved:
+            merged[role] = grants
+            continue
+        merged[role] = sorted(set(saved[role]) | {key for key in grants if key in new_keys})
+    return merged
+
+
 def default_matrix() -> dict[str, list[str]]:
     """出厂默认的角色权限矩阵（不含系统管理员，它恒为全集）。"""
     return {

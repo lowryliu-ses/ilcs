@@ -245,10 +245,18 @@ class ExecutionService:
             elif command.type == "abort":
                 result = adapter.abort(request)
             else:
-                violation = self.check_hard_window(batch, command) or self.check_environment(batch, command)
+                violation = self.check_hard_window(batch, command)
                 if violation:
                     ledger.state = "rejected"
                     self.fault(batch, command, violation, delivery="delivered")
+                    self._release(record, command)
+                    return
+                environment = self.check_environment(batch, command)
+                if environment:
+                    # 设备确定没见过这条指令：按「未投递」记，环境恢复后可以直接重新下发，不用现场核查
+                    ledger.state = "rejected"
+                    command.started_at = None
+                    self.fault(batch, command, environment, delivery="unreachable")
                     self._release(record, command)
                     return
                 result = adapter.submit(request)

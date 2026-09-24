@@ -2,7 +2,8 @@ from fastapi import APIRouter
 
 from fastapi.responses import Response
 
-from ...schemas import DecisionIn, PlanCreateIn, PlanPatchIn, PlanRestoreIn, PlanSubmitIn, PlanTemplateIn, ProposalIn
+from ...core.errors import ValidationFailed
+from ...schemas import CancelIn, DecisionIn, PlanCreateIn, PlanPatchIn, PlanRestoreIn, PlanSubmitIn, PlanTemplateIn, ProposalIn
 from ...services.plan_service import PlanService
 from ...services.proposal_service import ProposalService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
@@ -54,8 +55,6 @@ def create_plan(payload: PlanCreateIn, db: DbSession, user: CurrentUser, ctx=req
     # 套用模板时只取请求里显式给的字段，其余用模板的
     body = payload.model_dump(exclude_unset=True) if payload.template_id else payload.model_dump()
     if not body.get("recipe_id") and not payload.template_id:
-        from ...core.errors import ValidationFailed
-
         raise ValidationFailed("方案必须选择方法")
     return PlanService(db, ctx).create(body, user)
 
@@ -92,6 +91,12 @@ def submit_plan(
     """提交评审。可带多级审批（每级可指定审批人），逐级审，最后一级通过才算批准。"""
     approvers = [row.model_dump() for row in payload.approvers] if payload else []
     return PlanService(db, ctx).submit(plan_id, user, approvers)
+
+
+@router.post("/{plan_id}/withdraw")
+def withdraw_plan(plan_id: str, payload: CancelIn, db: DbSession, user: CurrentUser, ctx: Ctx):
+    """撤回评审回到草稿（提交人本人或有编辑权限的人）。指定的审批人审不了时用它解开。"""
+    return PlanService(db, ctx).withdraw(plan_id, payload.reason, user)
 
 
 @router.get("/{plan_id}/diff")

@@ -443,6 +443,8 @@ class PlanService:
             if not merged.get("recipe_id") and template.recipe_id:
                 merged["recipe_id"] = template.recipe_id
             payload = merged
+        if not payload.get("recipe_id"):
+            raise ValidationFailed("方案必须选择方法（模板没有建议方法时请在请求里给 recipe_id）")
         recipe = self.recipes.get(payload["recipe_id"])
         if not recipe:
             raise NotFound("方法不存在")
@@ -571,14 +573,15 @@ class PlanService:
             levels = approval_rules.build_levels(approvers)
         except ValueError as exc:
             raise ValidationFailed(str(exc)) from exc
+        candidates = {row["id"]: row for row in self.approvers()} if any(row["assignee_id"] for row in levels) else {}
         for row in levels:
             if not row["assignee_id"]:
                 continue
-            assignee = self.users.get(row["assignee_id"])
-            if assignee is None or not user_may(None, assignee, "plan.approve"):
-                raise ValidationFailed(f"第 {row['level']} 级指定的审批人不存在或没有批准方案的权限")
-            if same_person(assignee.id, user.id):
+            if same_person(row["assignee_id"], user.id):
                 raise ValidationFailed(f"第 {row['level']} 级不能指定提交人本人审批（职责分离）")
+            if row["assignee_id"] not in candidates:
+                # 只接受本组织有效成员里有批准权限的人：指定一个审不了的人，评审会一直卡住
+                raise ValidationFailed(f"第 {row['level']} 级指定的审批人不是本组织有批准方案权限的成员")
         assigned = [row["assignee_id"] for row in levels if row["assignee_id"]]
         if len(assigned) != len(set(assigned)):
             raise ValidationFailed("同一个人不能被指定审批两级")
@@ -600,7 +603,7 @@ class PlanService:
         self.audit.record(
             user, "提交方案评审", plan_id, before=before, after="评审中",
             detail=f"版本 {plan.version}；{len(levels)} 级审批：" + " → ".join(
-                row["label"] + (f"（指定 {self.users.get(row['assignee_id']).display_name}）" if row["assignee_id"] else "")
+                row["label"] + (f"（指定 {candidates[row['assignee_id']]['display_name']}）" if row["assignee_id"] else "")
                 for row in levels
             ),
             object_version=plan.row_version,
@@ -628,7 +631,7 @@ class PlanService:
             raise StateConflict("找不到待审版本记录")
         levels = list(version.approvals or []) or approval_rules.build_levels(None)
         level = approval_rules.current(levels)
-        reasons = approval_rules.blockers(levels, user.id, version.author_id)
+        reasons = approval_rules.blockers(levels, user.id, version.author_id, conclusion)
         author_only = reasons == ["不能审批本人编写的方案（职责分离）"]
         if reasons and not (author_only and admin_self_approval(self.db, self.ctx, user, plan.id, "批准本人编写的方案")):
             code = "self_approval_denied" if any("本人" in reason for reason in reasons) else "approver_not_assigned"
@@ -680,6 +683,26 @@ class PlanService:
             detail=f"版本 {plan.version} 冻结，不可再修改；修订将生成新版本"
             + (f"；{len(levels)} 级审批全部通过" if len(levels) > 1 else ""),
         )
+        self.db.commit()
+        return self.to_dict(plan, detail=True)
+
+    def withdraw(self, plan_id: str, reason: str, user: User) -> dict:
+        """撤回评审：回到草稿，已有的逐级结论作废。提交人本人或有编辑权限的人可以撤回。"""
+        plan = self.plans.get(plan_id)
+        if not plan:
+            raise NotFound("实验方案不存在")
+        if plan.approval_state != "review":
+            raise StateConflict("只有评审中的方案可以撤回")
+        version = self.versions.find(plan.id, plan.version)
+        if not (version is not None and same_person(version.author_id, user.id)) and not self.ctx.has("plan.edit"):
+            raise PermissionDenied("只有提交人或有编辑权限的人可以撤回评审")
+        plan.approval_state = "draft"
+        if version is not None:
+            version.state = "draft"
+            version.approvals = []
+        self.plans.bump(plan)
+        self.audit.record(user, "撤回方案评审", plan_id, before="评审中", after="草稿",
+                          detail=reason or "撤回后修改再提交", object_version=plan.row_version)
         self.db.commit()
         return self.to_dict(plan, detail=True)
 

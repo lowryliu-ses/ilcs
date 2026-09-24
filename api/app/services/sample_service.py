@@ -485,10 +485,17 @@ class SampleService:
         return occupancy
 
     def release_slots(self, container_id: str) -> int:
+        """释放孔位占用（批次结束 / 终止 / 删除）。样本随之从载具上解开，最后所在的载具孔位留作文本位置。"""
         released = 0
         for row in self.slots.query().filter_by(container_id=container_id, released_at=None).all():
             row.released_at = now()
             released += 1
+            sample = self.db.get(PhysicalSample, row.physical_sample_id)
+            if sample is not None and row.labware_id and sample.labware_id == row.labware_id:
+                labware = self.db.get(Labware, row.labware_id)
+                sample.current_location = f"{labware.barcode if labware else row.labware_id} · {sample.well or row.well}"
+                sample.labware_id = None
+                sample.well = ""
         return released
 
     def link_labware(self, container_id: str, labware: Labware | None) -> int:

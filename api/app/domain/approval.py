@@ -35,15 +35,19 @@ def current(levels: list[dict]) -> dict | None:
     return None
 
 
-def blockers(levels: list[dict], user_id: str, author_id: str) -> list[str]:
-    """这个人现在能不能审当前级别。"""
+def blockers(levels: list[dict], user_id: str, author_id: str, conclusion: str = "approved") -> list[str]:
+    """这个人现在能不能审当前级别。
+
+    指定审批人只约束「批准」：驳回任何有审批权限的人（作者除外）都可以——指定的人离职、
+    调走或失去权限时，评审不至于永远卡住。
+    """
     row = current(levels)
     if row is None:
         return ["各级审批都已完成"]
     reasons = []
     if author_id and user_id == author_id:
         reasons.append("不能审批本人编写的方案（职责分离）")
-    if row.get("assignee_id") and row["assignee_id"] != user_id:
+    if conclusion == "approved" and row.get("assignee_id") and row["assignee_id"] != user_id:
         reasons.append(f"第 {row['level']} 级（{row['label']}）指定了其他审批人")
     if any(other.get("decided_by") == user_id for other in levels if other is not row):
         reasons.append("同一个人不能审批两级")

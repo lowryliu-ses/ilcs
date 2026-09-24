@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -68,6 +69,8 @@ def check(requirement: dict, zone: str, reading: Reading | None, now: datetime, 
         return f"{label}：不知道在哪个区域测（步骤没有分到工位，也没写区域）"
     if reading is None:
         return f"{zone} 没有{label}读数"
+    if not math.isfinite(reading.value):
+        return f"{zone} {label}读数无效（传感器报 {reading.value}）"
     age = (now - reading.measured_at).total_seconds() / 60
     if age > max_age_min:
         return f"{zone} {label}读数已 {age:.0f} min 未更新（超过 {max_age_min:g} min）"

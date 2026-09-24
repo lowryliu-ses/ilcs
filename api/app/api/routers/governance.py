@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from ...core.errors import PermissionDenied
 from ...services.audit_service import AuditService
 from ...services.batch_service import BatchService
 from ...services.dashboard_service import DashboardService
@@ -34,8 +35,6 @@ def audit_log(
     按对象查（target）是对象自己的变更历史，能看到对象的人都能看；浏览全量日志、按动作筛选要「浏览全量审计日志」权限。
     """
     if not target and not ctx.has("audit.read"):
-        from ...core.errors import PermissionDenied
-
         raise PermissionDenied("当前角色无权限：浏览全量审计日志", code="permission_denied")
     service = AuditService(db, ctx)
     if paged or action:

@@ -391,7 +391,8 @@ class SopRecipeIn(BaseModel):
 class EnvironmentReadingIn(BaseModel):
     zone: str = Field(min_length=1, max_length=64)
     metric: str = Field(min_length=1, max_length=32)
-    value: float
+    # NaN / 无穷不收：它们和任何上下限比较都是假，会让越界的环境悄悄「通过」
+    value: float = Field(allow_inf_nan=False)
     unit: str = ""
     measured_at: datetime | None = None
     note: str = ""

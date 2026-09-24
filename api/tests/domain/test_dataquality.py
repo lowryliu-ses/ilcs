@@ -26,3 +26,28 @@ def test_logic_rules_compare_metrics_with_scale_and_skip_missing_sides():
     assert [row.id for row, _ in found] == ["r1", "r2"]
     assert dataquality.violations([rule], {"discharge": 210}) == [], "缺一侧的值不判"
     assert dataquality.rule_issues("a", "<=", "a", None, "flag") == ["左右两侧是同一个指标"]
+
+
+def test_nan_readings_and_values_never_pass():
+    from datetime import datetime
+
+    from app.domain import environment
+
+    moment = datetime(2026, 9, 24, 12, 0)
+    reason = environment.check({"metric": "h2o_ppm", "max": 0.1}, "GB-01", environment.Reading(float("nan"), moment), moment, 30)
+    assert reason and "无效" in reason
+    assert check_value("number", "", {}, float("nan"), "")
+    flags = dataquality.output_flags([{"key": "temp", "hi": 100}], {"temp": float("nan")})
+    assert flags[0]["code"] == "output_invalid"
+
+
+def test_saved_matrices_pick_up_permissions_added_later():
+    from app.domain.permissions import merge_saved_matrix
+
+    saved = {"operator": ["batch.control"], "qa": ["plan.approve"]}
+    merged = merge_saved_matrix(saved, None)
+    assert "environment.record" in merged["operator"] and "batch.create" not in merged["operator"], "只补新增的键，不回填管理员撤掉的"
+    assert "audit.read" in merged["qa"] and "method.release" in merged["qa"]
+    assert merged["auditor"] == ["audit.read"], "矩阵里没有的新角色取出厂默认"
+    known = merge_saved_matrix(saved, sorted(__import__("app.domain.permissions", fromlist=["PERMISSIONS"]).PERMISSIONS))
+    assert "environment.record" not in known["operator"], "管理员保存时已经有这个键：按他的选择"

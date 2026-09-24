@@ -141,3 +141,14 @@ def test_digital_sop_generates_a_method_draft_and_versions_restore(researcher, q
 def test_approver_candidates_have_the_approval_permission(researcher, qa):
     names = {row["id"] for row in researcher.get("/api/plans/approvers").json()}
     assert _me(qa)["id"] in names and _me(researcher)["id"] not in names
+
+
+def test_only_org_members_with_approval_rights_can_be_assigned_and_review_can_be_unstuck(researcher, qa, reset_runtime):
+    plan = _plan(researcher)
+    foreign = researcher.post(f"/api/plans/{plan['id']}/submit", {"approvers": [{"label": "外人", "assignee_id": "no-such-user"}]})
+    assert foreign.status_code == 422 and "本组织" in foreign.text
+    ops = researcher.post(f"/api/plans/{plan['id']}/submit", {"approvers": [{"label": "QA", "assignee_id": _me(qa)["id"]}]})
+    assert ops.status_code == 200
+    withdrawn = researcher.post(f"/api/plans/{plan['id']}/withdraw", {"reason": "改样本数"})
+    assert withdrawn.status_code == 200 and withdrawn.json()["approval_state"] == "draft"
+    assert withdrawn.json()["approvals"] == []

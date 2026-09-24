@@ -45,6 +45,13 @@ def test_environment_requirements_gate_preflight_and_each_dispatch(operator, db,
     detail = _run(operator, batch_id, executor)
     assert detail["state"] != "done"
     assert "环境条件不满足" in (detail["failure_reason"] or ""), detail["failure_reason"]
+    from app.models import Command
+
+    db.expire_all()
+    refused = db.query(Command).filter(Command.batch_id == batch_id, Command.step_index == 1, Command.type == "dispatch").first()
+    assert refused.delivery_state == "unreachable" and refused.started_at is None, "设备没见过它：按未投递记，恢复后可直接重发"
+    bad = operator.post("/api/environment/readings", {"zone": zone, "metric": "h2o_ppm", "value": "NaN"})
+    assert bad.status_code == 422
 
     stale = db.query(EnvironmentReading).filter(EnvironmentReading.zone == zone).all()
     for row in stale:

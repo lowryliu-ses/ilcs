@@ -46,6 +46,10 @@ export function PlanDetailPage() {
     (name: string) => api.post('/plans/templates', { name, from_plan_id: planId }),
     { invalidates: ['plans:templates'], onSuccess: () => toast.push('已存为方案模板，新建方案时可以套用') },
   );
+  const withdraw = useMutation(() => api.post(`/plans/${planId}/withdraw`, { reason: '撤回修改' }), {
+    invalidates,
+    onSuccess: () => toast.push('已撤回评审，回到草稿'),
+  });
   const restore = useMutation(
     (version: number) => api.post(`/plans/${planId}/restore`, { from_version: version, row_version: plan.data?.row_version }),
     { invalidates, onSuccess: () => toast.push('已把历史版本内容恢复到当前草稿；历史版本不变') },
@@ -112,6 +116,11 @@ export function PlanDetailPage() {
           {data.state === 'locked' && data.approval_state !== 'approved' && can('plan.edit') ? (
             <button className="btn" onClick={() => unlock.run().catch((error) => toast.push(error.message))}>
               解锁
+            </button>
+          ) : null}
+          {data.approval_state === 'review' && can('plan.edit') ? (
+            <button className="btn" disabled={withdraw.pending} onClick={() => withdraw.run().catch((error) => toast.push(error.message))}>
+              撤回评审
             </button>
           ) : null}
           {['draft', 'rejected'].includes(data.approval_state) && can('plan.submit') ? (

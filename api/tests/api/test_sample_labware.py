@@ -57,3 +57,14 @@ def test_store_to_a_registered_location_is_structured(operator, admin):
     qr = operator.get(f"/api/samples/{barcode}/qr").json()
     assert qr["content"] == barcode and qr["svg"].lstrip().startswith("<svg")
     assert operator.get(f"/api/samples/{barcode}").json()["id"] == sample_id, "扫码（条码）直接查到样本"
+
+
+def test_ending_the_batch_takes_samples_off_the_labware(operator, clean_labware):  # noqa: F811
+    batch_id = _batch(operator)
+    labware = _register(operator, "HOTEL-01/S01")
+    assert operator.post(f"/api/batches/{batch_id}/labware", {"labware_id": labware["id"]}).status_code == 200
+    sample_id = operator.get(f"/api/labware/{labware['id']}/samples").json()["samples"][0]["id"]
+    aborted = operator.post(f"/api/batches/{batch_id}/abort", {"reason": "用例结束", "signature_id": operator.sign("终止批次", target=batch_id)})
+    assert aborted.status_code == 200, aborted.text
+    location = operator.get(f"/api/samples/{sample_id}").json()["location"]
+    assert location["kind"] == "text" and labware["barcode"] in location["text"], "解开后保留最后所在的载具孔位"
