@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
-import { api } from '../../shared/api';
+import { api, idempotencyKey } from '../../shared/api';
 import { clock, num, params as formatParams, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
@@ -10,6 +10,7 @@ import type {
   BatchDetail, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
+import { FlowGraph, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
 import {
   Blocked, CheckList, ConfirmDialog, Empty, Field, GateBanner, Modal, NumberInput, Panel, Pill,
   useToast,
@@ -52,6 +53,10 @@ export function BatchDetailPage() {
   const [viewing, setViewing] = useState<StepRunRow | null>(null);
   const [verifying, setVerifying] = useState<BatchDetail['commands'][number] | null>(null);
   const [gateDeciding, setGateDeciding] = useState<StepRunRow | null>(null);
+  const [branchDeciding, setBranchDeciding] = useState<StepRunRow | null>(null);
+  const [skipping, setSkipping] = useState<StepRow | null>(null);
+  const [signaling, setSignaling] = useState<string | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
 
   if (!batch.data) return <div className="boot">{batch.error ? batch.error.message : '加载中…'}</div>;
   const data = batch.data;
@@ -129,6 +134,28 @@ export function BatchDetailPage() {
         <span className="muted">（{data.next_action.why}）</span>
       </div>
 
+      {data.steps.length ? (
+        <Panel
+          title="流程图"
+          aside={<span className="small muted">实线：已走过 · 虚线：未走 / 回环 · 框：子流程</span>}
+          flush
+        >
+          <RunGraph steps={data.steps} selected={focus} onSelect={setFocus} />
+          {focus ? (
+            <StepActions
+              step={data.steps.find((row) => row.step_id === focus) ?? null}
+              batchState={data.state}
+              onSubmit={setSubmitting}
+              onReview={setReviewing}
+              onGate={setGateDeciding}
+              onBranch={setBranchDeciding}
+              onSkip={setSkipping}
+              onSignal={setSignaling}
+            />
+          ) : null}
+        </Panel>
+      ) : null}
+
       <Panel title="工步" flush>
         <table>
           <thead>
@@ -148,6 +175,9 @@ export function BatchDetailPage() {
                 <td>
                   {step.index + 1}. {step.name}
                   <div className="tiny muted mono">{step.step_id}</div>
+                  {step.groups?.length ? (
+                    <div className="tiny muted">子流程 · {step.groups.map((group) => group.name).join(' › ')}</div>
+                  ) : null}
                   {step.hard?.maxGapMin ? (
                     <div className="tiny warn-text">
                       硬时限：{step.hard.from} 起 {step.hard.maxGapMin} min 内必须开始
@@ -194,9 +224,27 @@ export function BatchDetailPage() {
                     </button>
                   ) : null}
                   {step.run && step.kind === 'wait' && step.run.state === 'waiting' ? (
-                    <span className="tiny muted">
-                      到期 {step.run.due_at ? time(step.run.due_at) : '待业务事件'}
-                    </span>
+                    step.wait_for?.mode === 'event' ? (
+                      can('batch.signal') ? (
+                        <button className="btn sm" onClick={() => setSignaling(step.wait_for?.event ?? '')}>
+                          发出事件
+                        </button>
+                      ) : (
+                        <span className="tiny muted">等待事件 {step.wait_for?.event}</span>
+                      )
+                    ) : (
+                      <span className="tiny muted">到期 {step.run.due_at ? time(step.run.due_at) : '—'}</span>
+                    )
+                  ) : null}
+                  {step.run && step.kind === 'branch' && step.run.state === 'ready' && (can('step.submit') || can('step.review')) ? (
+                    <button className="btn sm primary" onClick={() => setBranchDeciding(step.run)}>
+                      选择出口
+                    </button>
+                  ) : null}
+                  {canSkip(step, data.state) && can('batch.recover') ? (
+                    <button className="btn sm" onClick={() => setSkipping(step)}>
+                      跳过
+                    </button>
                   ) : null}
                   {step.run?.form_data?.values ? (
                     <button className="btn sm" onClick={() => setViewing(step.run)}>
@@ -210,7 +258,8 @@ export function BatchDetailPage() {
         </table>
         <div className="panel-body small muted">
           人工、等待、审核节点不创建设备指令；不占工位的节点也不参与工位冲突检查。
-          审核退回会生成上一个人工步骤的新尝试，旧记录保留。
+          审核退回会生成上一个人工步骤的新尝试，旧记录保留。条件分支没走到的步骤记为「未走此分支」，
+          它预约的工位时间窗已归还；只有方法标了「可跳过」的步骤才出现跳过按钮。
         </div>
       </Panel>
 
@@ -438,7 +487,19 @@ export function BatchDetailPage() {
       ) : null}
 
       {dialog === 'recover' ? (
-        <RecoverDialog batchId={batchId} onClose={() => setDialog(null)} sign={sign} invalidates={invalidates} />
+        <RecoverDialog
+          batchId={batchId}
+          onClose={() => setDialog(null)}
+          sign={sign}
+          invalidates={invalidates}
+          onSkip={(stepId) => {
+            const step = data.steps.find((row) => row.step_id === stepId);
+            if (step) {
+              setDialog(null);
+              setSkipping(step);
+            }
+          }}
+        />
       ) : null}
 
       {submitting ? (
@@ -456,6 +517,20 @@ export function BatchDetailPage() {
 
       {gateDeciding ? (
         <GateDecisionDialog run={gateDeciding} onClose={() => setGateDeciding(null)} invalidates={invalidates} />
+      ) : null}
+      {branchDeciding ? (
+        <BranchDecisionDialog
+          run={branchDeciding}
+          held={data.state === 'paused'}
+          onClose={() => setBranchDeciding(null)}
+          invalidates={invalidates}
+        />
+      ) : null}
+      {skipping ? (
+        <SkipStepDialog batchId={batchId} step={skipping} onClose={() => setSkipping(null)} invalidates={invalidates} />
+      ) : null}
+      {signaling !== null ? (
+        <SignalDialog batchId={batchId} name={signaling} onClose={() => setSignaling(null)} invalidates={invalidates} />
       ) : null}
 
       {verifying ? (
@@ -694,11 +769,13 @@ function RecoverDialog({
   onClose,
   sign,
   invalidates,
+  onSkip,
 }: {
   batchId: string;
   onClose: () => void;
   sign: SignFn;
   invalidates: string[];
+  onSkip: (stepId: string) => void;
 }) {
   const toast = useToast();
   const evaluation = useQuery<RecoveryEvaluation>(`recovery:${batchId}`, () =>
@@ -777,6 +854,7 @@ function RecoverDialog({
             已核实上述实际量与设备状态（人工复核）
           </label>
           {recover.error ? <div className="note bad">{recover.error.message}</div> : null}
+          <FlowRecovery batchId={batchId} evaluation={data} sign={sign} invalidates={invalidates} onDone={onClose} onSkip={onSkip} />
         </>
       ) : (
         <div className="boot">加载中…</div>
@@ -866,6 +944,12 @@ function stepContent(step: StepRow): string {
       ? `等待业务事件 ${step.wait_for.event}`
       : `定时 ${step.dur} min`;
   }
+  if (step.kind === 'branch') {
+    const mode = { measure: '按测量值', form: '按记录字段', manual: '人工选择' }[step.branch?.mode ?? 'manual'];
+    return `${mode} · ${(step.branch?.cases ?? []).map((row) => row.label).join(' / ')}`;
+  }
+  if (step.kind === 'gate') return '质检关卡';
+  if (step.kind === 'split') return '样本拆分';
   return `审核角色 ${step.review_role || 'qa'}`;
 }
 
@@ -1365,5 +1449,415 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
         )
       ) : null}
     </Panel>
+  );
+}
+
+
+/* ---------- 流程图运行视图 ---------- */
+
+/** 运行时能不能跳过：方法标了可跳过，且这一步还没动（待开始 / 待办 / 等待中）或已明确失败。 */
+function canSkip(step: StepRow, batchState: string): boolean {
+  if (!step.skippable || !step.run) return false;
+  if (!['running', 'paused', 'fault'].includes(batchState)) return false;
+  if (['pending', 'ready', 'waiting'].includes(step.run.state)) return step.kind !== 'device' || step.run.state !== 'running';
+  return step.run.state === 'failed';
+}
+
+function RunGraph({ steps, selected, onSelect }: { steps: StepRow[]; selected: string | null; onSelect: (id: string) => void }) {
+  const byId = new Map(steps.map((step) => [step.step_id, step]));
+  const nodes: FlowGraphNode[] = steps.map((step) => {
+    const outer = step.groups?.[0];
+    return {
+      id: step.step_id,
+      index: step.index,
+      state: step.state,
+      className: `k-${step.kind}`,
+      group: outer ? { id: outer.step_id, label: outer.name } : undefined,
+      title: step.run?.reason || undefined,
+      content: (
+        <>
+          <span className="fn-head">
+            <span className="mono">{step.index + 1}</span>
+            <span className={`kind ${step.kind}`}>{step.kind_label}</span>
+            {step.kind === 'device' ? <span className="tag">{step.station_id ?? step.cap_name}</span> : null}
+            {step.attempts.length > 1 ? <span className="tag warn">第 {step.attempts.length} 次</span> : null}
+          </span>
+          <span className="fn-title">{step.name}</span>
+          <span className="fn-meta">{step.run?.reason || stepContent(step)}</span>
+          <span className="fn-foot">
+            <Pill state={step.state} label={step.run?.state_label ?? stepLabel(step.state)} />
+            <span className="mono muted">{step.run?.ended_at ? clock(step.run.ended_at) : step.planned_start ? clock(step.planned_start) : ''}</span>
+          </span>
+        </>
+      ),
+    };
+  });
+  const passed = new Set(['completed', 'skipped']);
+  const edges: FlowGraphEdge[] = steps.flatMap((step) =>
+    (step.after ?? []).map((from) => {
+      const parent = byId.get(from);
+      const dead = step.state === 'not_taken' || parent?.state === 'not_taken';
+      if (parent?.kind === 'branch') {
+        const exit = step.when?.[from];
+        const label = parent.branch?.cases?.find((row) => row.key === exit)?.label ?? exit;
+        const chosen = parent.run?.state === 'completed' ? parent.run.conclusion : '';
+        const tone = chosen ? (chosen === exit ? 'taken' : 'dead') : 'branch';
+        return { from, to: step.step_id, label, tone } as FlowGraphEdge;
+      }
+      const tone = dead ? 'dead' : parent && passed.has(parent.state) && step.state !== 'pending' ? 'taken' : undefined;
+      return { from, to: step.step_id, tone } as FlowGraphEdge;
+    }),
+  );
+  const loops: FlowGraphLoop[] = steps.flatMap((step) =>
+    step.kind === 'branch'
+      ? (step.branch?.cases ?? [])
+          .filter((row) => row.loop_to && byId.has(row.loop_to))
+          .map((row) => ({ from: step.step_id, to: row.loop_to as string, label: row.label }))
+      : [],
+  );
+  return <FlowGraph nodes={nodes} edges={edges} loops={loops} selected={selected} onSelect={onSelect} />;
+}
+
+/** 流程图里选中一个步骤后能做的事：和工步表每一行的按钮是同一套判据。 */
+function StepActions({
+  step,
+  batchState,
+  onSubmit,
+  onReview,
+  onGate,
+  onBranch,
+  onSkip,
+  onSignal,
+}: {
+  step: StepRow | null;
+  batchState: string;
+  onSubmit: (run: StepRunRow) => void;
+  onReview: (run: StepRunRow) => void;
+  onGate: (run: StepRunRow) => void;
+  onBranch: (run: StepRunRow) => void;
+  onSkip: (step: StepRow) => void;
+  onSignal: (name: string) => void;
+}) {
+  const { can } = useSession();
+  if (!step) return null;
+  const run = step.run;
+  const open = run && ['ready', 'running'].includes(run.state);
+  const actions: JSX.Element[] = [];
+  if (run && open && step.kind === 'manual' && can('step.submit')) {
+    actions.push(<button key="submit" className="btn sm primary" onClick={() => onSubmit(run)}>填写记录</button>);
+  }
+  if (run && open && step.kind === 'review' && can('step.review')) {
+    actions.push(<button key="review" className="btn sm primary" onClick={() => onReview(run)}>审核</button>);
+  }
+  if (run && run.state === 'ready' && step.kind === 'gate' && can('step.review')) {
+    actions.push(<button key="gate" className="btn sm primary" onClick={() => onGate(run)}>质检判定</button>);
+  }
+  if (run && run.state === 'ready' && step.kind === 'branch' && (can('step.submit') || can('step.review'))) {
+    actions.push(<button key="branch" className="btn sm primary" onClick={() => onBranch(run)}>选择出口</button>);
+  }
+  if (run && run.state === 'waiting' && step.wait_for?.mode === 'event' && can('batch.signal')) {
+    actions.push(<button key="signal" className="btn sm" onClick={() => onSignal(step.wait_for?.event ?? '')}>发出事件 {step.wait_for?.event}</button>);
+  }
+  if (canSkip(step, batchState) && can('batch.recover')) {
+    actions.push(<button key="skip" className="btn sm" onClick={() => onSkip(step)}>跳过</button>);
+  }
+  return (
+    <div className="panel-body row">
+      <b>
+        {step.index + 1}. {step.name}
+      </b>
+      <Pill state={step.state} label={run?.state_label ?? stepLabel(step.state)} />
+      {run?.deadline_at ? (
+        <span className={`tiny ${run.timed_out_at ? 'bad-text' : 'muted'}`}>
+          截止 {time(run.deadline_at)}{run.timed_out_at ? '（已超时）' : ''}
+        </span>
+      ) : null}
+      {run?.reason ? <span className="small muted">{run.reason}</span> : null}
+      <span className="row">{actions.length ? actions : <span className="tiny muted">当前没有可执行的操作</span>}</span>
+    </div>
+  );
+}
+
+/* 条件分支选出口。人工选择模式是普通待办；判据缺失或回环到上限而保持的分支要 QA 签名。 */
+function BranchDecisionDialog({
+  run,
+  held,
+  onClose,
+  invalidates,
+}: {
+  run: StepRunRow;
+  held: boolean;
+  onClose: () => void;
+  invalidates: string[];
+}) {
+  const toast = useToast();
+  const { sign } = useSignature();
+  const forward = run.branch_cases.filter((row) => !row.loop);
+  const [choice, setChoice] = useState(forward[0]?.key ?? run.branch_cases[0]?.key ?? '');
+  const [reason, setReason] = useState('');
+  const needsSignature = held || run.requires_signature;
+  const decide = useMutation(
+    (signatureId: string | null) =>
+      api.post(
+        `/step-runs/${run.id}/branch-decision`,
+        { case: choice, reason, row_version: run.row_version, signature_id: signatureId },
+        true,
+      ),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push('已选择出口，流程继续');
+        onClose();
+      },
+    },
+  );
+  const evidence = run.form_data as { field?: string; value?: unknown };
+  const submit = async () => {
+    if (!needsSignature) {
+      await decide.run(null).catch(() => undefined);
+      return;
+    }
+    const label = run.branch_cases.find((row) => row.key === choice)?.label ?? choice;
+    const signatureId = await sign(`条件分支选择出口：${label}`, run.id, ['分支判定属实']);
+    if (signatureId) await decide.run(signatureId).catch(() => undefined);
+  };
+  return (
+    <Modal
+      title={`选择出口 · ${run.step_name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={decide.pending || !choice || !reason.trim()} onClick={submit}>
+            {needsSignature ? '签署并提交' : '提交'}
+          </button>
+        </>
+      }
+    >
+      {run.reason ? <div className={`note${held ? ' warn' : ''}`}>{run.reason}</div> : null}
+      {evidence?.field ? (
+        <div className="small mono">
+          判据 {evidence.field} = {String(evidence.value ?? '无数值')}
+        </div>
+      ) : null}
+      <Field label="出口">
+        <select value={choice} onChange={(event) => setChoice(event.target.value)}>
+          {run.branch_cases.map((row) => (
+            <option key={row.key} value={row.key}>
+              {row.label}
+              {row.loop ? '（回环：作废回环体后重做）' : ''}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="依据（必填）">
+        <textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {decide.error ? <div className="note bad">{decide.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+/* 跳过步骤：只有方法标了可跳过的才行，理由必填并签名。设备已收到指令、结果未知时服务端会拒绝。 */
+function SkipStepDialog({
+  batchId,
+  step,
+  onClose,
+  invalidates,
+}: {
+  batchId: string;
+  step: StepRow;
+  onClose: () => void;
+  invalidates: string[];
+}) {
+  const toast = useToast();
+  const { sign } = useSignature();
+  const [reason, setReason] = useState('');
+  const skip = useMutation(
+    (signatureId: string) =>
+      api.post(`/batches/${batchId}/skip`, { step_id: step.step_id, reason, signature_id: signatureId }, true),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push(`第 ${step.index + 1} 步已跳过，流程继续`);
+        onClose();
+      },
+    },
+  );
+  return (
+    <Modal
+      title={`跳过步骤 · ${step.index + 1}. ${step.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            disabled={skip.pending || !reason.trim()}
+            onClick={() =>
+              sign(`跳过步骤：${step.name}`, batchId, ['确认该步骤可以跳过', '接受偏差风险'])
+                .then((signatureId) => (signatureId ? skip.run(signatureId) : undefined))
+                .catch((error) => toast.push(error.message))
+            }
+          >
+            签署并跳过
+          </button>
+        </>
+      }
+    >
+      <div className="note warn">
+        跳过后这一步不会执行，后继照常开出；原记录保留，审计写明跳过理由与签名。设备已经收到这一步的指令、
+        或指令结果未知时不能跳过。
+      </div>
+      <Field label="跳过理由（必填）">
+        <textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {skip.error ? (
+        <div className="note bad">
+          {skip.error.message}
+          <Blocked reasons={skip.error.blocked.map((row) => row.label)} />
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
+/* 发出批次业务事件：唤醒等着它的事件等待节点。外部系统走 /runtime/batches/{id}/signals（服务身份）。 */
+function SignalDialog({
+  batchId,
+  name: initial,
+  onClose,
+  invalidates,
+}: {
+  batchId: string;
+  name: string;
+  onClose: () => void;
+  invalidates: string[];
+}) {
+  const toast = useToast();
+  const [name, setName] = useState(initial);
+  const [note, setNote] = useState('');
+  // 同一次对话框里的重复点击是同一条事件：服务端按 event_id 去重，不会唤醒两个等待节点
+  const [eventId] = useState(() => idempotencyKey());
+  const send = useMutation(
+    () => api.post(`/batches/${batchId}/signals`, { name, event_id: eventId, payload: note ? { note } : {} }),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push(`已发出事件 ${name}`);
+        onClose();
+      },
+    },
+  );
+  return (
+    <Modal
+      title="发出业务事件"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={send.pending || !name.trim()} onClick={() => send.run().catch(() => undefined)}>
+            发出
+          </button>
+        </>
+      }
+    >
+      <div className="small muted">
+        事件会唤醒本批次里等着同名事件的节点；还没开出的等待节点开出时会直接消费这条事件。
+      </div>
+      <Field label="事件名">
+        <input value={name} onChange={(event) => setName(event.target.value)} />
+      </Field>
+      <Field label="说明（写入事件载荷）">
+        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="如：样品已由物流送达 3 号柜" />
+      </Field>
+      {send.error ? <div className="note bad">{send.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+/* 恢复评估里的流程级选项：跳过当前步骤、从指定节点重做。 */
+function FlowRecovery({
+  batchId,
+  evaluation,
+  sign,
+  invalidates,
+  onDone,
+  onSkip,
+}: {
+  batchId: string;
+  evaluation: RecoveryEvaluation;
+  sign: SignFn;
+  invalidates: string[];
+  onDone: () => void;
+  onSkip: (stepId: string) => void;
+}) {
+  const toast = useToast();
+  const [target, setTarget] = useState('');
+  const [reason, setReason] = useState('');
+  const rerun = useMutation(
+    (signatureId: string) =>
+      api.post(`/batches/${batchId}/rerun`, { step_id: target, reason, signature_id: signatureId }, true),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push('已从指定节点重做');
+        onDone();
+      },
+    },
+  );
+  const skip = evaluation.skip;
+  const targets = evaluation.rerun_targets ?? [];
+  if (!skip && !targets.length) return null;
+  return (
+    <div className="deps">
+      <b className="small">流程级处理</b>
+      {skip ? (
+        <div className="row">
+          <button className="btn sm" disabled={!skip.allowed} title={skip.reason || undefined} onClick={() => onSkip(skip.step_id)}>
+            跳过当前步骤
+          </button>
+          {!skip.allowed ? <span className="tiny muted">不可用：{skip.reason}</span> : null}
+        </div>
+      ) : null}
+      {targets.length ? (
+        <>
+          <div className="small muted">
+            从指定节点重做：该步与它的全部下游记录作废（保留），从该步重新开出；会重新执行的设备步骤写进审计。
+          </div>
+          <div className="row">
+            <select value={target} onChange={(event) => setTarget(event.target.value)}>
+              <option value="">选择重做起点</option>
+              {targets.map((row) => (
+                <option key={row.step_id} value={row.step_id}>
+                  第 {row.index + 1} 步 · {row.name}
+                </option>
+              ))}
+            </select>
+            <input value={reason} placeholder="重做理由（必填）" onChange={(event) => setReason(event.target.value)} />
+            <button
+              className="btn sm danger"
+              disabled={!target || !reason.trim() || rerun.pending}
+              onClick={() =>
+                sign('从指定节点重做', batchId, ['已核实现场状态', '接受重新执行设备步骤'])
+                  .then((signatureId) => (signatureId ? rerun.run(signatureId) : undefined))
+                  .catch((error) => toast.push(error.message))
+              }
+            >
+              签名并重做
+            </button>
+          </div>
+          {rerun.error ? <div className="note bad">{rerun.error.message}</div> : null}
+        </>
+      ) : (
+        <div className="tiny muted">存在没有结论的设备指令，先完成现场核查才能从指定节点重做。</div>
+      )}
+    </div>
   );
 }

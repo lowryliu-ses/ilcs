@@ -78,10 +78,32 @@ export type BatchSummary = {
   delete_blockers: string[];
 };
 
+export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow';
+
+/** 条件分支配置。出口按顺序匹配，第一个满足的生效；loop_to 表示回到上游某一步重做。 */
+export type BranchConfig = {
+  mode?: 'measure' | 'form' | 'manual';
+  source_step_id?: string;
+  field?: string;
+  cases?: BranchCase[];
+  default?: string;
+  max_loops?: number;
+};
+export type BranchCase = {
+  key: string;
+  label: string;
+  min?: number | null;
+  max?: number | null;
+  equals?: string;
+  loop_to?: string;
+};
+export type StepTimeout = { minutes: number; action: 'alarm' | 'fail' | 'skip' };
+export type SubflowGroup = { step_id: string; name: string; recipe_id: string; recipe_name: string; version: string };
+
 export type StepRow = {
   index: number;
   step_id: string;
-  kind: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
+  kind: StepKindName;
   kind_label: string;
   /** 人工 / 等待 / 审核节点默认不占工位，除非显式声明 */
   needs_station: boolean;
@@ -94,6 +116,12 @@ export type StepRow = {
   form: FormField[];
   wait_for: { mode?: string; event?: string };
   review_role: string;
+  branch: BranchConfig;
+  when: Record<string, string>;
+  after: string[];
+  skippable: boolean;
+  timeout: StepTimeout | null;
+  groups: SubflowGroup[];
   recovery: Recovery;
   station_id: string | null;
   planned_start: string | null;
@@ -204,6 +232,21 @@ export type BatchDetail = BatchSummary & {
   gate: Gate;
   preflight: Preflight | null;
   can_control: boolean;
+  signals: BatchSignalRow[];
+  graph_mode: boolean;
+  subflows: SubflowGroup[];
+};
+
+export type BatchSignalRow = {
+  id: string;
+  batch_id: string;
+  name: string;
+  payload: Record<string, unknown>;
+  source: string;
+  source_label: string;
+  received_at: string | null;
+  consumed_by_run_id: string;
+  consumed_at: string | null;
 };
 
 export type Preflight = {
@@ -265,6 +308,10 @@ export type RecoveryEvaluation = {
   ready: boolean;
   options: RecoveryOption[];
   gate: Gate;
+  /** 当前出问题的步骤能不能跳过（方法标了可跳过、且没有结果未知的指令） */
+  skip: { step_id: string; allowed: boolean; reason: string };
+  /** 可以「从这一步重做」的步骤：当前步骤及其上游 */
+  rerun_targets: { step_id: string; index: number; name: string }[];
 };
 
 export type BomItem = { material: string; qty: number; unit: string };
@@ -303,6 +350,8 @@ export type RecipeSummary = {
   needs_revision: boolean;
   valid: boolean;
   step_count: number;
+  /** 关键路径（分钟）；有子流程时按展开后的步骤算 */
+  critical_path_min: number;
   delete_blockers: string[];
   /** 乐观并发版本；编辑保存与审批签名都绑定它 */
   row_version: number;
@@ -312,6 +361,8 @@ export type RecipeSummary = {
 
 export type RecipeDetail = RecipeSummary & {
   steps: RecipeStep[];
+  /** 用过的步骤标识（含已删除的）：编辑器本地分配新标识时必须避开 */
+  used_step_ids: string[];
   bom: BomItem[];
   history: { v: string; state: string; note: string; by: string; at: string }[];
   diff: [string, string][];
@@ -347,7 +398,7 @@ export type RecipeDetail = RecipeSummary & {
     等待看 wait_for，审核看 review_role。step_id 稳定不复用。 */
 export type RecipeStep = {
   step_id?: string;
-  kind?: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
+  kind?: StepKindName;
   name: string;
   cap: string;
   params: Record<string, number | ''>;
@@ -376,6 +427,14 @@ export type RecipeStep = {
   split?: { count?: number; child_type?: string };
   /** 前驱步骤（依赖图）。任何一步声明了它，流程按依赖图推进；未声明的步骤依赖上一行 */
   after?: string[];
+  /** 前驱是条件分支时，本步在它的哪个出口上 */
+  when?: Record<string, string>;
+  branch?: BranchConfig;
+  subflow?: { recipe_id?: string };
+  timeout?: StepTimeout;
+  /** 方法作者同意运行时可以跳过这一步 */
+  skippable?: boolean;
+  groups?: SubflowGroup[];
 };
 
 export type PlanSummary = {
@@ -1096,7 +1155,7 @@ export type StepRunRow = {
   step_id: string;
   step_index: number;
   step_name: string;
-  kind: 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split';
+  kind: StepKindName;
   kind_label: string;
   attempt: number;
   state: string;
@@ -1108,10 +1167,17 @@ export type StepRunRow = {
   started_at: string | null;
   ended_at: string | null;
   form: FormField[];
-  form_data: { values?: Record<string, unknown>; checks?: Record<string, boolean>; note?: string };
+  form_data: { values?: Record<string, unknown>; checks?: Record<string, boolean>; note?: string; [key: string]: unknown };
   requires_signature: boolean;
   review_role: string;
   wait_for: { mode?: string; event?: string };
+  branch: BranchConfig;
+  branch_cases: { key: string; label: string; loop: boolean }[];
+  skippable: boolean;
+  timeout: StepTimeout | null;
+  deadline_at: string | null;
+  timed_out_at: string | null;
+  groups: SubflowGroup[];
   conclusion: string;
   reason: string;
   submitted_by: string;

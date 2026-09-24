@@ -1,33 +1,57 @@
-/* 配方图形化编辑：能力面板 → 流程画布 → 属性面板。
+/* 方法图形化编辑：节点面板 → 流程图 → 属性面板。
 
-   三条设计约束，与原型一致：
+   设计约束：
    1. 步骤绑定能力而不是设备，参数实时对照全部工位极限的并集；
-   2. 硬时限画在进入该步的连线上，因为它约束的是「上一事件到本步开始」的间隔；
-   3. 恢复规则由能力继承，配方不可覆盖，所以属性面板里只读展示。 */
-import type { ReactNode } from 'react';
+   2. 流程图按依赖关系分层排布，连线画在真实的前驱与后继之间；从节点右侧的连接柄拖到另一个
+      节点上就建一条依赖，点连线可以删掉。列表顺序始终保持拓扑序（后端要求前驱排在前面），
+      每次改依赖都会自动重排；
+   3. 条件分支的出边带出口名，回环画成虚线；子流程节点引用一个已发布的方法，时长按它的关键路径算；
+   4. 恢复规则由能力继承，配方不可覆盖，所以属性面板里只读展示。
+
+   这里的校验是即时提示，能不能提交由服务端重算（`domain/recipe_rules.py`）。 */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { BomItem, CapabilityRow, FormField, LotRow, RecipeDetail, RecipeStep, SopVersionRow, StationRow } from '../../shared/types';
+import type {
+  BomItem, BranchCase, CapabilityRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary, SopVersionRow,
+  StationRow,
+} from '../../shared/types';
 import { CheckList, Field, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import {
+  AUTOMATIC_KINDS,
+  SKIPPABLE_KINDS,
+  STEP_KINDS,
+  TIMEOUT_ACTIONS,
+  TIMEOUT_ACTIONS_BY_KIND,
+  ancestors,
+  branchCases,
   canSubmit,
   defaultParams,
+  descendants,
+  durationOf,
   editorChecks,
+  explicitAfter,
+  forwardCaseKeys,
+  freeCase,
   graphMode,
   indexCapabilities,
-  predecessors,
-  paramRange,
-  stationsForStep,
-  stepIssues,
   kindOf,
   needsStation,
-  STEP_KINDS,
-  AUTOMATIC_KINDS,
+  nextStepId,
+  paramRange,
+  predecessors,
+  stationsForStep,
+  stepIdOf,
+  stepIssues,
+  topoSort,
+  whenOf,
+  wouldCycle,
   type StepKind,
+  type SubflowIndex,
 } from './rules';
 
 type Meta = {
@@ -49,6 +73,45 @@ function sopLabel(versions: SopVersionRow[] | undefined, versionId: string): str
   return hit ? `${hit.code} ${hit.title} ${hit.version}` : versionId;
 }
 
+/** 新节点的默认内容。不同类型适用的字段不同，这里只填各自必需的那些。 */
+function blankStep(kind: Exclude<StepKind, 'device'>): RecipeStep {
+  switch (kind) {
+    case 'manual':
+      return {
+        kind, name: '人工步骤', cap: '', params: {}, dur: 15, requires_sample_check: true,
+        form: [{ key: 'value', label: '记录值', type: 'number', required: true }],
+      };
+    case 'wait':
+      return { kind, name: '等待', cap: '', params: {}, dur: 30, wait_for: { mode: 'duration' } };
+    case 'gate':
+      return { kind, name: '质检关卡', cap: '', params: {}, dur: 0, gate: { scope: 'batch', on_fail: 'hold', max_rework: 2 } };
+    case 'split':
+      return { kind, name: '样本拆分', cap: '', params: {}, dur: 0, split: { count: 4, child_type: '' } };
+    case 'branch':
+      return {
+        kind, name: '条件分支', cap: '', params: {}, dur: 0,
+        branch: {
+          mode: 'manual',
+          cases: [{ key: 'yes', label: '是' }, { key: 'no', label: '否' }],
+        },
+      };
+    case 'subflow':
+      return { kind, name: '子流程', cap: '', params: {}, dur: 0, subflow: { recipe_id: '' } };
+    default:
+      return { kind: 'review', name: '审核', cap: '', params: {}, dur: 0, review_role: 'qa' };
+  }
+}
+
+const NON_DEVICE: [Exclude<StepKind, 'device'>, string][] = [
+  ['manual', '人工'],
+  ['wait', '等待'],
+  ['review', '审核'],
+  ['gate', '质检关卡'],
+  ['split', '样本拆分'],
+  ['branch', '条件分支'],
+  ['subflow', '子流程'],
+];
+
 export function RecipeEditorPage() {
   const { recipeId = '' } = useParams();
   const navigate = useNavigate();
@@ -59,11 +122,12 @@ export function RecipeEditorPage() {
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'));
   const lots = useQuery<LotRow[]>('lots', () => api.get<LotRow[]>('/lots'));
+  const recipes = useQuery<RecipeSummary[]>('recipes', () => api.get<RecipeSummary[]>('/recipes'));
   // 只取已发布且生效的版本：草稿与已退役的 SOP 不该被新方法引用
   const sops = useQuery<SopVersionRow[]>('sops:effective', () => api.get<SopVersionRow[]>('/sops/effective'));
 
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const loadedFor = useRef('');
 
@@ -80,7 +144,7 @@ export function RecipeEditorPage() {
         sop_version_id: data.sop_version_id ?? '',
       },
     });
-    setSelected(data.steps?.length ? 0 : null);
+    setSelected(data.steps?.length ? stepIdOf(data.steps[0], 0) : null);
     setDirty(false);
   }, [recipe.data]);
 
@@ -98,6 +162,16 @@ export function RecipeEditorPage() {
   const submit = useMutation(() => api.post(`/recipes/${recipeId}/submit`), { invalidates });
 
   const capabilityIndex = useMemo(() => indexCapabilities(capabilities.data), [capabilities.data]);
+  const subflowIndex = useMemo<SubflowIndex>(
+    () =>
+      Object.fromEntries(
+        (recipes.data ?? []).map((row) => [
+          row.id,
+          { name: row.name, version: row.version, state: row.state, needs_revision: row.needs_revision, critical_path_min: row.critical_path_min ?? 0 },
+        ]),
+      ),
+    [recipes.data],
+  );
   const materials = useMemo(
     () => [...new Set((lots.data ?? []).map((lot) => lot.material))].sort(),
     [lots.data],
@@ -114,9 +188,11 @@ export function RecipeEditorPage() {
             stations.data,
             capabilityIndex,
             sopLabel(sops.data, draft.meta.sop_version_id),
+            recipes.data ? subflowIndex : undefined,
+            recipeId,
           )
         : [],
-    [draft, stations.data, capabilityIndex, sops.data],
+    [draft, stations.data, capabilityIndex, sops.data, subflowIndex, recipes.data, recipeId],
   );
 
   if (!recipe.data || !draft) {
@@ -131,6 +207,8 @@ export function RecipeEditorPage() {
         ? '当前角色不能编辑配方'
         : '';
   const readOnly = !!readOnlyWhy;
+  const ids = draft.steps.map(stepIdOf);
+  const selectedIndex = selected ? ids.indexOf(selected) : -1;
 
   /* ---------- 编辑动作 ---------- */
 
@@ -139,62 +217,88 @@ export function RecipeEditorPage() {
     setDirty(true);
   };
 
-  const insert = (step: RecipeStep) => {
-    const at = selected === null ? draft.steps.length : selected + 1;
+  /** 新步骤：依赖图模式下接在选中的节点之后（选中的是分支就占它下一个空闲出口）；顺序流程插在选中行之后。 */
+  const insert = (raw: RecipeStep, after: string | null = selected) => {
+    const step: RecipeStep = { ...raw, step_id: nextStepId(draft.steps, data.used_step_ids) };
+    const anchorIndex = after ? ids.indexOf(after) : -1;
+    const anchor = anchorIndex >= 0 ? draft.steps[anchorIndex] : null;
+    const toGraph = graphMode(draft.steps) || kindOf(step) === 'branch' || (anchor && kindOf(anchor) === 'branch');
     mutate((current) => {
-      current.steps.splice(at, 0, step);
+      if (!toGraph) {
+        const at = anchorIndex >= 0 ? anchorIndex + 1 : current.steps.length;
+        current.steps.splice(at, 0, step);
+        return current;
+      }
+      const steps = explicitAfter(current.steps);
+      const added: RecipeStep = { ...step, after: anchor ? [after as string] : [] };
+      if (anchor && kindOf(anchor) === 'branch') added.when = { [after as string]: freeCase(steps, after as string) };
+      current.steps = topoSort([...steps, added]);
       return current;
     });
-    setSelected(at);
+    setSelected(step.step_id as string);
   };
 
-  const addStep = (capability: CapabilityRow) =>
-    insert({
-      kind: 'device',
-      name: capability.name,
-      cap: capability.id,
-      params: defaultParams(stations.data, capability),
-      dur: 15,
-    });
+  const addDevice = (capability: CapabilityRow, after: string | null = selected) =>
+    insert(
+      { kind: 'device', name: capability.name, cap: capability.id, params: defaultParams(stations.data, capability), dur: 15 },
+      after,
+    );
 
-  /** 人工、等待、审核节点不绑定能力，也不占工位——它们不需要「可承接工位」。 */
-  const addNonDeviceStep = (kind: 'manual' | 'wait' | 'review' | 'gate' | 'split') => {
-    if (kind === 'manual') {
-      insert({
-        kind: 'manual',
-        name: '人工步骤',
-        cap: '',
-        params: {},
-        dur: 15,
-        requires_sample_check: true,
-        form: [{ key: 'value', label: '记录值', type: 'number', required: true }],
-      });
+  const addFromPalette = (payload: string, onto: string | null) => {
+    const [type, value] = payload.split(':');
+    if (type === 'cap') {
+      const capability = capabilityIndex[value];
+      if (capability) addDevice(capability, onto);
       return;
     }
-    if (kind === 'wait') {
-      insert({ kind: 'wait', name: '等待', cap: '', params: {}, dur: 30, wait_for: { mode: 'duration' } });
-      return;
-    }
-    if (kind === 'gate') {
-      insert({
-        kind: 'gate', name: '质检关卡', cap: '', params: {}, dur: 0,
-        gate: { scope: 'batch', on_fail: 'hold', max_rework: 2 },
-      });
-      return;
-    }
-    if (kind === 'split') {
-      insert({ kind: 'split', name: '样本拆分', cap: '', params: {}, dur: 0, split: { count: 4, child_type: '' } });
-      return;
-    }
-    insert({ kind: 'review', name: '审核', cap: '', params: {}, dur: 0, review_role: 'qa' });
+    insert(blankStep(value as Exclude<StepKind, 'device'>), onto);
   };
 
-  const setStep = (index: number, change: (step: RecipeStep) => void) =>
+  /** 建依赖 from → to。成环、重复都拒绝；改完按拓扑序重排列表。 */
+  const connect = (from: string, to: string) => {
+    if (readOnly) return;
+    if (wouldCycle(draft.steps, from, to)) {
+      toast.push('这条依赖会形成环：目标步骤已经在它的上游。回环请用条件分支的「回到」出口');
+      return;
+    }
+    const target = draft.steps[ids.indexOf(to)];
+    if (graphMode(draft.steps) && predecessors(draft.steps)[ids.indexOf(to)].includes(ids.indexOf(from))) {
+      toast.push('已经有这条依赖');
+      return;
+    }
+    const source = draft.steps[ids.indexOf(from)];
     mutate((current) => {
-      change(current.steps[index]);
+      const steps = explicitAfter(current.steps);
+      const at = steps.findIndex((step, index) => stepIdOf(step, index) === to);
+      steps[at] = { ...steps[at], after: [...new Set([...(steps[at].after ?? []), from])] };
+      if (kindOf(source) === 'branch') steps[at].when = { ...whenOf(target), [from]: freeCase(steps, from) };
+      current.steps = topoSort(steps);
+      return current;
+    });
+  };
+
+  const disconnect = (from: string, to: string) => {
+    if (readOnly) return;
+    mutate((current) => {
+      const steps = explicitAfter(current.steps);
+      const at = steps.findIndex((step, index) => stepIdOf(step, index) === to);
+      const when = { ...whenOf(steps[at]) };
+      delete when[from];
+      steps[at] = { ...steps[at], after: (steps[at].after ?? []).filter((ref) => ref !== from), when };
+      if (!Object.keys(when).length) delete steps[at].when;
+      current.steps = topoSort(steps);
+      return current;
+    });
+  };
+
+  const setStep = (id: string, change: (step: RecipeStep) => void) =>
+    mutate((current) => {
+      const at = current.steps.findIndex((step, index) => stepIdOf(step, index) === id);
+      if (at >= 0) change(current.steps[at]);
       return current;
     });
 
+  /** 顺序流程里前移 / 后移就是改执行顺序；依赖图里顺序由依赖决定，不提供。 */
   const moveStep = (from: number, to: number) => {
     if (to < 0 || to >= draft.steps.length || from === to) return;
     mutate((current) => {
@@ -202,29 +306,50 @@ export function RecipeEditorPage() {
       current.steps.splice(to, 0, step);
       return current;
     });
-    setSelected(to);
   };
 
-  const duplicateStep = (index: number) => {
+  const duplicateStep = (id: string) => {
+    const at = ids.indexOf(id);
+    const copy: RecipeStep = { ...clone(draft.steps[at]), step_id: nextStepId(draft.steps, data.used_step_ids) };
     mutate((current) => {
-      current.steps.splice(index + 1, 0, clone(current.steps[index]));
+      current.steps.splice(at + 1, 0, copy);
+      if (graphMode(current.steps)) current.steps = topoSort(current.steps);
       return current;
     });
-    setSelected(index + 1);
+    setSelected(copy.step_id as string);
   };
 
-  const deleteStep = (index: number) => {
+  /** 删除节点。依赖图里它的后继改接到它的前驱上，出口条件一并继承，不留断头的路。 */
+  const deleteStep = (id: string) => {
+    const at = ids.indexOf(id);
     mutate((current) => {
-      current.steps.splice(index, 1);
+      if (!graphMode(current.steps)) {
+        current.steps.splice(at, 1);
+        return current;
+      }
+      const steps = explicitAfter(current.steps);
+      const removed = steps[at];
+      const rest = steps.filter((_, index) => index !== at).map((step) => {
+        if (!(step.after ?? []).includes(id)) return step;
+        const when = { ...whenOf(step) };
+        delete when[id];
+        Object.entries(whenOf(removed)).forEach(([branch, key]) => (when[branch] ??= key));
+        const after = [...new Set([...(step.after ?? []).filter((ref) => ref !== id), ...(removed.after ?? [])])];
+        const next: RecipeStep = { ...step, after, when };
+        if (!Object.keys(when).length) delete next.when;
+        return next;
+      });
+      current.steps = topoSort(rest);
       return current;
     });
-    setSelected(draft.steps.length > 1 ? Math.min(index, draft.steps.length - 2) : null);
+    const remaining = ids.filter((value) => value !== id);
+    setSelected(remaining[Math.min(at, remaining.length - 1)] ?? null);
   };
 
-  const changeCapability = (index: number, capabilityId: string) => {
+  const changeCapability = (id: string, capabilityId: string) => {
     const capability = capabilityIndex[capabilityId];
     if (!capability) return;
-    setStep(index, (step) => {
+    setStep(id, (step) => {
       const wasDefaultName = step.name === capabilityIndex[step.cap]?.name;
       step.cap = capabilityId;
       step.params = defaultParams(stations.data, capability);
@@ -232,15 +357,18 @@ export function RecipeEditorPage() {
     });
   };
 
-  const toggleHard = (index: number, on: boolean) =>
-    setStep(index, (step) => {
+  const toggleHard = (id: string, on: boolean) => {
+    const at = ids.indexOf(id);
+    const previous = predecessors(draft.steps)[at]?.[0];
+    setStep(id, (step) => {
       if (on) {
-        const previous = draft.steps[index - 1];
-        step.hard = { from: previous ? `${previous.name}结束` : '托盘就位', maxGapMin: 30 };
+        const before = previous !== undefined ? draft.steps[previous] : undefined;
+        step.hard = { from: before ? `${before.name}结束` : '托盘就位', maxGapMin: 30 };
       } else {
         delete step.hard;
       }
     });
+  };
 
   const discard = () => {
     setDraft({
@@ -251,7 +379,7 @@ export function RecipeEditorPage() {
         sop_version_id: data.sop_version_id ?? '',
       },
     });
-    setSelected(data.steps?.length ? 0 : null);
+    setSelected(data.steps?.length ? stepIdOf(data.steps[0], 0) : null);
     setDirty(false);
     toast.push('已放弃未保存的更改');
   };
@@ -284,41 +412,56 @@ export function RecipeEditorPage() {
     }
   };
 
-  /* ---------- 画布 ---------- */
+  /* ---------- 流程图 ---------- */
 
-  // 依赖图模式下每个节点标出它的前驱：画布仍按列表顺序排（列表就是拓扑序），分叉与汇合看标签
-  const dependencyMap = graphMode(draft.steps) ? predecessors(draft.steps) : null;
-
-  const canvas = (
-    <div className="fcanvas">
-      <div className="fnode term">
-        开始
-        <div className="small muted">托盘就位</div>
-      </div>
-      {draft.steps.map((step, index) => (
-        <FlowNode
-          key={index}
-          index={index}
+  const before = predecessors(draft.steps);
+  const nodes: FlowGraphNode[] = draft.steps.map((step, index) => {
+    const id = ids[index];
+    const issues = stepIssues(step, capabilityIndex, draft.steps, index, recipes.data ? subflowIndex : undefined, recipeId);
+    const fits = stationsForStep(stations.data, step).map((station) => station.id);
+    const requiresStation = needsStation(step);
+    const bad = issues.length > 0 || (requiresStation && fits.length === 0);
+    return {
+      id,
+      index,
+      className: `k-${kindOf(step)}${bad ? ' bad' : ''}`,
+      title: bad ? [...issues, ...(requiresStation && !fits.length ? ['没有工位能承接这些参数'] : [])].join('；') : '点击编辑属性',
+      content: (
+        <NodeCard
           step={step}
-          deps={dependencyMap ? dependencyMap[index] : undefined}
-          selected={selected === index}
-          readOnly={readOnly}
-          issues={stepIssues(step, capabilityIndex, draft.steps, index)}
-          fits={stationsForStep(stations.data, step).map((station) => station.id)}
+          index={index}
+          fits={fits}
           capabilityName={capabilityIndex[step.cap]?.name ?? step.cap}
           paramLabels={capabilityIndex[step.cap]?.params ?? {}}
-          onSelect={() => setSelected(index)}
-          onDrop={(from) => moveStep(from, index)}
+          subflowName={subflowIndex[step.subflow?.recipe_id ?? '']?.name}
+          duration={durationOf(step, subflowIndex)}
         />
-      ))}
-      <Edge />
-      <DropTarget disabled={readOnly} onDrop={(from) => moveStep(from, draft.steps.length - 1)}>
-        <div className="fnode term">
-          结束
-          <div className="small muted">样品交付检测</div>
-        </div>
-      </DropTarget>
-    </div>
+      ),
+    };
+  });
+  const edges: FlowGraphEdge[] = draft.steps.flatMap((step, index) =>
+    before[index].map((parent) => {
+      const parentStep = draft.steps[parent];
+      const branchKey = whenOf(step)[ids[parent]];
+      if (kindOf(parentStep) === 'branch') {
+        const label = branchCases(parentStep).find((row) => row.key === branchKey)?.label;
+        return { from: ids[parent], to: ids[index], tone: 'branch' as const, label: label ?? '未指定出口' };
+      }
+      if (step.hard?.maxGapMin) {
+        return {
+          from: ids[parent], to: ids[index], tone: 'hard' as const, label: `≤${step.hard.maxGapMin} min`,
+          title: `自${step.hard.from}起 ${step.hard.maxGapMin} min 内必须开始`,
+        };
+      }
+      return { from: ids[parent], to: ids[index] };
+    }),
+  );
+  const loops: FlowGraphLoop[] = draft.steps.flatMap((step, index) =>
+    kindOf(step) === 'branch'
+      ? branchCases(step)
+          .filter((row) => row.loop_to && ids.includes(row.loop_to))
+          .map((row) => ({ from: ids[index], to: row.loop_to as string, label: `${row.label}（≤${step.branch?.max_loops ?? '?'} 次）` }))
+      : [],
   );
 
   return (
@@ -367,10 +510,9 @@ export function RecipeEditorPage() {
         <div className="note warn">只读：{readOnlyWhy}。</div>
       ) : (
         <div className="note">
-          六类节点：设备、人工、等待、审核、质检关卡、样本拆分。设备步骤绑定能力而不是设备，参数实时对照全部工位极限；
-          人工步骤定义结构化记录表单；审核批准才继续。默认按画布顺序逐步推进；在步骤属性里勾选「前驱步骤」
-          即改为依赖图：一步可以同时开出多个后继（并行），汇合步骤等全部前驱完成。
-          这里的校验是即时提示，能不能提交由服务端重算。
+          从左侧拖一个节点到画布上（落在某个节点上就接在它后面），或选中节点后点「添加」。
+          按住节点右侧的圆点拖到另一个节点上即建立依赖：一个节点连出多条就是并行，多条连进一个节点就是汇合。
+          条件分支的每条出边要指定出口，回环在分支的出口里设「回到」。这里的校验是即时提示，能不能提交由服务端重算。
         </div>
       )}
 
@@ -379,32 +521,34 @@ export function RecipeEditorPage() {
           <div className="palette">
             <div className="cap">
               <div className="cap-head">
-                <b>非设备节点</b>
+                <b>流程节点</b>
               </div>
-              <div className="small muted">人工记录、定时等待、流程审核、质检关卡、样本拆分；它们不绑定能力，也不占工位。</div>
+              <div className="small muted">不绑定能力、默认不占工位；可拖到画布上。</div>
               <div className="filters" style={{ marginTop: 6 }}>
-                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('manual')}>
-                  + 人工
-                </button>
-                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('wait')}>
-                  + 等待
-                </button>
-                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('review')}>
-                  + 审核
-                </button>
-                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('gate')}>
-                  + 质检关卡
-                </button>
-                <button className="btn sm" disabled={readOnly} onClick={() => addNonDeviceStep('split')}>
-                  + 样本拆分
-                </button>
+                {NON_DEVICE.map(([kind, label]) => (
+                  <button
+                    key={kind}
+                    className="btn sm"
+                    disabled={readOnly}
+                    draggable={!readOnly}
+                    onDragStart={(event) => event.dataTransfer.setData(PALETTE_TYPE, `kind:${kind}`)}
+                    onClick={() => insert(blankStep(kind))}
+                  >
+                    + {label}
+                  </button>
+                ))}
               </div>
             </div>
             {(capabilities.data ?? []).map((capability) => (
-              <div key={capability.id} className="cap">
+              <div
+                key={capability.id}
+                className="cap"
+                draggable={!readOnly}
+                onDragStart={(event) => event.dataTransfer.setData(PALETTE_TYPE, `cap:${capability.id}`)}
+              >
                 <div className="cap-head">
                   <b>{capability.name}</b>
-                  <button className="btn sm" disabled={readOnly} onClick={() => addStep(capability)}>
+                  <button className="btn sm" disabled={readOnly} onClick={() => addDevice(capability)}>
                     添加
                   </button>
                 </div>
@@ -421,17 +565,22 @@ export function RecipeEditorPage() {
 
         <div className="grid">
           <Panel
-            title={`流程画布 · ${draft.steps.length} 步`}
-            aside={<span className="small muted">拖动节点调整顺序</span>}
+            title={`流程图 · ${draft.steps.length} 步`}
+            aside={<span className="small muted">{graphMode(draft.steps) ? '依赖图' : '顺序流程'}</span>}
             flush
           >
-            {canvas}
-            {draft.steps.length ? null : (
-              <div className="empty">
-                从左侧面板添加步骤。设备步骤绑定能力而不是设备，参数对照全部工位的极限校验；
-                人工、等待、审核节点不占工位。
-              </div>
-            )}
+            <FlowGraph
+              nodes={nodes}
+              edges={edges}
+              loops={loops}
+              selected={selected}
+              editable={!readOnly}
+              onSelect={setSelected}
+              onConnect={connect}
+              onRemoveEdge={disconnect}
+              onDropPalette={addFromPalette}
+              empty="从左侧拖入或点击添加节点。设备步骤绑定能力而不是设备，参数对照全部工位的极限校验；人工、等待、审核节点不占工位。"
+            />
           </Panel>
           <Panel title="校验">
             <CheckList checks={checks} />
@@ -439,24 +588,27 @@ export function RecipeEditorPage() {
           </Panel>
         </div>
 
-        {selected !== null && draft.steps[selected] ? (
+        {selectedIndex >= 0 ? (
           <StepProperties
-            index={selected}
-            step={draft.steps[selected]}
-            previous={draft.steps[selected - 1]}
+            index={selectedIndex}
+            step={draft.steps[selectedIndex]}
             steps={draft.steps}
+            recipeId={recipeId}
+            recipes={recipes.data ?? []}
+            subflows={subflowIndex}
             capabilities={capabilities.data ?? []}
             capabilityIndex={capabilityIndex}
             stations={stations.data}
             readOnly={readOnly}
-            total={draft.steps.length}
             onBack={() => setSelected(null)}
-            onSet={(change) => setStep(selected, change)}
-            onCapability={(id) => changeCapability(selected, id)}
-            onHard={(on) => toggleHard(selected, on)}
-            onMove={(to) => moveStep(selected, to)}
-            onDuplicate={() => duplicateStep(selected)}
-            onDelete={() => deleteStep(selected)}
+            onSet={(change) => setStep(ids[selectedIndex], change)}
+            onCapability={(id) => changeCapability(ids[selectedIndex], id)}
+            onHard={(on) => toggleHard(ids[selectedIndex], on)}
+            onMove={(to) => moveStep(selectedIndex, to)}
+            onConnect={(from) => connect(from, ids[selectedIndex])}
+            onDisconnect={(from) => disconnect(from, ids[selectedIndex])}
+            onDuplicate={() => duplicateStep(ids[selectedIndex])}
+            onDelete={() => deleteStep(ids[selectedIndex])}
           />
         ) : (
           <RecipeProperties
@@ -480,164 +632,72 @@ export function RecipeEditorPage() {
   );
 }
 
-/* ---------- 画布节点与连线 ---------- */
+/* ---------- 画布节点 ---------- */
 
-/* 拖拽用 HTML5 原生 DnD：节点是线性链，不需要自由布局，省一个依赖。 */
-const DRAG_TYPE = 'application/x-ilcs-step';
-
-function Edge({ hard }: { hard?: { from: string; maxGapMin: number } }) {
-  return (
-    <div className={`fedge${hard ? ' hard' : ''}`}>
-      {hard ? (
-        <span className="fedge-label" title={`自${hard.from}起 ${hard.maxGapMin} min 内必须开始`}>
-          ≤{hard.maxGapMin} min
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function DropTarget({
-  children,
-  disabled,
-  onDrop,
-}: {
-  children: ReactNode;
-  disabled?: boolean;
-  onDrop: (from: number) => void;
-}) {
-  const [over, setOver] = useState(false);
-  if (disabled) return <>{children}</>;
-  return (
-    <div
-      className={`drop-end${over ? ' over' : ''}`}
-      onDragOver={(event) => {
-        event.preventDefault();
-        setOver(true);
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(event) => {
-        event.preventDefault();
-        setOver(false);
-        const from = Number(event.dataTransfer.getData(DRAG_TYPE));
-        if (Number.isInteger(from)) onDrop(from);
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function FlowNode({
-  index,
+function NodeCard({
   step,
-  deps,
-  selected,
-  readOnly,
-  issues,
+  index,
   fits,
   capabilityName,
   paramLabels,
-  onSelect,
-  onDrop,
+  subflowName,
+  duration,
 }: {
-  index: number;
   step: RecipeStep;
-  deps?: number[];
-  selected: boolean;
-  readOnly: boolean;
-  issues: string[];
+  index: number;
   fits: string[];
   capabilityName: string;
   paramLabels: Record<string, string>;
-  onSelect: () => void;
-  onDrop: (from: number) => void;
+  subflowName?: string;
+  duration: number;
 }) {
-  const [over, setOver] = useState(false);
-  const [dragging, setDragging] = useState(false);
   const kind = kindOf(step);
   const requiresStation = needsStation(step);
-  // 不占工位的节点没有「可承接工位」这回事，缺工位不算问题
-  const bad = issues.length > 0 || (requiresStation && fits.length === 0);
-  const classes = ['fnode', selected ? 'sel' : '', bad ? 'bad' : '', over ? 'over' : '', dragging ? 'dragging' : ''];
-
+  const meta =
+    kind === 'device'
+      ? Object.entries(step.params ?? {})
+          .map(([key, value]) => `${(paramLabels[key] ?? key).split(' ')[0]} ${value === '' ? '?' : value}`)
+          .join(' · ') || '无参数'
+      : kind === 'manual'
+      ? `${(step.form ?? []).length} 个记录字段`
+      : kind === 'wait'
+      ? step.wait_for?.mode === 'event'
+        ? `等待事件 ${step.wait_for.event || '未填写'}`
+        : '定时等待'
+      : kind === 'gate'
+      ? `${step.gate?.field || '未选字段'} ${step.gate?.min ?? '−∞'}…${step.gate?.max ?? '+∞'} · ${
+          { rework: '返工', scrap: '报废', hold: '保持' }[step.gate?.on_fail ?? 'hold']
+        }`
+      : kind === 'split'
+      ? `每样本拆 ${step.split?.count ?? '?'} 个${step.split?.child_type || ''}`
+      : kind === 'branch'
+      ? `${{ measure: '按测量值', form: '按记录字段', manual: '人工选择' }[step.branch?.mode ?? 'manual']} · ${branchCases(step)
+          .map((row) => row.label || row.key)
+          .join(' / ')}`
+      : kind === 'subflow'
+      ? subflowName ? `引用 ${step.subflow?.recipe_id} ${subflowName}` : '未选择引用的方法'
+      : `审核角色 ${step.review_role || 'qa'}`;
   return (
     <>
-      <Edge hard={step.hard} />
-      <button
-        type="button"
-        className={classes.filter(Boolean).join(' ')}
-        draggable={!readOnly}
-        title={
-          bad
-            ? [...issues, ...(requiresStation && !fits.length ? ['没有工位能承接这些参数'] : [])].join('；')
-            : '点击编辑属性，拖动调整顺序'
-        }
-        onClick={onSelect}
-        onDragStart={(event) => {
-          event.dataTransfer.effectAllowed = 'move';
-          event.dataTransfer.setData(DRAG_TYPE, String(index));
-          setDragging(true);
-        }}
-        onDragEnd={() => setDragging(false)}
-        onDragOver={(event) => {
-          if (readOnly) return;
-          event.preventDefault();
-          setOver(true);
-        }}
-        onDragLeave={() => setOver(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setOver(false);
-          const from = Number(event.dataTransfer.getData(DRAG_TYPE));
-          if (Number.isInteger(from)) onDrop(from);
-        }}
-      >
-        <span className="fn-head">
-          <span className="mono">{index + 1}</span>
-          <span className={`kind ${kind}`}>
-            {STEP_KINDS.find(([value]) => value === kind)?.[1] ?? kind}
-          </span>
-          {kind === 'device' ? <span className="tag">{capabilityName}</span> : null}
-          {deps ? (
-            <span
-              className={`tag dep${
-                (index === 0 && !deps.length) || (deps.length === 1 && deps[0] === index - 1) ? '' : ' branch'
-              }`}
-            >
-              {deps.length ? `依赖 ${deps.map((at) => at + 1).join('、')}` : '起点'}
-            </span>
-          ) : null}
+      <span className="fn-head">
+        <span className="mono">{index + 1}</span>
+        <span className={`kind ${kind}`}>{STEP_KINDS.find(([value]) => value === kind)?.[1] ?? kind}</span>
+        {kind === 'device' ? <span className="tag">{capabilityName}</span> : null}
+        {step.skippable ? <span className="tag" title="运行时允许跳过">可跳过</span> : null}
+        {step.timeout ? <span className="tag warn" title="步骤级超时">⏱{step.timeout.minutes}</span> : null}
+      </span>
+      <span className="fn-title">{step.name || <span className="muted">未命名</span>}</span>
+      <span className="fn-meta">{meta}</span>
+      <span className="fn-foot">
+        <span className="mono">
+          {kind === 'subflow' ? `${duration} min` : AUTOMATIC_KINDS.includes(kind) ? '—' : `${step.dur} min`}
         </span>
-        <span className="fn-title">{step.name || <span className="muted">未命名</span>}</span>
-        <span className="fn-meta">
-          {kind === 'device'
-            ? Object.entries(step.params ?? {})
-                .map(([key, value]) => `${(paramLabels[key] ?? key).split(' ')[0]} ${value === '' ? '?' : value}`)
-                .join(' · ') || '无参数'
-            : kind === 'manual'
-            ? `${(step.form ?? []).length} 个记录字段`
-            : kind === 'wait'
-            ? step.wait_for?.mode === 'event'
-              ? `等待事件 ${step.wait_for.event || '未选择'}`
-              : '定时等待'
-            : kind === 'gate'
-            ? `${step.gate?.field || '未选字段'} ${step.gate?.min ?? '−∞'}…${step.gate?.max ?? '+∞'} · ${
-                { rework: '返工', scrap: '报废', hold: '保持' }[step.gate?.on_fail ?? 'hold']
-              }`
-            : kind === 'split'
-            ? `每样本拆 ${step.split?.count ?? '?'} 个${step.split?.child_type || ''}`
-            : `审核角色 ${step.review_role || 'qa'}`}
-        </span>
-        <span className="fn-foot">
-          <span className="mono">{AUTOMATIC_KINDS.includes(kind) ? '—' : `${step.dur} min`}</span>
-          {requiresStation ? (
-            <span className={fits.length ? 'muted' : 'bad'}>{fits.length ? fits.join(' ') : '无可承接工位'}</span>
-          ) : (
-            <span className="muted">不占工位</span>
-          )}
-        </span>
-      </button>
+        {requiresStation ? (
+          <span className={fits.length ? 'muted' : 'bad'}>{fits.length ? fits.join(' ') : '无可承接工位'}</span>
+        ) : (
+          <span className="muted">不占工位</span>
+        )}
+      </span>
     </>
   );
 }
@@ -647,35 +707,41 @@ function FlowNode({
 function StepProperties({
   index,
   step,
-  previous,
   steps,
+  recipeId,
+  recipes,
+  subflows,
   capabilities,
   capabilityIndex,
   stations,
   readOnly,
-  total,
   onBack,
   onSet,
   onCapability,
   onHard,
   onMove,
+  onConnect,
+  onDisconnect,
   onDuplicate,
   onDelete,
 }: {
   index: number;
   step: RecipeStep;
-  previous?: RecipeStep;
   steps: RecipeStep[];
+  recipeId: string;
+  recipes: RecipeSummary[];
+  subflows: SubflowIndex;
   capabilities: CapabilityRow[];
   capabilityIndex: Record<string, CapabilityRow>;
   stations: StationRow[] | undefined;
   readOnly: boolean;
-  total: number;
   onBack: () => void;
   onSet: (change: (step: RecipeStep) => void) => void;
   onCapability: (id: string) => void;
   onHard: (on: boolean) => void;
   onMove: (to: number) => void;
+  onConnect: (from: string) => void;
+  onDisconnect: (from: string) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
@@ -683,9 +749,11 @@ function StepProperties({
   const recovery = capability?.recovery ?? {};
   const fits = stationsForStep(stations, step);
   const kind = kindOf(step);
+  const upstream = predecessors(steps)[index].map((at) => steps[at]);
+  const timeoutActions = TIMEOUT_ACTIONS_BY_KIND[kind];
 
   return (
-    <Panel title={`第 ${index + 1} 步`} aside={<button className="btn sm" onClick={onBack}>方法属性</button>}>
+    <Panel title={`第 ${index + 1} 步 · ${stepIdOf(step, index)}`} aside={<button className="btn sm" onClick={onBack}>方法属性</button>}>
       <Field label="步骤名称">
         <input
           value={step.name}
@@ -706,13 +774,16 @@ function StepProperties({
                 current.cap = '';
                 current.params = {};
               }
-              if (next === 'manual' && !current.form?.length) {
-                current.form = [{ key: 'value', label: '记录值', type: 'number', required: true }];
-              }
+              const blank = next === 'device' ? null : blankStep(next);
+              if (next === 'manual' && !current.form?.length) current.form = blank?.form;
               if (next === 'wait' && !current.wait_for) current.wait_for = { mode: 'duration' };
               if (next === 'review' && !current.review_role) current.review_role = 'qa';
-              if (next === 'gate' && !current.gate) current.gate = { scope: 'batch', on_fail: 'hold', max_rework: 2 };
-              if (next === 'split' && !current.split) current.split = { count: 4, child_type: '' };
+              if (next === 'gate' && !current.gate) current.gate = blank?.gate;
+              if (next === 'split' && !current.split) current.split = blank?.split;
+              if (next === 'branch' && !current.branch) current.branch = blank?.branch;
+              if (next === 'subflow' && !current.subflow) current.subflow = { recipe_id: '' };
+              if (!SKIPPABLE_KINDS.includes(next)) delete current.skippable;
+              if (!TIMEOUT_ACTIONS_BY_KIND[next]) delete current.timeout;
             })
           }
         >
@@ -737,132 +808,43 @@ function StepProperties({
         </Field>
       ) : null}
 
-      {kind === 'manual' ? (
+      {kind === 'manual' ? <ManualFields step={step} readOnly={readOnly} onSet={onSet} /> : null}
+
+      {kind === 'wait' ? (
         <>
-          <Field label="记录表单" hint="人工步骤必须有结构化记录；缺必填项时服务端不推进">
-            <div className="stack">
-              {(step.form ?? []).map((field, position) => (
-                <div className="filters" key={position}>
-                  <input
-                    placeholder="字段标识"
-                    value={field.key}
-                    readOnly={readOnly}
-                    onChange={(event) =>
-                      onSet((current) => void (current.form![position].key = event.target.value))
-                    }
-                  />
-                  <input
-                    placeholder="显示名称"
-                    value={field.label}
-                    readOnly={readOnly}
-                    onChange={(event) =>
-                      onSet((current) => void (current.form![position].label = event.target.value))
-                    }
-                  />
-                  <select
-                    value={field.type ?? 'text'}
-                    disabled={readOnly}
-                    onChange={(event) =>
-                      onSet(
-                        (current) =>
-                          void (current.form![position].type = event.target.value as FormField['type']),
-                      )
-                    }
-                  >
-                    <option value="number">数值</option>
-                    <option value="text">文本</option>
-                    <option value="bool">勾选</option>
-                    <option value="enum">枚举</option>
-                  </select>
-                  <label className="tiny">
-                    <input
-                      type="checkbox"
-                      checked={field.required !== false}
-                      disabled={readOnly}
-                      onChange={(event) =>
-                        onSet((current) => void (current.form![position].required = event.target.checked))
-                      }
-                    />
-                    必填
-                  </label>
-                  <button
-                    className="btn sm"
-                    disabled={readOnly}
-                    onClick={() => onSet((current) => void current.form!.splice(position, 1))}
-                  >
-                    移除
-                  </button>
-                </div>
-              ))}
-              <button
-                className="btn sm"
-                disabled={readOnly}
-                onClick={() =>
-                  onSet((current) => {
-                    current.form = [
-                      ...(current.form ?? []),
-                      { key: '', label: '', type: 'text', required: true },
-                    ];
-                  })
-                }
-              >
-                增加字段
-              </button>
-            </div>
+          <Field label="等待方式" hint="业务事件由批次页或外部系统（服务身份）发出，早到的事件会先登记">
+            <select
+              value={step.wait_for?.mode ?? 'duration'}
+              disabled={readOnly}
+              onChange={(event) =>
+                onSet((current) => {
+                  const mode = event.target.value as 'duration' | 'event';
+                  current.wait_for = { ...current.wait_for, mode };
+                  if (mode === 'duration') delete current.timeout;
+                })
+              }
+            >
+              <option value="duration">固定时长</option>
+              <option value="event">业务事件</option>
+            </select>
           </Field>
-          <Field label="其他要求">
-            <label className="small">
+          {step.wait_for?.mode === 'event' ? (
+            <Field label="事件名" hint="如 sample_received、qc_released；外部系统按这个名字发信号">
               <input
-                type="checkbox"
-                checked={Boolean(step.requires_signature)}
-                disabled={readOnly}
-                onChange={(event) =>
-                  onSet((current) => void (current.requires_signature = event.target.checked))
-                }
+                value={step.wait_for?.event ?? ''}
+                readOnly={readOnly}
+                onChange={(event) => onSet((current) => void (current.wait_for = { ...current.wait_for, event: event.target.value }))}
               />
-              提交需要电子签名
-            </label>
-            <label className="small">
-              <input
-                type="checkbox"
-                checked={Boolean(step.consumes_materials)}
-                disabled={readOnly}
-                onChange={(event) =>
-                  onSet((current) => void (current.consumes_materials = event.target.checked))
-                }
-              />
-              该步骤消耗 BOM 物料（勾了才要求 BOM 与投料许可）
-            </label>
-          </Field>
+            </Field>
+          ) : null}
         </>
       ) : null}
 
-      {kind === 'wait' ? (
-        <Field label="等待方式" hint="当前只支持固定时长；业务事件等待在事件接口落地前不可用">
-          <select
-            value={step.wait_for?.mode ?? 'duration'}
-            disabled={readOnly}
-            onChange={(event) =>
-              onSet(
-                (current) =>
-                  void (current.wait_for = { ...current.wait_for, mode: event.target.value as 'duration' | 'event' }),
-              )
-            }
-          >
-            <option value="duration">固定时长</option>
-            <option value="event" disabled>
-              业务事件（暂不支持）
-            </option>
-          </select>
-          {step.wait_for?.mode === 'event' ? (
-            <div className="note warn">
-              该步骤仍是旧的「业务事件」等待（{step.wait_for?.event || '未选择事件'}），开跑后不会被唤醒，请改为固定时长。
-            </div>
-          ) : null}
-        </Field>
-      ) : null}
-
       {kind === 'gate' ? <GateFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} /> : null}
+      {kind === 'branch' ? <BranchFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} /> : null}
+      {kind === 'subflow' ? (
+        <SubflowFields step={step} recipeId={recipeId} recipes={recipes} subflows={subflows} readOnly={readOnly} onSet={onSet} />
+      ) : null}
       {kind === 'split' ? (
         <div className="grid cols-2">
           <Field label="每个样本拆分份数" hint="如一瓶电解液做 4 个扣电">
@@ -947,17 +929,42 @@ function StepProperties({
         </Field>
       ) : null}
 
-      <DependencyEditor steps={steps} index={index} readOnly={readOnly} onSet={onSet} />
+      <DependencyEditor steps={steps} index={index} readOnly={readOnly} onConnect={onConnect} onDisconnect={onDisconnect} />
+      {upstream.some((row) => kindOf(row) === 'branch') ? (
+        <WhenFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} />
+      ) : null}
 
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={!!step.hard}
-          disabled={readOnly}
-          onChange={(event) => onHard(event.target.checked)}
-        />
-        硬时限：本步必须在上一事件后的限定时间内开始
-      </label>
+      {timeoutActions ? (
+        <TimeoutFields step={step} actions={timeoutActions} readOnly={readOnly} onSet={onSet} />
+      ) : null}
+      {SKIPPABLE_KINDS.includes(kind) ? (
+        <label className="check" title="方法作者在设计时同意：运行时可由有恢复权限的人签名跳过这一步">
+          <input
+            type="checkbox"
+            checked={Boolean(step.skippable)}
+            disabled={readOnly}
+            onChange={(event) =>
+              onSet((current) => {
+                if (event.target.checked) current.skippable = true;
+                else delete current.skippable;
+              })
+            }
+          />
+          运行时允许跳过（非关键步骤；跳过要写理由并签名）
+        </label>
+      ) : null}
+
+      {!AUTOMATIC_KINDS.includes(kind) ? (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={!!step.hard}
+            disabled={readOnly}
+            onChange={(event) => onHard(event.target.checked)}
+          />
+          硬时限：本步必须在上一事件后的限定时间内开始
+        </label>
+      ) : null}
 
       {step.hard ? (
         <div className="grid cols-2">
@@ -965,7 +972,7 @@ function StepProperties({
             <input
               value={step.hard.from}
               readOnly={readOnly}
-              placeholder={previous ? `${previous.name}结束` : '托盘就位'}
+              placeholder="上一步结束"
               onChange={(event) => onSet((current) => void (current.hard!.from = event.target.value))}
             />
           </Field>
@@ -981,35 +988,43 @@ function StepProperties({
         </div>
       ) : null}
 
-      <div className={`small ${fits.length ? 'muted' : 'bad-text'}`}>
-        {fits.length ? (
-          <>
-            可承接工位：
-            {fits.map((station) => (
-              <span key={station.id} className="tag">
-                {station.id}
-              </span>
-            ))}
-          </>
-        ) : (
-          '没有工位的能力极限能覆盖这些参数'
-        )}
-      </div>
+      {needsStation(step) ? (
+        <div className={`small ${fits.length ? 'muted' : 'bad-text'}`}>
+          {fits.length ? (
+            <>
+              可承接工位：
+              {fits.map((station) => (
+                <span key={station.id} className="tag">
+                  {station.id}
+                </span>
+              ))}
+            </>
+          ) : (
+            '没有工位的能力极限能覆盖这些参数'
+          )}
+        </div>
+      ) : null}
 
-      <div className="small muted">
-        恢复规则（继承自能力，配方不可覆盖）：
-        {recovery.pausable ? `可保持 ≤ ${recovery.maxHoldMin} min，${recovery.hold}` : '不可保持'} ·{' '}
-        {recovery.retryable ? '可重试' : '不可重试'}
-        {recovery.verify?.length ? ` · 恢复前核实 ${recovery.verify.join('、')}` : ''}
-      </div>
+      {kind === 'device' ? (
+        <div className="small muted">
+          恢复规则（继承自能力，配方不可覆盖）：
+          {recovery.pausable ? `可保持 ≤ ${recovery.maxHoldMin} min，${recovery.hold}` : '不可保持'} ·{' '}
+          {recovery.retryable ? '可重试' : '不可重试'}
+          {recovery.verify?.length ? ` · 恢复前核实 ${recovery.verify.join('、')}` : ''}
+        </div>
+      ) : null}
 
       <div className="actions">
-        <button className="btn sm" disabled={readOnly || index === 0} onClick={() => onMove(index - 1)}>
-          ◀ 前移
-        </button>
-        <button className="btn sm" disabled={readOnly || index === total - 1} onClick={() => onMove(index + 1)}>
-          后移 ▶
-        </button>
+        {!graphMode(steps) ? (
+          <>
+            <button className="btn sm" disabled={readOnly || index === 0} onClick={() => onMove(index - 1)}>
+              ◀ 前移
+            </button>
+            <button className="btn sm" disabled={readOnly || index === steps.length - 1} onClick={() => onMove(index + 1)}>
+              后移 ▶
+            </button>
+          </>
+        ) : null}
         <button className="btn sm" disabled={readOnly} onClick={onDuplicate}>
           复制
         </button>
@@ -1018,6 +1033,100 @@ function StepProperties({
         </button>
       </div>
     </Panel>
+  );
+}
+
+function ManualFields({
+  step,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  return (
+    <>
+      <Field label="记录表单" hint="人工步骤必须有结构化记录；缺必填项时服务端不推进">
+        <div className="stack">
+          {(step.form ?? []).map((field, position) => (
+            <div className="filters" key={position}>
+              <input
+                placeholder="字段标识"
+                value={field.key}
+                readOnly={readOnly}
+                onChange={(event) => onSet((current) => void (current.form![position].key = event.target.value))}
+              />
+              <input
+                placeholder="显示名称"
+                value={field.label}
+                readOnly={readOnly}
+                onChange={(event) => onSet((current) => void (current.form![position].label = event.target.value))}
+              />
+              <select
+                value={field.type ?? 'text'}
+                disabled={readOnly}
+                onChange={(event) =>
+                  onSet((current) => void (current.form![position].type = event.target.value as FormField['type']))
+                }
+              >
+                <option value="number">数值</option>
+                <option value="text">文本</option>
+                <option value="bool">勾选</option>
+                <option value="enum">枚举</option>
+              </select>
+              <label className="tiny">
+                <input
+                  type="checkbox"
+                  checked={field.required !== false}
+                  disabled={readOnly}
+                  onChange={(event) => onSet((current) => void (current.form![position].required = event.target.checked))}
+                />
+                必填
+              </label>
+              <button
+                className="btn sm"
+                disabled={readOnly}
+                onClick={() => onSet((current) => void current.form!.splice(position, 1))}
+              >
+                移除
+              </button>
+            </div>
+          ))}
+          <button
+            className="btn sm"
+            disabled={readOnly}
+            onClick={() =>
+              onSet((current) => {
+                current.form = [...(current.form ?? []), { key: '', label: '', type: 'text', required: true }];
+              })
+            }
+          >
+            增加字段
+          </button>
+        </div>
+      </Field>
+      <Field label="其他要求">
+        <label className="small">
+          <input
+            type="checkbox"
+            checked={Boolean(step.requires_signature)}
+            disabled={readOnly}
+            onChange={(event) => onSet((current) => void (current.requires_signature = event.target.checked))}
+          />
+          提交需要电子签名
+        </label>
+        <label className="small">
+          <input
+            type="checkbox"
+            checked={Boolean(step.consumes_materials)}
+            disabled={readOnly}
+            onChange={(event) => onSet((current) => void (current.consumes_materials = event.target.checked))}
+          />
+          该步骤消耗 BOM 物料（勾了才要求 BOM 与投料许可）
+        </label>
+      </Field>
+    </>
   );
 }
 
@@ -1290,61 +1399,387 @@ function GateFields({
   );
 }
 
-/* 前驱步骤。勾选多个即汇合；多个步骤勾同一个前驱即分叉。只能依赖排在前面的步骤（列表即拓扑序），
-   新加的步骤保存后有了稳定标识才能被引用。 */
+/* 前驱步骤。勾选即连一条依赖（和在画布上拖线一样），取消即删掉；勾选多个即汇合。
+   不能选本步的下游——那会成环；回环请用条件分支的「回到」出口。 */
 function DependencyEditor({
   steps,
   index,
   readOnly,
-  onSet,
+  onConnect,
+  onDisconnect,
 }: {
   steps: RecipeStep[];
   index: number;
   readOnly: boolean;
-  onSet: (change: (step: RecipeStep) => void) => void;
+  onConnect: (from: string) => void;
+  onDisconnect: (from: string) => void;
 }) {
-  const step = steps[index];
   const graph = graphMode(steps);
-  const explicit = step.after !== undefined;
   const current = predecessors(steps)[index];
-  const earlier = steps.slice(0, index);
+  const downstream = descendants(steps, index);
+  const candidates = steps
+    .map((row, at) => ({ row, at, id: stepIdOf(row, at) }))
+    .filter(({ at }) => at !== index && !downstream.has(at));
   return (
     <div className="deps">
       <div className="small">
         <b>前驱步骤</b>{' '}
         <span className="muted">
-          {!graph ? '顺序流程：依赖上一步' : explicit ? (current.length ? '按勾选' : '起点：不依赖任何步骤') : '未声明：依赖上一行'}
+          {!graph ? '顺序流程：依赖上一步；勾选任意一项即改为依赖图' : current.length ? '汇合时等全部入边有结论' : '起点：不依赖任何步骤'}
         </span>
       </div>
-      {earlier.length ? (
+      {candidates.length ? (
         <div className="dep-list">
-          {earlier.map((row, at) => (
-            <label key={at} className="check" title={row.step_id ? '' : '新步骤保存后才能被引用'}>
+          {candidates.map(({ row, at, id }) => (
+            <label key={id} className="check">
               <input
                 type="checkbox"
-                disabled={readOnly || !row.step_id}
+                disabled={readOnly}
                 checked={current.includes(at)}
-                onChange={(event) =>
-                  onSet((target) => {
-                    const chosen = new Set(current.map((parent) => steps[parent].step_id).filter((id): id is string => !!id));
-                    if (event.target.checked) chosen.add(row.step_id as string);
-                    else chosen.delete(row.step_id as string);
-                    target.after = earlier.map((item) => item.step_id).filter((id): id is string => !!id && chosen.has(id));
-                  })
-                }
+                onChange={(event) => (event.target.checked ? onConnect(id) : onDisconnect(id))}
               />
-              {at + 1}. {row.name || '未命名'}
+              {at + 1}. {row.name || '未命名'} <span className="tiny muted mono">{id}</span>
             </label>
           ))}
         </div>
       ) : (
-        <div className="tiny muted">第一步没有可依赖的步骤。</div>
+        <div className="tiny muted">没有可以作为前驱的步骤。</div>
       )}
-      {explicit ? (
-        <button className="btn sm" disabled={readOnly} onClick={() => onSet((target) => void delete target.after)}>
-          恢复为依赖上一行
-        </button>
-      ) : null}
     </div>
   );
 }
+
+/* 本步在前驱分支的哪个出口上。每条来自分支的入边都要指定，否则推进器不知道该不该走这条路。 */
+function WhenFields({
+  step,
+  steps,
+  index,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  steps: RecipeStep[];
+  index: number;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const branches = predecessors(steps)[index].map((at) => ({ row: steps[at], id: stepIdOf(steps[at], at) }))
+    .filter(({ row }) => kindOf(row) === 'branch');
+  return (
+    <div className="deps">
+      <div className="small">
+        <b>分支出口</b> <span className="muted">本步只在选中的出口被选中时执行，否则记为「未走此分支」</span>
+      </div>
+      {branches.map(({ row, id }) => (
+        <Field key={id} label={`分支「${row.name}」`}>
+          <select
+            value={whenOf(step)[id] ?? ''}
+            disabled={readOnly}
+            onChange={(event) =>
+              onSet((current) => void (current.when = { ...whenOf(current), [id]: event.target.value }))
+            }
+          >
+            <option value="">未指定</option>
+            {branchCases(row)
+              .filter((c) => !c.loop_to)
+              .map((c) => (
+                <option key={c.key} value={c.key}>
+                  {c.label || c.key}
+                </option>
+              ))}
+          </select>
+        </Field>
+      ))}
+    </div>
+  );
+}
+
+/* 条件分支：按上游测量值 / 上游人工记录字段 / 人工选择取一个出口。出口按顺序匹配，第一个满足的生效；
+   判据取不到值时走默认出口，没有默认出口就保持、等 QA 签名选择。出口可以「回到」上游某一步，
+   就是有上限的循环。 */
+function BranchFields({
+  step,
+  steps,
+  index,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  steps: RecipeStep[];
+  index: number;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const config = step.branch ?? {};
+  const mode = config.mode ?? 'manual';
+  const cases = branchCases(step);
+  const upstream = ancestors(steps, index);
+  const earlier = steps
+    .map((row, at) => ({ row, at, id: stepIdOf(row, at) }))
+    .filter(({ at }) => upstream.has(at));
+  const sources = earlier.filter(({ row }) => (mode === 'measure' ? kindOf(row) === 'device' : kindOf(row) === 'manual'));
+  const source = earlier.find(({ id }) => id === config.source_step_id)?.row;
+  const set = (change: Partial<NonNullable<RecipeStep['branch']>>) =>
+    onSet((current) => void (current.branch = { ...current.branch, ...change }));
+  const setCase = (position: number, change: Partial<BranchCase>) =>
+    onSet((current) => {
+      const rows = [...branchCases(current)];
+      rows[position] = { ...rows[position], ...change };
+      current.branch = { ...current.branch, cases: rows };
+    });
+  const numberOrNull = (value: number | '') => (value === '' ? null : value);
+  const rowClass = mode === 'manual' ? 'case-row manual' : mode === 'form' ? 'case-row form' : 'case-row';
+  const hasLoop = cases.some((c) => c.loop_to);
+
+  return (
+    <>
+      <Field label="分支依据">
+        <select value={mode} disabled={readOnly} onChange={(event) => set({ mode: event.target.value as typeof mode })}>
+          <option value="manual">人工选择（操作员在批次页选出口）</option>
+          <option value="measure">上游设备测量值（设备回执 delivered 里的键）</option>
+          <option value="form">上游人工记录字段</option>
+        </select>
+      </Field>
+      {mode !== 'manual' ? (
+        <div className="grid cols-2">
+          <Field label="判据来源（上游步骤）">
+            <select value={config.source_step_id ?? ''} disabled={readOnly} onChange={(event) => set({ source_step_id: event.target.value })}>
+              <option value="">选择步骤</option>
+              {sources.map(({ row, at, id }) => (
+                <option key={id} value={id}>
+                  第 {at + 1} 步 · {row.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="判据字段">
+            {mode === 'form' ? (
+              <select value={config.field ?? ''} disabled={readOnly} onChange={(event) => set({ field: event.target.value })}>
+                <option value="">选择字段</option>
+                {(source?.form ?? []).map((field) => (
+                  <option key={field.key} value={field.key}>
+                    {field.label || field.key}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input value={config.field ?? ''} readOnly={readOnly} placeholder="如 mass、water_ppm" onChange={(event) => set({ field: event.target.value })} />
+            )}
+          </Field>
+        </div>
+      ) : null}
+      <Field label="出口" hint="按顺序匹配，第一个满足条件的生效；回环出口会作废回环体后从目标重做">
+        <div className="stack">
+          <div className={`${rowClass} tiny muted`}>
+            <span>标识</span>
+            <span>名称</span>
+            {mode === 'measure' ? (
+              <>
+                <span>下限</span>
+                <span>上限</span>
+              </>
+            ) : null}
+            {mode === 'form' ? <span>等于（或留空用上下限）</span> : null}
+            <span>回到（可选）</span>
+            <span />
+          </div>
+          {cases.map((row, position) => (
+            <div key={position} className={rowClass}>
+              <input value={row.key} readOnly={readOnly} onChange={(event) => setCase(position, { key: event.target.value.trim() })} />
+              <input value={row.label} readOnly={readOnly} onChange={(event) => setCase(position, { label: event.target.value })} />
+              {mode === 'measure' ? (
+                <>
+                  <NumberInput value={row.min ?? ''} disabled={readOnly} ariaLabel="下限" onChange={(next) => setCase(position, { min: numberOrNull(next) })} />
+                  <NumberInput value={row.max ?? ''} disabled={readOnly} ariaLabel="上限" onChange={(next) => setCase(position, { max: numberOrNull(next) })} />
+                </>
+              ) : null}
+              {mode === 'form' ? (
+                <input value={row.equals ?? ''} readOnly={readOnly} onChange={(event) => setCase(position, { equals: event.target.value })} />
+              ) : null}
+              <select value={row.loop_to ?? ''} disabled={readOnly} onChange={(event) => setCase(position, { loop_to: event.target.value || undefined })}>
+                <option value="">往下走</option>
+                {earlier.map(({ row: target, at, id }) => (
+                  <option key={id} value={id}>
+                    回到第 {at + 1} 步 · {target.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn sm"
+                disabled={readOnly || cases.length <= 2}
+                title={cases.length <= 2 ? '至少保留两个出口' : '删除出口'}
+                onClick={() => onSet((current) => void (current.branch = { ...current.branch, cases: branchCases(current).filter((_, at) => at !== position) }))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            className="btn sm"
+            disabled={readOnly}
+            onClick={() =>
+              onSet((current) => {
+                const rows = branchCases(current);
+                current.branch = { ...current.branch, cases: [...rows, { key: `c${rows.length + 1}`, label: `出口 ${rows.length + 1}` }] };
+              })
+            }
+          >
+            增加出口
+          </button>
+        </div>
+      </Field>
+      <div className="grid cols-2">
+        {mode !== 'manual' ? (
+          <Field label="默认出口" hint="判据有值但不满足任何条件时走它；判据缺失时一律转人工">
+            <select value={config.default ?? ''} disabled={readOnly} onChange={(event) => set({ default: event.target.value || undefined })}>
+              <option value="">无（保持待人工选择）</option>
+              {forwardCaseKeys(step).map((key) => (
+                <option key={key} value={key}>
+                  {cases.find((c) => c.key === key)?.label ?? key}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+        {hasLoop ? (
+          <Field label="最多循环次数" hint="超过后转人工选择出口">
+            <NumberInput
+              value={config.max_loops ?? ''}
+              disabled={readOnly}
+              ariaLabel="最多循环次数"
+              onChange={(next) => set({ max_loops: next === '' ? undefined : next })}
+            />
+          </Field>
+        ) : null}
+      </div>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={Boolean(step.requires_signature)}
+          disabled={readOnly}
+          onChange={(event) => onSet((current) => void (current.requires_signature = event.target.checked))}
+        />
+        人工选择出口时要求电子签名
+      </label>
+    </>
+  );
+}
+
+/* 子流程：引用一个已发布的方法，建批次时展开进快照。被引用方法修订发布后旧版本退役，引用随之失效，
+   要改这里重新评审——不会悄悄换掉已批准流程里的一段。 */
+function SubflowFields({
+  step,
+  recipeId,
+  recipes,
+  subflows,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  recipeId: string;
+  recipes: RecipeSummary[];
+  subflows: SubflowIndex;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const chosen = step.subflow?.recipe_id ?? '';
+  const target = subflows[chosen];
+  const options = recipes.filter((row) => row.id !== recipeId && row.state === 'released' && !row.needs_revision);
+  return (
+    <>
+      <Field label="引用的方法" hint="只列已发布、无需修订的方法；子方法的 BOM 会并入批次物料预留">
+        <select
+          value={chosen}
+          disabled={readOnly}
+          onChange={(event) =>
+            onSet((current) => {
+              const recipe = recipes.find((row) => row.id === event.target.value);
+              const wasDefault = !current.name || current.name === '子流程' || recipes.some((row) => row.name === current.name);
+              current.subflow = { recipe_id: event.target.value };
+              if (recipe && wasDefault) current.name = recipe.name;
+            })
+          }
+        >
+          <option value="">选择方法</option>
+          {options.map((row) => (
+            <option key={row.id} value={row.id}>
+              {row.id} · {row.name} v{row.version}（{row.step_count} 步，关键路径 {row.critical_path_min} min）
+            </option>
+          ))}
+          {chosen && !options.some((row) => row.id === chosen) ? (
+            <option value={chosen}>{chosen}（已失效）</option>
+          ) : null}
+        </select>
+      </Field>
+      {target ? (
+        <div className="small muted">
+          {target.name} v{target.version} · {target.state === 'released' && !target.needs_revision ? '有效' : '已失效，请改引用新版本'} ·{' '}
+          <Link to={`/recipes/${chosen}`}>查看</Link>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function TimeoutFields({
+  step,
+  actions,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  actions: string[];
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const timeout = step.timeout;
+  const fixedWait = kindOf(step) === 'wait' && (step.wait_for?.mode ?? 'duration') === 'duration';
+  if (fixedWait) return null;
+  return (
+    <>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={!!timeout}
+          disabled={readOnly}
+          onChange={(event) =>
+            onSet((current) => {
+              if (event.target.checked) current.timeout = { minutes: Math.max(5, Number(current.dur) * 2 || 30), action: 'alarm' };
+              else delete current.timeout;
+            })
+          }
+        />
+        步骤级超时：开出后超过限定时长仍未完成时处理
+      </label>
+      {timeout ? (
+        <div className="grid cols-2">
+          <Field label="超时 min">
+            <NumberInput
+              value={timeout.minutes}
+              invalid={!(timeout.minutes > 0)}
+              disabled={readOnly}
+              ariaLabel="超时分钟"
+              onChange={(next) => onSet((current) => void (current.timeout = { ...current.timeout!, minutes: next === '' ? 0 : next }))}
+            />
+          </Field>
+          <Field label="超时处理" hint={kindOf(step) === 'device' ? '设备步骤只报警：指令超时另有硬上限与人工核查' : undefined}>
+            <select
+              value={timeout.action}
+              disabled={readOnly}
+              onChange={(event) =>
+                onSet((current) => void (current.timeout = { ...current.timeout!, action: event.target.value as 'alarm' | 'fail' | 'skip' }))
+              }
+            >
+              {TIMEOUT_ACTIONS.filter(([value]) => actions.includes(value)).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      ) : null}
+    </>
+  );
+}
+

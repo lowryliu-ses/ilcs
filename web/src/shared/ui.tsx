@@ -30,19 +30,25 @@ const STATE_CLASS: Record<string, string> = {
   completed: 'done', superseded: 'done', exhausted: 'done', left: 'done', split: 'done',
   // 终止、取消
   aborted: 'aborted', aborting: 'aborted', cancelled: 'aborted', disposed: 'aborted', not_sent: 'aborted',
-  not_executed: 'aborted',
+  not_executed: 'aborted', not_taken: 'aborted',
   scrapped: 'aborted',
 };
 
 /** 步骤类型的中文名。批次详情、任务中心、报告都读同一份。 */
 export const STEP_KIND_LABEL: Record<string, string> = {
   device: '设备', manual: '人工', wait: '等待', review: '审核', gate: '质检关卡', split: '样本拆分',
+  branch: '条件分支', subflow: '子流程',
 };
 
 /** 开跑检查的三种结论。「不适用」不是通过的近义词，颜色也不一样。 */
 export const CHECK_STATE_LABEL: Record<string, string> = {
   pass: '通过', blocked: '阻塞', not_applicable: '不适用',
 };
+
+/** 状态对应的配色类名（planned / scheduled / running / paused / fault / done / aborted / neutral）。 */
+export function stateClass(state: string): string {
+  return STATE_CLASS[state] ?? 'neutral';
+}
 
 export function Pill({ state, label }: { state: string; label?: string }) {
   return <span className={`pill ${STATE_CLASS[state] ?? 'neutral'}`}>{label ?? state}</span>;

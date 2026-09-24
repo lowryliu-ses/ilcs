@@ -276,35 +276,13 @@ tr.current td { background: var(--accent-soft); }
 .palette .cap { border: 1px solid var(--border); border-radius: var(--r); padding: 8px 10px; display: grid; gap: 3px; background: var(--surface-2); }
 .palette .cap-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 
-.fcanvas {
-  display: flex; align-items: center; overflow-x: auto; padding: 32px 14px 20px; min-height: 180px;
-  background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 16px 16px;
-}
-.fnode {
-  flex: 0 0 200px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--surface);
-  padding: 8px 10px; display: grid; gap: 4px; cursor: grab; box-shadow: var(--shadow); position: relative;
-  text-align: left; font: inherit; color: inherit;
-}
-.fnode:disabled { cursor: default; }
-.fnode.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.fnode.bad { border-color: var(--sev-1); }
-.fnode.over { outline: 2px dashed var(--accent); outline-offset: 2px; }
-.fnode.dragging { opacity: .45; }
-.fnode.term { flex-basis: 104px; background: var(--surface-2); text-align: center; cursor: default; border-style: dashed; font-weight: 500; box-shadow: none; }
-.fn-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
+.fn-head { display: flex; gap: 4px; align-items: center; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.fg-node .fn-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fg-node .fn-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fn-title { font-weight: 600; }
 .fn-meta { font-size: 11.5px; color: var(--ink-2); }
 .fn-foot { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: var(--muted); }
 .fn-foot .bad { color: var(--sev-1); }
-.fedge { flex: 0 0 56px; position: relative; height: 2px; background: var(--border-2); }
-.fedge::after { content: ""; position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left-color: var(--border-2); }
-.fedge.hard { background: var(--sev-2); }
-.fedge.hard::after { border-left-color: var(--sev-2); }
-.fedge-label {
-  position: absolute; left: 50%; top: -24px; transform: translateX(-50%); font-size: 10px; color: var(--sev-2);
-  border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; background: var(--surface);
-  white-space: nowrap; font-family: var(--mono);
-}
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 input.bad, select.bad { border-color: var(--sev-1); }
 .dirty-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--s-paused); margin-right: 6px; }
@@ -338,8 +316,6 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .swatch.dot.suspect { background: var(--s-paused); }
 .swatch.dot.invalid { background: var(--sev-1); }
 .swatch.ring { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--s-scheduled); }
-.drop-end { flex: 0 0 auto; display: flex; }
-.drop-end.over { outline: 2px dashed var(--accent); outline-offset: 2px; border-radius: 8px; }
 .chart-dot { stroke: var(--surface); stroke-width: .8; }
 .chart-dot.measured { fill: var(--accent); }
 .chart-dot.golden { fill: var(--s-paused); }
@@ -421,3 +397,67 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .dep-list { display: grid; gap: 2px; max-height: 160px; overflow: auto; }
 .tag.dep { background: var(--accent-soft); color: var(--accent); }
 .tag.dep.branch { background: color-mix(in srgb, var(--s-paused) 16%, transparent); color: var(--s-paused); }
+
+/* ---------- 流程图（方法编辑器与批次运行视图共用） ---------- */
+.fgraph {
+  overflow: auto; min-height: 200px; max-height: 70vh; position: relative;
+  background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 16px 16px;
+}
+.fgraph.over { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.fgraph > .empty { padding: 40px 24px; }
+.fgraph-stage { position: relative; }
+.fgraph-svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.fg-edge { fill: none; stroke: var(--border-2); stroke-width: 1.6; }
+.fg-edge.branch { stroke: var(--s-paused); }
+.fg-edge.taken { stroke: var(--s-running); stroke-width: 2; }
+.fg-edge.dead { stroke: var(--border); stroke-dasharray: 4 4; }
+.fg-edge.hard { stroke: var(--sev-2); }
+.fg-edge.loop { stroke: var(--s-paused); stroke-dasharray: 6 4; }
+.fg-edge.dragging { stroke: var(--accent); stroke-dasharray: 5 4; }
+.fg-edge.sel { stroke: var(--accent); stroke-width: 2.4; }
+.fg-edge-hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; pointer-events: stroke; }
+.fg-arrow { fill: var(--border-2); }
+.fg-arrow.branch, .fg-arrow.loop { fill: var(--s-paused); }
+.fg-arrow.taken { fill: var(--s-running); }
+.fg-arrow.dead { fill: var(--border); }
+.fg-arrow.hard { fill: var(--sev-2); }
+.fg-group { fill: color-mix(in srgb, var(--accent) 4%, transparent); stroke: color-mix(in srgb, var(--accent) 40%, var(--border)); stroke-dasharray: 5 4; }
+.fg-group-label { fill: var(--accent); font-size: 11px; }
+.fg-label {
+  position: absolute; transform: translate(-50%, -50%); display: flex; gap: 4px; align-items: center;
+  font-size: 10.5px; white-space: nowrap; pointer-events: auto; z-index: 2;
+}
+.fg-label > span { border: 1px solid currentColor; border-radius: 3px; padding: 0 5px; background: var(--surface); color: var(--ink-2); }
+.fg-label.branch > span, .fg-label.loop > span { color: var(--s-paused); }
+.fg-label.dead > span { color: var(--muted); text-decoration: line-through; }
+.fg-label.taken > span { color: var(--s-running); }
+.fg-label.hard > span { color: var(--sev-2); font-family: var(--mono); }
+.fg-remove { font-size: 10.5px; border: 1px solid var(--sev-1); color: var(--sev-1); background: var(--surface); border-radius: 3px; padding: 0 6px; }
+.fg-node {
+  position: absolute; border: 1px solid var(--border-2); border-radius: 8px; background: var(--surface);
+  padding: 8px 10px; display: grid; gap: 3px; align-content: start; cursor: pointer; box-shadow: var(--shadow);
+  text-align: left; overflow: hidden; z-index: 1; user-select: none;
+}
+.fg-node:focus-visible { outline: 2px solid var(--accent); }
+.fg-node.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.fg-node.bad { border-color: var(--sev-1); }
+.fg-node.k-branch { border-style: solid; border-left: 4px solid var(--s-paused); }
+.fg-node.k-subflow { border-left: 4px double var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+.fg-node.st-completed { border-left: 4px solid var(--s-done); }
+.fg-node.st-skipped { border-left: 4px solid var(--s-done); opacity: .8; }
+.fg-node.st-not_taken, .fg-node.st-superseded, .fg-node.st-cancelled { opacity: .5; border-style: dashed; }
+.fg-node.st-running, .fg-node.st-ready { border-color: var(--s-running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-running) 18%, transparent); }
+.fg-node.st-waiting, .fg-node.st-paused { border-color: var(--s-paused); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-paused) 18%, transparent); }
+.fg-node.st-failed, .fg-node.st-unknown { border-color: var(--s-fault); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-fault) 18%, transparent); }
+.fg-handle {
+  position: absolute; right: -1px; top: 50%; width: 14px; height: 14px; margin-top: -7px; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--accent); cursor: crosshair; touch-action: none;
+}
+.fg-handle:hover { background: var(--accent); }
+.kind.branch { border-color: color-mix(in srgb, var(--s-paused) 55%, var(--border)); color: var(--s-paused); }
+.kind.subflow { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+.kind.gate, .kind.split { border-color: color-mix(in srgb, var(--s-scheduled) 45%, var(--border)); color: var(--ink-2); }
+.palette .cap[draggable="true"] { cursor: grab; }
+.case-row { display: grid; grid-template-columns: 70px 1fr 70px 70px 1fr 28px; gap: 4px; align-items: center; }
+.case-row.form { grid-template-columns: 70px 1fr 1fr 1fr 28px; }
+.case-row.manual { grid-template-columns: 70px 1fr 1fr 28px; }
