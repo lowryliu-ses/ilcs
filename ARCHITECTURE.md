@@ -35,7 +35,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | 服务 | `services/` | 用例编排，一个方法 = 一个事务 | 写 SQL 细节、拼 HTTP |
 | 仓储 | `repositories/` | 聚合读写、作用域过滤、时间线查询 | 业务规则 |
 | 领域 | `domain/` | 纯函数与纯数据：能力匹配、方法校验、节点类型、依赖图、排程、多批次顺序搜索与可选 CP-SAT 模型、载具转运计划、开跑检查、恢复策略、条件矩阵、库存三量、资质判定、正式统计 | 碰数据库、碰时钟、碰框架 |
-| 适配 | `adapters/` | 设备侧契约、模拟实现、`http_json_v1` HTTPS 网关驱动与 `sila2_v1` 驱动 | 业务状态迁移 |
+| 适配 | `adapters/` | 设备侧契约、模拟实现、`http_json_v1` HTTPS 网关、`sila2_v1`、`modbus_tcp_v1`、`opcua_v1` 驱动 | 业务状态迁移 |
 | 模型 | `models/` | SQLAlchemy 表定义 | 行为 |
 | 基础 | `core/` | 配置、会话、`Quantity` 类型、版本校验、访问上下文、时钟、随机数、口令与 JWT、领域异常 | 领域概念 |
 

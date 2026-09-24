@@ -806,9 +806,10 @@ class ExecutorLoop:
     def probe_devices(self, station_id: str | None = None) -> int:
         """主动探测真实设备的在线状态。
 
-        SiLA 设备不会往系统推心跳：由执行器按周期读取设备身份，读到了才算在线，并同步设备
-        自报的联锁与是否接受指令。探测失败只标失联，不编造心跳。心跳方式可在适配器配置里用
-        `heartbeat_mode` 指定：`probe`（sila2_v1 默认）或 `push`（设备自己上报，http_json_v1 默认）。
+        SiLA 2 / Modbus TCP / OPC UA 设备不会往系统推心跳：由执行器按周期读取设备身份，读到了才算
+        在线，并同步设备自报的联锁与是否接受指令。探测失败只标失联，不编造心跳。心跳方式可在适配器配置里用
+        `heartbeat_mode` 指定：`probe`（sila2_v1 / modbus_tcp_v1 / opcua_v1 默认）或 `push`（设备自己上报，
+        http_json_v1 默认）。
         """
         from ..adapters.registry import probe_interval
 

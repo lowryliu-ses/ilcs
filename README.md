@@ -157,8 +157,11 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 设备回执里报了实际消耗 | 按指令号去重直接入库存消耗；超预留或对不上预留不入账并报警；偏差超 5% 入账并报警待复核 |
 | 设备遥测上报 | 同一 `event_id` 只入库一次；设备时钟超前 5 分钟整批拒收；保留 1 年 |
 | 维护工单 | 建单即登记维护占用；开工资产转维护状态；完工写记录签名，不合格资产保持维护状态 |
-| 工位接到 SiLA 2 设备（`sila2_v1`） | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
-| 正式环境接入自报为模拟器的 SiLA 设备 | 健康检查拒绝 |
+| 工位接到 SiLA 2（`sila2_v1`）/ Modbus TCP（`modbus_tcp_v1`）/ OPC UA（`opcua_v1`）设备 | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
+| Modbus 指令带孔位矩阵、未映射的参数或能力 | 驱动直接拒绝，不写触发寄存器 |
+| Modbus 写了触发等不到应答 / 执行器重启 | 结果未知不重写触发；新实例从设备当前的触发与应答序号里较大的一个接着编号 |
+| OPC UA 未钉住服务器证书、客户端证书不受信任、正式环境用 None 安全策略 | 配置或握手阶段拒绝 |
+| 正式环境接入自报为模拟器的设备（任一协议） | 健康检查拒绝 |
 | 质检关卡测量值超限 | 按方法配置返工（超过次数转 QA）/ 报废 / 保持待 QA 签名判定；取不到数值一律不放行 |
 | 逐孔位质检 | 不合格样本单独剔除，其余继续 |
 | 样本拆分节点 | 每个样本拆出 N 个子样本，谱系指向母样，继承条件分组 |
@@ -175,7 +178,7 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
-未验证项：**现场真实设备试点（AC-37）**。系统已内置 `http_json_v1` HTTPS 网关驱动，覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测；本地假设备协议测试已通过。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
+未验证项：**现场真实设备试点（AC-37）**。系统已内置 `http_json_v1`（HTTPS 网关）、`sila2_v1`、`modbus_tcp_v1`、`opcua_v1` 四个真实驱动，覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测；与各协议外部模拟设备的联调测试已通过。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
 
 ## 目录
 
@@ -183,10 +186,10 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 api/         FastAPI 服务：core / models / domain / repositories / services / adapters / api
 api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单 → 0011 并行通道 / 设计空间 / 闭环提案
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
-simulators/  外部 SiLA 2 模拟设备（配液工作站 / 充放电柜，含故障注入），见 simulators/sila_device/README.md
+simulators/  外部模拟设备：SiLA 2 / Modbus TCP / OPC UA / HTTPS 网关，同一套设备行为与故障注入，见 simulators/README.md
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）
-contracts/   OpenAPI 快照；sila2/ 下是设备侧 TaskExecution 特性契约
+contracts/   OpenAPI 快照；设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
 docs/        需求文档与迁移报告
 ```
 
@@ -294,7 +297,25 @@ cd /opt/ilcs/deploy && docker compose --profile pilot up -d sila-sim-lh sila-sim
 
 然后在「工位与能力」页把试点工位的适配器改成 `kind=real`、`driver=sila2_v1`，配置示例见
 [设备适配器配置模板](docs/设备适配器配置模板.md)；在线状态由执行器探测。模拟设备自报为模拟器，
-`ILCS_ENVIRONMENT=production` 时会被拒绝接入。故障注入与验收用法见 [simulators/sila_device/README.md](simulators/sila_device/README.md)。
+`ILCS_ENVIRONMENT=production` 时会被拒绝接入。故障注入与验收用法见 [simulators/README.md](simulators/README.md)。
+
+其他协议同样有外部模拟设备（同一 `pilot` profile），和 SiLA 2 那两台共用设备行为与故障注入：
+
+| 服务 | 协议 / 驱动 | 试点工位 | 凭据目录 |
+|---|---|---|---|
+| `modbus-sim-mixer`（SIM-MIX-01） | Modbus TCP / `modbus_tcp_v1` | ST-02 中试匀浆罐 | 无（明文 Modbus，只在后端网络） |
+| `opcua-sim-calender`（SIM-CAL-01） | OPC UA / `opcua_v1`，Basic256Sha256 + SignAndEncrypt | ST-04 辊压冲切机 | `secrets/opcua/` |
+| `gateway-sim-coater`（SIM-COAT-01） | HTTPS JSON / `http_json_v1`，TLS + Bearer 令牌 | ST-03 涂布烘干线 | `secrets/gateway/` |
+
+```bash
+sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/opcua /opt/ilcs/secrets/gateway
+# deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 再追加 modbus-sim-mixer,opcua-sim-calender,gateway-sim-coater
+docker compose --profile pilot up -d modbus-sim-mixer opcua-sim-calender gateway-sim-coater
+docker compose exec api python ../scripts/configure-pilot-adapters.py apply \
+  --station ST-02=modbus_tcp_v1@modbus-sim-mixer:5020:SIM-MIX-01 \
+  --station ST-04=opcua_v1@opcua-sim-calender:4840:SIM-CAL-01 \
+  --station ST-03=http_json_v1@gateway-sim-coater:8443:SIM-COAT-01
+```
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
 （方法修订 → 矩阵方案 → 排程下发 → 质检关卡 → 多通道 → 故障演练 → 闭环提案）见 [试点操作案例](docs/试点操作案例.md)；`scripts/reset-pilot-case.sh` 可把演示库重置为该案例跑完的结果。
 

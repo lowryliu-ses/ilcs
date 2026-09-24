@@ -25,3 +25,7 @@ protobuf==6.33.6
 ortools==9.15.6755
 # 模拟设备生成自签 TLS 证书（sila2[cryptography] 的可选依赖）
 cryptography==50.0.1
+# Modbus TCP 设备驱动（modbus_tcp_v1）与外部 Modbus 模拟设备共用；3.9 起从站上下文改名，版本固定
+pymodbus==3.8.6
+# OPC UA 设备驱动（opcua_v1）与外部 OPC UA 模拟设备共用
+asyncua==1.1.5

@@ -257,6 +257,8 @@ class HttpJsonAdapter:
         response = self._call("GET", self.paths["health"])
         if response.get("reachable") is False:
             raise AdapterError("设备网关报告设备不可达")
+        if response.get("simulator") and settings.environment == "production":
+            raise AdapterError("该设备网关自报为模拟器；正式环境不接入模拟设备")
         expected = str(self.config.get("expected_device_id") or "")
         field = str(self.config.get("device_id_field") or "device_id")
         actual = str(response.get(field) or "")
@@ -268,6 +270,10 @@ class HttpJsonAdapter:
             "protocol": self.contract.protocol,
             "device_id": actual,
             "gateway_version": response.get("version", ""),
+            # 网关回报了才同步；没回报的按「无联锁、接受指令」，与推送心跳模式的缺省一致
+            "simulator": bool(response.get("simulator")),
+            "interlock": bool(response.get("interlock")),
+            "accepts_commands": bool(response.get("accepts_commands", True)),
         }
 
     @staticmethod

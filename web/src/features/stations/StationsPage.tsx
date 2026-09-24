@@ -416,6 +416,11 @@ export function StationsPage() {
   );
 }
 
+type DriverTemplate = 'http_json_v1' | 'sila2_v1' | 'modbus_tcp_v1' | 'opcua_v1';
+const DRIVER_TEMPLATES: [DriverTemplate, string][] = [
+  ['http_json_v1', 'HTTPS JSON 网关'], ['sila2_v1', 'SiLA 2'], ['modbus_tcp_v1', 'Modbus TCP'], ['opcua_v1', 'OPC UA'],
+];
+
 function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
@@ -457,30 +462,68 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
   const update = <K extends keyof AdapterRow>(key: K, value: AdapterRow[K]) =>
     setDraft((current) => current ? { ...current, [key]: value } : current);
 
-  const applyHttpGatewayTemplate = () => {
+  // 各内置驱动的配置模板；Modbus 的能力码与参数槽位按本工位的能力限值依次编号，必须与 PLC 程序核对
+  const applyTemplate = (driver: DriverTemplate) => {
+    const capabilities = Object.keys(station.limits ?? {}).sort();
+    const params = [...new Set(capabilities.flatMap((cap) => Object.keys(station.limits[cap] ?? {})))].sort();
+    const templates: Record<DriverTemplate, { protocol: string; config: Record<string, unknown>; credential?: string }> = {
+      http_json_v1: {
+        protocol: 'HTTPS JSON',
+        credential: `file:///run/secrets/ilcs/${station.id}.token`,
+        config: {
+          base_url: 'https://instrument-gateway.lab.internal/api/v1',
+          verify_tls: true,
+          connect_timeout_sec: 3,
+          request_timeout_sec: 10,
+          expected_device_id: station.id,
+          paths: {
+            health: '/health',
+            submit: '/commands',
+            query: '/commands/{command_id}',
+            hold: '/commands/{command_id}/hold',
+            abort: '/commands/{command_id}/abort',
+          },
+          idempotency_header: 'Idempotency-Key',
+        },
+      },
+      sila2_v1: {
+        protocol: 'SiLA 2',
+        config: {
+          host: 'sila-device.lab.internal', port: 50052, ca_file: `/run/secrets/ilcs/sila/${station.id}.crt`,
+          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
+        },
+      },
+      modbus_tcp_v1: {
+        protocol: 'Modbus TCP',
+        config: {
+          host: 'plc.lab.internal', port: 502, unit_id: 1, base_address: 0,
+          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
+          capabilities: Object.fromEntries(capabilities.map((cap, index) => [cap, index + 1])),
+          params: Object.fromEntries(params.slice(0, 16).map((name, index) => [name, index + 1])),
+        },
+      },
+      opcua_v1: {
+        protocol: 'OPC UA',
+        credential: 'file:///run/secrets/ilcs/opcua/ilcs-client.json',
+        config: {
+          endpoint: 'opc.tcp://opcua-device.lab.internal:4840/ilcs/',
+          security_policy: 'Basic256Sha256', security_mode: 'SignAndEncrypt',
+          server_certificate: `/run/secrets/ilcs/opcua/${station.id}.crt`, application_uri: 'urn:ilcs:client',
+          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
+        },
+      },
+    };
+    const template = templates[driver];
     setDraft((current) => current ? {
       ...current,
       kind: 'real',
-      driver: 'http_json_v1',
-      protocol: 'HTTPS JSON',
+      driver,
+      protocol: template.protocol,
       version: '1.0',
+      credential_ref: template.credential ?? '',
       capabilities: { ...current.capabilities, query: true, dedup: true },
     } : current);
-    setConfigText(JSON.stringify({
-      base_url: 'https://instrument-gateway.lab.internal/api/v1',
-      verify_tls: true,
-      connect_timeout_sec: 3,
-      request_timeout_sec: 10,
-      expected_device_id: station.id,
-      paths: {
-        health: '/health',
-        submit: '/commands',
-        query: '/commands/{command_id}',
-        hold: '/commands/{command_id}/hold',
-        abort: '/commands/{command_id}/abort',
-      },
-      idempotency_header: 'Idempotency-Key',
-    }, null, 2));
+    setConfigText(JSON.stringify(template.config, null, 2));
   };
 
   const submit = async () => {
@@ -543,7 +586,12 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
     >
       <div className="note warn">
         保存会递增配置版本并强制离线，避免旧连接继续被当作有效。密钥原文不得写进 JSON，只能填写密钥管理器引用。
-        <div><button type="button" className="btn small" onClick={applyHttpGatewayTemplate}>填入 HTTPS JSON 网关模板</button></div>
+        <div className="row">
+          填入模板：
+          {DRIVER_TEMPLATES.map(([driver, label]) => (
+            <button key={driver} type="button" className="btn small" onClick={() => applyTemplate(driver)}>{label}</button>
+          ))}
+        </div>
       </div>
       <div className="grid cols-3">
         <Field label="模式">
@@ -552,7 +600,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
             <option value="real">真实设备</option>
           </select>
         </Field>
-        <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）与 sila2_v1（SiLA 2 TaskExecution）；其他键必须先在后端注册">
+        <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）、sila2_v1（SiLA 2）、modbus_tcp_v1（Modbus TCP 任务寄存器）、opcua_v1（OPC UA）；其他键必须先在后端注册">
           <input
             className="mono"
             value={draft.kind === 'simulation' ? 'simulation' : draft.driver}
@@ -575,7 +623,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
           <input value={draft.version} onChange={(event) => update('version', event.target.value)} />
         </Field>
       </div>
-      <Field label="连接配置 JSON" hint='http_json_v1：{"base_url":"https://gateway/api/v1","verify_tls":true,"expected_device_id":"ST-01"}；sila2_v1：{"host":"sila-sim-lh","port":50052,"ca_file":"/run/secrets/ilcs/sila/SIM-LH-01.crt","expected_device_id":"SIM-LH-01"}'>
+      <Field label="连接配置 JSON" hint="用上方模板按驱动填入；字段说明见 docs/设备适配器配置模板.md">
         <textarea className="mono" rows={8} value={configText} onChange={(event) => setConfigText(event.target.value)} />
       </Field>
       <Field label="凭据引用" hint="只接受 vault://、env://、file://；不要填写密码、token 或私钥原文">
@@ -1145,7 +1193,7 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
                 <option value="real">真实设备</option>
               </select>
             </Field>
-            <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）与 sila2_v1（SiLA 2 TaskExecution）；其他键必须先在后端注册">
+            <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）、sila2_v1（SiLA 2）、modbus_tcp_v1（Modbus TCP 任务寄存器）、opcua_v1（OPC UA）；其他键必须先在后端注册">
               <input
                 className="mono"
                 value={adapterKind === 'simulation' ? 'simulation' : adapterDriver}

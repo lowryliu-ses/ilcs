@@ -20,7 +20,7 @@ def _free_port() -> int:
 
 @pytest.fixture()
 def simulator():
-    from simulators.sila_device.device import SimulatedDevice
+    from simulators.common.device import SimulatedDevice
     from simulators.sila_device.server import SimulatorRunner, parse
 
     port = _free_port()
@@ -172,7 +172,7 @@ def test_tls_with_generated_certificate_and_ca_file(tmp_path, monkeypatch):
     from app.adapters import AdapterUnreachable
     from app.adapters.sila2 import Sila2Adapter
     from app.core.config import settings
-    from simulators.sila_device.device import SimulatedDevice
+    from simulators.common.device import SimulatedDevice
     from simulators.sila_device.server import SimulatorRunner, parse
 
     monkeypatch.setattr(settings, "adapter_credential_root", str(tmp_path))

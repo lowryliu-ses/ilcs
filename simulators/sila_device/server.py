@@ -15,23 +15,27 @@ import argparse
 import json
 import logging
 import os
-import signal
+import sys
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from uuid import UUID, uuid5, NAMESPACE_URL
 
-from sila2.framework import Feature
-from sila2.framework.errors.defined_execution_error import DefinedExecutionError
-from sila2.server import FeatureImplementationBase, SilaServer
-
-try:  # 作为包导入（测试）或直接运行（容器）都要能找到设备模型
-    from .device import DeviceRejected, ReceiptLost, SimulatedDevice, load_material_map
-except ImportError:  # pragma: no cover
-    from device import DeviceRejected, ReceiptLost, SimulatedDevice, load_material_map
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulators 包
+    sys.path.insert(0, str(ROOT))
+
+from cryptography import x509  # noqa: E402
+from sila2.framework import Feature  # noqa: E402
+from sila2.framework.errors.defined_execution_error import DefinedExecutionError  # noqa: E402
+from sila2.server import FeatureImplementationBase, SilaServer  # noqa: E402
+
+from simulators.common.certs import self_signed_certificate  # noqa: E402
+from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.runtime import (  # noqa: E402
+    build_device, configure_logging, device_arguments, serve_forever,
+)
+
 FEATURES = ROOT / "contracts" / "sila2"
 TASK_FEATURE = Feature((FEATURES / "TaskExecution.sila.xml").read_text(encoding="utf-8"))
 CONTROL_FEATURE = Feature((FEATURES / "SimulatorControl.sila.xml").read_text(encoding="utf-8"))
@@ -93,74 +97,13 @@ class SimulatorControlImpl(FeatureImplementationBase):
         return json.dumps(self.device.state(), ensure_ascii=False)
 
 
-def self_signed_certificate(server_uuid: UUID, host_name: str) -> tuple[bytes, bytes]:
-    """自签证书：主机名写进 DNS SAN，另附 SiLA 规定的服务器 UUID 扩展。
-
-    sila2 自带的生成器只把「生成时解析到的 IP」写进 SAN：系统按服务名（如 sila-sim-lh）连接时
-    主机名校验永远不通过，容器重启换了 IP 证书也就作废。
-    """
-    import ipaddress
-    import socket
-    from datetime import datetime, timedelta, timezone
-
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    names: list[x509.GeneralName] = []
-    try:
-        names.append(x509.IPAddress(ipaddress.ip_address(host_name)))
-    except ValueError:
-        names.append(x509.DNSName(host_name))
-        try:  # 同时写入当前解析到的地址，便于按 IP 直连调试
-            for info in socket.getaddrinfo(host_name, None):
-                address = ipaddress.ip_address(info[4][0])
-                if x509.IPAddress(address) not in names:
-                    names.append(x509.IPAddress(address))
-        except OSError:
-            pass
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, host_name),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ILCS SiLA 2 Simulator"),
-    ])
-    moment = datetime.now(timezone.utc)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject).issuer_name(subject).public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(moment - timedelta(hours=1)).not_valid_after(moment + timedelta(days=825))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-        .add_extension(x509.SubjectAlternativeName(names), critical=False)
-        .add_extension(
-            x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.58583"), str(server_uuid).encode("ascii")),
-            critical=False,
-        )
-        .sign(key, hashes.SHA256())
+def sila_certificate(server_uuid: UUID, host_name: str) -> tuple[bytes, bytes]:
+    """自签证书，另附 SiLA 规定的服务器 UUID 扩展。sila2 自带的生成器只写 IP SAN，按服务名连接过不了校验。"""
+    return self_signed_certificate(
+        host_name, "ILCS SiLA 2 Simulator",
+        extensions=(x509.UnrecognizedExtension(
+            x509.ObjectIdentifier("1.3.6.1.4.1.58583"), str(server_uuid).encode("ascii")),),
     )
-    return (
-        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
-                          serialization.NoEncryption()),
-        cert.public_bytes(serialization.Encoding.PEM),
-    )
-
-
-class TelemetryPusher:
-    """把运行中任务的遥测推到 ILCS 的遥测上报接口（服务身份认证）。"""
-
-    def __init__(self, base_url: str, station_id: str, source: str, secret: str):
-        self.url = f"{base_url.rstrip('/')}/api/runtime/stations/{station_id}/telemetry"
-        self.headers = {
-            "Content-Type": "application/json", "X-Service-Source": source, "X-Service-Secret": secret,
-        }
-
-    def __call__(self, event_id: str, points: list[dict], command_id: str) -> None:
-        body = json.dumps({"event_id": event_id, "command_id": command_id, "points": points}).encode()
-        request = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
-        with urllib.request.urlopen(request, timeout=5):
-            pass
 
 
 class SimulatorRunner:
@@ -180,7 +123,7 @@ class SimulatorRunner:
         cert_path = directory / f"{self.args.device_id}.crt"
         if key_path.exists() and cert_path.exists():
             return key_path.read_bytes(), cert_path.read_bytes()
-        key, cert = self_signed_certificate(self.server_uuid, self.args.host_name)
+        key, cert = sila_certificate(self.server_uuid, self.args.host_name)
         directory.mkdir(parents=True, exist_ok=True)
         key_path.write_bytes(key)
         key_path.chmod(0o600)
@@ -230,42 +173,19 @@ class SimulatorRunner:
 def parse(argv=None) -> argparse.Namespace:
     env = os.environ.get
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device-id", default=env("SIM_DEVICE_ID", "SIM-DEVICE-01"))
-    parser.add_argument("--profile", default=env("SIM_PROFILE", "generic"), choices=["liquid_handler", "cycler", "generic"])
-    parser.add_argument("--address", default=env("SIM_ADDRESS", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(env("SIM_PORT", "50052")))
-    parser.add_argument("--host-name", default=env("SIM_HOST_NAME", "localhost"), help="写进证书的主机名，须与 ILCS 连接用的主机名一致")
+    device_arguments(parser, default_port=50052)
     parser.add_argument("--cert-dir", default=env("SIM_CERT_DIR", "./sila-certs"))
     parser.add_argument("--insecure", action="store_true", default=env("SIM_INSECURE", "0") == "1")
-    parser.add_argument("--channels", type=int, default=int(env("SIM_CHANNELS", "1")))
-    parser.add_argument("--task-seconds", type=float, default=float(env("SIM_TASK_SECONDS", "5")))
-    parser.add_argument("--material-map", default=env("SIM_MATERIAL_MAP", ""),
-                        help='组分 → 物料映射，如 {"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}')
-    parser.add_argument("--tick-seconds", type=float, default=float(env("SIM_TICK_SECONDS", "1")))
     return parser.parse_args(argv)
 
 
 def main(argv=None) -> int:
-    logging.basicConfig(level=os.environ.get("SIM_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     args = parse(argv)
-    sink = None
-    if os.environ.get("ILCS_URL") and os.environ.get("ILCS_SERVICE_SOURCE"):
-        sink = TelemetryPusher(
-            os.environ["ILCS_URL"], os.environ.get("ILCS_STATION_ID", args.device_id),
-            os.environ["ILCS_SERVICE_SOURCE"], os.environ.get("ILCS_SERVICE_SECRET", ""),
-        )
-    device = SimulatedDevice(
-        args.device_id, args.profile, channels=args.channels, task_seconds=args.task_seconds,
-        material_map=load_material_map(args.material_map), telemetry_sink=sink,
-    )
+    device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
-    stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-    while not stop.wait(args.tick_seconds):
-        device.tick()
-    runner.stop()
+    serve_forever(device, args.tick_seconds, runner.stop)
     return 0
 
 

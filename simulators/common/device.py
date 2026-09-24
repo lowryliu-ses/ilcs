@@ -1,4 +1,6 @@
-"""模拟设备的行为模型，与 SiLA 2 协议层分开，便于直接单测。
+"""模拟设备的行为模型，与协议层（SiLA 2 / Modbus TCP / OPC UA / HTTPS 网关）分开，便于直接单测。
+
+各协议的模拟器只做报文转换，设备行为、故障注入与 `executions` 计数都在这里，同一份逻辑。
 
 它模拟的是「一台会出问题的真设备」，而不是一个永远成功的桩：
 - 任务按 ILCS 指令号登记；默认对重复指令号去重（返回原任务，不再动作）。
@@ -21,14 +23,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 PROFILES = {"liquid_handler", "cycler", "generic"}
-FAULTS = {
+# 顺序固定：Modbus 模拟器的故障寄存器按这里的序号编码
+FAULT_MODES = (
     "none", "offline", "slow_submit", "lost_receipt", "no_dedup", "fail", "partial", "stuck",
     "interlock", "busy", "clock_skew",
-}
+)
+FAULTS = set(FAULT_MODES)
+REJECTIONS = ("InvalidParameters", "Interlocked", "DeviceBusy", "NotSupported")
 
 
 class DeviceRejected(Exception):
-    """设备明确拒绝，没有动作。identifier 对应 SiLA 特性里的 DefinedExecutionError。"""
+    """设备明确拒绝，没有动作。identifier 是协议无关的拒绝类别，各协议层映射成自己的错误表达
+    （SiLA DefinedExecutionError / Modbus 应答码 / OPC UA 状态码 / HTTP 4xx）。"""
 
     def __init__(self, identifier: str, message: str):
         super().__init__(message)

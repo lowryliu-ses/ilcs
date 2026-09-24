@@ -1,4 +1,4 @@
-"""设备回执契约：`http_json_v1` 与 `sila2_v1` 共用同一份解读规则。
+"""设备回执契约：`http_json_v1`、`sila2_v1`、`opcua_v1`、`modbus_tcp_v1` 共用同一份解读规则。
 
 回执已经到达时，字段不合规只说明「无法确认」，不能说明「设备没动」——所以一律按
 `AdapterIndeterminate`（结果未知）处理，而不是明确失败。

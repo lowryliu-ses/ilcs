@@ -173,6 +173,92 @@ services:
     networks:
       - backend
 
+  # ---------- 试点：其他协议的外部模拟设备（同样 --profile pilot） ----------
+  # 与 SiLA 2 模拟设备同一套设备行为与故障注入，只是协议层不同。系统侧驱动与凭据位置：
+  #   modbus-sim-mixer    → ST-02，modbus_tcp_v1（明文 Modbus TCP，只在后端网络可见）
+  #   opcua-sim-calender  → ST-04，opcua_v1（Basic256Sha256 + SignAndEncrypt，证书写到 ../secrets/opcua/）
+  #   gateway-sim-coater  → ST-03，http_json_v1（HTTPS + Bearer 令牌，证书与令牌写到 ../secrets/gateway/）
+  # 切换命令见 scripts/configure-pilot-adapters.py 开头说明。
+  modbus-sim-mixer:
+    image: ilcs-api:latest
+    container_name: ilcs-modbus-sim-mixer
+    profiles: ["pilot"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SIM_DEVICE_ID: SIM-MIX-01
+      SIM_MODEL: PILOT-MIX-8
+      SIM_PROFILE: generic
+      SIM_PORT: "5020"
+      SIM_TASK_SECONDS: "20"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "simulators/modbus_device/server.py"]
+    networks:
+      - backend
+
+  opcua-sim-calender:
+    image: ilcs-api:latest
+    container_name: ilcs-opcua-sim-calender
+    profiles: ["pilot"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SIM_DEVICE_ID: SIM-CAL-01
+      SIM_MODEL: CALENDER-P2
+      SIM_PROFILE: generic
+      SIM_PORT: "4840"
+      SIM_HOST_NAME: opcua-sim-calender
+      SIM_CERT_DIR: /run/secrets/ilcs/opcua
+      SIM_TASK_SECONDS: "20"
+    volumes:
+      - ../secrets/opcua:/run/secrets/ilcs/opcua
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "simulators/opcua_device/server.py"]
+    networks:
+      - backend
+
+  gateway-sim-coater:
+    image: ilcs-api:latest
+    container_name: ilcs-gateway-sim-coater
+    profiles: ["pilot"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      SIM_DEVICE_ID: SIM-COAT-01
+      SIM_MODEL: COATER-150
+      SIM_PROFILE: generic
+      SIM_PORT: "8443"
+      SIM_HOST_NAME: gateway-sim-coater
+      SIM_CERT_DIR: /run/secrets/ilcs/gateway
+      SIM_TASK_SECONDS: "30"
+    volumes:
+      - ../secrets/gateway:/run/secrets/ilcs/gateway
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "simulators/http_gateway/server.py"]
+    networks:
+      - backend
+
   web:
     image: nginx:alpine
     container_name: ilcs-web

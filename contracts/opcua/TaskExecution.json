@@ -1,0 +1,29 @@
+{
+  "contract": "ILCS TaskExecution (OPC UA)",
+  "version": 1,
+  "description": "OPC UA 任务执行契约：设备（或厂商 OPC UA 服务器）在下述命名空间的 Objects/ILCS/TaskExecution 对象上实现方法与变量。方法入参、出参都是 String；回执 JSON 与 HTTPS JSON / SiLA 2 契约一致。设备明确拒绝时方法返回下表的 Bad 状态码且不动作，其他 Bad 状态码一律按结果未知处理。",
+  "namespace": "urn:ilcs:task-execution",
+  "path": ["ILCS", "TaskExecution"],
+  "methods": {
+    "SubmitTask": {"inputs": ["CommandId", "TaskType", "Capability", "ParametersJson", "ContextJson"], "outputs": ["ReceiptJson"]},
+    "QueryTask": {"inputs": ["CommandId"], "outputs": ["ReceiptJson"]},
+    "HoldTask": {"inputs": ["CommandId", "TargetCommandId"], "outputs": ["ReceiptJson"]},
+    "AbortTask": {"inputs": ["CommandId", "TargetCommandId"], "outputs": ["ReceiptJson"]}
+  },
+  "variables": {
+    "DeviceIdentity": "String：JSON，含 device_id、model、serial、firmware、simulator、interlock、accepts_commands、device_ts",
+    "Heartbeat": "UInt32：设备程序每个周期加一"
+  },
+  "rejections": {
+    "BadInvalidArgument": "InvalidParameters",
+    "BadInvalidState": "Interlocked",
+    "BadResourceUnavailable": "DeviceBusy",
+    "BadNotSupported": "NotSupported"
+  },
+  "query_not_found": "QueryTask 对未知指令号返回 {\"state\": \"not_found\"}，不返回 Bad 状态码",
+  "simulator_control": {
+    "path": ["ILCS", "SimulatorControl"],
+    "methods": {"SetFault": {"inputs": ["Mode", "Parameter"], "outputs": ["StateJson"]}},
+    "variables": {"SimulatorState": "String：JSON，当前故障、各指令状态与 executions"}
+  }
+}

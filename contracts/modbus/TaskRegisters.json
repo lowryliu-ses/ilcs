@@ -1,0 +1,63 @@
+{
+  "contract": "ILCS TaskRegisters",
+  "version": 1,
+  "description": "Modbus TCP 任务寄存器契约：保持寄存器（功能码 03 读、16 写），地址为相对 base_address 的 0 基偏移。字段格式 [偏移, 类型, 长度]：ascii 的长度是字符数（每寄存器 2 字符，高字节在前，NUL 补齐）；f32 带长度时是连续数组。多字节数值一律大端字节序、大端字序。",
+  "task_types": {"dispatch": 1, "resume": 2, "retry": 3, "hold": 4, "abort": 5},
+  "ack_codes": {"0": "accepted", "1": "InvalidParameters", "2": "Interlocked", "3": "DeviceBusy", "4": "NotSupported", "9": "InternalError"},
+  "states": {"0": "not_found", "1": "accepted", "2": "running", "3": "done", "4": "failed", "5": "unknown"},
+  "qualities": {"0": "good", "1": "bad", "2": "uncertain"},
+  "error_codes": {"0": "", "1": "设备报告执行失败", "2": "执行到一半设备停止：部分执行", "3": "任务被终止", "4": "设备内部错误"},
+  "flags": {"simulator": 0, "interlock": 1, "accepts_commands": 2},
+  "slots": 16,
+  "blocks": {
+    "identity": {
+      "address": 0, "length": 40, "writer": "device",
+      "fields": {
+        "device_id": [0, "ascii", 32], "model": [16, "ascii", 32], "contract_version": [32, "u16"],
+        "flags": [33, "u16"], "heartbeat": [34, "u16"], "channels": [35, "u16"], "device_time_ms": [36, "u64"]
+      }
+    },
+    "command": {
+      "address": 100, "length": 76, "writer": "ilcs", "trigger": "trigger",
+      "fields": {
+        "command_id": [0, "ascii", 40], "task_type": [20, "u16"], "capability_code": [21, "u16"],
+        "target_command_id": [22, "ascii", 40], "param_mask": [42, "u16"], "params": [43, "f32", 16],
+        "trigger": [75, "u16"]
+      }
+    },
+    "ack": {
+      "address": 200, "length": 28, "writer": "device", "sequence": "seq",
+      "fields": {
+        "seq": [0, "u16"], "code": [1, "u16"], "command_id": [2, "ascii", 40], "state": [22, "u16"],
+        "quality": [23, "u16"], "device_time_ms": [24, "u64"]
+      }
+    },
+    "query": {
+      "address": 300, "length": 21, "writer": "ilcs", "trigger": "trigger",
+      "fields": {"command_id": [0, "ascii", 40], "trigger": [20, "u16"]}
+    },
+    "result": {
+      "address": 400, "length": 62, "writer": "device", "sequence": "seq",
+      "fields": {
+        "seq": [0, "u16"], "command_id": [1, "ascii", 40], "state": [21, "u16"], "quality": [22, "u16"],
+        "device_time_ms": [23, "u64"], "error_code": [27, "u16"], "channel": [28, "u16"],
+        "actual_mask": [29, "u16"], "actuals": [30, "f32", 16]
+      }
+    },
+    "simulator_control": {
+      "address": 900, "length": 4, "writer": "ilcs", "trigger": "trigger", "simulator_only": true,
+      "fields": {"fault": [0, "u16"], "parameter": [1, "f32"], "trigger": [3, "u16"]}
+    },
+    "simulator_state": {
+      "address": 1000, "length": 1001, "writer": "device", "simulator_only": true,
+      "fields": {"length": [0, "u16"], "json": [1, "ascii", 2000]}
+    }
+  },
+  "handshake": [
+    "ILCS 先整块写入 command（不含 trigger），再单独写 trigger = 新序号（1–65535 循环，不用 0）",
+    "设备检测到 trigger 变化后处理指令：先写完 ack 的其余字段，最后写 ack.seq = trigger",
+    "ILCS 轮询 ack.seq，等到与 trigger 相同且 ack.command_id 一致才采信；超时即结果未知，不重写 trigger",
+    "查询同理：写 query.command_id，再写 query.trigger；设备写完 result 后最后写 result.seq",
+    "同一 command_id 重复触发时设备回放原任务的 ack，不再动作（设备端去重）"
+  ]
+}

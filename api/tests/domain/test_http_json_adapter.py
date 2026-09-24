@@ -136,6 +136,10 @@ def test_http_json_driver_health_dedup_query_and_controls(device_gateway):
         "protocol": "HTTPS JSON",
         "device_id": "GW-ST-01",
         "gateway_version": "1.4.2",
+        # 网关没回报这几项：按「非模拟器、无联锁、接受指令」
+        "simulator": False,
+        "interlock": False,
+        "accepts_commands": True,
     }
     first = adapter.submit(request())
     duplicate = adapter.submit(request())

@@ -21,7 +21,7 @@ def sila_device(reset_runtime):
     from app.adapters.registry import reset_cache
     from app.core.db import SessionLocal
     from app.models import Adapter
-    from simulators.sila_device.device import SimulatedDevice
+    from simulators.common.device import SimulatedDevice
     from simulators.sila_device.server import SimulatorRunner, parse
 
     with socket.socket() as probe:

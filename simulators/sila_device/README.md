@@ -4,6 +4,9 @@
 任务契约。系统侧把工位适配器配成 `sila2_v1` 驱动接入，和接一台真设备走同一条路。它用于在
 真机到位之前验证驱动、执行器、对账与异常处置，**不是**系统内置的模拟适配器。
 
+设备行为（任务推进、去重、故障注入）在 `simulators/common/device.py`，与 Modbus TCP / OPC UA / HTTPS 网关
+模拟设备共用，见 [../README.md](../README.md)。
+
 ## 设备类型
 
 | `--profile` | 行为 |

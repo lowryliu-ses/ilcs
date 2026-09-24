@@ -1,5 +1,5 @@
 执行器入口为 `main.py`。它从业务库中的持久化指令队列取指令，按工位配置调用模拟适配器、
-`http_json_v1` 真实 HTTPS 网关驱动或 `sila2_v1` 驱动，异步轮询长任务并写检查点；真实设备遥测不会用设定值补造。
+`http_json_v1` 真实 HTTPS 网关驱动、`sila2_v1`、`modbus_tcp_v1` 或 `opcua_v1` 驱动，异步轮询长任务并写检查点；真实设备遥测不会用设定值补造。
 
 默认按工位并发（`app/services/executor_runtime.py`，线程数 `ILCS_EXECUTOR_WORKERS`）：控制回路
 （心跳、监控报警、流程推进）在主线程里每轮必跑，设备 I/O 按工位进线程池，一台设备卡住不拖慢别的
