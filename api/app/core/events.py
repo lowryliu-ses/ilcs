@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import itertools
 import json
 from typing import Any
 
@@ -117,12 +118,24 @@ def _changed(obj: Any, attr: str) -> tuple[Any, Any] | None:
     return (old, new) if old != new else None
 
 
+_TOKENS = itertools.count(1)
+
+
+def _token(transaction) -> int:
+    """事务的稳定标识。不用 id()：保存点结束后 CPython 会复用它的 id，后一个保存点回滚时会误删前一个的事件。"""
+    token = getattr(transaction, "_ilcs_token", None)
+    if token is None:
+        token = next(_TOKENS)
+        transaction._ilcs_token = token
+    return token
+
+
 def _chain(session: Session) -> tuple[int, ...]:
     """当前事务从最内层保存点到根事务的链。保存点回滚时，登记在它（及其内层）里的对外事件一并作废。"""
     current = session.get_nested_transaction() or session.get_transaction()
     chain: list[int] = []
     while current is not None:
-        chain.append(id(current))
+        chain.append(_token(current))
         current = current.parent
     return tuple(chain)
 
@@ -262,6 +275,10 @@ def _emit(session: Session) -> None:
 
 
 def _discard(session: Session, *_args) -> None:
+    """真正的整体回滚才清空。保存点回滚同样会触发 after_rollback——那时只该丢保存点自己的事件
+    （由 `_discard_savepoint` 按事务链过滤），外层事务里已登记的通知与对外事件都要保留。"""
+    if session.in_nested_transaction():
+        return
     session.info.pop(_PENDING, None)
     session.info.pop(_WAKE, None)
     session.info.pop(_OUTBOX, None)
@@ -272,7 +289,7 @@ def _discard_savepoint(session: Session, previous_transaction) -> None:
     events = session.info.get(_OUTBOX)
     if not events:
         return
-    marker = id(previous_transaction)
+    marker = _token(previous_transaction)
     session.info[_OUTBOX] = [event for event in events if marker not in event.get("chain", ())]
 
 

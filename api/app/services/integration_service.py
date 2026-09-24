@@ -218,6 +218,10 @@ def deliver_due(db: Session, limit: int = 50, client=None) -> dict:
         .all()
     )
     work = [(row.id, row.subscription_id) for row in rows]
+    # 租约：领取时把下次时刻推到这次投递必然结束之后，提交后释放行锁也不会被另一个进程再领一遍
+    lease = now() + timedelta(seconds=settings.webhook_timeout_sec * 2 + 30)
+    for row in rows:
+        row.next_attempt_at = lease
     db.commit()
     sent = failed = 0
     owned = client is None

@@ -179,3 +179,30 @@ def test_notify_node_publishes_flow_notify(admin, operator, reset_runtime, db, e
     rows = db.query(WebhookDelivery).filter(WebhookDelivery.subscription_id == subscription["id"]).all()
     assert any(row.payload["data"].get("message") == "干燥完成，请准备称重" for row in rows)
     _disable_subscriptions(db)
+
+
+def test_a_rolled_back_savepoint_keeps_events_registered_before_it(admin, db):
+    """保存点回滚也会触发 after_rollback：外层事务里先登记的对外事件不能被一起清掉。"""
+    from app.core.db import SessionLocal
+    from app.core.events import publish
+    from app.models import WebhookDelivery
+
+    _disable_subscriptions(db)
+    subscription = _subscribe(admin, ["flow.notify"])
+    with SessionLocal() as session:
+        publish(session, "ORG-001", "flow.notify", "batch", "B-BEFORE", {})
+        for attempt in range(3):
+            try:
+                with session.begin_nested():
+                    publish(session, "ORG-001", "flow.notify", "batch", f"B-ROLLED-{attempt}", {})
+                    raise RuntimeError("保存点失败")
+            except RuntimeError:
+                pass
+            with session.begin_nested():
+                publish(session, "ORG-001", "flow.notify", "batch", f"B-RELEASED-{attempt}", {})
+        session.commit()
+    db.expire_all()
+    ids = sorted(row.payload["object"]["id"] for row in db.query(WebhookDelivery).filter(
+        WebhookDelivery.subscription_id == subscription["id"]).all())
+    assert ids == ["B-BEFORE", "B-RELEASED-0", "B-RELEASED-1", "B-RELEASED-2"]
+    _disable_subscriptions(db)

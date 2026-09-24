@@ -43,3 +43,18 @@ def test_alarm_condition_keys_map_to_categories():
     assert classify_condition("asset:A-1:calibration_due") == "device_fault"
     assert classify_condition("command:abc:overdue") == "timeout"
     assert classify_condition("gate:run-1") == "sample"
+
+
+def test_only_commands_never_handed_to_an_adapter_count_as_never_sent():
+    """对账时找不到适配器的指令之前已经交给过适配器：即使被判不可达，也不能当作「设备没见过」。"""
+    from datetime import datetime
+
+    from app.models import Command
+    from app.services.exception_service import never_left_system
+
+    refused = Command(type="dispatch", delivery_state="unreachable", started_at=None)
+    assert never_left_system(refused)
+    handed_over = Command(type="dispatch", delivery_state="unreachable", started_at=datetime(2026, 9, 24, 8, 0))
+    assert not never_left_system(handed_over)
+    assert not never_left_system(Command(type="dispatch", delivery_state="maybe_sent", started_at=None))
+    assert not never_left_system(Command(type="hold", delivery_state="unreachable", started_at=None))

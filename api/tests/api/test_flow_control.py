@@ -369,3 +369,44 @@ def test_subflow_is_expanded_into_the_batch_snapshot_and_runs(operator, reset_ru
     result = _run(operator, batch_id, executor)
     assert result["state"] == "done", result["failure_reason"]
     assert result["steps"][0]["groups"][0]["name"] == "前处理"
+
+
+def test_review_timeout_fail_is_a_fault_not_a_rejection(operator, reset_runtime, db, executor):
+    """审核超时判失败走恢复评估；不能被当成 QA 退回、悄悄重开上游人工步骤。"""
+    def shape(steps):
+        dry, weigh, assemble, test = steps
+        review = {"step_id": "r1", "name": "QA 审核", "kind": "review", "review_role": "qa",
+                  "timeout": {"minutes": 1, "action": "fail"}}
+        return [_manual(), review, _strip_hard(weigh)]
+
+    batch_id = _graph_batch(operator, db, shape)
+    _dispatch(operator, batch_id)
+    manual = _runs(operator.get(f"/api/batches/{batch_id}").json(), "m1")[-1]
+    submitted = operator.post(f"/api/step-runs/{manual['id']}/submit", {
+        "form_data": {"note": "已核对"}, "checks": {"samples": True, "materials": True}, "row_version": manual["row_version"],
+    })
+    assert submitted.status_code == 200, submitted.text
+    _run(operator, batch_id, executor, rounds=3, until=("never",))
+    _expire_deadlines(db, batch_id)
+    detail = _run(operator, batch_id, executor, rounds=6, until=("fault",))
+    assert detail["state"] == "fault"
+    assert _runs(detail, "r1")[-1]["state"] == "failed"
+    assert len(_runs(detail, "m1")) == 1, "上游人工步骤没有被当成退回重开"
+
+
+def test_a_second_signal_is_kept_for_the_next_wait(operator, reset_runtime, db, executor):
+    """第一个等待已绑定信号、推进事件还没处理时到来的第二条同名信号，要留给下一个等待节点。"""
+    def shape(steps):
+        dry, weigh, assemble, test = steps
+        return [_event_wait("tray_ready"), {**_event_wait("tray_ready"), "step_id": "w2", "name": "等第二盘"}, _strip_hard(weigh)]
+
+    batch_id = _graph_batch(operator, db, shape)
+    assert operator.post(f"/api/batches/{batch_id}/signals", {"name": "tray_ready", "event_id": "T-1"}).status_code == 200
+    _dispatch(operator, batch_id)
+    second = operator.post(f"/api/batches/{batch_id}/signals", {"name": "tray_ready", "event_id": "T-2"})
+    assert second.status_code == 200, second.text
+    detail = _run(operator, batch_id, executor)
+    assert detail["state"] == "done", detail["failure_reason"]
+    signals = {row["name"] + row["id"]: row for row in operator.get(f"/api/batches/{batch_id}/signals").json()}
+    consumers = {row["consumed_by_run_id"] for row in signals.values()}
+    assert consumers == {_runs(detail, "w1")[-1]["id"], _runs(detail, "w2")[-1]["id"]}, "两条信号各唤醒一个等待"

@@ -219,3 +219,19 @@ def test_bom_merge_adds_quantities_exactly():
         [{"material": "LP57", "qty": 0.2, "unit": "mL"}, {"material": "NMP", "qty": 1, "unit": "L"}],
     )
     assert merged == [{"material": "LP57", "qty": 0.3, "unit": "mL"}, {"material": "NMP", "qty": 1, "unit": "L"}]
+
+
+def test_back_references_cannot_point_at_a_subflow_node():
+    """子流程建批次时展开，节点本身不存在于快照里：回环与返工必须指向具体步骤。"""
+    from app.domain.steps import gate_issues
+
+    sub = {"step_id": "s01", "name": "前处理", "kind": "subflow", "subflow": {"recipe_id": "R-A"}}
+    branch = _branch(after=("s02",), source="s02", cases=[
+        {"key": "again", "label": "重做", "min": 1, "loop_to": "s01"}, {"key": "ok", "label": "合格", "max": 1},
+    ], max_loops=2)
+    steps = [sub, _device("s02", ["s01"]), branch]
+    assert any("子流程节点" in text for text in branch_issues(branch, steps, 2))
+    gate = {"step_id": "g1", "name": "关卡", "kind": "gate", "gate": {
+        "source_step_id": "s02", "field": "x", "min": 1, "on_fail": "rework", "rework_to": "s01", "max_rework": 1,
+    }}
+    assert any("子流程节点" in text for text in gate_issues(gate, [sub, _device("s02", ["s01"]), gate], 2))

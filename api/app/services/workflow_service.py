@@ -114,7 +114,10 @@ class WorkflowService:
     def _consume_early_signal(self, batch: Batch, run: StepRun, step: dict) -> None:
         """事件等待开出时，先看有没有早到的同名信号：有就直接消费，不让它空等。"""
         name = (step.get("wait_for") or {}).get("event") or ""
+        # 与 signal() 取同一把批次行锁：等待节点开出与信号到达在两个事务里同时发生时，
+        # 后到的一方一定能看到先提交的那一方，不会谁都看不见对方
         self.db.flush()
+        self.batches.lock(batch.id)
         signal = self.signals.unconsumed(batch.id, name)
         if signal is None:
             return
@@ -389,7 +392,8 @@ class WorkflowService:
                 f"step:{run.id}:timeout", f"第 {run.step_index + 1} 步已给出结论 {target}",
             )
 
-        if target == workflow.FAILED and run.kind == REVIEW:
+        if target == workflow.FAILED and run.kind == REVIEW and event.event_type == "review_decision":
+            # 只有审核人退回才是退回；审核超时判失败走普通故障，进入恢复评估
             return self._handle_review_rejection(run, batch)
         if target in {workflow.FAILED, workflow.CANCELLED}:
             batch.state = "fault" if target == workflow.FAILED else batch.state

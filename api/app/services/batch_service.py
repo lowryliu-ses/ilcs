@@ -1337,10 +1337,10 @@ class BatchService:
         """结果未知、人工核查中、部分执行的指令：这些没有结论之前，不能在它们之上改流程。"""
         rows = []
         for command in self.commands.for_batch(batch.id):
-            # 没离开系统就被拒的指令（unreachable）设备从未见过，不算「结果未知」
-            unsettled = command.state == "manual" or (
-                command.state == "unknown" and command.delivery_state != "unreachable"
-            )
+            # 从未交给适配器就被拒的指令设备没见过，不算「结果未知」；交给过的一律要现场核查
+            from .exception_service import never_left_system
+
+            unsettled = command.state == "manual" or (command.state == "unknown" and not never_left_system(command))
             if unsettled:
                 rows.append({"key": "command", "label": f"指令 {command.id[:8]} 结果未知，先到现场核查"})
             elif command.state == "partial":
@@ -1379,8 +1379,12 @@ class BatchService:
             raise StateConflict("这一步还没开出：只能跳过已经开出或已失败的步骤，不能预先跳过", code="step_not_open")
         if live.state in {"completed", "skipped", "not_taken"}:
             raise StateConflict(f"这一步已是「{live.state}」，不需要跳过")
+        from .exception_service import never_left_system
+
         own = [c for c in self.commands.for_batch(batch.id) if c.step_run_id == live.id]
-        if live.state == "unknown" and any(c.delivery_state not in {"unreachable", "queued", "not_sent"} for c in own):
+        if live.state == "unknown" and any(
+            not (never_left_system(c) or c.delivery_state in {"queued", "not_sent"}) for c in own
+        ):
             raise StateConflict("这一步的设备动作结果未知：先到现场核查，再决定跳过或重试", code="manual_check_required")
         blockers = self._blind_blockers(batch)
         if blockers:
@@ -1399,7 +1403,7 @@ class BatchService:
         for command in own:
             if command.state == "sent" and command.delivery_state == "queued":
                 withdrawn += int(execution.withdraw(command, f"第 {index + 1} 步被跳过，指令撤回"))
-            elif command.state == "unknown" and command.delivery_state == "unreachable":
+            elif command.state == "unknown" and never_left_system(command):
                 # 没离开系统的指令：随步骤跳过结束，不再挂在「结果未知」清单里
                 command.state = "not_executed"
                 command.error = (command.error + "；" if command.error else "") + "未送达设备，随步骤跳过结束"
@@ -1479,9 +1483,14 @@ class BatchService:
             signature_id, user, f"从第 {index + 1} 步重做", object_ref=batch.id, object_version=batch.row_version,
         )
         execution = ExecutionService(self.db, self.ctx)
+        from .exception_service import never_left_system
+
         for command in self.commands.for_batch(batch.id):
             if command.step_index in scope and command.state == "sent" and command.delivery_state == "queued":
                 execution.withdraw(command, f"从第 {index + 1} 步重做，未投递指令撤回")
+            elif command.step_index in scope and command.state == "unknown" and never_left_system(command):
+                command.state = "not_executed"
+                command.error = (command.error + "；" if command.error else "") + "未送达设备，随从指定节点重做结束"
         voided: list[str] = []
         rerun_devices: list[str] = []
         for row in self.runs.for_batch(batch.id):
@@ -1489,7 +1498,8 @@ class BatchService:
                 continue
             if row.state in {"pending", "ready", "running", "waiting"}:
                 row.state = "cancelled"
-            elif row.state in {"completed", "skipped", "not_taken", "failed"}:
+            elif row.state in {"completed", "skipped", "not_taken", "failed", "unknown"}:
+                # unknown 在这里只可能是指令从未送达设备（其余结果未知已被上面的核查挡住）
                 if row.state == "completed" and row.kind == DEVICE:
                     rerun_devices.append(f"第 {row.step_index + 1} 步「{(row.step_snapshot or {}).get('name')}」")
                 row.state = "superseded"

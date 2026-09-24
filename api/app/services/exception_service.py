@@ -28,6 +28,19 @@ _GUARD = "ilcs_exception_handling"
 OPEN = {"open", "manual"}
 
 
+def never_left_system(command: Command, delivery: str = "") -> bool:
+    """能证明设备从没见过这条指令：它从未被交给适配器（领取时才写 started_at），且判为未送达。
+
+    只看投递状态不够：对账时找不到适配器的指令也会被判为不可达，但它之前已经交给过适配器。
+    """
+    from ..repositories.execution import DISPATCHING
+
+    return (
+        command.type in DISPATCHING and command.started_at is None
+        and (delivery or command.delivery_state) == "unreachable"
+    )
+
+
 class ExceptionService:
     def __init__(self, db: Session, ctx: AccessContext):
         self.db = db
@@ -193,7 +206,7 @@ class ExceptionService:
             )
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         step = steps[command.step_index] if 0 <= command.step_index < len(steps) else {}
-        never_sent = delivery == "unreachable" and command.type in DISPATCHING
+        never_sent = never_left_system(command, delivery)
         category = rules.classify(reason, command_type=command.type, delivery=delivery)
         event = self.record(
             category=category, message=reason, source_type="command", source_id=command.id, batch=batch,
@@ -316,18 +329,20 @@ class ExceptionService:
         ready = max(now(), current.starts_at if current else now())
         duration = timedelta(minutes=float(step.get("dur") or 0))
         begin, station_id = min((earliest_free(context, sid, ready, duration), sid) for sid in candidates)
-        for row in mine:
-            if row.step_index == index:
-                self.db.delete(row)
         station = StationRepository(self.db, self.ctx).get(station_id)
-        self.db.add(Allocation(
-            batch_id=batch.id, step_index=index, station_id=station_id,
-            asset_id=station.asset_id if station is not None else "", starts_at=begin, ends_at=begin + duration,
-            kind="work",
-        ))
-        self.db.flush()
         try:
-            schedule._refuse_overlaps(batch.id)
+            # 保存点：改派后的时间窗若与别的批次重叠，撤销这次时间窗改动，批次保持原样留在故障
+            with self.db.begin_nested():
+                for row in mine:
+                    if row.step_index == index:
+                        self.db.delete(row)
+                self.db.add(Allocation(
+                    batch_id=batch.id, step_index=index, station_id=station_id,
+                    asset_id=station.asset_id if station is not None else "", starts_at=begin,
+                    ends_at=begin + duration, kind="work",
+                ))
+                self.db.flush()
+                schedule._refuse_overlaps(batch.id)
         except StateConflict as error:
             return False, f"改派后的时间窗与其他批次重叠：{error}"
         run = self._run_of(command)

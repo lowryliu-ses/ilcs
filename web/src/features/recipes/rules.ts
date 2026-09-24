@@ -232,6 +232,9 @@ function branchIssues(step: RecipeStep, steps: RecipeStep[], index: number): str
       if (numeric.length === 2 && (c.min as number) > (c.max as number)) issues.push(`${label} 下限不能大于上限`);
     }
     if (c.loop_to && !ids.slice(0, index).includes(c.loop_to)) issues.push(`${label} 回环目标必须是分支之前的步骤`);
+    else if (c.loop_to && kindOf(steps[ids.indexOf(c.loop_to)]) === 'subflow') {
+      issues.push(`${label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤`);
+    }
   });
   const fallback = config.default ?? '';
   if (fallback && !seen.has(fallback)) issues.push(`默认出口 ${fallback} 不存在`);
@@ -290,6 +293,7 @@ function gateIssues(step: RecipeStep, steps: RecipeStep[], index: number): strin
   if (gate.on_fail === 'rework') {
     const target = ids.slice(0, index).indexOf(gate.rework_to ?? '');
     if (target < 0) issues.push('返工必须回到关卡之前的某一步');
+    else if (kindOf(steps[target]) === 'subflow') issues.push('返工目标不能是子流程节点：子流程建批次时展开，请指向具体步骤');
     else if (sourceIndex >= 0 && target > sourceIndex) issues.push('返工目标不能晚于测量来源：否则返工不会重新测量');
     const rounds = gate.max_rework;
     if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1 || rounds > 5) {

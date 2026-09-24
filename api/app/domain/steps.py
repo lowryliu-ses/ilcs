@@ -290,6 +290,8 @@ def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int)
         target = str(case.get("loop_to") or "")
         if target and target not in ids[:index]:
             issues.append(f"{label} 回环目标必须是分支之前的步骤")
+        elif target and kind_of(steps[ids.index(target)]) == SUBFLOW:
+            issues.append(f"{label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
     default = str(config.get("default") or "")
     if default and default not in seen:
         issues.append(f"默认出口 {default} 不存在")
@@ -384,6 +386,8 @@ def gate_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -
         target = str(gate.get("rework_to") or "")
         if target not in ids[:index]:
             issues.append("返工必须回到关卡之前的某一步")
+        elif kind_of(steps[ids.index(target)]) == SUBFLOW:
+            issues.append("返工目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
         elif source in ids and ids.index(target) > ids.index(source):
             issues.append("返工目标不能晚于测量来源：否则返工不会重新测量")
         rounds = gate.get("max_rework")

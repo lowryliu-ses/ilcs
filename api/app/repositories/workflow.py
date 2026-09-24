@@ -88,10 +88,12 @@ class StepRunRepository(ScopedRepository[StepRun]):
             .order_by(StepRun.started_at, StepRun.created_at)
             .all()
         )
+        # 已经绑定过信号、只是推进事件还没处理完的等待节点不再收第二条：那条要留给下一个等待节点
         return [
             row for row in rows
             if ((row.step_snapshot or {}).get("wait_for") or {}).get("mode") == "event"
             and ((row.step_snapshot or {}).get("wait_for") or {}).get("event") == name
+            and not (row.form_data or {}).get("signal_id")
         ]
 
     def pending_review(self) -> list[StepRun]:

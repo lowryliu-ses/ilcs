@@ -873,7 +873,8 @@ class ExecutorLoop:
             service = ExecutionService(self.db, system_context(command.org_id, "执行器对账"))
             batch = self.db.get(Batch, command.batch_id)
             if record is None:
-                service.fault(batch, command, "对账时找不到适配器，结果未知", delivery="unreachable")
+                # 这条指令已经交给过适配器（maybe_sent）：可能已送达，不能标成「未送达」
+                service.fault(batch, command, "对账时找不到适配器，结果未知", delivery="maybe_sent")
                 mismatches += 1
                 continue
             if not record.supports_query:
