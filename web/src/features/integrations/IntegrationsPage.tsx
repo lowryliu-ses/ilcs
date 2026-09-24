@@ -1,4 +1,7 @@
-/* 集成与事件：出向事件（Webhook）订阅。
+/* 集成与事件：出向事件订阅与站外通知渠道。
+
+   渠道：Webhook（签名 JSON，给系统）、企业微信 / 钉钉群机器人与邮件（给人看的中文消息，带回到系统的链接）。
+   四种渠道共用一条投递链路：事务内发件箱、失败退避重试、超过次数判死信、可重投。
 
    业务事件在业务事务里写进发件箱，执行器在事务外投递：2xx 算送达，其余指数退避重试，超过次数判死信。
    每次投递带 X-ILCS-Signature（HMAC-SHA256，密钥只在新建 / 轮换时显示一次）与 X-ILCS-Event-Id，
@@ -57,7 +60,8 @@ export function IntegrationsPage() {
             <thead>
               <tr>
                 <th>名称</th>
-                <th>地址</th>
+                <th>渠道</th>
+                <th>地址 / 收件人</th>
                 <th>主题</th>
                 <th>最近投递</th>
                 <th>状态</th>
@@ -70,7 +74,12 @@ export function IntegrationsPage() {
                   <td>
                     <b>{row.name}</b>
                   </td>
-                  <td className="small mono">{row.url}</td>
+                  <td className="small">
+                    {row.channel_label}
+                    {row.config?.max_severity ? <div className="tiny muted">报警 ≤ {row.config.max_severity} 级</div> : null}
+                    {row.channel === 'dingtalk' ? <div className="tiny muted">{row.bot_signed ? '已加签' : '未加签'}</div> : null}
+                  </td>
+                  <td className="small mono">{row.channel === 'email' ? (row.config?.to ?? []).join('、') : row.url}</td>
                   <td className="small">{row.topics.join('、')}</td>
                   <td className="small">
                     {row.last_success_at ? `成功 ${clock(row.last_success_at)}` : '—'}
@@ -90,9 +99,11 @@ export function IntegrationsPage() {
                     <button className="btn sm" disabled={ping.pending || !row.enabled} onClick={() => ping.run(row).catch((error) => toast.push(error.message))}>
                       测试
                     </button>
-                    <button className="btn sm" disabled={rotate.pending} onClick={() => rotate.run(row).catch((error) => toast.push(error.message))}>
-                      轮换密钥
-                    </button>
+                    {row.channel === 'webhook' ? (
+                      <button className="btn sm" disabled={rotate.pending} onClick={() => rotate.run(row).catch((error) => toast.push(error.message))}>
+                        轮换密钥
+                      </button>
+                    ) : null}
                     <button className="btn sm" disabled={toggle.pending} onClick={() => toggle.run(row).catch((error) => toast.push(error.message))}>
                       {row.enabled ? '停用' : '启用'}
                     </button>
@@ -110,7 +121,8 @@ export function IntegrationsPage() {
           onClose={() => setCreating(false)}
           onCreated={(row) => {
             setCreating(false);
-            setSecret({ name: row.name, secret: row.secret ?? '' });
+            if (row.secret) setSecret({ name: row.name, secret: row.secret });
+            else toast.push('已新建；可以点「测试」发一条测试消息');
           }}
         />
       ) : null}
@@ -136,21 +148,35 @@ function CreateDialog({
 }) {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
+  const [channel, setChannel] = useState<WebhookRow['channel']>('webhook');
+  const [recipients, setRecipients] = useState('');
+  const [botSecret, setBotSecret] = useState('');
+  const [maxSeverity, setMaxSeverity] = useState('');
   const [chosen, setChosen] = useState<string[]>(['batch.state_changed', 'exception.opened']);
-  const create = useMutation(() => api.post<WebhookRow>('/webhooks', { name, url, topics: chosen }), {
+  const create = useMutation(() => api.post<WebhookRow>('/webhooks', {
+    name, channel, url: channel === 'email' ? '' : url, topics: chosen, bot_secret: botSecret,
+    config: {
+      to: channel === 'email' ? recipients.split(/[,，;；\s]+/).map((value) => value.trim()).filter(Boolean) : [],
+      max_severity: maxSeverity ? Number(maxSeverity) : null,
+    },
+  }), {
     invalidates: ['webhooks'],
     onSuccess: onCreated,
   });
   return (
     <Modal
-      title="新建出向事件订阅"
+      title="新建订阅 / 通知渠道"
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose}>
             取消
           </button>
-          <button className="btn primary" disabled={create.pending || !name.trim() || !url.trim() || !chosen.length} onClick={() => create.run().catch(() => undefined)}>
+          <button
+            className="btn primary"
+            disabled={create.pending || !name.trim() || (channel === 'email' ? !recipients.trim() : !url.trim()) || !chosen.length}
+            onClick={() => create.run().catch(() => undefined)}
+          >
             新建
           </button>
         </>
@@ -159,8 +185,52 @@ function CreateDialog({
       <Field label="名称">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="如：LIMS 结果回填" />
       </Field>
-      <Field label="接收地址" hint="主机必须在 ILCS_WEBHOOK_ALLOWED_HOSTS 里；正式环境只允许 https">
-        <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://lims.example.internal/ilcs/events" />
+      <Field label="渠道">
+        <select value={channel} onChange={(event) => setChannel(event.target.value as WebhookRow['channel'])}>
+          <option value="webhook">Webhook（签名 JSON，给系统）</option>
+          <option value="wecom">企业微信群机器人</option>
+          <option value="dingtalk">钉钉群机器人</option>
+          <option value="email">邮件</option>
+        </select>
+      </Field>
+      {channel === 'email' ? (
+        <Field label="收件人" hint="逗号分隔；发信走服务端配置的 SMTP（ILCS_SMTP_HOST）">
+          <input value={recipients} onChange={(event) => setRecipients(event.target.value)} placeholder="qa@lab.example, ehs@lab.example" />
+        </Field>
+      ) : (
+        <Field
+          label={channel === 'webhook' ? '接收地址' : '机器人地址'}
+          hint={
+            channel === 'webhook'
+              ? '主机必须在 ILCS_WEBHOOK_ALLOWED_HOSTS 里；正式环境只允许 https'
+              : '在群设置里添加自定义机器人后复制地址；地址里的 key / access_token 是凭据，列表里不回显'
+          }
+        >
+          <input
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder={
+              channel === 'wecom'
+                ? 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'
+                : channel === 'dingtalk'
+                  ? 'https://oapi.dingtalk.com/robot/send?access_token=…'
+                  : 'https://lims.example.internal/ilcs/events'
+            }
+          />
+        </Field>
+      )}
+      {channel === 'dingtalk' ? (
+        <Field label="加签密钥（可选）" hint="机器人安全设置选「加签」时填 SEC 开头的密钥；只写不读">
+          <input value={botSecret} onChange={(event) => setBotSecret(event.target.value)} />
+        </Field>
+      ) : null}
+      <Field label="报警严重度门槛" hint="只推严重度不低于它的报警（1 最严重）；不选全推">
+        <select value={maxSeverity} onChange={(event) => setMaxSeverity(event.target.value)}>
+          <option value="">全部报警</option>
+          <option value="1">只推 1 级</option>
+          <option value="2">1–2 级</option>
+          <option value="3">1–3 级</option>
+        </select>
       </Field>
       <Field label="订阅主题">
         <div className="dep-list">

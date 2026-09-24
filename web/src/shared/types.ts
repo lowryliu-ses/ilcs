@@ -1977,6 +1977,12 @@ export type WebhookRow = {
   last_error: string;
   consecutive_failures: number;
   row_version: number;
+  /** webhook 签名 JSON；wecom / dingtalk 群机器人；email 邮件 */
+  channel: 'webhook' | 'wecom' | 'dingtalk' | 'email';
+  channel_label: string;
+  config: { to?: string[]; max_severity?: number };
+  /** 钉钉机器人是否配置了加签密钥 */
+  bot_signed: boolean;
   /** 只在新建 / 轮换的响应里出现一次 */
   secret?: string;
 };

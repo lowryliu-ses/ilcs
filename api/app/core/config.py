@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     webhook_timeout_sec: float = 5.0
     webhook_max_attempts: int = 8
     webhook_retry_base_sec: float = 30.0
+    # 站外通知：通知里的「在 ILCS 中查看」链接前缀，如 https://ilcs.lab.internal
+    public_url: str = ""
+    # 邮件通知走的 SMTP；没配 host 就不能新建邮件渠道
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
 
     # 只给模拟适配器补心跳。未设置时开发 / 测试默认开、正式环境默认关；
     # 正式环境显式打开会被硬门禁拒绝——那里的「在线」必须由设备自己上报。

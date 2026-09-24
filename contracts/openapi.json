@@ -1061,6 +1061,33 @@
         "title": "CapabilityPatchIn",
         "type": "object"
       },
+      "ChannelConfigIn": {
+        "properties": {
+          "max_severity": {
+            "anyOf": [
+              {
+                "maximum": 4.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Severity"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "title": "ChannelConfigIn",
+        "type": "object"
+      },
       "CommandEventIn": {
         "description": "设备回执。必须绑定原 command_id（在路径上），并给出明确结论。",
         "properties": {
@@ -6193,6 +6220,25 @@
       },
       "WebhookIn": {
         "properties": {
+          "bot_secret": {
+            "default": "",
+            "title": "Bot Secret",
+            "type": "string"
+          },
+          "channel": {
+            "default": "webhook",
+            "enum": [
+              "webhook",
+              "wecom",
+              "dingtalk",
+              "email"
+            ],
+            "title": "Channel",
+            "type": "string"
+          },
+          "config": {
+            "$ref": "#/components/schemas/ChannelConfigIn"
+          },
           "enabled": {
             "default": true,
             "title": "Enabled",
@@ -6210,13 +6256,13 @@
             "type": "array"
           },
           "url": {
+            "default": "",
             "title": "Url",
             "type": "string"
           }
         },
         "required": [
           "name",
-          "url",
           "topics"
         ],
         "title": "WebhookIn",
@@ -6224,6 +6270,27 @@
       },
       "WebhookPatchIn": {
         "properties": {
+          "bot_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bot Secret"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChannelConfigIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "enabled": {
             "anyOf": [
               {

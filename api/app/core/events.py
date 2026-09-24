@@ -241,6 +241,10 @@ def _outbox(session: Session) -> None:
             wanted = set(subscription.topics or [])
             if "*" not in wanted and event["topic"] not in wanted:
                 continue
+            ceiling = (subscription.config or {}).get("max_severity")
+            if ceiling and event["topic"] == "alarm.raised" and int(event["data"].get("severity") or 9) > int(ceiling):
+                # 只推严重度不低于门槛的报警（1 最严重）：群里刷低级报警只会让人忽略真正要处理的
+                continue
             session.add(WebhookDelivery(
                 org_id=event["org"], subscription_id=subscription.id, event_id=event_id, topic=event["topic"],
                 payload=payload, next_attempt_at=moment,

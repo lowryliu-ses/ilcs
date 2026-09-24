@@ -651,11 +651,23 @@ class ExceptionRuleIn(BaseModel):
     row_version: int | None = None
 
 
+class ChannelConfigIn(BaseModel):
+    # 邮件收件人
+    to: list[str] = Field(default_factory=list, max_length=50)
+    # 报警只推严重度不低于它的（1 最严重）；不填全推
+    max_severity: int | None = Field(default=None, ge=1, le=4)
+
+
 class WebhookIn(BaseModel):
     name: str
-    url: str
+    # webhook：签名 JSON；wecom / dingtalk：群机器人地址；email：不填，收件人写在 config.to
+    channel: Literal["webhook", "wecom", "dingtalk", "email"] = "webhook"
+    url: str = ""
     topics: list[str]
     enabled: bool = True
+    config: ChannelConfigIn = Field(default_factory=ChannelConfigIn)
+    # 钉钉机器人「加签」密钥（可选）；只写不读
+    bot_secret: str = ""
 
 
 class WebhookPatchIn(BaseModel):
@@ -663,6 +675,8 @@ class WebhookPatchIn(BaseModel):
     url: str | None = None
     topics: list[str] | None = None
     enabled: bool | None = None
+    config: ChannelConfigIn | None = None
+    bot_secret: str | None = None
     row_version: int | None = None
 
 

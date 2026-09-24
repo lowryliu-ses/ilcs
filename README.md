@@ -84,7 +84,7 @@ cd ilcs && api/.venv/bin/python executor/main.py
 | 执行 | 现场总览 / 任务中心 / 排程 / 批次 / 报警中心 / 异常中心 | 工位实时状态与载具位置、扫码放置、实验任务分配与接单、步骤级排程与多批次优化（优化 / 截止时间 / 优先级 / 先进先出）、重排建议、依赖图执行、异常处置、异常事件与处理策略库 |
 | 科学数据 | 样本中心 / 数据审核 / 结果分析 / 报告 | 物理样本与运行分配、逐条数据复核、正式统计与排除说明、报告审签发布 |
 | 资源 | 仪器设备 / 工位与能力 / 试剂耗材 / 人员与资质 | 设备台账与可用性、能力极限、库存三量与台账、资质与到期预警 |
-| 治理 | 指标定义 / 审计记录 / 系统治理 | 账号创建、多角色分配、角色权限矩阵、成员状态、首次改密与口令重置；服务身份签发、授权编辑、密钥轮换、停用；拒绝访问日志；集成与事件（Webhook 订阅、签名密钥、投递记录与重投） |
+| 治理 | 指标定义 / 审计记录 / 系统治理 | 账号创建、多角色分配、角色权限矩阵、成员状态、首次改密与口令重置；服务身份签发、授权编辑、密钥轮换、停用；拒绝访问日志；集成与事件（Webhook 订阅、签名密钥、企业微信 / 钉钉机器人与邮件通知、投递记录与重投） |
 
 ## 验证
 
@@ -390,3 +390,18 @@ ssh 10.10.106.51 'sudo bash /opt/ilcs/scripts/reset-demo.sh'
 ## 后续演进
 
 按需求文档 FUT 段继续延后的项：NATS JetStream、Keycloak OIDC、真实工位驱动实现、TimescaleDB 遥测、CP-SAT 直接出时间窗（当前作为优化候选）、AGV 车队系统对接、外部 LIMS/ERP 双向集成。PostgreSQL 的部署、迁移和双数据库回归已纳入当前基线；生产切换仍需在维护窗口执行并留存核对报告。每项的落点见 [ARCHITECTURE.md](ARCHITECTURE.md) 末节。
+
+## 站外通知配置
+
+企业微信 / 钉钉群机器人的官方地址（`qyapi.weixin.qq.com`、`oapi.dingtalk.com`）默认放行，其余 Webhook 主机仍要进
+`ILCS_WEBHOOK_ALLOWED_HOSTS`。邮件与消息里的链接在 `deploy/.env` 里配：
+
+```
+ILCS_PUBLIC_URL=https://ilcs.lab.internal
+ILCS_SMTP_HOST=smtp.lab.internal
+ILCS_SMTP_PORT=587
+ILCS_SMTP_USER=ilcs-notify
+ILCS_SMTP_PASSWORD=...
+ILCS_SMTP_FROM=ilcs-notify@lab.internal
+ILCS_SMTP_STARTTLS=true
+```

@@ -23,7 +23,11 @@ class WebhookSubscription(Base):
     name: Mapped[str] = mapped_column(String)
     url: Mapped[str] = mapped_column(Text)
     topics: Mapped[list] = mapped_column(JSON, default=list)
-    # HMAC-SHA256 签名密钥。投递时要用原文，所以不能只存摘要；接口只在签发时返回它
+    # webhook：签名 JSON 给系统；wecom / dingtalk：群机器人；email：邮件。投递、重试、死信是同一条链路
+    channel: Mapped[str] = mapped_column(String, default="webhook")
+    # 渠道配置：email {to: [...]}；各渠道可选 max_severity（报警只推严重度不低于它的，1 最严重）
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # webhook：HMAC-SHA256 签名密钥（系统生成，只在签发时返回）；dingtalk：机器人「加签」密钥（管理员提供）
     secret: Mapped[str] = mapped_column(String)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_by: Mapped[str] = mapped_column(String, default="")
