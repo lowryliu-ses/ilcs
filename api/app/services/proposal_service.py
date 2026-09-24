@@ -144,7 +144,7 @@ class ProposalService:
         recipe = self.recipes.get(plan.recipe_id)
         repeats = payload.get("repeats") or plan.repeats
         if recipe is not None and len(points) * max(1, repeats) > recipe.plate:
-            issues.append(f"{len(points)} 个点 × {repeats} 次重复超过方法每批 {recipe.plate} 个样品位")
+            issues.append(f"{len(points)} 个点 × {repeats} 次重复超过流程每批 {recipe.plate} 个样品位")
         if points and recipe is not None:
             proposed = [
                 {**factor, "levels": sorted({point[index] for point in points})}

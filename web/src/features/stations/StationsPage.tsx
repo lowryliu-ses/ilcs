@@ -44,7 +44,7 @@ export function StationsPage() {
         toast.push(
           result.broken_recipes.length
             ? `已更新；${result.broken_recipes.join('、')} 重校验不再通过`
-            : '工位状态已更新，配方重校验无影响',
+            : '工位状态已更新，流程重校验无影响',
         ),
     },
   );
@@ -54,7 +54,7 @@ export function StationsPage() {
       api.post(`/capabilities/${payload.id}/retire`, { retired: payload.retired }),
     {
       invalidates: ['capabilities', 'recipes', 'audit'],
-      onSuccess: () => toast.push('能力状态已更新；已有配方与批次快照不受影响'),
+      onSuccess: () => toast.push('能力状态已更新；已有流程与批次快照不受影响'),
     },
   );
 
@@ -75,9 +75,9 @@ export function StationsPage() {
     <div className="page">
       <div className="page-head">
         <div>
-          <h1>工位与能力</h1>
+          <h1>工位配置</h1>
           <div className="small muted">
-            能力极限是配方校验与排程匹配的唯一数据源，修改需要电子签名并触发配方重校验
+            能力极限是流程校验与排程匹配的唯一数据源，修改需要电子签名并触发流程重校验
           </div>
         </div>
         <div className="row">
@@ -346,7 +346,7 @@ export function StationsPage() {
                 <td className="small mono">
                   {capability.stations.join('、') || '无'}
                   {capability.recipes.length ? (
-                    <div className="tiny muted">{capability.recipes.length} 个配方在用</div>
+                    <div className="tiny muted">{capability.recipes.length} 个流程在用</div>
                   ) : null}
                 </td>
                 <td className="row-end">
@@ -357,7 +357,7 @@ export function StationsPage() {
                       </button>
                       <button
                         className="btn sm"
-                        title={capability.retired ? '恢复可选' : '新配方步骤不能再选它，已有配方不受影响'}
+                        title={capability.retired ? '恢复可选' : '新流程步骤不能再选它，已有流程不受影响'}
                         onClick={() =>
                           retireCapability
                             .run({ id: capability.id, retired: !capability.retired })
@@ -412,7 +412,7 @@ export function StationsPage() {
           onConfirm={() => removeCapability.run(deletingCapability.id).catch(() => undefined)}
         >
           <div className="note warn">
-            <span className="mono">{deletingCapability.id}</span> 没有工位实现、也没有配方引用，可以从字典里移除。
+            <span className="mono">{deletingCapability.id}</span> 没有工位实现、也没有流程引用，可以从字典里移除。
             有引用的能力请改用「停用」。
           </div>
         </ConfirmDialog>
@@ -671,7 +671,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
 }
 
 /* 结构化极限编辑。一行一个参数，只填上下限两个数；未列出的参数视为该工位不能承接。
-   区间是配方校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的配方列出来。 */
+   区间是流程校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的流程列出来。 */
 function LimitsEditor({
   station,
   capabilities,
@@ -700,7 +700,7 @@ function LimitsEditor({
         toast.push(
           result.broken_recipes.length
             ? `已保存；${result.broken_recipes.join('、')} 校验不再通过，已标记需修订`
-            : '已保存并重新校验全部引用配方',
+            : '已保存并重新校验全部引用流程',
         );
         onClose();
       },
@@ -760,7 +760,7 @@ function LimitsEditor({
       }
     >
       <div className="note warn">
-        工位未定义的参数视为不能承接该步骤。保存后服务端重校验所有引用这些能力的配方，
+        工位未定义的参数视为不能承接该步骤。保存后服务端重校验所有引用这些能力的流程，
         已发布但不再通过的版本进入「需修订」，不能再创建批次。
       </div>
 
@@ -843,8 +843,8 @@ function LimitsEditor({
   );
 }
 
-/* 登记新能力：参数定义 + 恢复规则 + 实现工位。恢复规则写在能力上而不是配方上，
-   因为「能不能保持、能不能重试」是设备物理属性，配方无权覆盖。 */
+/* 登记新能力：参数定义 + 恢复规则 + 实现工位。恢复规则写在能力上而不是流程上，
+   因为「能不能保持、能不能重试」是设备物理属性，流程无权覆盖。 */
 function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
@@ -910,7 +910,7 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
       }
     >
       <div className="note">
-        能力是配方步骤的绑定对象。参数定义决定配方里能填哪些字段，恢复规则由能力继承到每一个引用它的步骤。
+        能力是流程步骤的绑定对象。参数定义决定流程里能填哪些字段，恢复规则由能力继承到每一个引用它的步骤。
       </div>
 
       <div className="grid cols-2">
@@ -928,7 +928,7 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
 
       <div>
         <div className="small muted" style={{ marginBottom: 6 }}>
-          参数定义（键用于配方与指令，标签用于界面显示，建议带单位）
+          参数定义（键用于流程与指令，标签用于界面显示，建议带单位）
         </div>
         <table>
           <thead>
@@ -1061,7 +1061,7 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
   );
 }
 
-/* 登记新工位。能力极限一并写入并立刻重校验受影响的配方，所以要签名。 */
+/* 登记新工位。能力极限一并写入并立刻重校验受影响的流程，所以要签名。 */
 function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[]; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
@@ -1306,7 +1306,7 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
       }
     >
       <div className="note">
-        这里只改台账信息。能力极限是排程与配方校验的判据，改动要签名并触发重校验，请用「编辑极限」。
+        这里只改台账信息。能力极限是排程与流程校验的判据，改动要签名并触发重校验，请用「编辑极限」。
       </div>
       <Field label="名称">
         <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -1335,7 +1335,7 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
   );
 }
 
-/* 改能力定义。增删参数会改变所有引用配方的校验结果，所以签名并当场报告影响面。 */
+/* 改能力定义。增删参数会改变所有引用流程的校验结果，所以签名并当场报告影响面。 */
 function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
@@ -1355,7 +1355,7 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
         toast.push(
           result.broken_recipes.length
             ? `已保存；${result.broken_recipes.join('、')} 重校验不再通过`
-            : '已保存并重新校验全部引用配方',
+            : '已保存并重新校验全部引用流程',
         );
         onClose();
       },
@@ -1391,13 +1391,13 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
     >
       {capability.recipes.length ? (
         <div className="note warn">
-          {capability.recipes.length} 个配方的步骤在用它（{capability.recipes.slice(0, 5).join('、')}）。
+          {capability.recipes.length} 个流程的步骤在用它（{capability.recipes.slice(0, 5).join('、')}）。
           改参数定义会立刻重算它们的校验结果。
         </div>
       ) : null}
       {removed.length ? (
         <div className="note bad">
-          将移除参数 <span className="mono">{removed.join('、')}</span>：引用它的配方步骤会变成「参数不属于该能力」，
+          将移除参数 <span className="mono">{removed.join('、')}</span>：引用它的流程步骤会变成「参数不属于该能力」，
           各工位极限里的对应条目也会一并清掉。
         </div>
       ) : null}

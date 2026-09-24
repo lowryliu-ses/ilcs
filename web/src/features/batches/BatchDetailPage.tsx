@@ -261,7 +261,7 @@ export function BatchDetailPage() {
         <div className="panel-body small muted">
           人工、等待、审核节点不创建设备指令；不占工位的节点也不参与工位冲突检查。
           审核退回会生成上一个人工步骤的新尝试，旧记录保留。条件分支没走到的步骤记为「未走此分支」，
-          它预约的工位时间窗已归还；只有方法标了「可跳过」的步骤才出现跳过按钮。
+          它预约的工位时间窗已归还；只有流程标了「可跳过」的步骤才出现跳过按钮。
         </div>
       </Panel>
 
@@ -281,7 +281,7 @@ export function BatchDetailPage() {
             ))}
           </div>
           <div className="panel-body small muted">
-            运行分配 = 物理样本 × 这一次运行的孔位与条件组。物理实体、流转与检测任务在样本中心，
+            运行分配 = 物理样本 × 这一次运行的孔位与条件组。物理实体、流转与检测任务在样本管理，
             结果质量与审核在数据审核页——批次跑完不代表数据可用。
           </div>
         </Panel>
@@ -560,7 +560,7 @@ export function BatchDetailPage() {
             该批次尚未下发设备。删除会归还它占的 {data.allocations.length} 个工位时间窗、
             释放 {data.reservations.length} 项物料预留，并移除 {data.samples.length} 个未开跑的样品记录。
           </div>
-          <div className="small muted">删除动作写审计；配方快照与实验计划不受影响。</div>
+          <div className="small muted">删除动作写审计；流程快照与实验计划不受影响。</div>
         </ConfirmDialog>
       ) : null}
 
@@ -579,7 +579,7 @@ export function BatchDetailPage() {
 
 type SignFn = (action: string, target: string, meanings: string[]) => Promise<string | null>;
 
-/* 遥测曲线。点位来自执行器写入的设备时间戳序列；配方有黄金批次时把它叠在同一张图上，
+/* 遥测曲线。点位来自执行器写入的设备时间戳序列；流程有黄金批次时把它叠在同一张图上，
    按采样序号对齐——两批的绝对时间不同，能比的是同一步内的走势。 */
 function TelemetryPanel({ batchId }: { batchId: string }) {
   const feed = useQuery<TelemetryFeed>(
@@ -604,7 +604,7 @@ function TelemetryPanel({ batchId }: { batchId: string }) {
         feed.data?.golden_batch_id ? (
           <span className="small muted">已叠加黄金批次 {feed.data.golden_batch_id}</span>
         ) : (
-          <span className="small muted">配方尚未设定黄金批次，无对照曲线</span>
+          <span className="small muted">流程尚未设定黄金批次，无对照曲线</span>
         )
       }
     >
@@ -712,7 +712,7 @@ function PreflightDialog({
         <textarea
           rows={2}
           value={reason}
-          placeholder="例如：物料与托盘复核完成，按批准方法执行"
+          placeholder="例如：物料与托盘复核完成，按批准流程执行"
           onChange={(event) => setReason(event.target.value)}
         />
       </Field>
@@ -1449,7 +1449,7 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
             ))}
           </select>
         ) : (
-          <Empty>没有空闲载具：先在「现场总览」登记</Empty>
+          <Empty>没有空闲载具：先在「现场监控」登记</Empty>
         )
       ) : null}
     </Panel>
@@ -1459,7 +1459,7 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
 
 /* ---------- 流程图运行视图 ---------- */
 
-/** 运行时能不能跳过：方法标了可跳过，且这一步还没动（待开始 / 待办 / 等待中）或已明确失败。 */
+/** 运行时能不能跳过：流程标了可跳过，且这一步还没动（待开始 / 待办 / 等待中）或已明确失败。 */
 function canSkip(step: StepRow, batchState: string): boolean {
   if (!step.skippable || !step.run) return false;
   if (!['running', 'paused', 'fault'].includes(batchState)) return false;
@@ -1664,7 +1664,7 @@ function BranchDecisionDialog({
   );
 }
 
-/* 跳过步骤：只有方法标了可跳过的才行，理由必填并签名。设备已收到指令、结果未知时服务端会拒绝。 */
+/* 跳过步骤：只有流程标了可跳过的才行，理由必填并签名。设备已收到指令、结果未知时服务端会拒绝。 */
 function SkipStepDialog({
   batchId,
   step,
@@ -1867,14 +1867,14 @@ function FlowRecovery({
 }
 
 
-/* 本批次的异常事件：自动处理做了什么、结果如何、最终怎么收尾。处理入口在异常中心。 */
+/* 本批次的异常事件：自动处理做了什么、结果如何、最终怎么收尾。处理入口在异常处理。 */
 function BatchExceptions({ batchId }: { batchId: string }) {
   const events = useQuery<ExceptionEventRow[]>(`exceptions:batch:${batchId}`, () =>
     api.get<ExceptionEventRow[]>(`/exceptions?batch_id=${batchId}`), 15000,
   );
   if (!events.data?.length) return null;
   return (
-    <Panel title={`异常事件（${events.data.length}）`} aside={<Link to="/exceptions" className="small">异常中心</Link>} flush>
+    <Panel title={`异常事件（${events.data.length}）`} aside={<Link to="/exceptions" className="small">异常处理</Link>} flush>
       <table>
         <tbody>
           {events.data.map((row) => (

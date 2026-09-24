@@ -302,12 +302,12 @@ function notifyIssues(step: RecipeStep): string[] {
 
 function subflowIssues(step: RecipeStep, subflows: SubflowIndex | undefined, selfId: string): string[] {
   const recipeId = step.subflow?.recipe_id ?? '';
-  if (!recipeId) return ['子流程必须选择引用的方法'];
-  if (recipeId === selfId) return ['子流程不能引用方法自己'];
+  if (!recipeId) return ['子流程必须选择引用的流程'];
+  if (recipeId === selfId) return ['子流程不能引用流程自己'];
   if (!subflows) return [];
   const target = subflows[recipeId];
-  if (!target) return [`子流程引用的方法 ${recipeId} 不存在`];
-  if (target.state !== 'released' || target.needs_revision) return [`子流程引用的方法 ${recipeId}（${target.name}）不是有效的已发布版本`];
+  if (!target) return [`子流程引用的流程 ${recipeId} 不存在`];
+  if (target.state !== 'released' || target.needs_revision) return [`子流程引用的流程 ${recipeId}（${target.name}）不是有效的已发布版本`];
   return [];
 }
 
@@ -686,7 +686,7 @@ export function editorChecks(
       key: 'sop',
       label: '关联 SOP 版本',
       ok: true,
-      detail: sopVersionId || '未关联：允许保存草稿；需要受控作业指导的方法请补上',
+      detail: sopVersionId || '未关联：允许保存草稿；需要受控作业指导的流程请补上',
     },
   ];
 }

@@ -14,7 +14,7 @@
 - 电子签名票据由脚本写入，签名含义照常填写，备注与审计都注明「案例导入脚本代签」，
   审计记录里能看出这批签名不是本人输入口令签署的。
 
-`--prune-demo` 先删掉种子里的演示方法与方案（R-205 除外）和演示报警，只在库里还没有批次时允许。
+`--prune-demo` 先删掉种子里的演示流程与方案（R-205 除外）和演示报警，只在库里还没有批次时允许。
 正式环境（ILCS_ENVIRONMENT=production）一律拒绝运行。
 """
 from __future__ import annotations
@@ -131,7 +131,7 @@ def prune_demo() -> None:
         recipes = db.query(Recipe).filter(Recipe.id != SOURCE_RECIPE).delete()
         alarms = db.query(Alarm).delete()
         db.commit()
-    ok("已删除", f"方案 {plans}（版本 {versions}）、方法 {recipes}（保留 {SOURCE_RECIPE}）、演示报警 {alarms}")
+    ok("已删除", f"方案 {plans}（版本 {versions}）、流程 {recipes}（保留 {SOURCE_RECIPE}）、演示报警 {alarms}")
 
 
 def capacity(fec: float, volume: float) -> float:
@@ -141,7 +141,7 @@ def capacity(fec: float, volume: float) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--prune-demo", action="store_true", help="先删种子里的演示方法、方案与报警")
+    parser.add_argument("--prune-demo", action="store_true", help="先删种子里的演示流程、方案与报警")
     args = parser.parse_args()
     if settings.environment == "production":
         raise Failed("正式环境不导入演示案例")
@@ -156,7 +156,7 @@ def main() -> int:
     if not gate["open"] or blocked:
         raise Failed(f"执行门未就绪：{gate['reasons']} {blocked}（SiLA 模拟设备在线了吗？）")
 
-    # ---------- 1 方法修订 ----------
+    # ---------- 1 流程修订 ----------
     step("1 修订 R-205，加放电容量质检关卡")
     revision = researcher.post(f"/recipes/{SOURCE_RECIPE}/revision")
     recipe_id = revision["id"]
@@ -172,12 +172,12 @@ def main() -> int:
         "row_version": current["row_version"],
     })
     researcher.post(f"/recipes/{recipe_id}/submit")
-    for target, meaning in (("approved", "批准方法"), ("released", "发布方法")):
+    for target, meaning in (("approved", "批准流程"), ("released", "发布流程")):
         fresh = qa.get(f"/recipes/{recipe_id}")
         qa.post(f"/recipes/{recipe_id}/transition", {
             "target_state": target, "signature_id": qa.sign(meaning, recipe_id, fresh["row_version"]),
         })
-    ok("方法已发布", recipe_id)
+    ok("流程已发布", recipe_id)
 
     # ---------- 2 方案 ----------
     step("2 矩阵方案：注液量下发到设备，设定设计空间")
@@ -319,7 +319,7 @@ def main() -> int:
     }, expect=(422,))
     ok("越界提案被拒并留档", "；".join(rejected["detail"]["issues"])[:120])
 
-    print(f"\n完成：方法 {recipe_id} · 方案 {plan_id} · 批次 {batch_id} · 报告 {report['id']} · 第 2 轮 {accepted['created_plan_id']}")
+    print(f"\n完成：流程 {recipe_id} · 方案 {plan_id} · 批次 {batch_id} · 报告 {report['id']} · 第 2 轮 {accepted['created_plan_id']}")
     return 0
 
 

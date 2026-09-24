@@ -138,7 +138,7 @@ def target_issues(factors: list[dict], steps: list[dict], stations) -> list[str]
         step_id, param = str(target.get("step_id") or ""), str(target.get("param") or "")
         step = by_id.get(step_id)
         if step is None:
-            issues.append(f"因子「{name}」作用的步骤 {step_id or '未选择'} 不在方法里")
+            issues.append(f"因子「{name}」作用的步骤 {step_id or '未选择'} 不在流程里")
             continue
         if kind_of(step) != DEVICE:
             issues.append(f"因子「{name}」作用的步骤「{step.get('name')}」不是设备步骤，参数无法下发")

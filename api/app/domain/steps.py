@@ -319,7 +319,7 @@ def notify_issues(step: dict[str, Any]) -> list[str]:
 def subflow_issues(step: dict[str, Any]) -> list[str]:
     config = (step or {}).get("subflow") or {}
     if not str(config.get("recipe_id") or "").strip():
-        return ["子流程必须选择引用的方法"]
+        return ["子流程必须选择引用的流程"]
     return []
 
 

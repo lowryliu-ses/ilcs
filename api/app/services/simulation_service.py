@@ -62,7 +62,7 @@ class SimulationService:
     def _require(self, recipe_id: str) -> Recipe:
         recipe = self.recipes.get(recipe_id)
         if recipe is None:
-            raise NotFound("方法不存在")
+            raise NotFound("流程不存在")
         return recipe
 
     # ---------- 入口 ----------
@@ -79,7 +79,7 @@ class SimulationService:
         return result
 
     def require_feasible(self, recipe: Recipe, action: str) -> dict:
-        """提交评审 / 批准前的硬门槛。结论写在方法上，不通过就拒绝并列出原因。"""
+        """提交评审 / 批准前的硬门槛。结论写在流程上，不通过就拒绝并列出原因。"""
         result = self.feasibility(recipe, persist=True)
         if not result["ok"]:
             raise StateConflict(
@@ -115,7 +115,7 @@ class SimulationService:
         if expand_error:
             checks.append(_check("structure", "流程结构", BLOCKED, f"子流程无法展开：{expand_error}"))
         elif not steps:
-            checks.append(_check("structure", "流程结构", BLOCKED, "方法没有步骤"))
+            checks.append(_check("structure", "流程结构", BLOCKED, "流程没有步骤"))
         elif broken:
             checks.append(_check(
                 "structure", "流程结构", BLOCKED,

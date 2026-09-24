@@ -62,7 +62,7 @@ export function SamplesPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>样本中心</h1>
+        <h1>样本管理</h1>
         <span className="small muted">
           物理样本与「这一次运行里的位置」是两件事。登记样本不要求先有批次，也不要求已有检测结果。
         </span>
@@ -358,7 +358,7 @@ export function SampleDetailPage() {
                   <tr>
                     <th>任务</th>
                     <th>轮次</th>
-                    <th>方法版本</th>
+                    <th>检测方法版本</th>
                     <th>采集状态</th>
                   </tr>
                 </thead>

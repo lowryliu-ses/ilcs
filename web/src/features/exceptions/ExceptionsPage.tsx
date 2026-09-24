@@ -1,4 +1,4 @@
-/* 异常中心：统一异常事件与策略库。
+/* 异常处理：统一异常事件与策略库。
 
    报警是「让人知道」，异常事件是「这件事怎么处理」：类别、影响了哪些批次 / 样本 / 工位、
    系统按哪条策略自动做了什么、结果如何、人做了什么、最终怎么恢复。
@@ -33,7 +33,7 @@ const CATEGORIES: [string, string][] = [
 const ACTIONS: [ExceptionRuleRow['action'], string][] = [
   ['reroute', '改派到具备同样能力的工位'],
   ['retry', '延时后重新下发（同一工位）'],
-  ['skip', '跳过该步骤（方法须标为可跳过）'],
+  ['skip', '跳过该步骤（流程须标为可跳过）'],
   ['reschedule', '生成重排建议'],
   ['hold', '保持，转人工处理'],
 ];
@@ -54,7 +54,7 @@ export function ExceptionsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>异常中心</h1>
+        <h1>异常处理</h1>
         <span className="small muted">
           每条异常都记下类别、影响面、系统自动做了什么、人做了什么、最终怎么恢复。自动重试 / 改派只在指令从未送达设备时发生。
         </span>
@@ -276,7 +276,7 @@ function RulesPanel() {
       flush
     >
       <div className="panel-body small muted">
-        按优先级取第一条匹配的启用策略；没有匹配时转人工。匹配可以按能力、工位、步骤类型、方法、步骤细分，留空表示不限。
+        按优先级取第一条匹配的启用策略；没有匹配时转人工。匹配可以按能力、工位、步骤类型、流程、步骤细分，留空表示不限。
         工位失联时没有配策略，也会生成一份重排建议等调度确认，不会自动挪动任何预约。
       </div>
       {rules.data?.length ? (
@@ -410,7 +410,7 @@ function RuleDialog({
         <Field label="只匹配工位">
           <input value={draft.match.station_id ?? ''} placeholder="如 ST-01-A；留空不限" onChange={(event) => setMatch('station_id', event.target.value)} />
         </Field>
-        <Field label="只匹配方法">
+        <Field label="只匹配流程">
           <input value={draft.match.recipe_id ?? ''} placeholder="如 R-205；留空不限" onChange={(event) => setMatch('recipe_id', event.target.value)} />
         </Field>
         <Field label="只匹配步骤">

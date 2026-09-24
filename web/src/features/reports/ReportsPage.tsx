@@ -36,7 +36,7 @@ export function ReportsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>报告</h1>
+        <h1>报告管理</h1>
         <span className="small muted">
           正式报告只纳入审核通过且质量有效的结果；无效或可疑的结果作为已审核的排除说明出现，
           不进入正式结论统计。发布后只读，源结果修订要发布新版本并标明替代关系。

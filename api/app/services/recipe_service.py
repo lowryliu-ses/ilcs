@@ -150,7 +150,7 @@ class RecipeService:
     def get(self, recipe_id: str) -> dict:
         recipe = self.recipes.get(recipe_id)
         if not recipe:
-            raise NotFound("方法不存在")
+            raise NotFound("流程不存在")
         return self.to_dict(recipe, detail=True)
 
     def _sop_brief(self, sop_version_id: str) -> dict | None:
@@ -191,14 +191,14 @@ class RecipeService:
             used_step_ids=self._step_ids_of(source) if source else [],
         )
         self.recipes.add(recipe)
-        self.audit.record(user, "新建配方", recipe_id, before="—", after="草稿")
+        self.audit.record(user, "新建流程", recipe_id, before="—", after="草稿")
         self.db.commit()
         return self.to_dict(recipe, detail=True)
 
     def create_from_steps(
         self, name: str, plate: int, steps: list[dict], user: User, *, sop_version_id: str = "", note: str = "",
     ) -> Recipe:
-        """由数字 SOP 生成的方法草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
+        """由数字 SOP 生成的流程草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
         recipe_id = self._next_recipe_id()
         recipe = Recipe(
             id=recipe_id, name=name, version="0.1.0", state="draft", owner=user.display_name, updated=today_iso(),
@@ -209,7 +209,7 @@ class RecipeService:
             sop_version_id=sop_version_id,
         )
         self.recipes.add(recipe)
-        self.audit.record(user, "新建配方", recipe_id, before="—", after="草稿", detail=note)
+        self.audit.record(user, "新建流程", recipe_id, before="—", after="草稿", detail=note)
         return recipe
 
     def _next_recipe_id(self) -> str:
@@ -236,7 +236,7 @@ class RecipeService:
         if recipe.state not in EDITABLE_STATES:
             raise StateConflict("只有草稿可编辑")
         # 两人同时编辑同一草稿：后提交的一方必须看到冲突，不静默覆盖
-        self.recipes.check_version(recipe, expected_version, "方法草稿")
+        self.recipes.check_version(recipe, expected_version, "流程草稿")
         before = {key: getattr(recipe, key) for key in changes}
         if "steps" in changes:
             # 已用过的 step_id 不复用：删掉的步骤 ID 也记在 used_step_ids 里，
@@ -266,7 +266,7 @@ class RecipeService:
             }]
         meta_detail = "；".join(f"{k}: {before[k]} → {v}" for k, v in changes.items() if k not in {"steps", "bom"})
         self.audit.record(
-            user, "编辑配方草稿", recipe_id,
+            user, "编辑流程草稿", recipe_id,
             detail="；".join(filter(None, [
                 meta_detail,
                 f"步骤 {len(step_diff)} 处变更" if step_diff else "",
@@ -307,7 +307,7 @@ class RecipeService:
         if not is_valid(self.validation_of(recipe)):
             raise StateConflict("能力校验未通过，已阻止提交")
         if not recipe.steps:
-            raise StateConflict("方法没有步骤")
+            raise StateConflict("流程没有步骤")
 
         # 执行前仿真：结构、所有分支路径、可达性、能力与硬时限在空实验室里排得下
         SimulationService(self.db, self.ctx).require_feasible(recipe, "提交评审")
@@ -317,16 +317,16 @@ class RecipeService:
         recipe.history = [*recipe.history, {
             "v": recipe.version, "state": "review", "note": "提交评审", "by": user.display_name, "at": today_iso(),
         }]
-        self.audit.record(user, "提交配方评审", f"{recipe_id} v{recipe.version}", before="草稿", after="评审中")
+        self.audit.record(user, "提交流程评审", f"{recipe_id} v{recipe.version}", before="草稿", after="评审中")
         self.db.commit()
         return self.to_dict(recipe, detail=True)
 
     def transition_with_signature(self, recipe_id: str, target_state: str, signature_id: str, user: User) -> dict:
         recipe = self._require(recipe_id)
         rules = {
-            "approved": ("review", "recipe.approve", "批准配方"),
-            "released": ("approved", "recipe.release", "发布配方"),
-            "retired": ("released", "recipe.release", "退役配方"),
+            "approved": ("review", "recipe.approve", "批准流程"),
+            "released": ("approved", "recipe.release", "发布流程"),
+            "retired": ("released", "recipe.release", "退役流程"),
         }
         if target_state not in rules:
             raise StateConflict("不支持的目标状态")
@@ -334,7 +334,7 @@ class RecipeService:
         if not user_may(self.ctx, user, permission):
             raise PermissionDenied(f"当前角色无权限：{permission}")
         if recipe.state != required_state:
-            raise StateConflict(f"只有{STATE_LABEL[required_state]}配方可{action[:2]}")
+            raise StateConflict(f"只有{STATE_LABEL[required_state]}流程可{action[:2]}")
         if target_state != "retired" and not is_valid(self.validation_of(recipe)):
             raise StateConflict("能力校验未通过，已阻止")
         if target_state == "approved":
@@ -343,10 +343,10 @@ class RecipeService:
             SimulationService(self.db, self.ctx).require_feasible(recipe, "批准")
         if target_state == "approved" and (
             same_person(recipe.author_user_id, user.id) or same_person(recipe.submitted_by, user.id)
-        ) and not admin_self_approval(self.db, self.ctx, user, recipe.id, "批准本人编写或提交的方法"):
+        ) and not admin_self_approval(self.db, self.ctx, user, recipe.id, "批准本人编写或提交的流程"):
             # 管理员也不例外：同一个人编写、提交又批准，审批就只剩形式
             raise PermissionDenied(
-                "不能批准本人编写或提交的方法（职责分离）", code="self_approval_denied",
+                "不能批准本人编写或提交的流程（职责分离）", code="self_approval_denied",
             )
         # 签名必须针对这个方法的这个版本：为别的对象或旧版本签的票据不能挪用
         signature = self.identity.consume_signature(
@@ -373,7 +373,7 @@ class RecipeService:
         return self.to_dict(recipe, detail=True)
 
     def _retire_parent(self, recipe: Recipe, user: User) -> str | None:
-        """修订版发布即取代来源版本：同一方法不能同时有两个「已发布」。"""
+        """修订版发布即取代来源版本：同一流程不能同时有两个「已发布」。"""
         if not recipe.parent:
             return None
         parent = self.recipes.get(recipe.parent)
@@ -386,7 +386,7 @@ class RecipeService:
             "by": user.display_name, "at": today_iso(),
         }]
         self.audit.record(
-            user, "退役配方", f"{parent.id} v{parent.version}", before="已发布", after="已退役",
+            user, "退役流程", f"{parent.id} v{parent.version}", before="已发布", after="已退役",
             detail=f"被修订版 {recipe.id} v{recipe.version} 取代；已建批次仍引用原快照",
         )
         return f"{parent.id} v{parent.version}"
@@ -394,7 +394,7 @@ class RecipeService:
     def create_revision(self, recipe_id: str, user: User) -> dict:
         source = self._require(recipe_id)
         if source.state != "released":
-            raise StateConflict("只有已发布配方可新建修订草稿")
+            raise StateConflict("只有已发布流程可新建修订草稿")
         # 修订号取已有最大号 + 1，不按数量算：删掉 r1 后按数量会再造一个 r2 撞主键
         siblings = [
             row.id for row in self.db.query(Recipe).filter(Recipe.id.like(f"{recipe_id}-r%")).all()
@@ -442,9 +442,9 @@ class RecipeService:
         recipe = self._require(recipe_id)
         blockers = self.deletable(recipe)
         if blockers:
-            raise StateConflict("配方不可删除", {"blocked": [{"key": "recipe", "label": b} for b in blockers]})
+            raise StateConflict("流程不可删除", {"blocked": [{"key": "recipe", "label": b} for b in blockers]})
         self.audit.record(
-            user, "删除配方草稿", f"{recipe_id} v{recipe.version}", before="草稿", after="已删除",
+            user, "删除流程草稿", f"{recipe_id} v{recipe.version}", before="草稿", after="已删除",
             detail=f"{recipe.name}；{len(recipe.steps or [])} 步，无批次与计划引用",
         )
         self.db.delete(recipe)
@@ -496,5 +496,5 @@ class RecipeService:
     def _require(self, recipe_id: str) -> Recipe:
         recipe = self.recipes.get(recipe_id)
         if not recipe:
-            raise NotFound("方法不存在")
+            raise NotFound("流程不存在")
         return recipe

@@ -28,7 +28,7 @@ export function PlansPage() {
   const create = useMutation(
     () =>
       templateId
-        // 套用模板：只给名称与（可选的）方法，其余结构取自模板
+        // 套用模板：只给名称与（可选的）流程，其余结构取自模板
         ? api.post<PlanSummary>('/plans', { name: form.name, template_id: templateId, ...(form.recipe_id ? { recipe_id: form.recipe_id } : {}) })
         : api.post<PlanSummary>('/plans', {
         ...form,
@@ -99,7 +99,7 @@ export function PlansPage() {
               <tr>
                 <th>方案</th>
                 <th>类型</th>
-                <th>方法</th>
+                <th>流程</th>
                 <th>结构</th>
                 <th>审批</th>
                 <th className="num">样本</th>
@@ -169,7 +169,7 @@ export function PlansPage() {
           onConfirm={() => remove.run(deleting.id).catch(() => undefined)}
         >
           <div className="note warn">
-            将删除「{deleting.name}」及其结构定义（{deleting.sample_count} 个样本）。方法不受影响。
+            将删除「{deleting.name}」及其结构定义（{deleting.sample_count} 个样本）。流程不受影响。
             已批准、已绑定批次或已有任务的方案不能删除。
           </div>
         </ConfirmDialog>
@@ -252,7 +252,7 @@ export function PlansPage() {
             </Field>
           ) : null}
           </>)}
-          <Field label="方法" hint="样品位数由方法决定，样本数不能超过它">
+          <Field label="实验流程" hint="样品位数由流程决定，样本数不能超过它">
             <select value={form.recipe_id} onChange={(event) => setForm({ ...form, recipe_id: event.target.value })}>
               {(recipes.data ?? []).map((recipe) => (
                 <option key={recipe.id} value={recipe.id}>

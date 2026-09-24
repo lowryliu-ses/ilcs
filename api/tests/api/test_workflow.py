@@ -393,11 +393,11 @@ def test_review_rejection_after_only_device_steps_needs_recovery(
     assert researcher.post(f"/api/recipes/{recipe_id}/submit").status_code == 200
     assert qa.post(
         f"/api/recipes/{recipe_id}/transition",
-        {"target_state": "approved", "signature_id": qa.sign_recipe("批准配方", recipe_id)},
+        {"target_state": "approved", "signature_id": qa.sign_recipe("批准流程", recipe_id)},
     ).status_code == 200
     assert qa.post(
         f"/api/recipes/{recipe_id}/transition",
-        {"target_state": "released", "signature_id": qa.sign_recipe("发布配方", recipe_id)},
+        {"target_state": "released", "signature_id": qa.sign_recipe("发布流程", recipe_id)},
     ).status_code == 200
 
     plan = researcher.post(

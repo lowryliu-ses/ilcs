@@ -47,7 +47,7 @@ def set_readiness(station_id: str, payload: ReadinessIn, db: DbSession, user: Cu
 
 @router.post("/stations", status_code=201)
 def create_station(payload: StationCreateIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
-    """登记新工位。能力极限一并写入并立刻重校验受影响的配方。"""
+    """登记新工位。能力极限一并写入并立刻重校验受影响的流程。"""
     return StationService(db, ctx).create_station(
         payload.model_dump(exclude={"signature_id"}), payload.signature_id, user
     )
@@ -77,13 +77,13 @@ def update_capability(capability_id: str, payload: CapabilityPatchIn, db: DbSess
 
 @router.post("/capabilities/{capability_id}/retire")
 def retire_capability(capability_id: str, payload: RetireIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
-    """停用能力：新配方步骤不能再选，已有配方与批次快照不受影响。"""
+    """停用能力：新流程步骤不能再选，已有流程与批次快照不受影响。"""
     return StationService(db, ctx).set_capability_retired(capability_id, payload.retired, user)
 
 
 @router.delete("/capabilities/{capability_id}")
 def delete_capability(capability_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
-    """无工位实现且无配方引用才可删，否则只能停用。"""
+    """无工位实现且无流程引用才可删，否则只能停用。"""
     return StationService(db, ctx).delete_capability(capability_id, user)
 
 

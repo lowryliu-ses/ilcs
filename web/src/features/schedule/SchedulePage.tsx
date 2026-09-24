@@ -254,7 +254,7 @@ export function SchedulePage() {
               <tr>
                 <th />
                 <th>批次</th>
-                <th>配方</th>
+                <th>流程</th>
                 <th className="num">优先级</th>
                 <th>交付期</th>
                 <th>可排程</th>

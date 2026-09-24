@@ -90,17 +90,17 @@ def _prefixed(step: dict[str, Any], prefix: str, local: set[str]) -> dict[str, A
 
 def resolve_checked(recipe_id: str, resolve: Resolver, stack: tuple[str, ...], step_id: str = "") -> SubflowRecipe:
     if not recipe_id:
-        raise SubflowError("子流程没有选择引用的方法", step_id)
+        raise SubflowError("子流程没有选择引用的流程", step_id)
     if recipe_id in stack:
         raise SubflowError(f"子流程循环引用：{' → '.join((*stack, recipe_id))}", step_id)
     if len(stack) > MAX_DEPTH:
         raise SubflowError(f"子流程嵌套超过 {MAX_DEPTH} 层", step_id)
     sub = resolve(recipe_id)
     if sub is None:
-        raise SubflowError(f"子流程引用的方法 {recipe_id} 不存在", step_id)
+        raise SubflowError(f"子流程引用的流程 {recipe_id} 不存在", step_id)
     if sub.state != "released" or sub.needs_revision:
         raise SubflowError(
-            f"子流程引用的方法 {recipe_id}（{sub.name}）不是有效的已发布版本：只能引用已发布、无需修订的方法",
+            f"子流程引用的流程 {recipe_id}（{sub.name}）不是有效的已发布版本：只能引用已发布、无需修订的流程",
             step_id,
         )
     return sub
@@ -130,7 +130,7 @@ def expand(
         inner, inner_bom = expand(sub.steps, resolve, (*stack, sub.id))
         inner = explicit(inner)
         if not inner:
-            raise SubflowError(f"子流程引用的方法 {sub.id} 没有步骤", step_id)
+            raise SubflowError(f"子流程引用的流程 {sub.id} 没有步骤", step_id)
         prefix = f"{step_id}."
         local = {child["step_id"] for child in inner}
         group = {

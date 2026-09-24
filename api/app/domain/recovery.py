@@ -1,6 +1,6 @@
 """恢复评估：四项前置 + 能力规则决定可用策略。
 
-策略可用性由能力的恢复规则决定，配方不能覆盖。不可逆投料步骤不提供重试。
+策略可用性由能力的恢复规则决定，流程不能覆盖。不可逆投料步骤不提供重试。
 """
 from dataclasses import dataclass, field
 
@@ -120,7 +120,7 @@ def options(context: RecoveryContext, precondition_rows: list[dict]) -> list[Opt
         ),
         Option(
             ABORT, "安全终止并清退", True, "",
-            f"按配方终止，{context.unfinished_sample_count} 个未完成样品待隔离处置。"
+            f"按流程终止，{context.unfinished_sample_count} 个未完成样品待隔离处置。"
             + (f"跳过下游硬时限步骤「{next_hard['name']}」。" if next_hard else ""),
         ),
     ]

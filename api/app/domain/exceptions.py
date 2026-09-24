@@ -31,7 +31,7 @@ CATEGORIES = {
 ACTIONS = {
     "retry": "延时后重新下发（同一工位）",
     "reroute": "改派到具备同样能力的工位",
-    "skip": "跳过该步骤（方法须标为可跳过）",
+    "skip": "跳过该步骤（流程须标为可跳过）",
     "reschedule": "生成重排建议",
     "hold": "保持，转人工处理",
 }
@@ -198,7 +198,7 @@ def decide(signal: Signal, rules: list[Rule]) -> Decision:
     if rule.action in DRIVING_ACTIONS and not signal.never_sent:
         return Decision("hold", rule, f"策略「{rule.name}」要求重新驱动设备，但设备可能已收到指令：结果未知只能由人核查")
     if rule.action == "skip" and not signal.skippable:
-        return Decision("hold", rule, f"策略「{rule.name}」要跳过步骤，但方法没有把这一步标为可跳过")
+        return Decision("hold", rule, f"策略「{rule.name}」要跳过步骤，但流程没有把这一步标为可跳过")
     limit = int((rule.params or {}).get("max_attempts", 1 if rule.action == "reroute" else 0) or 0)
     if rule.action in {"retry", "reroute"} and signal.attempts >= limit:
         return Decision("hold", rule, f"策略「{rule.name}」已自动处理 {signal.attempts} 次、达到上限 {limit}，转人工")

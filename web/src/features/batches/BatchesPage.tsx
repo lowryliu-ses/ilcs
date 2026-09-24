@@ -55,7 +55,7 @@ export function BatchesPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>批次</h1>
+        <h1>批次管理</h1>
         {can('batch.create') ? (
           <button
             className="btn primary"
@@ -76,7 +76,7 @@ export function BatchesPage() {
             <thead>
               <tr>
                 <th>批次</th>
-                <th>配方 / 计划</th>
+                <th>流程 / 计划</th>
                 <th>状态</th>
                 <th>下一步动作</th>
                 <th>计划时间</th>
@@ -194,7 +194,7 @@ export function BatchesPage() {
           }
         >
           <div className="note">
-            批次只能从已锁定矩阵的实验计划创建。创建时冻结配方快照、按 BOM 选择已放行批号写入预留、
+            批次只能从已锁定矩阵的实验计划创建。创建时冻结流程快照、按 BOM 选择已放行批号写入预留、
             按条件矩阵生成样品孔位，三者在同一事务内完成。
           </div>
           <Field label="实验计划">

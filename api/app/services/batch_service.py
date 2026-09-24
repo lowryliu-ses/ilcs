@@ -482,9 +482,9 @@ class BatchService:
             )
         recipe = self.recipes.get(plan.recipe_id)
         if not recipe:
-            raise NotFound("方法不存在")
+            raise NotFound("流程不存在")
         if recipe.state != "released" or recipe.needs_revision:
-            raise StateConflict("只能从有效的已发布方法创建批次")
+            raise StateConflict("只能从有效的已发布流程创建批次")
 
         from .task_service import TaskService
 
@@ -553,7 +553,7 @@ class BatchService:
         return self.summary_out(batch)
 
     def _freeze_recipe(self, recipe) -> dict:
-        """冻结方法快照。子流程在这里展开：之后被引用的方法怎么修订，这个批次的步骤都不变。"""
+        """冻结流程快照。子流程在这里展开：之后被引用的方法怎么修订，这个批次的步骤都不变。"""
         from ..domain.subflow import SubflowError, has_subflow, merge_bom
         from .flow_expansion import expanded_steps, resolved_steps
 
@@ -575,7 +575,7 @@ class BatchService:
                     if group["step_id"] not in seen:
                         seen.add(group["step_id"])
                         subflows.append(group)
-        # 设备方法引用（含子方法里的）：补缺省参数并冻结方法快照；引用失效（未发布 / 已退役 / 不一致）不建批次
+        # 设备方法引用（含子方法里的）：补缺省参数并冻结流程快照；引用失效（未发布 / 已退役 / 不一致）不建批次
         steps, method_problems = resolved_steps(self.db, self.ctx, steps)
         if method_problems:
             labels = [f"{step_id}：{problem}" for step_id, rows in method_problems.items() for problem in rows]
@@ -1181,7 +1181,7 @@ class BatchService:
                 "allowed": bool(current.get("skippable")) and not blockers,
                 "reason": (
                     "" if current.get("skippable") and not blockers
-                    else "方法没有把这一步标为可跳过" if not current.get("skippable")
+                    else "流程没有把这一步标为可跳过" if not current.get("skippable")
                     else "存在没有结论的设备指令"
                 ),
             },
@@ -1409,7 +1409,7 @@ class BatchService:
         step = steps[index]
         if not step.get("skippable"):
             raise StateConflict(
-                f"第 {index + 1} 步「{step.get('name')}」在方法里没有标为可跳过：关键步骤不能在运行时临时跳掉",
+                f"第 {index + 1} 步「{step.get('name')}」在流程里没有标为可跳过：关键步骤不能在运行时临时跳掉",
                 code="step_not_skippable",
             )
         history = [row for row in self.runs.for_batch(batch.id) if row.step_id == step_id]

@@ -202,7 +202,7 @@ def _plan(page: "Page", content: dict) -> None:
 
 def _method(page: "Page", content: dict) -> None:
     method = content.get("method_section") or {}
-    for label, key in (("方法", "recipe"), ("方法版本", "recipe_version"), ("SOP", "sop"), ("SOP 版本", "sop_version"),
+    for label, key in (("流程", "recipe"), ("流程版本", "recipe_version"), ("SOP", "sop"), ("SOP 版本", "sop_version"),
                        ("附件摘要", "sop_checksum"), ("风险评估", "risk")):
         page.field(label, str(method.get(key, "") or "—"))
 
@@ -235,7 +235,7 @@ def _resources(page: "Page", content: dict) -> None:
             [24, 26, 14, 14, 12, 10],
         )
     else:
-        page.text("本方法无物料需求")
+        page.text("本流程无物料需求")
 
 
 def _instruments(page: "Page", content: dict) -> None:

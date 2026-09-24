@@ -39,7 +39,7 @@ export function RecipeDetailPage() {
   const data = recipe.data;
 
   const runTransition = async (target: string, label: string, meanings: string[]) => {
-    // 签名绑定方法 ID 与版本：服务端按严格模式核对，挪用到别的方法或旧版本会被拒
+    // 签名绑定流程 ID 与版本：服务端按严格模式核对，挪用到别的流程或旧版本会被拒
     const signatureId = await sign(label, data.id, meanings, data.row_version);
     if (!signatureId) return;
     await transition.run({ target_state: target, signature_id: signatureId }).catch((error) => toast.push(error.message));
@@ -77,12 +77,12 @@ export function RecipeDetailPage() {
             </button>
           ) : null}
           {data.state === 'review' && can('recipe.approve') ? (
-            <button className="btn primary" onClick={() => runTransition('approved', '批准配方', ['评审通过'])}>
+            <button className="btn primary" onClick={() => runTransition('approved', '批准流程', ['评审通过'])}>
               批准
             </button>
           ) : null}
           {data.state === 'approved' && can('recipe.release') ? (
-            <button className="btn primary" onClick={() => runTransition('released', '发布配方', ['批准发布'])}>
+            <button className="btn primary" onClick={() => runTransition('released', '发布流程', ['批准发布'])}>
               发布
             </button>
           ) : null}
@@ -92,7 +92,7 @@ export function RecipeDetailPage() {
             </button>
           ) : null}
           {data.state === 'released' && can('recipe.release') ? (
-            <button className="btn danger" onClick={() => runTransition('retired', '退役配方', ['不再使用'])}>
+            <button className="btn danger" onClick={() => runTransition('retired', '退役流程', ['不再使用'])}>
               退役
             </button>
           ) : null}
@@ -211,7 +211,7 @@ export function RecipeDetailPage() {
               </tbody>
             </table>
           ) : (
-            <Empty>没有引用该配方的实验计划</Empty>
+            <Empty>没有引用该流程的实验计划</Empty>
           )}
         </Panel>
       </div>

@@ -497,10 +497,10 @@ class ExceptionService:
             category="timeout", message=reason, source_type="step", source_id=run.id, batch=batch,
             step_index=run.step_index, station_id=run.station_id, severity=2 if action != "alarm" else 3,
         )
-        event.decision = f"按方法的步骤超时配置：{ {'alarm': '只报警', 'fail': '判为失败', 'skip': '自动跳过'}.get(action, action) }"
+        event.decision = f"按流程的步骤超时配置：{ {'alarm': '只报警', 'fail': '判为失败', 'skip': '自动跳过'}.get(action, action) }"
         if action == "skip":
             event.auto_action = "skip"
-            event.auto_result = "步骤已按方法配置自动跳过"
+            event.auto_result = "步骤已按流程配置自动跳过"
             event.state = "auto_resolved"
             event.final_result = event.auto_result
             event.resolved_at = now()

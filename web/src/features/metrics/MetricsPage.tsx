@@ -52,7 +52,7 @@ export function MetricsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>指标定义</h1>
+        <h1>指标与规则</h1>
         <span className="small muted">
           检测任务声明要测哪些指标、结果回传按指标版本入账、统计按指标版本分组。
           允许范围不是质量判定：超范围的值照常入库并打标为可疑，在范围内的值也仍然要复核。

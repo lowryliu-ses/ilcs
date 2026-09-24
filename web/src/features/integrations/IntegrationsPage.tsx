@@ -1,4 +1,4 @@
-/* 集成与事件：出向事件订阅与站外通知渠道。
+/* 集成与通知：出向事件订阅与站外通知渠道。
 
    渠道：Webhook（签名 JSON，给系统）、企业微信 / 钉钉群机器人与邮件（给人看的中文消息，带回到系统的链接）。
    四种渠道共用一条投递链路：事务内发件箱、失败退避重试、超过次数判死信、可重投。
@@ -40,7 +40,7 @@ export function IntegrationsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>集成与事件</h1>
+        <h1>集成与通知</h1>
         <button className="btn primary" onClick={() => setCreating(true)}>
           新建订阅
         </button>

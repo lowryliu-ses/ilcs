@@ -2,7 +2,7 @@
 
 这套系统的审计是只追加的、批次快照是只读的，所以「删除」不能一刀切。分界线只有一条：
 **这条记录有没有被别的记录引用过**。没被引用的草稿是纯粹的编辑残留，删掉不丢信息；
-一旦被引用——配方出过批次、批号进过投料、工位排过工步——记录本身就是某段历史的一部分，
+一旦被引用——流程出过批次、批号进过投料、工位排过工步——记录本身就是某段历史的一部分，
 删了会让审计链、样品谱系或物料台账出现讲不通的空洞，这时只能停用 / 退役 / 报废。
 
 每个判据都返回「不能删的理由」列表，空列表表示可以删。理由直接回给界面，
@@ -16,17 +16,17 @@ from typing import Any
 RECIPE_DELETABLE_STATES = {"draft"}
 # 非草稿状态各自该走哪条路，提示要说得准，不能一律让人去「退役」
 RECIPE_STATE_ADVICE = {
-    "review": "评审中的配方请先撤回或让 QA 批准后再处理",
-    "approved": "已批准的配方请先发布或退役",
-    "released": "已发布的配方请用「退役」",
-    "retired": "已退役的配方保留存档，不删除",
+    "review": "评审中的流程请先撤回或让 QA 批准后再处理",
+    "approved": "已批准的流程请先发布或退役",
+    "released": "已发布的流程请用「退役」",
+    "retired": "已退役的流程保留存档，不删除",
 }
 PLAN_DELETABLE_STATES = {"draft"}
 BATCH_DELETABLE_STATES = {"planned", "scheduled"}  # 未下发：没有物理动作要撤销
 
 
 def recipe_delete_blockers(state: str, batch_ids: list[str], child_ids: list[str]) -> list[str]:
-    """配方草稿可删。出过批次或派生过修订的不行——批次快照会指回这个版本号。"""
+    """流程草稿可删。出过批次或派生过修订的不行——批次快照会指回这个版本号。"""
     blockers = []
     if state not in RECIPE_DELETABLE_STATES:
         advice = RECIPE_STATE_ADVICE.get(state, "只有草稿可删除")
@@ -63,12 +63,12 @@ def batch_delete_blockers(state: str, has_commands: bool) -> list[str]:
 
 
 def capability_delete_blockers(station_ids: list[str], recipe_ids: list[str]) -> list[str]:
-    """能力没有工位实现、也没有配方引用时才可删，否则只能停用。"""
+    """能力没有工位实现、也没有流程引用时才可删，否则只能停用。"""
     blockers = []
     if station_ids:
         blockers.append(f"{len(station_ids)} 个工位声明实现了它：{'、'.join(station_ids[:5])}")
     if recipe_ids:
-        blockers.append(f"{len(recipe_ids)} 个配方的步骤在用它：{'、'.join(recipe_ids[:5])}")
+        blockers.append(f"{len(recipe_ids)} 个流程的步骤在用它：{'、'.join(recipe_ids[:5])}")
     return blockers
 
 

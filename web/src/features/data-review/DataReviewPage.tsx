@@ -213,7 +213,7 @@ export function DataReviewPage() {
             <thead>
               <tr>
                 <th>样本</th>
-                <th>方法</th>
+                <th>检测方法</th>
                 <th>轮次</th>
                 <th>要求指标</th>
                 <th>待复核</th>
@@ -230,7 +230,7 @@ export function DataReviewPage() {
                   </td>
                   <td className="small">
                     {row.method || '—'}
-                    <div className="tiny muted">{row.method_version || '未记方法版本'}</div>
+                    <div className="tiny muted">{row.method_version || '未记检测方法版本'}</div>
                   </td>
                   <td className="mono small">
                     第 {row.round_no} 轮
@@ -303,7 +303,7 @@ function MetricPicker({
   if (!rows.length) {
     return (
       <div className="note bad">
-        还没有在用的指标定义。请先到「治理 · 指标定义」登记指标，检测任务才有可要求的指标。
+        还没有在用的指标定义。请先到「数据与报告 · 指标与规则」登记指标，检测任务才有可要求的指标。
       </div>
     );
   }

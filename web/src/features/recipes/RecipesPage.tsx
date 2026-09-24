@@ -39,7 +39,7 @@ export function RecipesPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>配方</h1>
+        <h1>实验流程</h1>
         {can('recipe.edit') ? (
           <button className="btn primary" onClick={() => setCreating(true)}>
             新建草稿
@@ -47,12 +47,12 @@ export function RecipesPage() {
         ) : null}
       </div>
 
-      <Panel title={`配方（${recipes.data?.length ?? 0}）`} flush>
+      <Panel title={`流程（${recipes.data?.length ?? 0}）`} flush>
         {recipes.data?.length ? (
           <table>
             <thead>
               <tr>
-                <th>配方</th>
+                <th>流程</th>
                 <th>版本</th>
                 <th>状态</th>
                 <th className="num">步骤</th>
@@ -106,13 +106,13 @@ export function RecipesPage() {
             </tbody>
           </table>
         ) : (
-          <Empty>还没有配方</Empty>
+          <Empty>还没有实验流程</Empty>
         )}
       </Panel>
 
       {deleting ? (
         <ConfirmDialog
-          title={`删除配方草稿 · ${deleting.id}`}
+          title={`删除流程草稿 · ${deleting.id}`}
           danger
           confirmLabel="删除"
           pending={remove.pending}
@@ -129,7 +129,7 @@ export function RecipesPage() {
 
       {creating ? (
         <Modal
-          title="新建配方草稿"
+          title="新建流程草稿"
           onClose={() => setCreating(false)}
           footer={
             <>

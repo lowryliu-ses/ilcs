@@ -38,7 +38,7 @@ export function SopsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>SOP</h1>
+        <h1>SOP 规程</h1>
         <span className="small muted">
           已发布内容不可原位编辑；修订和恢复历史内容都产生新版本。新版本生效不自动改在途运行，
           只显示影响并由负责人决定。
@@ -161,7 +161,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
     {
       invalidates: ['recipes'],
       onSuccess: (result) => {
-        toast.push(result.sop_linked ? '已生成方法草稿并挂接本 SOP 版本' : '已生成方法草稿（SOP 未发布，未挂接）');
+        toast.push(result.sop_linked ? '已生成流程草稿并挂接本 SOP 版本' : '已生成流程草稿（SOP 未发布，未挂接）');
         navigate(`/recipes/${result.recipe_id}/edit`);
       },
     },
@@ -186,7 +186,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
         const row = result as SopVersionRow & { impacted_recipes?: { id: string }[] };
         toast.push(
           row.state === 'published'
-            ? `已发布；影响 ${row.impacted_recipes?.length ?? 0} 个方法，在途运行不自动改版`
+            ? `已发布；影响 ${row.impacted_recipes?.length ?? 0} 个流程，在途运行不自动改版`
             : '已驳回回草稿',
         );
         setRejecting(false);
@@ -287,7 +287,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
             ) : null}
             {version.steps.length && can('recipe.edit') ? (
               <button className="btn sm" disabled={generate.pending} onClick={() => generate.run().catch((error) => toast.push(error.message))}>
-                生成方法草稿
+                生成流程草稿
               </button>
             ) : null}
             {['published', 'retired'].includes(version.state) && can('sop.edit') ? (
@@ -329,7 +329,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 </tbody>
               </table>
             ) : (
-              <Empty>还没有结构化步骤；写上之后可以一键生成方法草稿</Empty>
+              <Empty>还没有结构化步骤；写上之后可以一键生成流程草稿</Empty>
             )}
           </Panel>
 
@@ -351,7 +351,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
             {against ? <SopDiff versionId={version.id} against={against} /> : <div className="small muted">选一个版本查看附件、适用范围与步骤的差异</div>}
           </Panel>
 
-          <Panel title="引用该版本的方法" flush>
+          <Panel title="引用该版本的流程" flush>
             {version.using_recipes?.length ? (
               <table>
                 <tbody>
@@ -368,7 +368,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 </tbody>
               </table>
             ) : (
-              <Empty>还没有方法引用它</Empty>
+              <Empty>还没有流程引用它</Empty>
             )}
           </Panel>
 
@@ -523,7 +523,7 @@ function DraftEditDialog({ version, onClose }: { version: SopVersionRow; onClose
       <Field label="培训要求">
         <label className="small">
           <input type="checkbox" checked={needsAck} onChange={(event) => setNeedsAck(event.target.checked)} />
-          需要阅读确认后才能执行引用它的方法
+          需要阅读确认后才能执行引用它的流程
         </label>
       </Field>
       {save.error ? <div className="note bad">{save.error.message}</div> : null}
@@ -750,7 +750,7 @@ function StepsEditor({ version, onClose }: { version: SopVersionRow; onClose: ()
             />
             {step.kind === 'manual' ? (
               <input
-                placeholder="逐项核对（用；分隔），生成方法时每项变成一个勾选项"
+                placeholder="逐项核对（用；分隔），生成流程时每项变成一个勾选项"
                 value={step.checks.join('；')}
                 onChange={(event) => update(index, { checks: event.target.value.split(/[；;]/).map((text) => text.trim()).filter(Boolean) })}
               />

@@ -81,7 +81,7 @@ export function GovernancePage() {
     <div className="page">
       <div className="page-head">
         <div>
-          <h1>系统治理</h1>
+          <h1>用户与权限</h1>
           <div className="small muted">管理设备与外部系统凭据、授权范围、数据库兼容状态和拒绝访问记录</div>
         </div>
       </div>

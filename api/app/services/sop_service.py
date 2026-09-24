@@ -236,7 +236,7 @@ class SopService:
         return self.version_out(version)
 
     def generate_recipe(self, version_id: str, payload: dict, user: User) -> dict:
-        """一键生成方法草稿。已发布的 SOP 版本同时挂到方法上；草稿 SOP 生成的方法不挂（方法只能引用已发布 SOP）。"""
+        """一键生成流程草稿。已发布的 SOP 版本同时挂到流程上；草稿 SOP 生成的流程不挂（流程只能引用已发布 SOP）。"""
         from .recipe_service import RecipeService
 
         version = self._require(version_id)
@@ -244,7 +244,7 @@ class SopService:
             raise StateConflict("这个 SOP 版本还没有结构化步骤", code="sop_steps_missing")
         sop = self.sops.get(version.sop_id)
         steps = sop_steps.to_recipe_steps(version.steps)
-        name = (payload.get("name") or "").strip() or f"{sop.title if sop else 'SOP'} 方法草稿"
+        name = (payload.get("name") or "").strip() or f"{sop.title if sop else 'SOP'} 流程草稿"
         linked = version.id if version.state == "published" else ""
         recipes = RecipeService(self.db, self.ctx)
         recipe = recipes.create_from_steps(
@@ -252,8 +252,8 @@ class SopService:
             note=f"由 SOP {sop.code if sop else ''} {version.version} 生成",
         )
         self.audit.record(
-            user, "由 SOP 生成方法草稿", version.id, after=recipe.id,
-            detail=f"{len(steps)} 步；" + ("已挂接本 SOP 版本" if linked else "SOP 未发布，方法未挂接 SOP"),
+            user, "由 SOP 生成流程草稿", version.id, after=recipe.id,
+            detail=f"{len(steps)} 步；" + ("已挂接本 SOP 版本" if linked else "SOP 未发布，流程未挂接 SOP"),
         )
         self.db.commit()
         return {"recipe_id": recipe.id, "name": recipe.name, "steps": len(steps), "sop_linked": bool(linked)}
@@ -388,7 +388,7 @@ class SopService:
             object_version=version.row_version,
             detail=(
                 f"生效 {effective_from:%Y-%m-%d %H:%M}；"
-                f"影响 {len(impacted)} 个方法，在途运行不自动改版"
+                f"影响 {len(impacted)} 个流程，在途运行不自动改版"
             ),
         )
         self.db.commit()
@@ -410,7 +410,7 @@ class SopService:
             user, "退役 SOP 版本", version.id, before="已发布", after="已退役",
             object_version=version.row_version,
             detail=(
-                f"{reason}；{len(impacted)} 个方法仍引用它，历史引用与附件保持可查；"
+                f"{reason}；{len(impacted)} 个流程仍引用它，历史引用与附件保持可查；"
                 f"新任务需改用有效版本"
             ),
         )

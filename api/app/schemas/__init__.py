@@ -221,7 +221,7 @@ class BookingCancelIn(BaseModel):
     reason: str
 
 
-# ---------- 方法（配方） ----------
+# ---------- 方法（流程） ----------
 
 class RecipeCreateIn(BaseModel):
     name: str

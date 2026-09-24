@@ -19,7 +19,7 @@ export function AuditPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>审计记录</h1>
+        <h1>审计日志</h1>
         <div className="row">
           <input
             placeholder="按对象过滤，例如 B-260920-001"

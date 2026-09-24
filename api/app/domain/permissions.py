@@ -113,9 +113,9 @@ ACTION_NAMES = {
 
 # 权限目录：界面上按分组展示的中文名。新增权限必须在这里登记，测试会核对两边一致。
 PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
-    ("方法与方案", [
-        ("recipe.edit", "编辑方法"), ("recipe.submit", "提交方法评审"), ("recipe.approve", "批准方法"),
-        ("recipe.release", "发布方法"), ("method.edit", "起草与修订设备方法"), ("method.release", "发布与退役设备方法"),
+    ("方案与流程", [
+        ("recipe.edit", "编辑流程"), ("recipe.submit", "提交流程评审"), ("recipe.approve", "批准流程"),
+        ("recipe.release", "发布流程"), ("method.edit", "起草与修订设备方法"), ("method.release", "发布与退役设备方法"),
         ("plan.edit", "编辑实验方案"), ("plan.submit", "提交方案评审"),
         ("plan.approve", "批准实验方案"),
     ]),

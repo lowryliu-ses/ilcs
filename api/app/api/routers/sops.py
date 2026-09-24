@@ -15,7 +15,7 @@ def list_sops(db: DbSession, ctx: Ctx, paging: Paging, state: str | None = None)
 
 @router.get("/effective")
 def effective(db: DbSession, ctx: Ctx, capability_id: str = ""):
-    """给方法编辑器用：某能力当前生效的 SOP 版本。"""
+    """给流程编辑器用：某能力当前生效的 SOP 版本。"""
     return SopService(db, ctx).effective_for_capability(capability_id)
 
 
@@ -49,7 +49,7 @@ def update_steps(version_id: str, payload: SopStepsIn, db: DbSession, user: Curr
 
 @router.post("/{version_id}/generate-recipe", status_code=201)
 def generate_recipe(version_id: str, payload: SopRecipeIn, db: DbSession, user: CurrentUser, ctx=require("recipe.edit")):
-    """按结构化步骤一键生成方法草稿；已发布的 SOP 版本同时挂到方法上。"""
+    """按结构化步骤一键生成流程草稿；已发布的 SOP 版本同时挂到流程上。"""
     return SopService(db, ctx).generate_recipe(version_id, payload.model_dump(), user)
 
 

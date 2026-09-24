@@ -39,7 +39,7 @@ APPROVAL_LABEL = {"draft": "草稿", "review": "评审中", "approved": "已批�
 # 草稿与已驳回可以编辑；评审中冻结内容（审的是哪一份就是哪一份），已批准只能修订
 EDITABLE_APPROVAL = {"draft", "rejected"}
 SNAPSHOT_LABELS = {
-    "name": "名称", "plan_type": "方案类型", "goal": "目的", "recipe_id": "方法", "method_version": "方法版本",
+    "name": "名称", "plan_type": "方案类型", "goal": "目的", "recipe_id": "实验流程", "method_version": "流程版本",
     "factors": "因子与水平", "control": "对照", "repeats": "重复次数", "layout": "布局", "seed": "随机种子",
     "design_points": "设计点", "design_space": "设计空间", "sample_count": "样本数", "sample_ids": "样本清单",
     "required_metrics": "检测指标", "resource_requirements": "资源需求",
@@ -90,7 +90,7 @@ class PlanService:
     def layout(self, plan: Plan) -> list[dict]:
         if plan.plan_type != MATRIX:
             return []
-        recipe = self.recipes.require(plan.recipe_id, "方法不存在")
+        recipe = self.recipes.require(plan.recipe_id, "流程不存在")
         return [
             {
                 "well": a.well, "group": a.group, "repeat": a.repeat, "levels": a.levels,
@@ -136,8 +136,8 @@ class PlanService:
             },
             self._design_space_check(plan),
             {
-                "key": "capacity", "label": "条件 × 重复 不超过方法样品位",
-                "detail": f"{len(conditions)} × {plan.repeats} = {total}；方法每批 {plate} 位",
+                "key": "capacity", "label": "条件 × 重复 不超过流程样品位",
+                "detail": f"{len(conditions)} × {plan.repeats} = {total}；流程每批 {plate} 位",
                 "ok": 0 < total <= plate,
             },
             {
@@ -168,7 +168,7 @@ class PlanService:
         }
 
     def _target_options(self, plan: Plan) -> list[dict]:
-        """因子可以作用的设备参数：方法里每个设备步骤及其能力声明的参数。"""
+        """因子可以作用的设备参数：流程里每个设备步骤及其能力声明的参数。"""
         from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
         from ..repositories.resources import CapabilityRepository
 
@@ -197,7 +197,7 @@ class PlanService:
         if not declared:
             return {
                 "key": "targets", "label": "因子作用的设备参数",
-                "detail": "未声明作用参数：条件只区分样本，设备按方法里的固定参数执行",
+                "detail": "未声明作用参数：条件只区分样本，设备按流程里的固定参数执行",
                 "ok": True,
             }
         recipe = self.recipes.get(plan.recipe_id)
@@ -225,8 +225,8 @@ class PlanService:
                 "ok": total > 0 and not missing,
             },
             {
-                "key": "capacity", "label": "样本数不超过方法样品位",
-                "detail": f"{total}；方法每批 {plate} 位",
+                "key": "capacity", "label": "样本数不超过流程样品位",
+                "detail": f"{total}；流程每批 {plate} 位",
                 "ok": 0 < total <= plate,
             },
             {
@@ -249,9 +249,9 @@ class PlanService:
                 "ok": bool(listed) and not missing,
             },
             {
-                "key": "method", "label": "使用已发布方法",
+                "key": "method", "label": "使用已发布流程",
                 "detail": (
-                    f"{recipe.id} v{recipe.version}（{recipe.state}）" if recipe else "未选择方法"
+                    f"{recipe.id} v{recipe.version}（{recipe.state}）" if recipe else "未选择流程"
                 ),
                 "ok": bool(recipe and recipe.state == "released"),
             },
@@ -286,8 +286,8 @@ class PlanService:
         """BOM + 因子换算需求，对照每种物料的可用量。委托检测没有物料需求。"""
         if plan.plan_type == COMMISSIONED:
             return []
-        recipe = self.recipes.require(plan.recipe_id, "方法不存在")
-        demands = [{"factor": "方法 BOM", **item} for item in (recipe.bom or [])]
+        recipe = self.recipes.require(plan.recipe_id, "流程不存在")
+        demands = [{"factor": "流程 BOM", **item} for item in (recipe.bom or [])]
         if plan.plan_type == MATRIX:
             demands += matrix.material_demand(plan.factors or [], plan.repeats, plan.design_points or None)
         rows = []
@@ -444,10 +444,10 @@ class PlanService:
                 merged["recipe_id"] = template.recipe_id
             payload = merged
         if not payload.get("recipe_id"):
-            raise ValidationFailed("方案必须选择方法（模板没有建议方法时请在请求里给 recipe_id）")
+            raise ValidationFailed("方案必须选择实验流程（模板没有建议流程时请在请求里给 recipe_id）")
         recipe = self.recipes.get(payload["recipe_id"])
         if not recipe:
-            raise NotFound("方法不存在")
+            raise NotFound("流程不存在")
         plan_type = payload.get("plan_type", MATRIX)
         if plan_type not in PLAN_TYPES:
             raise ValidationFailed(f"方案类型只能是 {'、'.join(PLAN_TYPES)}")
@@ -480,7 +480,7 @@ class PlanService:
         self.plans.add(plan)
         self.audit.record(
             user, "新建实验方案", plan.id, before="—", after="草稿",
-            detail=f"{TYPE_LABEL.get(plan_type, plan_type)}；方法 {recipe.id} v{recipe.version}",
+            detail=f"{TYPE_LABEL.get(plan_type, plan_type)}；流程 {recipe.id} v{recipe.version}",
             object_version=plan.row_version,
         )
         self.db.commit()

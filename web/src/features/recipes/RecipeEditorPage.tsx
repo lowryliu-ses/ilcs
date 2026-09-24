@@ -1,12 +1,12 @@
-/* 方法图形化编辑：节点面板 → 流程图 → 属性面板。
+/* 流程图形化编辑：节点面板 → 流程图 → 属性面板。
 
    设计约束：
    1. 步骤绑定能力而不是设备，参数实时对照全部工位极限的并集；
    2. 流程图按依赖关系分层排布，连线画在真实的前驱与后继之间；从节点右侧的连接柄拖到另一个
       节点上就建一条依赖，点连线可以删掉。列表顺序始终保持拓扑序（后端要求前驱排在前面），
       每次改依赖都会自动重排；
-   3. 条件分支的出边带出口名，回环画成虚线；子流程节点引用一个已发布的方法，时长按它的关键路径算；
-   4. 恢复规则由能力继承，配方不可覆盖，所以属性面板里只读展示。
+   3. 条件分支的出边带出口名，回环画成虚线；子流程节点引用一个已发布的流程，时长按它的关键路径算；
+   4. 恢复规则由能力继承，流程不可覆盖，所以属性面板里只读展示。
 
    这里的校验是即时提示，能不能提交由服务端重算（`domain/recipe_rules.py`）。 */
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -129,7 +129,7 @@ export function RecipeEditorPage() {
     api.get<DeviceMethodRow[]>('/device-methods?state=released'),
   );
   const recipes = useQuery<RecipeSummary[]>('recipes', () => api.get<RecipeSummary[]>('/recipes'));
-  // 只取已发布且生效的版本：草稿与已退役的 SOP 不该被新方法引用
+  // 只取已发布且生效的版本：草稿与已退役的 SOP 不该被新流程引用
   const sops = useQuery<SopVersionRow[]>('sops:effective', () => api.get<SopVersionRow[]>('/sops/effective'));
 
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -210,7 +210,7 @@ export function RecipeEditorPage() {
     data.state !== 'draft'
       ? `当前状态「${data.state_label}」不可编辑，请在已发布版本上新建修订草稿`
       : !can('recipe.edit')
-        ? '当前角色不能编辑配方'
+        ? '当前角色不能编辑实验流程'
         : '';
   const readOnly = !!readOnlyWhy;
   const ids = draft.steps.map(stepIdOf);
@@ -481,7 +481,7 @@ export function RecipeEditorPage() {
             图形化编辑 · {draft.meta.name} <Pill state={data.state} label={data.state_label} />
           </h1>
           <div className="small muted">
-            <Link to="/recipes">配方</Link> / <Link to={`/recipes/${data.id}`}>{data.id}</Link> / 编辑 ·{' '}
+            <Link to="/recipes">实验流程</Link> / <Link to={`/recipes/${data.id}`}>{data.id}</Link> / 编辑 ·{' '}
             <span className="mono">v{data.version}</span>
           </div>
         </div>
@@ -684,7 +684,7 @@ function NodeCard({
           .map((row) => row.label || row.key)
           .join(' / ')}`
       : kind === 'subflow'
-      ? subflowName ? `引用 ${step.subflow?.recipe_id} ${subflowName}` : '未选择引用的方法'
+      ? subflowName ? `引用 ${step.subflow?.recipe_id} ${subflowName}` : '未选择引用的流程'
       : kind === 'notify'
       ? step.notify?.message || '未填写通知内容'
       : `审核角色 ${step.review_role || 'qa'}`;
@@ -766,7 +766,7 @@ function StepProperties({
   const timeoutActions = TIMEOUT_ACTIONS_BY_KIND[kind];
 
   return (
-    <Panel title={`第 ${index + 1} 步 · ${stepIdOf(step, index)}`} aside={<button className="btn sm" onClick={onBack}>方法属性</button>}>
+    <Panel title={`第 ${index + 1} 步 · ${stepIdOf(step, index)}`} aside={<button className="btn sm" onClick={onBack}>流程属性</button>}>
       <Field label="步骤名称">
         <input
           value={step.name}
@@ -980,7 +980,7 @@ function StepProperties({
       ) : null}
       {kind === 'device' || kind === 'manual' ? <EnvironmentFields step={step} readOnly={readOnly} onSet={onSet} /> : null}
       {SKIPPABLE_KINDS.includes(kind) ? (
-        <label className="check" title="方法作者在设计时同意：运行时可由有恢复权限的人签名跳过这一步">
+        <label className="check" title="流程作者在设计时同意：运行时可由有恢复权限的人签名跳过这一步">
           <input
             type="checkbox"
             checked={Boolean(step.skippable)}
@@ -1049,7 +1049,7 @@ function StepProperties({
 
       {kind === 'device' ? (
         <div className="small muted">
-          恢复规则（继承自能力，配方不可覆盖）：
+          恢复规则（继承自能力，流程不可覆盖）：
           {recovery.pausable ? `可保持 ≤ ${recovery.maxHoldMin} min，${recovery.hold}` : '不可保持'} ·{' '}
           {recovery.retryable ? '可重试' : '不可重试'}
           {recovery.verify?.length ? ` · 恢复前核实 ${recovery.verify.join('、')}` : ''}
@@ -1196,7 +1196,7 @@ function RecipeProperties({
   const selectedSop = (sops ?? []).find((row) => row.id === meta.sop_version_id);
 
   return (
-    <Panel title="配方属性">
+    <Panel title="流程属性">
       <Field label="名称">
         <input value={meta.name} readOnly={readOnly} onChange={(event) => onMeta('name', event.target.value)} />
       </Field>
@@ -1707,7 +1707,7 @@ function BranchFields({
   );
 }
 
-/* 子流程：引用一个已发布的方法，建批次时展开进快照。被引用方法修订发布后旧版本退役，引用随之失效，
+/* 子流程：引用一个已发布的流程，建批次时展开进快照。被引用流程修订发布后旧版本退役，引用随之失效，
    要改这里重新评审——不会悄悄换掉已批准流程里的一段。 */
 function SubflowFields({
   step,
@@ -1729,7 +1729,7 @@ function SubflowFields({
   const options = recipes.filter((row) => row.id !== recipeId && row.state === 'released' && !row.needs_revision);
   return (
     <>
-      <Field label="引用的方法" hint="只列已发布、无需修订的方法；子方法的 BOM 会并入批次物料预留">
+      <Field label="引用的流程" hint="只列已发布、无需修订的流程；子流程的 BOM 会并入批次物料预留">
         <select
           value={chosen}
           disabled={readOnly}
@@ -1742,7 +1742,7 @@ function SubflowFields({
             })
           }
         >
-          <option value="">选择方法</option>
+          <option value="">选择流程</option>
           {options.map((row) => (
             <option key={row.id} value={row.id}>
               {row.id} · {row.name} v{row.version}（{row.step_count} 步，关键路径 {row.critical_path_min} min）
@@ -1848,8 +1848,8 @@ function MethodField({
         current
           ? known
             ? `${known.code} v${known.version} · 程序 ${known.program || '—'} · 适用型号 ${known.instrument_models.join('、') || '不限'}`
-            : `引用的方法 ${step.method?.code ?? current} v${step.method?.version ?? '?'} 已不是有效发布版本，请改选`
-          : '不引用时参数直接写在步骤上；引用后参数取方法缺省值并受方法范围约束'
+            : `引用的设备方法 ${step.method?.code ?? current} v${step.method?.version ?? '?'} 已不是有效发布版本，请改选`
+          : '不引用时参数直接写在步骤上；引用后参数取设备方法缺省值并受其范围约束'
       }
     >
       <select

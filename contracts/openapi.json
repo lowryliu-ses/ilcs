@@ -10218,7 +10218,7 @@
     },
     "/api/capabilities/{capability_id}": {
       "delete": {
-        "description": "无工位实现且无配方引用才可删，否则只能停用。",
+        "description": "无工位实现且无流程引用才可删，否则只能停用。",
         "operationId": "delete_capability_api_capabilities__capability_id__delete",
         "parameters": [
           {
@@ -10349,7 +10349,7 @@
     },
     "/api/capabilities/{capability_id}/retire": {
       "post": {
-        "description": "停用能力：新配方步骤不能再选，已有配方与批次快照不受影响。",
+        "description": "停用能力：新流程步骤不能再选，已有流程与批次快照不受影响。",
         "operationId": "retire_capability_api_capabilities__capability_id__retire_post",
         "parameters": [
           {
@@ -22560,7 +22560,7 @@
     },
     "/api/sops/effective": {
       "get": {
-        "description": "给方法编辑器用：某能力当前生效的 SOP 版本。",
+        "description": "给流程编辑器用：某能力当前生效的 SOP 版本。",
         "operationId": "effective_api_sops_effective_get",
         "parameters": [
           {
@@ -22959,7 +22959,7 @@
     },
     "/api/sops/{version_id}/generate-recipe": {
       "post": {
-        "description": "按结构化步骤一键生成方法草稿；已发布的 SOP 版本同时挂到方法上。",
+        "description": "按结构化步骤一键生成流程草稿；已发布的 SOP 版本同时挂到流程上。",
         "operationId": "generate_recipe_api_sops__version_id__generate_recipe_post",
         "parameters": [
           {
@@ -23357,7 +23357,7 @@
         ]
       },
       "post": {
-        "description": "登记新工位。能力极限一并写入并立刻重校验受影响的配方。",
+        "description": "登记新工位。能力极限一并写入并立刻重校验受影响的流程。",
         "operationId": "create_station_api_stations_post",
         "parameters": [
           {

@@ -1,4 +1,4 @@
-"""方法（配方）校验规则。提交、批准、创建批次前都用同一份判据。
+"""流程校验规则。提交、批准、创建批次前都用同一份判据。
 
 判据按步骤类型分支：设备步骤校验能力匹配与参数，人工步骤校验记录表单，
 等待步骤校验等待方式，审核步骤校验审核角色。不适用的字段不提示缺失——
@@ -182,7 +182,7 @@ def recipe_checks(
     recipe_steps: list[dict[str, Any]], validation: list[dict], bom: list[dict], risk: str,
     sop_version_id: str = "", sop_label: str = "", expanded_critical_min: float | None = None,
 ) -> list[dict]:
-    """方法级检查清单。编辑器与详情页显示同一份，提交评审按前五项裁决。"""
+    """流程级检查清单。编辑器与详情页显示同一份，提交评审按前五项裁决。"""
     no_station = [
         row["index"] + 1 for row in validation if row["needs_station"] and not row["fits"]
     ]
@@ -255,7 +255,7 @@ def recipe_checks(
             # 显示编号与版本，不显示版本 UUID：清单是给人看的
             "detail": (
                 sop_label or sop_version_id
-                or "未关联：允许保存草稿；需要受控作业指导的方法请补上"
+                or "未关联：允许保存草稿；需要受控作业指导的流程请补上"
             ),
         },
     ]

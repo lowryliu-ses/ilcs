@@ -623,7 +623,7 @@ function ReceiveDialog({ onClose, invalidates }: { onClose: () => void; invalida
             onChange={(event) => setForm({ ...form, qty: Number(event.target.value) })}
           />
         </Field>
-        <Field label="单位" hint="必须与配方 BOM 的单位一致才能预留">
+        <Field label="单位" hint="必须与流程 BOM 的单位一致才能预留">
           <input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} />
         </Field>
         <Field label="有效期">

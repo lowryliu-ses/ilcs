@@ -11,7 +11,7 @@ from .base import Base, uid
 
 
 class Batch(Base):
-    """批次。recipe_snapshot 创建后只读，配方修订不影响在途批次。"""
+    """批次。recipe_snapshot 创建后只读，流程修订不影响在途批次。"""
 
     __tablename__ = "batches"
     id: Mapped[str] = mapped_column(String, primary_key=True)

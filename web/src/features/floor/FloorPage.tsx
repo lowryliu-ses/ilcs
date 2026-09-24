@@ -9,7 +9,7 @@ import { QrLabel } from '../../shared/labels';
 import type { Floor, FloorSlot, FloorStation, LabwareRow, LabwareType, LocationRow } from '../../shared/types';
 import { Blocked, Empty, Field, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
-/* 现场总览：中控室大屏看的就是这一页。
+/* 现场监控：中控室大屏看的就是这一页。
 
    一眼要能回答三件事：哪台设备在干什么（或为什么不能干）、每块板在哪、有什么在路上。
    数据由服务端变更推送驱动刷新；推送断开时退回 10 s 轮询，顶栏的「实时 / 轮询」标明当前模式。 */
@@ -139,7 +139,7 @@ export function FloorPage() {
   return (
     <div className="page floor">
       <div className="page-head">
-        <h1>现场总览</h1>
+        <h1>现场监控</h1>
         <span className="small muted">
           执行中 <b>{tally.busy}</b> · 空闲 <b>{tally.idle}</b> · 异常 <b className={tally.bad ? 'bad-text' : ''}>{tally.bad}</b> · 在途转运{' '}
           <b>{tally.transfers}</b> · {live ? '实时推送' : '轮询刷新'} · 数据时间 {data ? clock(data.now) : '—'}
@@ -163,7 +163,7 @@ export function FloorPage() {
 
       {data && !data.tracking ? (
         <div className="note">
-          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员可在「工位与能力」按现场布局登记位置。
+          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员可在「工位配置」按现场布局登记位置。
         </div>
       ) : null}
       {data?.lost.length ? (

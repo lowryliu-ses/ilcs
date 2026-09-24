@@ -9,14 +9,14 @@ from .base import Base, uid
 
 
 class Capability(Base):
-    """能力字典。恢复规则挂在能力上，配方步骤只继承不覆盖。"""
+    """能力字典。恢复规则挂在能力上，流程步骤只继承不覆盖。"""
 
     __tablename__ = "capabilities"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
     params: Mapped[dict] = mapped_column(JSON, default=dict)
     recovery: Mapped[dict] = mapped_column(JSON, default=dict)
-    # 停用而不是删除：已有配方快照仍引用它，字典条目必须留着才解释得了历史批次
+    # 停用而不是删除：已有流程快照仍引用它，字典条目必须留着才解释得了历史批次
     retired: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

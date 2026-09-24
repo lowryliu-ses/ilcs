@@ -72,7 +72,7 @@ class WorkflowService:
         """
         steps = self.steps_of(batch)
         if not steps:
-            raise StateConflict("方法没有步骤，无法开跑")
+            raise StateConflict("流程没有步骤，无法开跑")
         indices = graph.frontier(steps, {}, {})[0] if graph.graph_mode(steps) else [0]
         entered: list[dict] = []
         for index in indices:
@@ -718,7 +718,7 @@ class WorkflowService:
                 return self._rework(batch, run, index, gate, rounds)
             return self._gate_hold(batch, run, f"{reason}；已返工 {rounds - 1} 次仍不合格，转人工判断")
         if on_fail == "scrap":
-            self._close_run(run, workflow.FAILED, f"{reason}；按方法报废")
+            self._close_run(run, workflow.FAILED, f"{reason}；按流程报废")
             return self._gate_scrap(batch, run, reason)
         return self._gate_hold(batch, run, reason)
 
@@ -748,7 +748,7 @@ class WorkflowService:
             sample.state = "failed"
             sample.flag_note = f"质检关卡报废：{reason}"
         batch.state = "fault"
-        batch.failure_reason = f"质检不合格，按方法报废：{reason}"
+        batch.failure_reason = f"质检不合格，按流程报废：{reason}"
         batch.held_at = batch.held_at or now()
         self._gate_alarm(batch, run, batch.failure_reason, "核对测量；确认后终止批次并处置样品。")
         return {"next": None, "batch_state": batch.state, "scrapped": True}
@@ -1128,7 +1128,7 @@ class WorkflowService:
                 response={
                     "alarm": "催办执行人或到现场查看；步骤完成后条件自动复位。",
                     "fail": "步骤已判为失败，批次进入恢复评估。",
-                    "skip": "步骤已按方法配置自动跳过，流程继续；请核对是否需要补做。",
+                    "skip": "步骤已按流程配置自动跳过，流程继续；请核对是否需要补做。",
                 }.get(action, ""),
                 owner="操作员", origin="system", condition_key=f"step:{run.id}:timeout",
             )

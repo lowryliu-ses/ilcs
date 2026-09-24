@@ -93,7 +93,7 @@ export function PlanDetailPage() {
           </h1>
           <div className="small muted">
             <span className="tag">{data.plan_type_label}</span>{' '}
-            <span className="mono">{data.id}</span> v{data.version} · 方法{' '}
+            <span className="mono">{data.id}</span> v{data.version} · 流程{' '}
             <Link to={`/recipes/${data.recipe_id}`}>{data.recipe_id}</Link> · {data.owner} · {data.created}
           </div>
         </div>
@@ -259,7 +259,7 @@ export function PlanDetailPage() {
                   </td>
                 </tr>
                 <tr>
-                  <td className="small muted">方法版本</td>
+                  <td className="small muted">流程版本</td>
                   <td className="small">{data.method_version || '—'}</td>
                 </tr>
               </tbody>
@@ -430,12 +430,12 @@ export function PlanDetailPage() {
           </tbody>
         </table>
         <div className="panel-body small muted">
-          创建批次时按配方 BOM 写入预留；因子换算物料需先入库并放行，否则开跑检查会拦截。
+          创建批次时按流程 BOM 写入预留；因子换算物料需先入库并放行，否则开跑检查会拦截。
         </div>
       </Panel>
       ) : (
         <Panel title="物料需求预览">
-          <div className="note">该方案没有物料需求（委托检测不强制定义耗材，空 BOM 的方法显示「无需物料」）。</div>
+          <div className="note">该方案没有物料需求（委托检测不强制定义耗材，空 BOM 的流程显示「无需物料」）。</div>
         </Panel>
       )}
 
@@ -451,7 +451,7 @@ export function PlanDetailPage() {
         >
           <div className="note warn">
             将删除「{data.name}」及其 {data.conditions.length} 组条件与孔位布局定义。
-            配方 {data.recipe_id} 不受影响。
+            流程 {data.recipe_id} 不受影响。
           </div>
         </ConfirmDialog>
       ) : null}
@@ -963,7 +963,7 @@ function FactorEditor({
 
               <Field
                 label="作用于设备参数（可选）"
-                hint="选了就按孔位把该因子的水平写进这一步的设备指令；不选则条件只区分样本，设备按方法固定参数执行"
+                hint="选了就按孔位把该因子的水平写进这一步的设备指令；不选则条件只区分样本，设备按流程固定参数执行"
               >
                 <select
                   value={factor.target ? `${factor.target.step_id}|${factor.target.param}` : ''}

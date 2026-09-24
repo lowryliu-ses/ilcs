@@ -92,7 +92,7 @@ def evaluate(context: PreflightContext) -> list[Check]:
         )
     checks.append(
         Check(
-            "snapshot", "方法快照已发布且有风险评估",
+            "snapshot", "流程快照已发布且有风险评估",
             _state(bool(context.recipe_risk) and context.recipe_state == "released"),
             f"v{context.snapshot_version}；{context.recipe_risk or '缺少风险评估'}"
             f"{snapshot_note}{sop_note}",
@@ -101,7 +101,7 @@ def evaluate(context: PreflightContext) -> list[Check]:
 
     # ---------- 2 物料 ----------
     if not context.bom_items:
-        detail = "该方法未定义物料需求" + (
+        detail = "该流程未定义物料需求" + (
             "，且没有消耗物料的步骤，无需投料许可" if not context.material_steps
             else "；但存在声明消耗物料的步骤，请补齐 BOM"
         )

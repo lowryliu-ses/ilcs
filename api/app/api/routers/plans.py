@@ -55,7 +55,7 @@ def create_plan(payload: PlanCreateIn, db: DbSession, user: CurrentUser, ctx=req
     # 套用模板时只取请求里显式给的字段，其余用模板的
     body = payload.model_dump(exclude_unset=True) if payload.template_id else payload.model_dump()
     if not body.get("recipe_id") and not payload.template_id:
-        raise ValidationFailed("方案必须选择方法")
+        raise ValidationFailed("方案必须选择实验流程")
     return PlanService(db, ctx).create(body, user)
 
 

@@ -42,7 +42,7 @@ class MigrationReportService:
         counts = {
             name: self.db.query(model).count()
             for name, model in (
-                ("组织", Organization), ("账号", User), ("方法", Recipe), ("方案", Plan),
+                ("组织", Organization), ("账号", User), ("流程", Recipe), ("方案", Plan),
                 ("批次", Batch), ("运行分配", Sample), ("物理样本", PhysicalSample),
                 ("批号", Lot), ("预留", Reservation), ("历史结果", Result),
                 ("结果明细", ResultValue), ("检测任务", AnalysisTask),
@@ -157,7 +157,7 @@ class MigrationReportService:
         }
         unlinked = accounts - len(linked_users)
         assets = self.db.query(Asset).count()
-        # 只看能承接工步的工位：开跑检查是按配方步骤所落的工位去查资产档案的。
+        # 只看能承接工步的工位：开跑检查是按流程步骤所落的工位去查资产档案的。
         # 转运车只实现 cap.transfer，不是工步落点、也没有校准档案；退役工位不再参与匹配。
         # 把这两类算进缺口，会报出一个永远修不完的假账。
         stations = [

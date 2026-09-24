@@ -66,7 +66,7 @@ export function SimulationPanel({ recipe, canRun }: { recipe: RecipeDetail; canR
         <>
           <div className="small muted">
             {clock(sim.at)} · v{sim.version} · 并发 {sim.concurrency} 批 · 阻断 {sim.summary.blocked} / 提醒 {sim.summary.warn} / 通过 {sim.summary.pass}
-            {!recipe.simulation_current && !latest ? ' · 方法内容已改动，结论仅供参考，请重跑' : ''}
+            {!recipe.simulation_current && !latest ? ' · 流程内容已改动，结论仅供参考，请重跑' : ''}
           </div>
           <CheckList checks={sim.checks} />
           <div className="grid cols-2">

@@ -1,4 +1,4 @@
-"""能力匹配。工位未定义的参数视为不能承接，这是配方校验与排程的唯一判据。"""
+"""能力匹配。工位未定义的参数视为不能承接，这是流程校验与排程的唯一判据。"""
 from dataclasses import dataclass, field
 from typing import Any
 

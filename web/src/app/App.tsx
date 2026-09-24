@@ -38,14 +38,47 @@ import { useSession } from '../shared/session';
 import type { Dashboard, Gate } from '../shared/types';
 
 /* 导航只列已实现的入口。未来才有的功能不作为可点的菜单出现——
-   点进去看到空页面比没有这一项更糟。 */
-const NAV: [string, [string, string][]][] = [
-  ['概览', [['/dashboard', '工作台']]],
-  ['设计', [['/plans', '实验方案'], ['/recipes', '方法与配方'], ['/methods', '设备方法'], ['/sops', 'SOP']]],
-  ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心'], ['/exceptions', '异常中心']]],
-  ['科学数据', [['/samples', '样本中心'], ['/data-review', '数据审核'], ['/results', '结果分析'], ['/reports', '报告']]],
-  ['资源', [['/assets', '仪器设备'], ['/stations', '工位与能力'], ['/materials', '试剂耗材'], ['/environment', '环境监测'], ['/people', '人员与资质']]],
-  ['治理', [['/metrics', '指标定义'], ['/audit', '审计记录'], ['/governance', '系统治理'], ['/integrations', '集成与事件']]],
+   点进去看到空页面比没有这一项更糟。
+   分组与组内顺序按业务主线：方案 → 流程 → 接样建批 → 排程执行 → 数据审核 → 报告。
+   菜单名与页面标题保持一致。 */
+type NavItem = { path: string; label: string; perm?: string };
+const NAV: [string, NavItem[]][] = [
+  ['工作台', [
+    { path: '/dashboard', label: '工作台' },
+    { path: '/tasks', label: '任务中心' },
+  ]],
+  ['实验设计', [
+    { path: '/plans', label: '实验方案' },
+    { path: '/recipes', label: '实验流程' },
+    { path: '/methods', label: '设备方法' },
+    { path: '/sops', label: 'SOP 规程' },
+  ]],
+  ['执行与监控', [
+    { path: '/samples', label: '样本管理' },
+    { path: '/batches', label: '批次管理' },
+    { path: '/schedule', label: '排程' },
+    { path: '/floor', label: '现场监控' },
+    { path: '/alarms', label: '报警处理' },
+    { path: '/exceptions', label: '异常处理' },
+  ]],
+  ['数据与报告', [
+    { path: '/data-review', label: '数据审核' },
+    { path: '/results', label: '结果分析' },
+    { path: '/reports', label: '报告管理' },
+    { path: '/metrics', label: '指标与规则' },
+  ]],
+  ['资源管理', [
+    { path: '/assets', label: '仪器设备' },
+    { path: '/stations', label: '工位配置' },
+    { path: '/materials', label: '试剂耗材' },
+    { path: '/people', label: '人员与资质' },
+    { path: '/environment', label: '环境监测' },
+  ]],
+  ['系统管理', [
+    { path: '/governance', label: '用户与权限', perm: 'service.manage' },
+    { path: '/integrations', label: '集成与通知', perm: 'integration.manage' },
+    { path: '/audit', label: '审计日志', perm: 'audit.read' },
+  ]],
 ];
 
 export function App() {
@@ -85,19 +118,23 @@ export function App() {
           <span>实验室平台</span>
         </div>
         <nav>
-          {NAV.map(([group, items]) => (
-            <div key={group}>
-              <div className="nav-group">{group}</div>
-              {items.filter(([path]) => (path !== '/governance' || user.perms.includes('service.manage')) && (path !== '/integrations' || user.perms.includes('integration.manage')) && (path !== '/audit' || user.perms.includes('audit.read'))).map(([path, label]) => (
-                <NavLink key={path} to={path} className={({ isActive }) => (isActive ? 'active' : '')}>
-                  {label}
-                  {badges[path] ? (
-                    <span className={`count${hot.has(path) ? ' hot' : ''}`}>{badges[path]}</span>
-                  ) : null}
-                </NavLink>
-              ))}
-            </div>
-          ))}
+          {NAV.map(([group, items]) => {
+            const visible = items.filter((item) => !item.perm || user.perms.includes(item.perm));
+            if (!visible.length) return null;
+            return (
+              <div key={group}>
+                <div className="nav-group">{group}</div>
+                {visible.map(({ path, label }) => (
+                  <NavLink key={path} to={path} className={({ isActive }) => (isActive ? 'active' : '')}>
+                    {label}
+                    {badges[path] ? (
+                      <span className={`count${hot.has(path) ? ' hot' : ''}`}>{badges[path]}</span>
+                    ) : null}
+                  </NavLink>
+                ))}
+              </div>
+            );
+          })}
         </nav>
       </aside>
 

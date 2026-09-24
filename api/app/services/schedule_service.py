@@ -227,7 +227,7 @@ class ScheduleService:
             raise StateConflict("只有计划中或已排程批次可重新排程")
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         if not steps:
-            raise StateConflict("方法快照没有步骤")
+            raise StateConflict("流程快照没有步骤")
         bom = batch.recipe_snapshot.get("bom") or []
         # 合法空 BOM 的方法不做物料检查，否则纯人工流程永远排不上
         if bom and not self.materials.bom_satisfied(batch.id, bom):

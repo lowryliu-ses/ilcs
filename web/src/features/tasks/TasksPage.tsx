@@ -655,7 +655,7 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
         {splitting ? (
           <div className="deps">
             <div className="tiny muted">
-              有样本清单时按每份样本数拆（留空按方法的样品位）；矩阵方案或没有样本清单时按份数拆，每份按方案整体执行一次。
+              有样本清单时按每份样本数拆（留空按流程的样品位）；矩阵方案或没有样本清单时按份数拆，每份按方案整体执行一次。
               父任务不绑定批次，状态由子任务汇总。
             </div>
             <div className="row">

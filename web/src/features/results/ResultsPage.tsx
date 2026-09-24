@@ -53,7 +53,7 @@ export function ResultsPage() {
             <thead>
               <tr>
                 <th>批次</th>
-                <th>方法</th>
+                <th>流程</th>
                 <th>运行分配</th>
                 <th>结果明细</th>
                 <th>待复核</th>
@@ -170,7 +170,7 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
       >
         <ScopeNotice official={view.official} label={view.scope_label} />
         <div className="small muted">
-          方案 {view.plan_id}（{view.plan_type}）· 方法 {view.recipe_name}
+          方案 {view.plan_id}（{view.plan_type}）· 流程 {view.recipe_name}
           {view.show_factor_effects ? '' : ' · 非矩阵实验不显示因子主效应'}
         </div>
         {view.non_numeric_metrics.length ? (

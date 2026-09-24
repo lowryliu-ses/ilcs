@@ -177,7 +177,7 @@ class StationService:
         return rows
 
     def _capability_usage(self) -> dict[str, list[str]]:
-        """哪些配方的步骤在用这个能力。停用与删除都要先回答这个问题。"""
+        """哪些流程的步骤在用这个能力。停用与删除都要先回答这个问题。"""
         usage: dict[str, list[str]] = {}
         for recipe in self.recipes.list():
             for step in recipe.steps or []:
@@ -242,7 +242,7 @@ class StationService:
         return {"station": station_id, "limits": station.limits, "broken_recipes": broken}
 
     def revalidate_recipes(self, capability_ids: set[str] | None = None) -> list[str]:
-        """极限变更后重校验；已发布配方不通过则进入需修订。"""
+        """极限变更后重校验；已发布流程不通过则进入需修订。"""
         specs = self.stations.specs()
         specs_by_capability = self.capabilities.specs()
         broken = []
@@ -397,7 +397,7 @@ class StationService:
             user, "登记新工位", station.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
             before="—", after="空闲",
             detail=f"{station.name}；{len(station.limits or {})} 项能力极限"
-                   + (f"；重校验影响 {len(broken)} 个配方" if broken else ""),
+                   + (f"；重校验影响 {len(broken)} 个流程" if broken else ""),
         )
         self.db.commit()
         return {"id": station.id, "broken_recipes": broken}
@@ -571,7 +571,7 @@ class StationService:
         self.audit.record(
             user, "停用工位" if retired else "启用工位", station_id,
             before="在用" if retired else "已停用", after="已停用" if retired else "在用",
-            detail=f"重校验后 {len(broken)} 个配方不再通过" if broken else "配方重校验无影响",
+            detail=f"重校验后 {len(broken)} 个流程不再通过" if broken else "流程重校验无影响",
         )
         self.db.commit()
         return {"id": station_id, "retired": retired, "broken_recipes": broken}
@@ -579,7 +579,7 @@ class StationService:
     # ---------- 能力改停删 ----------
 
     def update_capability(self, capability_id: str, changes: dict, signature_id: str, user: User) -> dict:
-        """改能力定义。参数增删会改变所有引用配方的校验结果，所以要签名并当场重校验。"""
+        """改能力定义。参数增删会改变所有引用流程的校验结果，所以要签名并当场重校验。"""
         capability = self.capabilities.get(capability_id)
         if not capability:
             raise NotFound("能力不存在")
@@ -604,13 +604,13 @@ class StationService:
             signature_id=signature.id,
             detail=f"{'、'.join(changes)} 已更新"
                    + (f"；移除参数 {'、'.join(removed)}" if removed else "")
-                   + (f"；重校验后 {len(broken)} 个配方不再通过" if broken else ""),
+                   + (f"；重校验后 {len(broken)} 个流程不再通过" if broken else ""),
         )
         self.db.commit()
         return {"id": capability_id, "broken_recipes": broken}
 
     def set_capability_retired(self, capability_id: str, retired: bool, user: User) -> dict:
-        """停用能力：新配方不能再选它，已有配方与批次快照不受影响。"""
+        """停用能力：新流程不能再选它，已有流程与批次快照不受影响。"""
         capability = self.capabilities.get(capability_id)
         if not capability:
             raise NotFound("能力不存在")
@@ -618,13 +618,13 @@ class StationService:
         self.audit.record(
             user, "停用能力" if retired else "启用能力", f"{capability_id} {capability.name}",
             before="在用" if retired else "已停用", after="已停用" if retired else "在用",
-            detail="已有配方与批次快照不受影响，新建步骤时不再可选" if retired else "恢复可选",
+            detail="已有流程与批次快照不受影响，新建步骤时不再可选" if retired else "恢复可选",
         )
         self.db.commit()
         return {"id": capability_id, "retired": retired}
 
     def delete_capability(self, capability_id: str, user: User) -> dict:
-        """没有工位实现、也没有配方引用的能力可以删掉；否则只能停用。"""
+        """没有工位实现、也没有流程引用的能力可以删掉；否则只能停用。"""
         capability = self.capabilities.get(capability_id)
         if not capability:
             raise NotFound("能力不存在")
@@ -635,7 +635,7 @@ class StationService:
             raise StateConflict("能力不可删除", {"blocked": [{"key": "capability", "label": b} for b in blockers]})
         self.audit.record(
             user, "删除能力", f"{capability_id} {capability.name}", before="在用", after="已删除",
-            detail="无工位实现、无配方引用",
+            detail="无工位实现、无流程引用",
         )
         self.db.delete(capability)
         self.db.commit()

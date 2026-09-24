@@ -26,7 +26,7 @@ export function AlarmsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>报警中心</h1>
+        <h1>报警处理</h1>
         <span className="small muted">
           「确认」表示人员已知晓，异常状态仍保留；「关闭」要求设备侧条件已恢复。批次恢复评估另行进行。
         </span>

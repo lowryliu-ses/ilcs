@@ -11,7 +11,7 @@ from .base import Base, uid
 
 
 class Recipe(Base):
-    """方法与配方。steps 绑定能力而非设备；hard 为结构化硬时限。
+    """实验流程。steps 绑定能力而非设备；hard 为结构化硬时限。
 
     步骤字段：`step_id` 稳定不复用；`kind` 见 `domain/steps.KINDS`（设备、人工、等待、审核、质检关卡、
     样本拆分、条件分支、子流程、消息通知）；`dur` 预期时长；`after` / `when` 依赖与分支出口；
@@ -80,7 +80,7 @@ class Plan(Base):
     reject_reason: Mapped[str] = mapped_column(Text, default="")
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     # 显式设计点：每项是与 factors 对齐的一组水平。非空时条件就是这些点，不再做全因子组合——
-    # 优化器提出的下一轮配方是一组离散的点，不是网格
+    # 优化器提出的下一轮流程是一组离散的点，不是网格
     design_points: Mapped[list] = mapped_column(JSON, default=list)
     # 设计空间：{"bounds": {因子名: {"min", "max"}}, "forbidden": [{因子名: 水平}], "max_points": N}。
     # 随方案审批冻结；外部提案超出它一律拒绝

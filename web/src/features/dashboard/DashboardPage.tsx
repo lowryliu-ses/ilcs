@@ -211,7 +211,7 @@ export function DashboardPage() {
             <thead>
               <tr>
                 <th>批次</th>
-                <th>配方</th>
+                <th>流程</th>
                 <th>状态</th>
                 <th>当前工位</th>
                 <th>进度</th>
@@ -413,7 +413,7 @@ export function DashboardPage() {
             <thead>
               <tr>
                 <th>批次</th>
-                <th>方法</th>
+                <th>流程</th>
                 <th className="num">结果 / 待复核 / 可用</th>
                 <th />
               </tr>
@@ -470,7 +470,7 @@ function KpiSection() {
   if (!data) return null;
   const busiest = [...data.utilization.stations].sort((a, b) => b.utilization - a.utilization || b.planned_load - a.planned_load).slice(0, 6);
   return (
-    <Panel title="运行指标（最近 24 小时）" aside={<Link to="/exceptions" className="small">异常中心</Link>}>
+    <Panel title="运行指标（最近 24 小时）" aside={<Link to="/exceptions" className="small">异常处理</Link>}>
       <div className="metrics">
         <Metric
           label="实验运行"
