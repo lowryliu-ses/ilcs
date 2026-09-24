@@ -13,8 +13,9 @@ from .base import Base, uid
 class Recipe(Base):
     """方法与配方。steps 绑定能力而非设备；hard 为结构化硬时限。
 
-    步骤字段：`step_id` 稳定不复用、`kind` ∈ device|manual|wait|review、
-    `dur` 预期时长、`resource` 资源需求、`inputs`/`outputs`、`timeout`。
+    步骤字段：`step_id` 稳定不复用；`kind` 见 `domain/steps.KINDS`（设备、人工、等待、审核、质检关卡、
+    样本拆分、条件分支、子流程、消息通知）；`dur` 预期时长；`after` / `when` 依赖与分支出口；
+    `timeout` 步骤级超时；`method` 引用的设备方法；`environment` 环境要求；`resource` 资源需求。
     """
 
     __tablename__ = "recipes"
