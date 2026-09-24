@@ -7,7 +7,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import { useSession } from '../../shared/session';
 import type {
-  BatchDetail, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
+  BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
 import { FlowGraph, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
@@ -408,6 +408,8 @@ export function BatchDetailPage() {
       </div>
 
       <div className="grid cols-2">
+        <BatchExceptions batchId={batchId} />
+
         <Panel title="报警" flush>
           {data.alarms.length ? (
             <table>
@@ -1859,5 +1861,39 @@ function FlowRecovery({
         <div className="tiny muted">存在没有结论的设备指令，先完成现场核查才能从指定节点重做。</div>
       )}
     </div>
+  );
+}
+
+
+/* 本批次的异常事件：自动处理做了什么、结果如何、最终怎么收尾。处理入口在异常中心。 */
+function BatchExceptions({ batchId }: { batchId: string }) {
+  const events = useQuery<ExceptionEventRow[]>(`exceptions:batch:${batchId}`, () =>
+    api.get<ExceptionEventRow[]>(`/exceptions?batch_id=${batchId}`), 15000,
+  );
+  if (!events.data?.length) return null;
+  return (
+    <Panel title={`异常事件（${events.data.length}）`} aside={<Link to="/exceptions" className="small">异常中心</Link>} flush>
+      <table>
+        <tbody>
+          {events.data.map((row) => (
+            <tr key={row.id}>
+              <td className="small mono">{time(row.created_at)}</td>
+              <td>
+                <span className="tag">{row.category_label}</span>
+                {row.step_index >= 0 ? <span className="tiny muted"> 第 {row.step_index + 1} 步</span> : null}
+                <div className="tiny muted">{row.message}</div>
+              </td>
+              <td className="small">
+                {row.auto_action ? `${row.auto_action_label}：${row.auto_result}` : row.decision}
+                {row.final_result ? <div className="tiny muted">最终：{row.final_result}</div> : null}
+              </td>
+              <td>
+                <Pill state={{ open: 'fault', manual: 'paused', auto_resolved: 'running' }[row.state] ?? 'done'} label={row.state_label} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Panel>
   );
 }

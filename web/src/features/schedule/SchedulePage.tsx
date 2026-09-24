@@ -5,7 +5,7 @@ import { api } from '../../shared/api';
 import { clock, dateOf, minutes } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { Gate, OptimizePreview, QueueRow, ScheduleBoard } from '../../shared/types';
+import type { Gate, OptimizePreview, QueueRow, ScheduleBoard, ScheduleProposalRow } from '../../shared/types';
 import { Empty, GateBanner, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 const LANE_MINUTES = 8 * 60;
@@ -16,11 +16,13 @@ function ScheduledBatches({
   gateOpen,
   can,
   onUnschedule,
+  onPropose,
 }: {
   board: ScheduleBoard | undefined;
   gateOpen: boolean;
   can: boolean;
   onUnschedule: { run: (batchId: string) => Promise<unknown>; pending: boolean };
+  onPropose: (batchId: string) => void;
 }) {
   const toast = useToast();
   const rows = useMemo(() => {
@@ -80,8 +82,13 @@ function ScheduledBatches({
                     取消排程
                   </button>
                 ) : (
-                  <span className="tiny muted">{row.state === 'scheduled' ? '无排程权限' : '已下发，只能终止'}</span>
+                  <span className="tiny muted">{row.state === 'scheduled' ? '无排程权限' : '已下发'}</span>
                 )}
+                {can ? (
+                  <button className="btn sm" title="重排还没开始的步骤：先生成建议，确认后写入" onClick={() => onPropose(row.batch_id)}>
+                    重排建议
+                  </button>
+                ) : null}
               </td>
             </tr>
           ))}
@@ -99,13 +106,30 @@ export function SchedulePage() {
   const gate = useQuery<Gate>('gate', () => api.get<Gate>('/gate'), 15000);
   const [selected, setSelected] = useState<string[]>([]);
   const [preview, setPreview] = useState<OptimizePreview | null>(null);
+  const [mode, setMode] = useState<OptimizePreview['mode']>('optimize');
+  const proposals = useQuery<ScheduleProposalRow[]>(
+    'schedule:proposals', () => api.get<ScheduleProposalRow[]>('/schedule/proposals?state=pending'), 15000,
+  );
+  const proposalInvalidates = ['schedule', 'batches', 'dashboard', 'audit'];
+  const applyProposal = useMutation((id: string) => api.post(`/schedule/proposals/${id}/apply`), {
+    invalidates: proposalInvalidates,
+    onSuccess: () => toast.push('已按重排建议写入时间线'),
+  });
+  const dismissProposal = useMutation((id: string) => api.post(`/schedule/proposals/${id}/dismiss`, { note: '调度驳回' }), {
+    invalidates: proposalInvalidates,
+    onSuccess: () => toast.push('已驳回重排建议'),
+  });
+  const requestProposal = useMutation(
+    (ids: string[]) => api.post<ScheduleProposalRow>('/schedule/proposals', { batch_ids: ids, reason: '调度请求重排' }),
+    { invalidates: proposalInvalidates, onSuccess: () => toast.push('已生成重排建议，确认后写入') },
+  );
 
   const schedule = useMutation((batchId: string) => api.post(`/batches/${batchId}/schedule`, {}, true), {
     invalidates: ['schedule', 'batches', 'dashboard'],
     onSuccess: () => toast.push('已写入步骤级分配'),
   });
 
-  const optimize = useMutation((ids: string[]) => api.post<OptimizePreview>('/schedule/optimize', { batch_ids: ids }), {
+  const optimize = useMutation((ids: string[]) => api.post<OptimizePreview>('/schedule/optimize', { batch_ids: ids, mode }), {
     invalidates: [],
     onSuccess: setPreview,
   });
@@ -143,14 +167,22 @@ export function SchedulePage() {
         <h1>排程</h1>
         <div className="row">
           {can('batch.schedule') ? (
-            <button
-              className="btn"
-              disabled={selected.length < 2 || optimize.pending}
-              title={selected.length < 2 ? '勾选 2 个以上待排程批次' : undefined}
-              onClick={() => optimize.run(selected).catch((error) => toast.push(error.message))}
-            >
-              优化排程（{selected.length}）
-            </button>
+            <>
+              <select value={mode} onChange={(event) => setMode(event.target.value as OptimizePreview['mode'])} title="排程模式">
+                <option value="optimize">优化：先保交付期，再缩短总跨度</option>
+                <option value="deadline">截止时间优先（EDD）</option>
+                <option value="priority">优先级优先</option>
+                <option value="fifo">先进先出</option>
+              </select>
+              <button
+                className="btn"
+                disabled={selected.length < 2 || optimize.pending}
+                title={selected.length < 2 ? '勾选 2 个以上待排程批次' : undefined}
+                onClick={() => optimize.run(selected).catch((error) => toast.push(error.message))}
+              >
+                按所选模式排程（{selected.length}）
+              </button>
+            </>
           ) : null}
           <span className="small muted">时间轴起点 {clock(origin.toISOString())}，跨度 8 h</span>
         </div>
@@ -164,7 +196,21 @@ export function SchedulePage() {
         </div>
       ) : null}
 
-      <ScheduledBatches board={board.data} gateOpen={!!gate.data?.open} can={can('batch.schedule')} onUnschedule={unschedule} />
+      <ProposalsPanel
+        rows={proposals.data ?? []}
+        can={can('batch.schedule')}
+        pending={applyProposal.pending || dismissProposal.pending}
+        onApply={(id) => applyProposal.run(id).catch((error) => toast.push(error.message))}
+        onDismiss={(id) => dismissProposal.run(id).catch((error) => toast.push(error.message))}
+      />
+
+      <ScheduledBatches
+        board={board.data}
+        gateOpen={!!gate.data?.open}
+        can={can('batch.schedule')}
+        onUnschedule={unschedule}
+        onPropose={(id) => requestProposal.run([id]).catch((error) => toast.push(error.message))}
+      />
 
       <Panel title="步骤级资源泳道" flush>
         <div className="lanes">
@@ -210,6 +256,7 @@ export function SchedulePage() {
                 <th>批次</th>
                 <th>配方</th>
                 <th className="num">优先级</th>
+                <th>交付期</th>
                 <th>可排程</th>
                 <th>路径预览</th>
                 <th />
@@ -241,6 +288,7 @@ export function SchedulePage() {
                     <div className="tiny muted mono">v{row.version} · {row.plan_id}</div>
                   </td>
                   <td className="num">{row.priority}</td>
+                  <td className="small mono">{row.due_at ? clock(row.due_at) : '—'}</td>
                   <td>
                     <Pill state={row.schedulable ? 'running' : 'fault'} label={row.schedulable ? '可排程' : '阻塞'} />
                     {row.blocker ? <div className="tiny bad-text">{row.blocker}</div> : null}
@@ -295,8 +343,10 @@ export function SchedulePage() {
             {preview.method === 'local_search'
               ? `迭代局部搜索评估了 ${preview.evaluated} 个候选顺序（${preview.elapsed_ms ?? 0} ms）`
               : `穷举全部 ${preview.evaluated} 个候选顺序`}
-            ，先比总跨度、再比按优先级加权的完成时间。每个候选都由同一个排程器生成时间窗，约束（通道、预约、转运、
-            硬时限、依赖）与单批排程完全一致。方案只在确认后写入，下发仍需逐批次开跑检查与电子签名。
+            ，先比按优先级加权的交付期拖期，再比总跨度与加权完成时间（模式：{
+              { optimize: '优化', deadline: '截止时间优先', priority: '优先级优先', fifo: '先进先出' }[preview.mode]
+            }）。每个候选都由同一个排程器生成时间窗，约束（通道、预约、转运、硬时限、依赖、任务先后）与单批排程完全一致。
+            方案只在确认后写入，下发仍需逐批次开跑检查与电子签名。
           </div>
           {preview.solver ? (
             <div className="small muted">
@@ -335,6 +385,28 @@ export function SchedulePage() {
               </tr>
             </tbody>
           </table>
+          {Object.values(preview.due ?? {}).some(Boolean) ? (
+            <table>
+              <thead>
+                <tr>
+                  <th>批次</th>
+                  <th>交付期</th>
+                  <th className="num">拖期</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.best.order.map((batchId) => (
+                  <tr key={batchId}>
+                    <td className="mono">{batchId}</td>
+                    <td className="small mono">{preview.due[batchId] ? clock(preview.due[batchId]) : '—'}</td>
+                    <td className={`num${(preview.best.lateness?.[batchId] ?? 0) > 0 ? ' bad-text' : ''}`}>
+                      {preview.due[batchId] ? `${preview.best.lateness?.[batchId] ?? 0} min` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
           <div className="small muted">
             {preview.improvement_min !== null && preview.improvement_min > 0
               ? `相比基线缩短 ${preview.improvement_min} min。`
@@ -343,5 +415,82 @@ export function SchedulePage() {
         </Modal>
       ) : null}
     </div>
+  );
+}
+
+
+/* 重排建议：工位不可用、指令故障、紧急插单、人工请求时生成。确认前不改时间线；
+   生成后时间线被改过、或又有步骤开出，应用时会被判为过期。 */
+function ProposalsPanel({
+  rows,
+  can,
+  pending,
+  onApply,
+  onDismiss,
+}: {
+  rows: ScheduleProposalRow[];
+  can: boolean;
+  pending: boolean;
+  onApply: (id: string) => void;
+  onDismiss: (id: string) => void;
+}) {
+  if (!rows.length) return null;
+  return (
+    <Panel title={`待确认的重排建议（${rows.length}）`} flush>
+      <table>
+        <thead>
+          <tr>
+            <th>触发</th>
+            <th>影响的批次</th>
+            <th>排不下</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td>
+                <b>{row.trigger_label}</b>
+                <div className="tiny muted">{row.reason}</div>
+                <div className="tiny muted mono">{clock(row.created_at)}</div>
+              </td>
+              <td className="small">
+                {Object.entries(row.impact).map(([batchId, change]) => (
+                  <div key={batchId}>
+                    <Link to={`/batches/${batchId}`} className="mono">
+                      {batchId}
+                    </Link>{' '}
+                    自第 {change.from_step + 1} 步 · 完成 {clock(change.old_end)} → {clock(change.new_end)}
+                    {change.delay_min ? (
+                      <span className={change.delay_min > 0 ? 'bad-text' : 'ok-text'}>
+                        （{change.delay_min > 0 ? '+' : ''}
+                        {change.delay_min} min）
+                      </span>
+                    ) : null}
+                    {change.late_min ? <span className="bad-text"> 超交付期 {change.late_min} min</span> : null}
+                    {change.moved.length ? <div className="tiny muted">{change.moved.join('；')}</div> : null}
+                  </div>
+                ))}
+              </td>
+              <td className="small bad-text">
+                {row.unplanned.map((item) => `${item.batch_id}：${item.reason}`).join('；') || <span className="muted">—</span>}
+              </td>
+              <td className="row-end">
+                {can ? (
+                  <>
+                    <button className="btn sm" disabled={pending} onClick={() => onDismiss(row.id)}>
+                      驳回
+                    </button>
+                    <button className="btn sm primary" disabled={pending || !Object.keys(row.after).length} onClick={() => onApply(row.id)}>
+                      确认写入
+                    </button>
+                  </>
+                ) : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Panel>
   );
 }

@@ -17,6 +17,7 @@ import { PlanDetailPage } from '../features/plans/PlanDetailPage';
 import { PlansPage } from '../features/plans/PlansPage';
 import { RecipeDetailPage } from '../features/recipes/RecipeDetailPage';
 import { RecipeEditorPage } from '../features/recipes/RecipeEditorPage';
+import { ExceptionsPage } from '../features/exceptions/ExceptionsPage';
 import { RecipesPage } from '../features/recipes/RecipesPage';
 import { ReportsPage } from '../features/reports/ReportsPage';
 import { ResultsPage } from '../features/results/ResultsPage';
@@ -38,7 +39,7 @@ import type { Dashboard, Gate } from '../shared/types';
 const NAV: [string, [string, string][]][] = [
   ['概览', [['/dashboard', '工作台']]],
   ['设计', [['/plans', '实验方案'], ['/recipes', '方法与配方'], ['/sops', 'SOP']]],
-  ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心']]],
+  ['执行', [['/floor', '现场总览'], ['/tasks', '任务中心'], ['/schedule', '排程'], ['/batches', '批次'], ['/alarms', '报警中心'], ['/exceptions', '异常中心']]],
   ['科学数据', [['/samples', '样本中心'], ['/data-review', '数据审核'], ['/results', '结果分析'], ['/reports', '报告']]],
   ['资源', [['/assets', '仪器设备'], ['/stations', '工位与能力'], ['/materials', '试剂耗材'], ['/people', '人员与资质']]],
   ['治理', [['/metrics', '指标定义'], ['/audit', '审计记录'], ['/governance', '系统治理']]],
@@ -59,7 +60,8 @@ export function App() {
   const counts = counters.data?.counts;
   const badges: Record<string, number | undefined> = {
     '/alarms': counts?.open_alarms,
-    '/schedule': counts?.planned,
+    '/exceptions': counts?.open_exceptions,
+    '/schedule': (counts?.planned ?? 0) + (counts?.pending_proposals ?? 0),
     '/recipes': counts?.recipes_in_review,
     '/plans': counts?.plans_in_review,
     '/batches': counts?.held,
@@ -70,7 +72,7 @@ export function App() {
     '/assets': counts?.unavailable_assets,
     '/materials': counts?.expiring_lots,
   };
-  const hot = new Set(['/alarms', '/people', '/materials', '/assets']);
+  const hot = new Set(['/alarms', '/exceptions', '/people', '/materials', '/assets']);
 
   return (
     <div className="shell">
@@ -152,6 +154,7 @@ export function App() {
           <Route path="/schedule" element={<SchedulePage />} />
           <Route path="/batches" element={<BatchesPage />} />
           <Route path="/batches/:batchId" element={<BatchDetailPage />} />
+          <Route path="/exceptions" element={<ExceptionsPage />} />
           <Route path="/samples" element={<SamplesPage />} />
           <Route path="/samples/:sampleId" element={<SampleDetailPage />} />
           <Route path="/data-review" element={<DataReviewPage />} />

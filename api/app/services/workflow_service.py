@@ -755,6 +755,9 @@ class WorkflowService:
         batch.held_at = batch.held_at or now()
         batch.failure_reason = f"质检关卡待人工判断：{reason}"
         self._gate_alarm(batch, run, batch.failure_reason, "QA 在批次页对该关卡签名放行或判为不合格。")
+        from .exception_service import ExceptionService
+
+        ExceptionService(self.db, self.ctx).on_hold(batch, run, "gate", batch.failure_reason)
         return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_decision": True}
 
     def _gate_alarm(self, batch: Batch, run: StepRun, message: str, response: str) -> None:
@@ -792,6 +795,9 @@ class WorkflowService:
         from .alarm_service import AlarmService
 
         AlarmService(self.db, self.ctx).resolve_condition(f"gate:{run.id}", f"QA 判定：{conclusion}；{reason}")
+        from .exception_service import ExceptionService
+
+        ExceptionService(self.db, self.ctx).settle_batch(batch, f"QA 质检判定 {conclusion}：{reason}", user)
         run.form_data = {**(run.form_data or {}), "decision": conclusion, "decision_reason": reason,
                          "decided_by": user.id}
         run.reviewed_by = user.id
@@ -928,11 +934,14 @@ class WorkflowService:
         batch.held_at = batch.held_at or now()
         batch.failure_reason = f"条件分支待人工选择：{reason}"
         batch.current_step = run.step_index
-        AlarmService(self.db, self.ctx).raise_alarm(
+        alarm = AlarmService(self.db, self.ctx).raise_alarm(
             severity=2, source_type="batch", source_id=batch.id, message=batch.failure_reason[:500],
             response="在批次页为该分支选择出口并签名；选择后批次继续。", owner="QA", origin="system",
             condition_key=f"branch:{run.id}",
         )
+        from .exception_service import ExceptionService
+
+        ExceptionService(self.db, self.ctx).on_hold(batch, run, "branch", batch.failure_reason, alarm.id)
         return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_decision": True}
 
     def decide_branch(self, step_run_id: str, payload: dict, user: User) -> dict:
@@ -983,7 +992,10 @@ class WorkflowService:
             before="待选择", after=case_label(step, case), detail=f"{step.get('name')}：{reason}",
         )
         if held:
+            from .exception_service import ExceptionService
+
             AlarmService(self.db, self.ctx).resolve_condition(f"branch:{run.id}", f"人工选择出口 {case}：{reason}")
+            ExceptionService(self.db, self.ctx).settle_batch(batch, f"QA 选择分支出口「{case_label(step, case)}」：{reason}", user)
             batch.state = "running"
             batch.held_at = None
             batch.failure_reason = ""
@@ -1104,6 +1116,9 @@ class WorkflowService:
                     batch.id, run.id, "timeout", f"timeout:{run.id}:{run.attempt}",
                     {"action": action, "reason": reason}, org_id=batch.org_id,
                 )
+            from .exception_service import ExceptionService
+
+            ExceptionService(self.db, self.ctx).on_step_timeout(batch, run, action, reason)
             handled += 1
         return handled
 
@@ -1166,9 +1181,12 @@ class WorkflowService:
                 child.flag_note = "所属拆分步骤被质检返工作废"
 
     def finish_batch(self, batch: Batch, user: User | None = None, detail: str = "") -> None:
+        from .exception_service import ExceptionService
+
         before = "运行中" if batch.state == "running" else batch.state
         batch.state = "done"
         batch.held_at = None
+        ExceptionService(self.db, self.ctx).settle_batch(batch, "批次运行完成", user)
         self.audit.record(
             user, "批次完成", batch.id, before=before, after="已完成",
             detail=detail or (

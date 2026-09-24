@@ -387,6 +387,20 @@ class AbortIn(Signed):
 class OptimizeIn(BaseModel):
     batch_ids: list[str]
     start_from: datetime | None = None
+    # optimize（先按交付期拖期、再按总跨度搜索顺序）/ priority / deadline / fifo；缺省取部署配置
+    mode: Literal["optimize", "priority", "deadline", "fifo"] | None = None
+
+
+class ProposalRequestIn(BaseModel):
+    """人工请求重排建议：选中的批次，或某台工位（标为不用）上的全部批次。"""
+
+    batch_ids: list[str] = []
+    station_id: str = ""
+    reason: str = ""
+
+
+class ProposalDismissIn(BaseModel):
+    note: str = ""
 
 
 class ApplyOptimizedIn(BaseModel):
@@ -436,6 +450,25 @@ class BatchSignalIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     event_id: str = ""
     payload: dict[str, Any] = {}
+
+
+class ExceptionHandleIn(BaseModel):
+    action: Literal["claim", "resolve", "close"]
+    note: str = ""
+
+
+class ExceptionRuleIn(BaseModel):
+    """异常策略：某类异常用什么动作处理。match 可按 capability / station_id / step_kind / recipe_id / step_id 细分。"""
+
+    name: str
+    category: str
+    action: Literal["retry", "reroute", "skip", "reschedule", "hold"]
+    match: dict[str, Any] = {}
+    params: dict[str, Any] = {}
+    priority: int = Field(default=100, ge=0, le=10000)
+    enabled: bool = True
+    note: str = ""
+    row_version: int | None = None
 
 
 class StepReviewIn(Versioned):

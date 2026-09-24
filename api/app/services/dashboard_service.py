@@ -58,6 +58,20 @@ class DashboardService:
         self.task_service = TaskService(db, ctx)
         self.workflow = WorkflowService(db, ctx)
 
+    def _open_exceptions(self) -> int:
+        from ..models import ExceptionEvent
+
+        return self.db.query(ExceptionEvent).filter(
+            ExceptionEvent.org_id == self.ctx.org_id, ExceptionEvent.state.in_(["open", "manual"]),
+        ).count()
+
+    def _pending_proposals(self) -> int:
+        from ..models import ScheduleProposal
+
+        return self.db.query(ScheduleProposal).filter(
+            ScheduleProposal.org_id == self.ctx.org_id, ScheduleProposal.state == "pending",
+        ).count()
+
     def overview(self, user: User) -> dict:
         batches = self.batches.list()
         active = [b for b in batches if b.state not in {"done", "aborted"}]
@@ -113,6 +127,8 @@ class DashboardService:
                 "expiring_lots": len([row for row in expiring_lots if row["expired"]]),
                 "unavailable_assets": len(unavailable_assets),
                 "official_results_today": self._official_results_today(),
+                "open_exceptions": self._open_exceptions(),
+                "pending_proposals": self._pending_proposals(),
             },
             "my_tasks": my_tasks[:8],
             "pending_accept": pending_accept[:8],

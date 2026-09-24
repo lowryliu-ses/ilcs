@@ -12,6 +12,7 @@ from .identity_service import user_may
 
 STATE_LABEL = {"active": "未确认", "acked": "已确认", "shelved": "已搁置", "closed": "已关闭"}
 SEVERITY_LABEL = {1: "紧急", 2: "高", 3: "中", 4: "低"}
+from ..domain.exceptions import CATEGORIES as CATEGORY_LABEL  # noqa: E402
 
 
 class AlarmService:
@@ -40,6 +41,8 @@ class AlarmService:
             "raised_at": alarm.raised_at.isoformat(timespec="seconds"),
             "origin": alarm.origin,
             "condition_key": alarm.condition_key,
+            "category": alarm.category,
+            "category_label": CATEGORY_LABEL.get(alarm.category, ""),
         }
 
     def list(self) -> list[dict]:
@@ -62,11 +65,14 @@ class AlarmService:
         from sqlalchemy.exc import IntegrityError
 
         for _ in range(5):
+            from ..domain.exceptions import classify_condition
+
             alarm = Alarm(
                 id=self.alarms.next_id(), severity=severity, source_type=source_type,
                 source_id=source_id, message=message, response=response, owner=owner,
                 raised_at=now(), origin=origin, condition_key=condition_key,
                 org_id=self.ctx.org_id if self.ctx else "",
+                category=classify_condition(condition_key, message),
             )
             try:
                 # 编号按现有最大号 + 1；并发撞号时在保存点里重试，不连带回滚调用方的事务

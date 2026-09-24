@@ -53,7 +53,9 @@ export function AlarmsPage() {
                   </td>
                   <td>
                     <span className="mono">{alarm.id}</span>
-                    <div className="small">{alarm.message}</div>
+                    <div className="small">
+                      {alarm.category_label ? <span className="tag">{alarm.category_label}</span> : null} {alarm.message}
+                    </div>
                     <div className="tiny muted">{clock(alarm.raised_at)} · 责任 {alarm.owner || '未指派'}</div>
                   </td>
                   <td className="small mono">

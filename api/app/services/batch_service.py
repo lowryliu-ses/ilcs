@@ -1315,10 +1315,16 @@ class BatchService:
                 )
             ),
         )
+        self._settle_exceptions(batch, f"恢复评估：{option['label']}", user)
         self.db.commit()
         return self.summary_out(batch)
 
     # ---------- 跳过与从指定节点重做 ----------
+
+    def _settle_exceptions(self, batch: Batch, final: str, user: User | None) -> None:
+        from .exception_service import ExceptionService
+
+        ExceptionService(self.db, self.ctx).settle_batch(batch, final, user)
 
     def _step_index(self, batch: Batch, step_id: str) -> int:
         steps = self.steps_of(batch)
@@ -1439,6 +1445,7 @@ class BatchService:
             ),
         )
         self.db.flush()
+        self._settle_exceptions(batch, f"人工跳过第 {index + 1} 步：{reason}", user)
         outcome = self.workflow._advance(skipped, batch)
         self.db.commit()
         return {**self.summary_out(batch), "advance": outcome}
@@ -1513,6 +1520,7 @@ class BatchService:
                 + (f"；将重新执行的设备步骤：{'、'.join(dict.fromkeys(rerun_devices))}" if rerun_devices else "")
             ),
         )
+        self._settle_exceptions(batch, f"从第 {index + 1} 步重做：{reason}", user)
         self.db.commit()
         return {**self.summary_out(batch), "advance": outcome}
 
@@ -1679,6 +1687,7 @@ class BatchService:
         # 终止只自动释放未领用未消耗部分；已领用的生成归还或处置待办
         material = self.materials.release_reservations(batch.id, user)
         pending = material.get("pending_return") or []
+        self._settle_exceptions(batch, f"批次终止：{reason or '人工终止'}", user)
 
         if batch.state in UNDISPATCHED:
             batch.state = "aborted"

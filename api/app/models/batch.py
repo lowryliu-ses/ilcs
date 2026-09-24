@@ -115,3 +115,31 @@ class Result(Base):
     checksum: Mapped[str] = mapped_column(String, default="")
     parser_version: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ScheduleProposal(Base):
+    """重排建议。设备故障 / 失联、紧急插单、指令故障、人工请求时生成，调度确认后才写进时间线。
+
+    before / after 按批次记下重排前后的设备时间窗，impact 记每个批次的完成时间变化与换了哪些工位。
+    应用时核对 before：生成建议之后时间线被别人改过，建议作废（stale），不按过期的判断写入。
+    """
+
+    __tablename__ = "schedule_proposals"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # station_condition | command_fault | priority_insert | manual
+    trigger: Mapped[str] = mapped_column(String, default="manual")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    station_id: Mapped[str] = mapped_column(String, default="")
+    # pending | applied | dismissed | stale | failed
+    state: Mapped[str] = mapped_column(String, default="pending", index=True)
+    batch_ids: Mapped[list] = mapped_column(JSON, default=list)
+    before: Mapped[dict] = mapped_column(JSON, default=dict)
+    after: Mapped[dict] = mapped_column(JSON, default=dict)
+    impact: Mapped[dict] = mapped_column(JSON, default=dict)
+    unplanned: Mapped[list] = mapped_column(JSON, default=list)
+    auto_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    decided_by: Mapped[str] = mapped_column(String, default="")
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")

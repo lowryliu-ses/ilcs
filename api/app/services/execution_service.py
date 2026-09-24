@@ -535,7 +535,7 @@ class ExecutionService:
             run.state = "unknown"
             run.reason = reason
             run.row_version = int(run.row_version or 0) + 1
-        self.alarms.raise_alarm(
+        alarm = self.alarms.raise_alarm(
             severity=2, source_type="batch", source_id=batch.id, message=reason,
             response=(
                 "到现场核实设备实态，在批次页对结果未知的指令下核查结论；"
@@ -547,6 +547,13 @@ class ExecutionService:
             None, "指令结果未知", command.id, before="running", after="unknown",
             detail=f"{reason}；投递状态 {delivery}", command_id=command.id,
         )
+        if batch.state not in {"done", "aborted"}:
+            # 异常引擎：登记影响面，按策略库决定——指令从未送达设备时才可能自动重试 / 改派 / 跳过
+            from .exception_service import ExceptionService
+
+            event = ExceptionService(self.db, self.ctx).on_command_fault(batch, command, reason, delivery)
+            if event is not None:
+                event.alarm_id = alarm.id
 
 
 class ExecutorLoop:

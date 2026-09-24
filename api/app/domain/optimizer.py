@@ -9,7 +9,8 @@
 - 批次多时用迭代局部搜索：几种构造规则起步，反复做「取出一个批次插到别处」的改进，
   卡住后随机扰动再搜，直到时间或次数预算用完。随机种子固定，同样的输入给同样的结果。
 
-目标：先比总跨度（最后一个设备步骤结束），再比加权完成时间（优先级高的批次早完成更好）。
+目标：先比按优先级加权的拖期（完成晚于任务期望完成时间），再比总跨度（最后一个设备步骤结束），
+最后比加权完成时间（优先级高的批次早完成更好）。没有交付期时拖期恒为 0，退回原来的两级比较。
 可选的 CP-SAT 求解器（`domain/cpsat.py`）另给一个下界与候选顺序，见服务层。
 """
 from __future__ import annotations
@@ -31,10 +32,15 @@ class Candidate:
     weighted_min: float = float("inf")
     reason: str = ""
     payload: dict = field(default_factory=dict, compare=False, hash=False)
+    # 按优先级加权的拖期（完成晚于任务期望完成时间的分钟数之和）；没有交付期时为 0
+    tardiness_min: float = 0.0
 
     @property
-    def key(self) -> tuple[float, float]:
-        return (self.span_min, self.weighted_min) if self.ok else (float("inf"), float("inf"))
+    def key(self) -> tuple[float, float, float]:
+        """先比拖期（交付期是对外承诺），再比总跨度，最后比加权完成时间。"""
+        if not self.ok:
+            return (float("inf"), float("inf"), float("inf"))
+        return (self.tardiness_min, self.span_min, self.weighted_min)
 
 
 Evaluate = Callable[[tuple[str, ...]], Candidate]

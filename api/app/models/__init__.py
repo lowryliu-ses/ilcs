@@ -1,8 +1,10 @@
 from .base import Base, uid
-from .batch import Allocation, AnalysisTask, Batch, Result, Sample
+from .batch import Allocation, AnalysisTask, Batch, Result, Sample, ScheduleProposal
 from .execution import AdapterExecution, Checkpoint, Command, ExecutorHeartbeat, Telemetry
 from .file import FileObject
-from .governance import AccessLog, Alarm, AuditEvent, IdempotencyKey, PlanBatchLink
+from .governance import (
+    AccessLog, Alarm, AuditEvent, ExceptionEvent, ExceptionRule, IdempotencyKey, PlanBatchLink,
+)
 from .identity import ESignature, RolePermissionSet, User, roles_of
 from .labware import Labware, LabwareMove, LabwareType, Location
 from .material import (
@@ -34,4 +36,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
+    "ExceptionEvent", "ExceptionRule", "ScheduleProposal",
 ]

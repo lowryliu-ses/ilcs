@@ -30,6 +30,8 @@ from .gate_service import GateService
 from .material_service import MaterialService
 
 HELD_STATES = {"paused", "fault"}
+# 排程模式：optimize 先按交付期拖期、再按总跨度与加权完成时间搜索顺序；其余按规则直接给顺序
+MODES = ("optimize", "priority", "deadline", "fifo")
 RESCHEDULABLE = {"planned", "scheduled", "running", "paused", "fault"}
 SCHEDULE_LOCK = "schedule:allocations"
 
@@ -215,7 +217,9 @@ class ScheduleService:
 
     # ---------- 写 ----------
 
-    def schedule(self, batch: Batch, start_from: datetime | None, prefer: str | None, user: User) -> list[Allocation]:
+    def schedule(
+        self, batch: Batch, start_from: datetime | None, prefer: str | None, user: User, *, allow_proposals: bool = True,
+    ) -> list[Allocation]:
         self.gate.require_open()
         lock_schedule(self.db)
         start_from = as_utc(start_from)
@@ -285,7 +289,35 @@ class ScheduleService:
             ),
         )
         self.db.flush()
+        if allow_proposals:
+            self._urgent_insert(batch, max(item.ends_at for item in work) if work else None)
         return rows
+
+    def _urgent_insert(self, batch: Batch, planned_end: datetime | None) -> None:
+        """紧急插单：最高优先级批次按现有时间线赶不上交付期时，生成一份让低优先级未下发批次让路的重排建议。"""
+        task = self._task_of(batch)
+        if batch.priority != 1 or planned_end is None or task is None or not task.due_at or planned_end <= task.due_at:
+            return
+        stations = {a.station_id for a in self.allocations.for_batch(batch.id) if a.kind == WORK}
+        others = {
+            row.batch_id for row in self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id)
+            .filter(
+                Allocation.station_id.in_(list(stations) or [""]), Allocation.starts_at > now(),
+                Batch.state == "scheduled", Batch.priority > 1, Batch.org_id == self.ctx.org_id,
+            ).all()
+        }
+        if not others:
+            return
+        from .reschedule_service import RescheduleService
+
+        RescheduleService(self.db, self.ctx).propose(
+            trigger="priority_insert",
+            reason=(
+                f"{batch.id}（优先级 1）按现有时间线 {planned_end:%m-%d %H:%M} 完成，晚于交付期 "
+                f"{task.due_at:%m-%d %H:%M}：建议让低优先级未下发批次让路"
+            ),
+            batch_ids=[batch.id, *sorted(others)],
+        )
 
     # ---------- 读 ----------
 
@@ -348,6 +380,10 @@ class ScheduleService:
                     "recipe": batch.recipe_snapshot.get("name"),
                     "version": batch.recipe_snapshot.get("version"),
                     "priority": batch.priority,
+                    "due_at": (
+                        task.due_at.isoformat(timespec="minutes")
+                        if (task := self._task_of(batch)) is not None and task.due_at else None
+                    ),
                     "plan_id": batch.plan_id,
                     "material_ok": material_ok,
                     "schedulable": preview["ok"],
@@ -452,7 +488,7 @@ class ScheduleService:
                 active.append((second, second_org))
         return found
 
-    def optimize_preview(self, batch_ids: list[str], start_from: datetime | None = None) -> dict:
+    def optimize_preview(self, batch_ids: list[str], start_from: datetime | None = None, mode: str | None = None) -> dict:
         """多批次优化预览：搜索批次投产顺序，每个候选都由同一个排程器解码并校验约束。
 
         批次不多时穷举；多时迭代局部搜索（`domain/optimizer.py`）。装了 OR-Tools 时再用 CP-SAT
@@ -471,6 +507,10 @@ class ScheduleService:
         by_id = {b.id: b for b in batches}
         steps_by_batch = {b.id: normalize(b.recipe_snapshot.get("steps") or []) for b in batches}
         weight = {b.id: max(1, 4 - int(b.priority or 2)) for b in batches}
+        mode = (mode or settings.scheduler_mode or "optimize").strip().lower()
+        if mode not in MODES:
+            raise StateConflict(f"排程模式只能是 {'、'.join(MODES)}", code="schedule_mode_invalid")
+        due = {b.id: (task.due_at if (task := self._task_of(b)) is not None else None) for b in batches}
         # 任务依赖：所选批次之间的先后必须保持；所选之外的上游给出固定的最早开工时刻
         from ..domain import tasks as task_rules
 
@@ -512,12 +552,17 @@ class ScheduleService:
                 for batch_id, planned in plans.items()
             }
             weighted = sum(weight[b] * (completion[b] - begin).total_seconds() / 60 for b in order)
+            lateness = {
+                b: round(max(0.0, (completion[b] - due[b]).total_seconds() / 60)) if due[b] else 0 for b in order
+            }
+            tardiness = sum(weight[b] * lateness[b] for b in order)
             return optimizer.Candidate(
                 order, True, round((finish - begin).total_seconds() / 60), round(weighted), "",
-                {"finish_at": finish.isoformat(timespec="minutes"), "plans": {
+                {"finish_at": finish.isoformat(timespec="minutes"), "lateness": lateness, "plans": {
                     batch_id: [self._planned_out(a, steps_by_batch[batch_id]) for a in planned]
                     for batch_id, planned in plans.items()
                 }},
+                tardiness_min=round(tardiness),
             )
 
         def out(candidate: optimizer.Candidate) -> dict:
@@ -526,6 +571,8 @@ class ScheduleService:
                 "finish_at": candidate.payload.get("finish_at", begin.isoformat(timespec="minutes")),
                 "span_min": candidate.span_min if candidate.ok else None,
                 "weighted_min": candidate.weighted_min if candidate.ok else None,
+                "tardiness_min": candidate.tardiness_min if candidate.ok else None,
+                "lateness": candidate.payload.get("lateness", {}),
                 "plans": candidate.payload.get("plans", {}),
             }
 
@@ -546,14 +593,26 @@ class ScheduleService:
             solver_info = {"status": "unavailable", "reason": "未安装 ortools，已用内置顺序搜索"}
 
         baseline = evaluate(priority_order)
-        report = optimizer.search(
-            ids, evaluate, seeds=seeds, budget_sec=settings.scheduler_search_budget_sec,
-        )
+        if mode == "optimize":
+            report = optimizer.search(
+                ids, evaluate, seeds=seeds, budget_sec=settings.scheduler_search_budget_sec,
+            )
+        else:
+            # 规则模式：顺序由规则直接给出（仍保持任务依赖），不搜索
+            rule = {
+                "fifo": lambda b: (by_id[b].created_at, b),
+                "priority": lambda b: (by_id[b].priority, by_id[b].created_at, b),
+                "deadline": lambda b: (due[b] or datetime.max, by_id[b].priority, b),
+            }[mode]
+            chosen = evaluate(valid(sorted(ids, key=rule)))
+            report = optimizer.SearchReport(chosen, 1, mode, 0)
         if not report.best.ok:
             raise StateConflict("所有候选顺序都无法满足约束", {"reason": report.best.reason or baseline.reason})
         return {
             # 应用时带回这个起点：预览与写入用同一个「现在」，分钟翻页不会让时间窗错开
             "start_from": begin.isoformat(timespec="seconds"),
+            "mode": mode,
+            "due": {b: due[b].isoformat(timespec="minutes") if due[b] else None for b in ids},
             "baseline": out(baseline),
             "best": out(report.best),
             "improvement_min": (baseline.span_min - report.best.span_min) if baseline.ok else None,
@@ -623,7 +682,7 @@ class ScheduleService:
             self.allocations.delete_for_batch(batch.id)
         self.db.flush()
         for batch in batches:
-            rows = self.schedule(batch, begin, None, user)
+            rows = self.schedule(batch, begin, None, user, allow_proposals=False)
             applied.append({"batch_id": batch.id, "steps": len([r for r in rows if r.kind == WORK])})
         self.audit.record(user, "应用优化排程", "、".join(order), detail=f"{len(order)} 个批次按优化顺序重排")
         self.db.commit()

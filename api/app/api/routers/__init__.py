@@ -1,5 +1,5 @@
 from . import (
-    admin, alarms, analysis, assets, auth, batches, files, governance, labware, maintenance, materials,
+    admin, alarms, analysis, assets, auth, batches, exceptions, files, governance, labware, maintenance, materials,
     metrics,
     people,
     plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks,
@@ -31,4 +31,5 @@ ROUTERS = [
     files.router,
     stream.router,
     labware.router,
+    exceptions.router,
 ]

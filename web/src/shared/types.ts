@@ -652,6 +652,9 @@ export type AlarmRow = {
   /** device：设备侧条件，只能设备上报恢复；system：软件判定，可由人写明原因签名清除 */
   origin: 'device' | 'system';
   condition_key: string;
+  /** 异常类别（设备故障 / 通信异常 / 超时 ……），按去重键与文案归类 */
+  category: string;
+  category_label: string;
 };
 
 export type AuditRow = {
@@ -764,6 +767,8 @@ export type QueueRow = {
   recipe: string;
   version: string;
   priority: number;
+  /** 任务的期望完成时间 */
+  due_at: string | null;
   plan_id: string;
   material_ok: boolean;
   schedulable: boolean;
@@ -775,8 +780,14 @@ export type QueueRow = {
 export type OptimizePreview = {
   /** 预览用的起点；应用时原样带回 */
   start_from: string;
+  mode: 'optimize' | 'priority' | 'deadline' | 'fifo';
+  /** 各批次任务的期望完成时间 */
+  due: Record<string, string | null>;
   baseline: { ok: boolean; order: string[]; span_min?: number | null; weighted_min?: number | null; finish_at?: string; reason: string };
-  best: { ok: boolean; order: string[]; span_min: number; weighted_min?: number; finish_at: string };
+  best: {
+    ok: boolean; order: string[]; span_min: number; weighted_min?: number; finish_at: string;
+    tardiness_min?: number | null; lateness?: Record<string, number>;
+  };
   improvement_min: number | null;
   evaluated: number;
   /** exhaustive：穷举全部顺序；local_search：迭代局部搜索 */
@@ -1650,4 +1661,81 @@ export type LocationRow = {
   accepts: string[];
   active: boolean;
   occupant: string;
+};
+
+
+/** 统一异常事件：类别、影响面、自动处理与结果、人工处理与最终结果。 */
+export type ExceptionEventRow = {
+  id: string;
+  category: string;
+  category_label: string;
+  severity: number;
+  source_type: string;
+  source_id: string;
+  batch_id: string;
+  step_id: string;
+  step_index: number;
+  station_id: string;
+  command_id: string;
+  alarm_id: string;
+  message: string;
+  impact: { batches?: string[]; samples?: number; stations?: string[]; tasks?: string[] };
+  never_sent: boolean;
+  state: string;
+  state_label: string;
+  rule_id: string;
+  decision: string;
+  auto_action: string;
+  auto_action_label: string;
+  auto_result: string;
+  manual_action: string;
+  manual_note: string;
+  manual_by: string;
+  final_result: string;
+  created_at: string;
+  updated_at: string | null;
+  resolved_at: string | null;
+};
+
+export type ExceptionSummary = {
+  open: number;
+  auto_resolved: number;
+  total: number;
+  by_category: { category: string; label: string; count: number }[];
+};
+
+export type ExceptionRuleRow = {
+  id: string;
+  name: string;
+  category: string;
+  category_label: string;
+  match: Record<string, string>;
+  action: 'retry' | 'reroute' | 'skip' | 'reschedule' | 'hold';
+  action_label: string;
+  params: { max_attempts?: number; delay_sec?: number };
+  priority: number;
+  enabled: boolean;
+  note: string;
+  updated_at: string | null;
+  row_version: number;
+};
+
+/** 重排建议：调度确认后才写入时间线。 */
+export type ScheduleProposalRow = {
+  id: string;
+  trigger: string;
+  trigger_label: string;
+  reason: string;
+  station_id: string;
+  state: string;
+  state_label: string;
+  batch_ids: string[];
+  after: Record<string, { from_step: number; allocations: { step_index: number; station_id: string; kind: string; starts_at: string; ends_at: string }[] }>;
+  impact: Record<string, { state: string; from_step: number; old_end: string | null; new_end: string | null; delay_min: number | null; moved: string[]; late_min: number }>;
+  unplanned: { batch_id: string; reason: string }[];
+  auto_applied: boolean;
+  created_at: string | null;
+  decided_by: string;
+  decided_at: string | null;
+  note: string;
 };

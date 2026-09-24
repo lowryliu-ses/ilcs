@@ -68,6 +68,8 @@ PERMISSIONS: dict[str, list[str]] = {
     "alarm.ack": ["operator", "ehs", "admin"],
     "alarm.shelve": ["ehs", "admin"],
     "alarm.close": ["operator", "ehs", "admin"],
+    "exception.handle": ["operator", "qa", "admin"],
+    "exception.rules": ["admin"],
     "golden.set": ["qa", "admin"],
     "org.admin": ["admin"],
     "service.manage": ["admin"],
@@ -137,6 +139,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("report.submit", "提交报告审核"), ("report.approve", "批准报告"), ("report.publish", "发布报告"),
         ("file.upload", "上传附件"), ("alarm.ack", "确认报警"), ("alarm.shelve", "搁置报警"),
         ("alarm.close", "关闭报警"), ("golden.set", "设定金标批次"),
+        ("exception.handle", "处理异常事件"), ("exception.rules", "维护异常策略库"),
     ]),
     ("系统治理", [("org.admin", "账号、角色与权限管理"), ("service.manage", "服务身份管理")]),
 ]

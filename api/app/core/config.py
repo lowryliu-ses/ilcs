@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     scheduler_search_budget_sec: float = 3.0
     scheduler_cpsat_time_limit_sec: float = 5.0
     scheduler_max_batches: int = 40
+    # 排程模式缺省值：optimize（先按交付期拖期、再按总跨度与加权完成时间搜索顺序）/ priority / deadline / fifo
+    scheduler_mode: str = "optimize"
+    # 事件触发的重排建议是否自动应用。只对还没下发的批次生效；在途批次的建议一律待调度确认
+    auto_reschedule: bool = False
 
     # ---------- 载具与转运 ----------
     # 下发前必须绑定载具（全自动产线打开；半自动 / 人工上下料的部署保持关闭）

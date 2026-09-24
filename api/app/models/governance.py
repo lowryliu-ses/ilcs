@@ -29,6 +29,68 @@ class Alarm(Base):
     origin: Mapped[str] = mapped_column(String, default="device")
     # 同一异常条件的去重键（如 station:ST-05:heartbeat_stale）；条件持续期间不重复报
     condition_key: Mapped[str] = mapped_column(String, default="", index=True)
+    # 异常类别（domain/exceptions.CATEGORIES）；按去重键与报警文案归类
+    category: Mapped[str] = mapped_column(String, default="")
+
+
+class ExceptionEvent(Base):
+    """统一异常事件。报警是「让人知道」，这里是「这件事怎么处理、影响了谁、最后怎么收尾」。
+
+    一条事件记录：类别、来源、影响的批次 / 样本 / 工位、系统按哪条策略自动做了什么、结果如何、
+    人做了什么、最终怎么恢复。自动处理只在指令从未送达设备时发生（见 domain/exceptions.py）。
+    """
+
+    __tablename__ = "exception_events"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, default="", index=True)
+    category: Mapped[str] = mapped_column(String, default="system")
+    severity: Mapped[int] = mapped_column(Integer, default=2)
+    # batch | station | command | step | schedule
+    source_type: Mapped[str] = mapped_column(String, default="batch")
+    source_id: Mapped[str] = mapped_column(String, default="")
+    batch_id: Mapped[str] = mapped_column(String, default="", index=True)
+    step_id: Mapped[str] = mapped_column(String, default="")
+    step_index: Mapped[int] = mapped_column(Integer, default=-1)
+    station_id: Mapped[str] = mapped_column(String, default="", index=True)
+    command_id: Mapped[str] = mapped_column(String, default="")
+    alarm_id: Mapped[str] = mapped_column(String, default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    # {"batches": [...], "samples": 12, "stations": [...], "tasks": [...]}
+    impact: Mapped[dict] = mapped_column(JSON, default=dict)
+    never_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    # open | auto_resolved | manual | resolved | closed
+    state: Mapped[str] = mapped_column(String, default="open", index=True)
+    rule_id: Mapped[str] = mapped_column(String, default="")
+    decision: Mapped[str] = mapped_column(Text, default="")
+    auto_action: Mapped[str] = mapped_column(String, default="")
+    auto_result: Mapped[str] = mapped_column(Text, default="")
+    manual_action: Mapped[str] = mapped_column(String, default="")
+    manual_note: Mapped[str] = mapped_column(Text, default="")
+    manual_by: Mapped[str] = mapped_column(String, default="")
+    final_result: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ExceptionRule(Base):
+    """异常策略库：某类异常（可按能力 / 工位 / 步骤类型 / 方法 / 步骤细分）用什么动作处理。"""
+
+    __tablename__ = "exception_rules"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, default="", index=True)
+    name: Mapped[str] = mapped_column(String)
+    category: Mapped[str] = mapped_column(String)
+    match: Mapped[dict] = mapped_column(JSON, default=dict)
+    # retry | reroute | skip | reschedule | hold
+    action: Mapped[str] = mapped_column(String)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class AuditEvent(Base):

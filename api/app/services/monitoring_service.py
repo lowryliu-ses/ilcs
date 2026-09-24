@@ -48,18 +48,25 @@ class DeviceMonitor:
             return 0, 0
         alarms = AlarmService(self.db, system_context(station.org_id, "设备监控"))
         raised = cleared = 0
+        from .exception_service import ExceptionService
+
+        exceptions = ExceptionService(self.db, system_context(station.org_id, "异常引擎"))
         for name, (active, severity, message) in self.station_conditions(adapter).items():
             key = f"station:{station_id}:{name}"
             if active:
                 before = alarms.alarms.open_by_condition(key)
-                alarms.raise_alarm(
+                alarm = alarms.raise_alarm(
                     severity=severity, source_type="station", source_id=station_id,
                     message=f"{station_id} {message}",
                     response="到现场确认设备状态与网络；条件消除后系统自动复位，确认与关闭由人处理。",
                     owner="设备负责人", origin="system", condition_key=key,
                 )
+                if before is None:
+                    # 新出现的条件：登记异常与影响面，策略要求时把这台工位上未开始的时间窗改派出去
+                    exceptions.on_station_condition(station_id, name, f"{station_id} {message}", alarm.id)
                 raised += before is None
             elif alarms.resolve_condition(key, f"{station_id} {message}已消除"):
+                exceptions.settle_station(station_id, f"{station_id} {message}已消除")
                 cleared += 1
         return raised, cleared
 

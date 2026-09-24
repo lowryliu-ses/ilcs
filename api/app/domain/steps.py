@@ -49,7 +49,7 @@ MAX_LOOPS = 10
 
 # 每类步骤适用哪些字段。不适用的字段即时校验时不提示缺失，服务端也不据此阻塞。
 APPLICABLE: dict[str, set[str]] = {
-    DEVICE: {"cap", "params", "dur", "hard", "resource", "timeout", "skippable", "on_error"},
+    DEVICE: {"cap", "params", "dur", "hard", "resource", "timeout", "skippable"},
     MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable"},
     WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
