@@ -8,6 +8,7 @@ import type { RecipeDetail } from '../../shared/types';
 import { CheckList, Empty, Panel, Pill, useToast } from '../../shared/ui';
 import { useSignature } from '../../shared/signature';
 import { SimulationBadge, SimulationPanel } from './SimulationPanel';
+import { CommentsPanel } from '../../shared/comments';
 
 export function RecipeDetailPage() {
   const { recipeId = '' } = useParams();
@@ -162,6 +163,7 @@ export function RecipeDetailPage() {
       </div>
 
       <SimulationPanel recipe={data} canRun={can('recipe.edit')} />
+      <CommentsPanel targetType="recipe" targetId={data.id} />
 
       <div className="grid cols-2">
         <Panel title="物料需求 BOM" flush>

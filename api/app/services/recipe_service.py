@@ -195,6 +195,23 @@ class RecipeService:
         self.db.commit()
         return self.to_dict(recipe, detail=True)
 
+    def create_from_steps(
+        self, name: str, plate: int, steps: list[dict], user: User, *, sop_version_id: str = "", note: str = "",
+    ) -> Recipe:
+        """由数字 SOP 生成的方法草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
+        recipe_id = self._next_recipe_id()
+        recipe = Recipe(
+            id=recipe_id, name=name, version="0.1.0", state="draft", owner=user.display_name, updated=today_iso(),
+            plate=plate, steps=copy.deepcopy(steps), bom=[],
+            history=[{"v": "0.1.0", "state": "draft", "note": note or "由数字 SOP 生成", "by": user.display_name,
+                      "at": today_iso()}],
+            author_user_id=user.id, used_step_ids=[step["step_id"] for step in steps if step.get("step_id")],
+            sop_version_id=sop_version_id,
+        )
+        self.recipes.add(recipe)
+        self.audit.record(user, "新建配方", recipe_id, before="—", after="草稿", detail=note)
+        return recipe
+
     def _next_recipe_id(self) -> str:
         used = {recipe.id for recipe in self.recipes.list()}
         numbers = [int(rid[2:]) for rid in used if rid.startswith("R-") and rid[2:].isdigit()]

@@ -5,7 +5,8 @@ import { api } from '../../shared/api';
 import { num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { DesignSpace, Factor, LotRow, MetricRow, PlanDetail, ProposalRow } from '../../shared/types';
+import { CommentsPanel } from '../../shared/comments';
+import type { ApprovalLevel, DesignSpace, DiffRow, Factor, LotRow, MetricRow, PlanDetail, ProposalRow } from '../../shared/types';
 import { useSignature } from '../../shared/signature';
 import {
   Blocked, CheckList, ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast,
@@ -21,6 +22,8 @@ export function PlanDetailPage() {
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [comparing, setComparing] = useState<number | null>(null);
 
   const invalidates = [`plans:${planId}`, 'plans', 'dashboard'];
   const lock = useMutation(() => api.post(`/plans/${planId}/lock`), {
@@ -39,10 +42,14 @@ export function PlanDetailPage() {
       navigate('/plans');
     },
   });
-  const submit = useMutation(() => api.post(`/plans/${planId}/submit`), {
-    invalidates,
-    onSuccess: () => toast.push('已提交评审；批准后才能建立实验任务与正式批次'),
-  });
+  const saveTemplate = useMutation(
+    (name: string) => api.post('/plans/templates', { name, from_plan_id: planId }),
+    { invalidates: ['plans:templates'], onSuccess: () => toast.push('已存为方案模板，新建方案时可以套用') },
+  );
+  const restore = useMutation(
+    (version: number) => api.post(`/plans/${planId}/restore`, { from_version: version, row_version: plan.data?.row_version }),
+    { invalidates, onSuccess: () => toast.push('已把历史版本内容恢复到当前草稿；历史版本不变') },
+  );
   const decide = useMutation(
     (payload: { conclusion: string; reason?: string; signature_id?: string }) =>
       api.post(`/plans/${planId}/decision`, payload),
@@ -50,7 +57,13 @@ export function PlanDetailPage() {
       invalidates,
       onSuccess: (result) => {
         const row = result as PlanDetail;
-        toast.push(row.approval_state === 'approved' ? '已批准；该版本冻结' : '已驳回回草稿');
+        toast.push(
+          row.approval_state === 'approved'
+            ? '已批准；该版本冻结'
+            : row.approval_state === 'review'
+              ? '本级已通过，等待下一级审批'
+              : '已驳回；作者修改后可重新提交',
+        );
         setRejecting(false);
       },
     },
@@ -63,7 +76,8 @@ export function PlanDetailPage() {
   if (!plan.data) return <div className="boot">{plan.error ? plan.error.message : '加载中…'}</div>;
   const data = plan.data;
   // 结构可编辑 = 未锁定且未批准。锁定是结构冻结，批准是审批结论，两件事都能挡住编辑。
-  const editable = data.state === 'draft' && data.approval_state !== 'approved' && can('plan.edit');
+  const editable = data.state === 'draft' && ['draft', 'rejected'].includes(data.approval_state) && can('plan.edit');
+  const currentLevel = data.approval_state === 'review' ? data.approvals.find((row) => !row.conclusion) : undefined;
 
   return (
     <div className="page">
@@ -100,20 +114,32 @@ export function PlanDetailPage() {
               解锁
             </button>
           ) : null}
-          {data.approval_state === 'draft' && can('plan.submit') ? (
+          {['draft', 'rejected'].includes(data.approval_state) && can('plan.submit') ? (
             <button
               className="btn"
-              disabled={!data.lockable || submit.pending}
+              disabled={!data.lockable}
               title={data.lockable ? undefined : '校验未通过，先补齐再提交'}
-              onClick={() => submit.run().catch((error) => toast.push(error.message))}
+              onClick={() => setSubmitting(true)}
             >
-              提交评审
+              {data.approval_state === 'rejected' ? '重新提交评审' : '提交评审'}
+            </button>
+          ) : null}
+          {can('plan.edit') ? (
+            <button
+              className="btn"
+              disabled={saveTemplate.pending}
+              onClick={() => {
+                const name = window.prompt('模板名称', `${data.name} 模板`);
+                if (name?.trim()) saveTemplate.run(name.trim()).catch((error) => toast.push(error.message));
+              }}
+            >
+              存为模板
             </button>
           ) : null}
           {data.approval_state === 'review' && can('plan.approve') ? (
             <>
               <button className="btn" onClick={() => setRejecting(true)}>
-                驳回
+                驳回{currentLevel ? `（${currentLevel.label}）` : ''}
               </button>
               <button
                 className="btn primary"
@@ -286,6 +312,7 @@ export function PlanDetailPage() {
                   <th>状态</th>
                   <th>编写</th>
                   <th>批准</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -301,6 +328,20 @@ export function PlanDetailPage() {
                       {row.approver_name || '—'}
                       {row.approved_at ? <div className="tiny muted">{row.approved_at.slice(0, 16)}</div> : null}
                     </td>
+                    <td className="row-end">
+                      <button className="btn sm" onClick={() => setComparing(row.version)}>
+                        对比当前
+                      </button>
+                      {editable && row.version <= data.version ? (
+                        <button
+                          className="btn sm"
+                          disabled={restore.pending}
+                          onClick={() => restore.run(row.version).catch((error) => toast.push(error.message))}
+                        >
+                          恢复此版内容
+                        </button>
+                      ) : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -308,8 +349,10 @@ export function PlanDetailPage() {
           ) : (
             <Empty>还没有提交过评审</Empty>
           )}
+          {data.approvals.length ? <ApprovalProgress levels={data.approvals} /> : null}
           <div className="panel-body small muted">
-            批准版本不可修改；修订生成新版本，历史运行仍引用原快照。
+            批准版本不可修改；修订生成新版本，历史运行仍引用原快照。逐级审批：前一级通过后一级才能审，
+            作者不能审任何一级，同一个人不能审两级。
           </div>
         </Panel>
       </div>
@@ -407,7 +450,149 @@ export function PlanDetailPage() {
       {editing ? <FactorEditor plan={data} onClose={() => setEditing(false)} invalidates={invalidates} /> : null}
 
       {data.is_matrix ? <CampaignPanel plan={data} invalidates={invalidates} /> : null}
+
+      <CommentsPanel
+        targetType="plan"
+        targetId={data.id}
+        anchors={[['goal', '目的'], ['factors', '因子与水平'], ['sample_count', '样本'], ['required_metrics', '检测指标'], ['layout', '布局']]}
+      />
+
+      {submitting ? <SubmitDialog plan={data} invalidates={invalidates} onClose={() => setSubmitting(false)} /> : null}
+      {comparing !== null ? <DiffDialog planId={data.id} from={comparing} onClose={() => setComparing(null)} /> : null}
     </div>
+  );
+}
+
+function ApprovalProgress({ levels }: { levels: ApprovalLevel[] }) {
+  return (
+    <div className="panel-body">
+      <div className="small">
+        <b>逐级审批</b>
+      </div>
+      <ol className="small" style={{ margin: 0, paddingLeft: 18 }}>
+        {levels.map((row) => (
+          <li key={row.level}>
+            {row.label}
+            {row.assignee_name ? <span className="muted">（指定 {row.assignee_name}）</span> : null}：
+            {row.conclusion === 'approved' ? (
+              <span> 已通过 · {row.decided_by_name} {row.decided_at?.slice(0, 16).replace('T', ' ')}</span>
+            ) : row.conclusion === 'rejected' ? (
+              <span className="bad-text"> 已驳回 · {row.decided_by_name}：{row.reason}</span>
+            ) : (
+              <span className="muted"> 待审</span>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+type Approver = { id: string; display_name: string; roles: string[] };
+
+/** 提交评审：可以设置多级审批并给每级指定审批人；不设就是一级「QA 审批」。 */
+function SubmitDialog({ plan, invalidates, onClose }: { plan: PlanDetail; invalidates: string[]; onClose: () => void }) {
+  const toast = useToast();
+  const approvers = useQuery<Approver[]>('plans:approvers', () => api.get<Approver[]>('/plans/approvers'));
+  const [levels, setLevels] = useState<{ label: string; assignee_id: string }[]>([{ label: 'QA 审批', assignee_id: '' }]);
+  const submit = useMutation(() => api.post(`/plans/${plan.id}/submit`, { approvers: levels }), {
+    invalidates,
+    onSuccess: () => {
+      toast.push(`已提交评审（${levels.length} 级）；全部通过后才能建立实验任务与正式批次`);
+      onClose();
+    },
+  });
+  const assigned = levels.map((row) => row.assignee_id).filter(Boolean);
+  const duplicate = assigned.length !== new Set(assigned).size;
+  return (
+    <Modal
+      title={`提交评审 · ${plan.id} v${plan.version}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={submit.pending || duplicate || !levels.length} onClick={() => submit.run().catch(() => undefined)}>
+            提交
+          </button>
+        </>
+      }
+    >
+      <div className="note">
+        按顺序逐级审：前一级通过后一级才能审，任一级驳回即结束本次评审。每级可以指定审批人，不指定则任何有批准权限的人都可以审；
+        同一个人不能被指定两级，作者本人不能审批。
+      </div>
+      {levels.map((row, index) => (
+        <div key={index} className="filters">
+          <span className="small mono">第 {index + 1} 级</span>
+          <input
+            value={row.label}
+            placeholder="级别名称，如 技术审核"
+            onChange={(event) => setLevels(levels.map((item, at) => (at === index ? { ...item, label: event.target.value } : item)))}
+          />
+          <select
+            value={row.assignee_id}
+            onChange={(event) => setLevels(levels.map((item, at) => (at === index ? { ...item, assignee_id: event.target.value } : item)))}
+          >
+            <option value="">不指定</option>
+            {(approvers.data ?? []).map((person) => (
+              <option key={person.id} value={person.id}>
+                {person.display_name}（{person.roles.join('、')}）
+              </option>
+            ))}
+          </select>
+          {levels.length > 1 ? (
+            <button className="btn sm" onClick={() => setLevels(levels.filter((_, at) => at !== index))}>
+              删除
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {levels.length < 5 ? (
+        <button className="btn sm" onClick={() => setLevels([...levels, { label: `第 ${levels.length + 1} 级审批`, assignee_id: '' }])}>
+          增加一级
+        </button>
+      ) : null}
+      {duplicate ? <div className="note bad">同一个人不能被指定审批两级</div> : null}
+      {submit.error ? <div className="note bad">{submit.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+function DiffDialog({ planId, from, onClose }: { planId: string; from: number; onClose: () => void }) {
+  const diff = useQuery<{ from: string; to: string; changes: DiffRow[] }>(`plans:${planId}:diff:${from}`, () =>
+    api.get(`/plans/${planId}/diff?from_version=${from}`),
+  );
+  return (
+    <Modal title={`版本对比 · ${diff.data ? `${diff.data.from} → ${diff.data.to}` : ''}`} wide onClose={onClose}>
+      {diff.data ? (
+        diff.data.changes.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>{diff.data.from}</th>
+                <th>{diff.data.to}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {diff.data.changes.map((row) => (
+                <tr key={row.field}>
+                  <td className="small">{row.label}</td>
+                  <td className="small mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{row.before}</td>
+                  <td className="small mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{row.after}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <Empty>两个版本内容相同</Empty>
+        )
+      ) : (
+        <div className="muted">{diff.error ? diff.error.message : '加载中…'}</div>
+      )}
+    </Modal>
   );
 }
 

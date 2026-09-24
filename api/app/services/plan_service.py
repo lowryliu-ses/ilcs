@@ -14,10 +14,11 @@ from ..core.clock import today_iso
 from ..core.context import AccessContext
 from ..core.db import dec
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
-from ..domain import matrix
+from ..domain import approval as approval_rules
+from ..domain import diffs, matrix
 from ..domain.access import same_person
 from ..domain.lifecycle import plan_delete_blockers
-from ..models import Plan, PlanVersion, User
+from ..models import Plan, PlanTemplate, PlanVersion, User
 from ..repositories.batches import BatchRepository
 from ..repositories.governance import UserRepository
 from ..repositories.materials import LotRepository
@@ -25,7 +26,7 @@ from ..repositories.metrics import MetricRepository
 from ..repositories.recipes import ExperimentTaskRepository, PlanRepository, PlanVersionRepository, RecipeRepository
 from ..repositories.samples import PhysicalSampleRepository
 from .audit_service import AuditService
-from .identity_service import IdentityService, admin_self_approval
+from .identity_service import IdentityService, admin_self_approval, user_may
 from .inventory_service import InventoryService
 
 MATRIX = "matrix"
@@ -35,6 +36,18 @@ PLAN_TYPES = (MATRIX, SINGLE, COMMISSIONED)
 TYPE_LABEL = {MATRIX: "矩阵实验", SINGLE: "单条件样本实验", COMMISSIONED: "委托检测"}
 STATE_LABEL = {"draft": "草稿", "locked": "矩阵已锁定"}
 APPROVAL_LABEL = {"draft": "草稿", "review": "评审中", "approved": "已批准", "rejected": "已驳回"}
+# 草稿与已驳回可以编辑；评审中冻结内容（审的是哪一份就是哪一份），已批准只能修订
+EDITABLE_APPROVAL = {"draft", "rejected"}
+SNAPSHOT_LABELS = {
+    "name": "名称", "plan_type": "方案类型", "goal": "目的", "recipe_id": "方法", "method_version": "方法版本",
+    "factors": "因子与水平", "control": "对照", "repeats": "重复次数", "layout": "布局", "seed": "随机种子",
+    "design_points": "设计点", "design_space": "设计空间", "sample_count": "样本数", "sample_ids": "样本清单",
+    "required_metrics": "检测指标", "resource_requirements": "资源需求",
+}
+RESTORABLE = ("name", "goal", "factors", "control", "repeats", "layout", "seed", "design_points", "design_space",
+              "sample_count", "sample_ids", "required_metrics", "resource_requirements")
+TEMPLATE_FIELDS = ("goal", "factors", "control", "repeats", "layout", "seed", "design_space", "sample_count",
+                   "required_metrics", "resource_requirements")
 
 
 class PlanService:
@@ -313,7 +326,19 @@ class PlanService:
             "approved_at": version.approved_at.isoformat(timespec="seconds") if version.approved_at else None,
             "reject_reason": version.reject_reason,
             "created_at": version.created_at.isoformat(timespec="seconds"),
+            "approvals": self._approvals_out(version.approvals or []),
         }
+
+    def _approvals_out(self, levels: list[dict]) -> list[dict]:
+        rows = []
+        for row in levels:
+            assignee = self.users.get(row.get("assignee_id")) if row.get("assignee_id") else None
+            decider = self.users.get(row.get("decided_by")) if row.get("decided_by") else None
+            rows.append({
+                **row, "assignee_name": assignee.display_name if assignee else "",
+                "decided_by_name": decider.display_name if decider else "",
+            })
+        return rows
 
     def to_dict(self, plan: Plan, *, detail: bool = False) -> dict:
         conditions = self.conditions(plan)
@@ -350,6 +375,11 @@ class PlanService:
             "task_count": len(self.tasks.for_plan(plan.id)),
             "row_version": plan.row_version,
             "reject_reason": plan.reject_reason,
+            # 当前版本的逐级审批进度
+            "approvals": self._approvals_out(
+                (self.versions.find(plan.id, plan.version).approvals or [])
+                if self.versions.find(plan.id, plan.version) is not None else []
+            ),
             "is_matrix": plan.plan_type == MATRIX,
             "delete_blockers": plan_delete_blockers(plan.state, bound),
         }
@@ -403,6 +433,16 @@ class PlanService:
     # ---------- 写 ----------
 
     def create(self, payload: dict, user: User) -> dict:
+        if payload.get("template_id"):
+            # 套用模板：模板给缺省结构，请求里显式给的字段优先
+            template = self._template(payload["template_id"])
+            if template.retired:
+                raise StateConflict("方案模板已停用")
+            merged = {**copy.deepcopy(template.body or {}), "plan_type": template.plan_type}
+            merged.update({key: value for key, value in payload.items() if value not in (None, "", [], {})})
+            if not merged.get("recipe_id") and template.recipe_id:
+                merged["recipe_id"] = template.recipe_id
+            payload = merged
         recipe = self.recipes.get(payload["recipe_id"])
         if not recipe:
             raise NotFound("方法不存在")
@@ -463,6 +503,8 @@ class PlanService:
             raise StateConflict(
                 "已批准的版本不可修改，请用「修订」生成新版本", code="plan_approved_immutable"
             )
+        if plan.approval_state == "review":
+            raise StateConflict("评审中的方案不能修改：审的是哪一份就是哪一份；需要改请先驳回", code="plan_in_review")
         if changes.get("plan_type") and changes["plan_type"] not in PLAN_TYPES:
             raise ValidationFailed(f"方案类型只能是 {'、'.join(PLAN_TYPES)}")
         for key, value in changes.items():
@@ -515,7 +557,8 @@ class PlanService:
 
     # ---------- 审批 ----------
 
-    def submit(self, plan_id: str, user: User) -> dict:
+    def submit(self, plan_id: str, user: User, approvers: list[dict] | None = None) -> dict:
+        """提交评审。可以带多级审批（每级可指定审批人），不带就是一级「QA 审批」。"""
         plan = self.plans.get(plan_id)
         if not plan:
             raise NotFound("实验方案不存在")
@@ -524,6 +567,21 @@ class PlanService:
         failed = [c for c in self.lock_checks(plan) if not c["ok"]]
         if failed:
             raise StateConflict("方案校验未通过，已阻止提交评审", {"checks": failed})
+        try:
+            levels = approval_rules.build_levels(approvers)
+        except ValueError as exc:
+            raise ValidationFailed(str(exc)) from exc
+        for row in levels:
+            if not row["assignee_id"]:
+                continue
+            assignee = self.users.get(row["assignee_id"])
+            if assignee is None or not user_may(None, assignee, "plan.approve"):
+                raise ValidationFailed(f"第 {row['level']} 级指定的审批人不存在或没有批准方案的权限")
+            if same_person(assignee.id, user.id):
+                raise ValidationFailed(f"第 {row['level']} 级不能指定提交人本人审批（职责分离）")
+        assigned = [row["assignee_id"] for row in levels if row["assignee_id"]]
+        if len(assigned) != len(set(assigned)):
+            raise ValidationFailed("同一个人不能被指定审批两级")
         version = self.versions.find(plan.id, plan.version)
         if version is None:
             version = PlanVersion(
@@ -534,18 +592,29 @@ class PlanService:
         else:
             version.state = "review"
             version.snapshot = self._snapshot(plan)
+        version.approvals = levels
+        before = APPROVAL_LABEL.get(plan.approval_state, plan.approval_state)
         plan.approval_state = "review"
         plan.reject_reason = ""
         self.plans.bump(plan)
         self.audit.record(
-            user, "提交方案评审", plan_id, before="草稿", after="评审中",
-            detail=f"版本 {plan.version}", object_version=plan.row_version,
+            user, "提交方案评审", plan_id, before=before, after="评审中",
+            detail=f"版本 {plan.version}；{len(levels)} 级审批：" + " → ".join(
+                row["label"] + (f"（指定 {self.users.get(row['assignee_id']).display_name}）" if row["assignee_id"] else "")
+                for row in levels
+            ),
+            object_version=plan.row_version,
         )
         self.db.commit()
         return self.to_dict(plan, detail=True)
 
     def decide(self, plan_id: str, payload: dict, user: User) -> dict:
-        """批准或驳回。批准版本不可修改；作者不能批准自己写的方案。"""
+        """逐级批准或驳回。最后一级通过才算批准（版本冻结）；任一级驳回，方案回到「已驳回」。
+
+        作者不能审任何一级；指定了审批人的级别只有他能审；同一个人不能审两级。每一级批准都要签名。
+        """
+        from ..core.clock import now
+
         plan = self.plans.get(plan_id)
         if not plan:
             raise NotFound("实验方案不存在")
@@ -557,24 +626,27 @@ class PlanService:
         version = self.versions.find(plan.id, plan.version)
         if version is None:
             raise StateConflict("找不到待审版本记录")
-        if same_person(version.author_id, user.id) and not admin_self_approval(
-            self.db, self.ctx, user, plan.id, "批准本人编写的方案",
-        ):
-            raise PermissionDenied(
-                "不能批准本人编写的方案（职责分离）", code="self_approval_denied"
-            )
+        levels = list(version.approvals or []) or approval_rules.build_levels(None)
+        level = approval_rules.current(levels)
+        reasons = approval_rules.blockers(levels, user.id, version.author_id)
+        author_only = reasons == ["不能审批本人编写的方案（职责分离）"]
+        if reasons and not (author_only and admin_self_approval(self.db, self.ctx, user, plan.id, "批准本人编写的方案")):
+            code = "self_approval_denied" if any("本人" in reason for reason in reasons) else "approver_not_assigned"
+            raise PermissionDenied("；".join(reasons), code=code)
         reason = (payload.get("reason") or "").strip()
+        stamp = now().isoformat(timespec="seconds")
         if conclusion == "rejected":
             if not reason:
                 raise ValidationFailed("驳回必须写明理由")
-            plan.approval_state = "draft"
+            version.approvals, _ = approval_rules.record(levels, user.id, "rejected", stamp, reason)
+            plan.approval_state = "rejected"
             plan.reject_reason = reason
-            version.state = "draft"
+            version.state = "rejected"
             version.reject_reason = reason
             self.plans.bump(plan)
             self.audit.record(
-                user, "驳回实验方案", plan_id, before="评审中", after="草稿", detail=reason,
-                object_version=plan.row_version,
+                user, "驳回实验方案", plan_id, before="评审中", after="已驳回",
+                detail=f"第 {level['level']} 级（{level['label']}）驳回：{reason}", object_version=plan.row_version,
             )
             self.db.commit()
             return self.to_dict(plan, detail=True)
@@ -583,7 +655,16 @@ class PlanService:
             payload.get("signature_id"), user, "批准实验方案",
             object_ref=plan.id, object_version=plan.row_version,
         )
-        from ..core.clock import now
+        version.approvals, done = approval_rules.record(levels, user.id, "approved", stamp, reason, signature.id)
+        if not done:
+            following = approval_rules.current(version.approvals)
+            self.audit.record(
+                user, "方案逐级审批", plan_id, sign=True, meaning=signature.meaning, signature_id=signature.id,
+                before=f"第 {level['level']} 级待审", after=f"第 {following['level']} 级待审",
+                detail=f"{level['label']} 通过；下一级 {following['label']}", object_version=plan.row_version,
+            )
+            self.db.commit()
+            return self.to_dict(plan, detail=True)
 
         plan.approval_state = "approved"
         version.state = "approved"
@@ -596,10 +677,134 @@ class PlanService:
             user, "批准实验方案", plan_id, sign=True, meaning=signature.meaning,
             signature_id=signature.id, before="评审中", after="已批准",
             object_version=plan.row_version,
-            detail=f"版本 {plan.version} 冻结，不可再修改；修订将生成新版本",
+            detail=f"版本 {plan.version} 冻结，不可再修改；修订将生成新版本"
+            + (f"；{len(levels)} 级审批全部通过" if len(levels) > 1 else ""),
         )
         self.db.commit()
         return self.to_dict(plan, detail=True)
+
+    # ---------- 版本对比与恢复 ----------
+
+    def diff(self, plan_id: str, from_version: int, to_version: int | None = None) -> dict:
+        plan = self.plans.get(plan_id)
+        if not plan:
+            raise NotFound("实验方案不存在")
+        source = self.versions.find(plan.id, from_version)
+        if source is None:
+            raise NotFound(f"方案版本 v{from_version} 不存在")
+        if to_version is None or to_version == plan.version:
+            target, label = self._snapshot(plan), f"v{plan.version}（当前）"
+        else:
+            row = self.versions.find(plan.id, to_version)
+            if row is None:
+                raise NotFound(f"方案版本 v{to_version} 不存在")
+            target, label = row.snapshot or {}, f"v{to_version}"
+        return {
+            "plan_id": plan.id, "from": f"v{from_version}", "to": label,
+            "changes": diffs.diff(source.snapshot or {}, target, SNAPSHOT_LABELS, ignore=("id", "version")),
+        }
+
+    def restore(self, plan_id: str, from_version: int, user: User, expected: int | None = None) -> dict:
+        """把历史版本的内容恢复到当前草稿（版本号不变，审批另走）。历史版本快照本身不动。"""
+        plan = self.plans.get(plan_id)
+        if not plan:
+            raise NotFound("实验方案不存在")
+        self.plans.check_version(plan, expected, "实验方案")
+        if plan.approval_state not in EDITABLE_APPROVAL or plan.state != "draft":
+            raise StateConflict("只有未锁定的草稿或已驳回的方案可以恢复历史内容；已批准的请先修订", code="plan_not_editable")
+        source = self.versions.find(plan.id, from_version)
+        if source is None:
+            raise NotFound(f"方案版本 v{from_version} 不存在")
+        snapshot = source.snapshot or {}
+        changes = diffs.diff(self._snapshot(plan), snapshot, SNAPSHOT_LABELS, ignore=("id", "version", "recipe_id", "method_version", "plan_type"))
+        for key in RESTORABLE:
+            if key in snapshot:
+                setattr(plan, key, copy.deepcopy(snapshot[key]))
+        self.plans.bump(plan)
+        self.audit.record(
+            user, "恢复方案历史内容", plan_id, before=f"v{plan.version} 草稿", after=f"内容取自 v{from_version}",
+            detail="、".join(row["label"] for row in changes) or "内容相同，无变化", object_version=plan.row_version,
+        )
+        self.db.commit()
+        return self.to_dict(plan, detail=True)
+
+    def approvers(self) -> list[dict]:
+        """本组织里有「批准实验方案」权限的有效成员：提交评审时给各级指定审批人用。"""
+        from ..domain.permissions import ROLE_NAMES
+        from ..models import roles_of
+        from ..repositories.organization import MembershipRepository
+
+        rows = []
+        for membership in MembershipRepository(self.db).for_org(self.ctx.org_id):
+            if membership.state != "active":
+                continue
+            user = self.users.get(membership.user_id)
+            if user is None or not user_may(None, user, "plan.approve"):
+                continue
+            rows.append({"id": user.id, "display_name": user.display_name,
+                         "roles": [ROLE_NAMES.get(role, role) for role in roles_of(user)]})
+        return sorted(rows, key=lambda row: row["display_name"])
+
+    # ---------- 方案模板 ----------
+
+    def template_out(self, template: PlanTemplate) -> dict:
+        return {
+            "id": template.id, "name": template.name, "description": template.description,
+            "plan_type": template.plan_type, "plan_type_label": TYPE_LABEL.get(template.plan_type, template.plan_type),
+            "recipe_id": template.recipe_id, "body": template.body or {}, "source_plan_id": template.source_plan_id,
+            "retired": template.retired, "row_version": template.row_version,
+            "created_at": template.created_at.isoformat(timespec="seconds") if template.created_at else None,
+        }
+
+    def templates(self, include_retired: bool = False) -> list[dict]:
+        query = self.db.query(PlanTemplate).filter(PlanTemplate.org_id == self.ctx.org_id)
+        if not include_retired:
+            query = query.filter(PlanTemplate.retired.is_(False))
+        return [self.template_out(row) for row in query.order_by(PlanTemplate.name).all()]
+
+    def _template(self, template_id: str) -> PlanTemplate:
+        template = self.db.get(PlanTemplate, template_id)
+        if template is None or template.org_id != self.ctx.org_id:
+            raise NotFound("方案模板不存在")
+        return template
+
+    def create_template(self, payload: dict, user: User) -> dict:
+        """新建模板：从一个已有方案取结构（from_plan_id），或直接给字段。"""
+        body: dict = {}
+        plan_type = payload.get("plan_type") or MATRIX
+        recipe_id = payload.get("recipe_id") or ""
+        source = ""
+        if payload.get("from_plan_id"):
+            plan = self.plans.get(payload["from_plan_id"])
+            if plan is None:
+                raise NotFound("来源方案不存在")
+            snapshot = self._snapshot(plan)
+            body = {key: copy.deepcopy(snapshot.get(key)) for key in TEMPLATE_FIELDS if key in snapshot}
+            plan_type, recipe_id, source = plan.plan_type, recipe_id or plan.recipe_id, plan.id
+        else:
+            body = {key: copy.deepcopy(payload[key]) for key in TEMPLATE_FIELDS if payload.get(key) is not None}
+        if plan_type not in PLAN_TYPES:
+            raise ValidationFailed(f"方案类型只能是 {'、'.join(PLAN_TYPES)}")
+        if not str(payload.get("name") or "").strip():
+            raise ValidationFailed("模板名称必填")
+        template = PlanTemplate(
+            org_id=self.ctx.org_id, name=payload["name"], description=payload.get("description", ""),
+            plan_type=plan_type, recipe_id=recipe_id, body=body, source_plan_id=source, created_by=user.id,
+        )
+        self.db.add(template)
+        self.db.flush()
+        self.audit.record(user, "新建方案模板", template.id, before="—", after="可用",
+                          detail=f"{template.name}（{TYPE_LABEL.get(plan_type, plan_type)}）" + (f"；取自 {source}" if source else ""))
+        self.db.commit()
+        return self.template_out(template)
+
+    def retire_template(self, template_id: str, user: User) -> dict:
+        template = self._template(template_id)
+        template.retired = True
+        template.row_version = int(template.row_version or 0) + 1
+        self.audit.record(user, "停用方案模板", template.id, before="可用", after="停用", detail=template.name)
+        self.db.commit()
+        return self.template_out(template)
 
     def revise(self, plan_id: str, user: User) -> dict:
         """修订已批准版本：生成新版本，原版本快照不变。"""

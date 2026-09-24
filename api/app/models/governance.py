@@ -166,3 +166,24 @@ class PlanBatchLink(Base):
     batch_id: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     ref: Mapped[str] = mapped_column(String, default=uid)
+
+
+class Comment(Base):
+    """批注。挂在方案、SOP 版本、方法或报告版本上，可以指到某个字段 / 章节；解决后保留。"""
+
+    __tablename__ = "comments"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # plan | sop_version | recipe | report_version
+    target_type: Mapped[str] = mapped_column(String)
+    target_id: Mapped[str] = mapped_column(String, index=True)
+    # 批注针对的对象版本（方案版本号、方法版本等），版本变了批注仍然知道它说的是哪一版
+    target_version: Mapped[str] = mapped_column(String, default="")
+    anchor: Mapped[str] = mapped_column(String, default="")
+    body: Mapped[str] = mapped_column(Text)
+    author_id: Mapped[str] = mapped_column(String, default="")
+    author_name: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    resolved_by: Mapped[str] = mapped_column(String, default="")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

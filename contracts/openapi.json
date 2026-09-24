@@ -438,6 +438,22 @@
         "title": "ApplyOptimizedIn",
         "type": "object"
       },
+      "ApprovalLevelIn": {
+        "properties": {
+          "assignee_id": {
+            "default": "",
+            "title": "Assignee Id",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "title": "ApprovalLevelIn",
+        "type": "object"
+      },
       "AssetCreateIn": {
         "properties": {
           "asset_no": {
@@ -1123,6 +1139,43 @@
           "note"
         ],
         "title": "CommandVerifyIn",
+        "type": "object"
+      },
+      "CommentIn": {
+        "properties": {
+          "anchor": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Anchor",
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "plan",
+              "sop_version",
+              "recipe",
+              "report_version"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_type",
+          "target_id",
+          "body"
+        ],
+        "title": "CommentIn",
         "type": "object"
       },
       "DataRuleIn": {
@@ -3251,6 +3304,7 @@
             "type": "string"
           },
           "recipe_id": {
+            "default": "",
             "title": "Recipe Id",
             "type": "string"
           },
@@ -3296,11 +3350,15 @@
             "default": 1,
             "title": "Seed",
             "type": "integer"
+          },
+          "template_id": {
+            "default": "",
+            "title": "Template Id",
+            "type": "string"
           }
         },
         "required": [
-          "name",
-          "recipe_id"
+          "name"
         ],
         "title": "PlanCreateIn",
         "type": "object"
@@ -3515,6 +3573,212 @@
           }
         },
         "title": "PlanPatchIn",
+        "type": "object"
+      },
+      "PlanRestoreIn": {
+        "properties": {
+          "from_version": {
+            "minimum": 1.0,
+            "title": "From Version",
+            "type": "integer"
+          },
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          }
+        },
+        "required": [
+          "from_version"
+        ],
+        "title": "PlanRestoreIn",
+        "type": "object"
+      },
+      "PlanSubmitIn": {
+        "description": "提交方案评审。approvers 为空就是一级「QA 审批」；最多 5 级，逐级审。",
+        "properties": {
+          "approvers": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalLevelIn"
+            },
+            "maxItems": 5,
+            "title": "Approvers",
+            "type": "array"
+          }
+        },
+        "title": "PlanSubmitIn",
+        "type": "object"
+      },
+      "PlanTemplateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "control": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "design_space": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Design Space"
+          },
+          "factors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Factors"
+          },
+          "from_plan_id": {
+            "default": "",
+            "title": "From Plan Id",
+            "type": "string"
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "layout": {
+            "anyOf": [
+              {
+                "enum": [
+                  "sequential",
+                  "randomized"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Layout"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "plan_type": {
+            "default": "matrix",
+            "enum": [
+              "matrix",
+              "single_condition",
+              "commissioned_test"
+            ],
+            "title": "Plan Type",
+            "type": "string"
+          },
+          "recipe_id": {
+            "default": "",
+            "title": "Recipe Id",
+            "type": "string"
+          },
+          "repeats": {
+            "anyOf": [
+              {
+                "maximum": 12.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeats"
+          },
+          "required_metrics": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Metrics"
+          },
+          "resource_requirements": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Requirements"
+          },
+          "sample_count": {
+            "anyOf": [
+              {
+                "maximum": 96.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Count"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PlanTemplateIn",
         "type": "object"
       },
       "ProposalDismissIn": {
@@ -4827,6 +5091,120 @@
           "reason"
         ],
         "title": "SkipStepIn",
+        "type": "object"
+      },
+      "SopRecipeIn": {
+        "properties": {
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "plate": {
+            "default": 8,
+            "maximum": 96.0,
+            "minimum": 1.0,
+            "title": "Plate",
+            "type": "integer"
+          }
+        },
+        "title": "SopRecipeIn",
+        "type": "object"
+      },
+      "SopRestoreIn": {
+        "description": "从历史版本恢复：产生一个新的草稿版本，内容（附件、适用范围、结构化步骤）取自历史版本。",
+        "properties": {
+          "version": {
+            "default": "",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "title": "SopRestoreIn",
+        "type": "object"
+      },
+      "SopStepIn": {
+        "properties": {
+          "capability": {
+            "default": "",
+            "title": "Capability",
+            "type": "string"
+          },
+          "checks": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "duration_min": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Duration Min",
+            "type": "number"
+          },
+          "instructions": {
+            "default": "",
+            "title": "Instructions",
+            "type": "string"
+          },
+          "kind": {
+            "default": "manual",
+            "enum": [
+              "device",
+              "manual",
+              "wait",
+              "review"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "SopStepIn",
+        "type": "object"
+      },
+      "SopStepsIn": {
+        "properties": {
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SopStepIn"
+            },
+            "maxItems": 200,
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "title": "SopStepsIn",
         "type": "object"
       },
       "SopVersionCreateIn": {
@@ -10090,6 +10468,203 @@
         "summary": "Verify Command",
         "tags": [
           "resource"
+        ]
+      }
+    },
+    "/api/comments": {
+      "get": {
+        "operationId": "list_comments_api_comments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "target_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "plan",
+                "sop_version",
+                "recipe",
+                "report_version"
+              ],
+              "title": "Target Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "title": "Target Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Comments",
+        "tags": [
+          "comment"
+        ]
+      },
+      "post": {
+        "operationId": "create_comment_api_comments_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Comment",
+        "tags": [
+          "comment"
+        ]
+      }
+    },
+    "/api/comments/{comment_id}/resolve": {
+      "post": {
+        "operationId": "resolve_comment_api_comments__comment_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "comment_id",
+            "required": true,
+            "schema": {
+              "title": "Comment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resolve Comment",
+        "tags": [
+          "comment"
         ]
       }
     },
@@ -15603,6 +16178,243 @@
         ]
       }
     },
+    "/api/plans/approvers": {
+      "get": {
+        "description": "可被指定为方案审批人的成员（有批准实验方案权限）。",
+        "operationId": "plan_approvers_api_plans_approvers_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Plan Approvers",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/templates": {
+      "get": {
+        "description": "方案模板库。新建方案时带 template_id 套用。",
+        "operationId": "list_plan_templates_api_plans_templates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_retired",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Retired",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Plan Templates",
+        "tags": [
+          "plan"
+        ]
+      },
+      "post": {
+        "operationId": "create_plan_template_api_plans_templates_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanTemplateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Plan Template",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/templates/{template_id}/retire": {
+      "post": {
+        "operationId": "retire_plan_template_api_plans_templates__template_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retire Plan Template",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
     "/api/plans/{plan_id}": {
       "delete": {
         "description": "只删草稿。已锁定先解锁；已批准、已绑定批次或已有任务的不能删。",
@@ -15927,6 +16739,93 @@
         ]
       }
     },
+    "/api/plans/{plan_id}/diff": {
+      "get": {
+        "description": "两个版本（或历史版本与当前内容）的字段级差异。",
+        "operationId": "diff_plan_api_plans__plan_id__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_version",
+            "required": true,
+            "schema": {
+              "title": "From Version",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Version"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Diff Plan",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
     "/api/plans/{plan_id}/lock": {
       "post": {
         "description": "锁定结构。这是结构冻结，不代表已审批。",
@@ -16121,6 +17020,78 @@
         ]
       }
     },
+    "/api/plans/{plan_id}/restore": {
+      "post": {
+        "description": "把历史版本的内容恢复到当前草稿；历史版本快照不变，恢复后照常评审。",
+        "operationId": "restore_plan_api_plans__plan_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanRestoreIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Restore Plan",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
     "/api/plans/{plan_id}/revisions": {
       "post": {
         "description": "修订已批准方案，生成新版本。原批准版本快照保留。",
@@ -16185,6 +17156,7 @@
     },
     "/api/plans/{plan_id}/submit": {
       "post": {
+        "description": "提交评审。可带多级审批（每级可指定审批人），逐级审，最后一级通过才算批准。",
         "operationId": "submit_plan_api_plans__plan_id__submit_post",
         "parameters": [
           {
@@ -16213,6 +17185,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PlanSubmitIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -21185,6 +22174,221 @@
         ]
       }
     },
+    "/api/sops/{version_id}/diff": {
+      "get": {
+        "description": "与同一 SOP 的另一个版本对比：附件、适用范围、结构化步骤。",
+        "operationId": "diff_versions_api_sops__version_id__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "against",
+            "required": true,
+            "schema": {
+              "title": "Against",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Diff Versions",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
+    "/api/sops/{version_id}/generate-recipe": {
+      "post": {
+        "description": "按结构化步骤一键生成方法草稿；已发布的 SOP 版本同时挂到方法上。",
+        "operationId": "generate_recipe_api_sops__version_id__generate_recipe_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SopRecipeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate Recipe",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
+    "/api/sops/{version_id}/restore": {
+      "post": {
+        "description": "从这个历史版本恢复：产生新的草稿版本，历史版本不变。",
+        "operationId": "restore_version_api_sops__version_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SopRestoreIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Restore Version",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
     "/api/sops/{version_id}/retire": {
       "post": {
         "operationId": "retire_version_api_sops__version_id__retire_post",
@@ -21251,6 +22455,78 @@
           }
         ],
         "summary": "Retire Version",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
+    "/api/sops/{version_id}/steps": {
+      "put": {
+        "description": "数字 SOP：结构化步骤（设备 / 人工 / 等待 / 审核）。只有草稿能改。",
+        "operationId": "update_steps_api_sops__version_id__steps_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SopStepsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Steps",
         "tags": [
           "sop"
         ]

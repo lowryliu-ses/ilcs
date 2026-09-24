@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
+from ..domain import diffs, sop_steps
 from ..domain.access import same_person
 from ..models import Sop, SopAck, SopVersion, User
 from ..repositories.files import FileRepository
@@ -66,6 +67,8 @@ class SopService:
             "reject_reason": version.reject_reason,
             "row_version": version.row_version,
             "editable": version.state == "draft",
+            "steps": version.steps or [],
+            "restored_from": version.restored_from,
             "ack_count": len(self.acks.for_version(version.id)),
         }
         if detail:
@@ -210,6 +213,109 @@ class SopService:
         )
         self.db.commit()
         return self.version_out(version)
+
+    # ---------- 数字 SOP ----------
+
+    def update_steps(self, version_id: str, steps: list[dict], expected: int | None, user: User) -> dict:
+        """结构化步骤：人照着做什么。只有草稿能改；步骤里的设备能力与参数按能力字典校验。"""
+        from ..repositories.resources import CapabilityRepository
+
+        version = self._require(version_id)
+        if version.state != "draft":
+            raise StateConflict("只有草稿能改结构化步骤；已发布的请建新版本", code="sop_not_editable")
+        self.versions.check_version(version, expected, "SOP 版本")
+        problems = sop_steps.issues(steps, CapabilityRepository(self.db, self.ctx).specs())
+        if problems:
+            raise ValidationFailed("；".join(problems[:5]), code="sop_steps_invalid")
+        before = len(version.steps or [])
+        version.steps = steps
+        self.versions.bump(version)
+        self.audit.record(user, "编辑 SOP 结构化步骤", version.id, before=f"{before} 步", after=f"{len(steps)} 步",
+                          object_version=version.row_version)
+        self.db.commit()
+        return self.version_out(version)
+
+    def generate_recipe(self, version_id: str, payload: dict, user: User) -> dict:
+        """一键生成方法草稿。已发布的 SOP 版本同时挂到方法上；草稿 SOP 生成的方法不挂（方法只能引用已发布 SOP）。"""
+        from .recipe_service import RecipeService
+
+        version = self._require(version_id)
+        if not version.steps:
+            raise StateConflict("这个 SOP 版本还没有结构化步骤", code="sop_steps_missing")
+        sop = self.sops.get(version.sop_id)
+        steps = sop_steps.to_recipe_steps(version.steps)
+        name = (payload.get("name") or "").strip() or f"{sop.title if sop else 'SOP'} 方法草稿"
+        linked = version.id if version.state == "published" else ""
+        recipes = RecipeService(self.db, self.ctx)
+        recipe = recipes.create_from_steps(
+            name, int(payload.get("plate") or 8), steps, user, sop_version_id=linked,
+            note=f"由 SOP {sop.code if sop else ''} {version.version} 生成",
+        )
+        self.audit.record(
+            user, "由 SOP 生成方法草稿", version.id, after=recipe.id,
+            detail=f"{len(steps)} 步；" + ("已挂接本 SOP 版本" if linked else "SOP 未发布，方法未挂接 SOP"),
+        )
+        self.db.commit()
+        return {"recipe_id": recipe.id, "name": recipe.name, "steps": len(steps), "sop_linked": bool(linked)}
+
+    # ---------- 版本对比与恢复 ----------
+
+    DIFF_LABELS = {
+        "filename": "附件", "file_checksum": "附件摘要", "capability_scope": "适用能力", "sample_types": "适用样本类型",
+        "requires_training_ack": "要求培训确认", "steps": "结构化步骤",
+    }
+
+    def _compare_view(self, version: SopVersion) -> dict:
+        attachment = self.files.get(version.file_id) if version.file_id else None
+        return {
+            "filename": attachment.filename if attachment else "", "file_checksum": version.file_checksum,
+            "capability_scope": version.capability_scope or [], "sample_types": version.sample_types or [],
+            "requires_training_ack": version.requires_training_ack, "steps": version.steps or [],
+        }
+
+    def diff(self, from_id: str, to_id: str) -> dict:
+        source, target = self._require(from_id), self._require(to_id)
+        if source.sop_id != target.sop_id:
+            raise ValidationFailed("只能对比同一个 SOP 的两个版本")
+        return {
+            "from": source.version, "to": target.version,
+            "changes": diffs.diff(self._compare_view(source), self._compare_view(target), self.DIFF_LABELS),
+        }
+
+    def restore(self, version_id: str, label: str, user: User) -> dict:
+        """从历史版本恢复：产生新的草稿版本，内容（附件、适用范围、结构化步骤）取自历史版本。
+
+        历史版本本身不动；新版本照常评审、发布，发布前旧的已发布版本仍然有效。
+        """
+        source = self._require(version_id)
+        sop = self.sops.get(source.sop_id)
+        existing = self.versions.for_sop(source.sop_id)
+        if any(row.state in {"draft", "review"} for row in existing):
+            raise StateConflict("这个 SOP 已有草稿或评审中的版本，先处理完再恢复", code="sop_draft_exists")
+        version_label = (label or "").strip() or f"v{len(existing) + 1}"
+        if any(row.version == version_label for row in existing):
+            raise StateConflict(f"版本 {version_label} 已存在")
+        version = SopVersion(
+            org_id=self.ctx.org_id, sop_id=source.sop_id, version=version_label, state="draft",
+            file_id=source.file_id, file_checksum=source.file_checksum,
+            capability_scope=list(source.capability_scope or []), sample_types=list(source.sample_types or []),
+            requires_training_ack=source.requires_training_ack, steps=list(source.steps or []),
+            author_id=user.id, restored_from=source.id,
+        )
+        self.versions.add(version)
+        self.audit.record(
+            user, "恢复 SOP 历史版本", version.id, before="—", after="草稿",
+            detail=f"{sop.code if sop else ''} {version_label} 的内容取自 {source.version}；历史版本不变",
+            object_version=version.row_version,
+        )
+        self.db.commit()
+        return self.version_out(version)
+
+    def _require(self, version_id: str) -> SopVersion:
+        version = self.versions.get(version_id)
+        if not version:
+            raise NotFound("SOP 版本不存在")
+        return version
 
     def submit(self, version_id: str, user: User) -> dict:
         version = self.versions.get(version_id)

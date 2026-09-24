@@ -5,7 +5,10 @@ import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { CapabilityRow, Paged, SopVersionRow } from '../../shared/types';
+import { useNavigate } from 'react-router-dom';
+
+import { CommentsPanel } from '../../shared/comments';
+import type { CapabilityRow, DiffRow, Paged, SopStep, SopVersionRow } from '../../shared/types';
 import {
   ConfirmDialog, Empty, Field, FileUpload, ListState, Modal, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -147,8 +150,26 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
   const [retiring, setRetiring] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editingSteps, setEditingSteps] = useState(false);
+  const [against, setAgainst] = useState('');
+  const navigate = useNavigate();
+  const siblings = useQuery<Paged<SopVersionRow>>('sops:siblings', () => api.get<Paged<SopVersionRow>>('/sops?page_size=100'));
 
   const invalidates = ['sops', 'recipes', 'dashboard'];
+  const generate = useMutation(
+    () => api.post<{ recipe_id: string; sop_linked: boolean }>(`/sops/${versionId}/generate-recipe`, { plate: 8 }),
+    {
+      invalidates: ['recipes'],
+      onSuccess: (result) => {
+        toast.push(result.sop_linked ? '已生成方法草稿并挂接本 SOP 版本' : '已生成方法草稿（SOP 未发布，未挂接）');
+        navigate(`/recipes/${result.recipe_id}/edit`);
+      },
+    },
+  );
+  const restore = useMutation(() => api.post<SopVersionRow>(`/sops/${versionId}/restore`, {}), {
+    invalidates,
+    onSuccess: (row) => toast.push(`已从此版本恢复出新草稿 ${row.version}；历史版本不变`),
+  });
   const submit = useMutation(() => api.post(`/sops/${versionId}/submit`), {
     invalidates,
     onSuccess: () => toast.push('已提交评审'),
@@ -264,7 +285,71 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 退役
               </button>
             ) : null}
+            {version.steps.length && can('recipe.edit') ? (
+              <button className="btn sm" disabled={generate.pending} onClick={() => generate.run().catch((error) => toast.push(error.message))}>
+                生成方法草稿
+              </button>
+            ) : null}
+            {['published', 'retired'].includes(version.state) && can('sop.edit') ? (
+              <button className="btn sm" disabled={restore.pending} onClick={() => restore.run().catch((error) => toast.push(error.message))}>
+                从此版本恢复
+              </button>
+            ) : null}
           </div>
+          {version.restored_from ? <div className="tiny muted">本版本内容恢复自历史版本 {version.restored_from.slice(0, 8)}</div> : null}
+
+          <Panel
+            title={`结构化步骤（${version.steps.length}）`}
+            aside={
+              version.state === 'draft' && can('sop.edit') ? (
+                <button className="btn sm" onClick={() => setEditingSteps(true)}>
+                  编辑步骤
+                </button>
+              ) : null
+            }
+            flush
+          >
+            {version.steps.length ? (
+              <table>
+                <tbody>
+                  {version.steps.map((step, index) => (
+                    <tr key={index}>
+                      <td className="mono small">{index + 1}</td>
+                      <td>
+                        <b>{step.title}</b> <span className="tag">{STEP_KIND_LABEL[step.kind]}</span>
+                        {step.instructions ? <div className="tiny muted">{step.instructions}</div> : null}
+                        {step.checks.length ? <div className="tiny">核对：{step.checks.join('；')}</div> : null}
+                      </td>
+                      <td className="small mono">
+                        {step.kind === 'device' ? `${step.capability} ${Object.entries(step.params).map(([k, v]) => `${k}=${v}`).join(' ')}` : ''}
+                      </td>
+                      <td className="small">{step.duration_min ? `${step.duration_min} min` : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <Empty>还没有结构化步骤；写上之后可以一键生成方法草稿</Empty>
+            )}
+          </Panel>
+
+          <Panel
+            title="版本对比"
+            aside={
+              <select value={against} onChange={(event) => setAgainst(event.target.value)}>
+                <option value="">选择同编号的另一个版本</option>
+                {(siblings.data?.items ?? [])
+                  .filter((row) => row.sop_id === version.sop_id && row.id !== version.id)
+                  .map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.version}（{row.state_label}）
+                    </option>
+                  ))}
+              </select>
+            }
+          >
+            {against ? <SopDiff versionId={version.id} against={against} /> : <div className="small muted">选一个版本查看附件、适用范围与步骤的差异</div>}
+          </Panel>
 
           <Panel title="引用该版本的方法" flush>
             {version.using_recipes?.length ? (
@@ -310,9 +395,11 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
         <ListState loading={detail.loading} error={detail.error} />
       )}
 
+      {version ? <CommentsPanel targetType="sop_version" targetId={version.id} /> : null}
       {editing && version ? (
         <DraftEditDialog version={version} onClose={() => setEditing(false)} />
       ) : null}
+      {editingSteps && version ? <StepsEditor version={version} onClose={() => setEditingSteps(false)} /> : null}
       {retiring ? (
         <ConfirmDialog
           title="退役 SOP 版本"
@@ -535,6 +622,146 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
       {file ? <div className="note">已上传 {file.filename}</div> : null}
       {upload.error ? <div className="note bad">{upload.error.message}</div> : null}
       {create.error ? <div className="note bad">{create.error.message}</div> : null}
+    </Modal>
+  );
+}
+
+const STEP_KIND_LABEL: Record<SopStep['kind'], string> = { device: '设备', manual: '人工', wait: '等待', review: '审核' };
+
+function SopDiff({ versionId, against }: { versionId: string; against: string }) {
+  const diff = useQuery<{ from: string; to: string; changes: DiffRow[] }>(`sops:diff:${against}:${versionId}`, () =>
+    api.get(`/sops/${versionId}/diff?against=${against}`),
+  );
+  if (!diff.data) return <div className="small muted">{diff.error ? diff.error.message : '加载中…'}</div>;
+  if (!diff.data.changes.length) return <div className="small muted">{diff.data.from} 与 {diff.data.to} 内容相同</div>;
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>项目</th>
+          <th>{diff.data.from}</th>
+          <th>{diff.data.to}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {diff.data.changes.map((row) => (
+          <tr key={row.field}>
+            <td className="small">{row.label}</td>
+            <td className="tiny mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{row.before}</td>
+            <td className="tiny mono" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{row.after}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** 数字 SOP 的步骤编辑：人照着做什么。设备步骤写能力与参数，人工步骤写说明与逐项核对。 */
+function StepsEditor({ version, onClose }: { version: SopVersionRow; onClose: () => void }) {
+  const toast = useToast();
+  const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
+  const [steps, setSteps] = useState<SopStep[]>(version.steps.length ? version.steps : []);
+  const save = useMutation(() => api.put(`/sops/${version.id}/steps`, { steps, row_version: version.row_version }), {
+    invalidates: ['sops'],
+    onSuccess: () => {
+      toast.push('结构化步骤已保存');
+      onClose();
+    },
+  });
+  const update = (index: number, change: Partial<SopStep>) =>
+    setSteps((current) => current.map((row, at) => (at === index ? { ...row, ...change } : row)));
+  const blank: SopStep = { title: '', kind: 'manual', capability: '', params: {}, duration_min: 0, instructions: '', checks: [] };
+  return (
+    <Modal
+      title={`结构化步骤 · ${version.code} ${version.version}`}
+      wide
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={save.pending || steps.some((row) => !row.title.trim())} onClick={() => save.run().catch(() => undefined)}>
+            保存
+          </button>
+        </>
+      }
+    >
+      {steps.map((step, index) => {
+        const capability = (capabilities.data ?? []).find((row) => row.id === step.capability);
+        return (
+          <div key={index} className="panel-body" style={{ border: '1px solid var(--border)', borderRadius: 6, marginBottom: 8 }}>
+            <div className="filters">
+              <span className="mono small">{index + 1}</span>
+              <input placeholder="步骤标题" value={step.title} onChange={(event) => update(index, { title: event.target.value })} />
+              <select value={step.kind} onChange={(event) => update(index, { kind: event.target.value as SopStep['kind'] })}>
+                {Object.entries(STEP_KIND_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min={0}
+                style={{ width: 80 }}
+                value={step.duration_min}
+                onChange={(event) => update(index, { duration_min: Number(event.target.value) || 0 })}
+              />
+              <span className="small muted">min</span>
+              <button className="btn sm" onClick={() => setSteps(steps.filter((_, at) => at !== index))}>
+                删除
+              </button>
+            </div>
+            {step.kind === 'device' ? (
+              <div className="filters">
+                <select value={step.capability} onChange={(event) => update(index, { capability: event.target.value, params: {} })}>
+                  <option value="">选择能力</option>
+                  {(capabilities.data ?? []).filter((row) => !row.retired).map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.name}
+                    </option>
+                  ))}
+                </select>
+                {Object.entries(capability?.params ?? {}).map(([key, label]) => (
+                  <label key={key} className="small">
+                    {label}{' '}
+                    <input
+                      type="number"
+                      style={{ width: 80 }}
+                      value={step.params[key] ?? ''}
+                      onChange={(event) =>
+                        update(index, {
+                          params: event.target.value === ''
+                            ? Object.fromEntries(Object.entries(step.params).filter(([name]) => name !== key))
+                            : { ...step.params, [key]: Number(event.target.value) },
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            <textarea
+              rows={2}
+              placeholder="操作说明"
+              value={step.instructions}
+              onChange={(event) => update(index, { instructions: event.target.value })}
+            />
+            {step.kind === 'manual' ? (
+              <input
+                placeholder="逐项核对（用；分隔），生成方法时每项变成一个勾选项"
+                value={step.checks.join('；')}
+                onChange={(event) => update(index, { checks: event.target.value.split(/[；;]/).map((text) => text.trim()).filter(Boolean) })}
+              />
+            ) : null}
+          </div>
+        );
+      })}
+      <button className="btn sm" onClick={() => setSteps([...steps, { ...blank }])}>
+        增加步骤
+      </button>
+      {save.error ? <div className="note bad">{save.error.message}</div> : null}
     </Modal>
   );
 }

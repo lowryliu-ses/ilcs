@@ -319,6 +319,75 @@ class DataRulePatchIn(Versioned):
     note: str | None = None
 
 
+class ApprovalLevelIn(BaseModel):
+    label: str = ""
+    # 指定审批人（账号 ID）；不指定则任何有审批权限的人都可以审这一级
+    assignee_id: str = ""
+
+
+class PlanSubmitIn(BaseModel):
+    """提交方案评审。approvers 为空就是一级「QA 审批」；最多 5 级，逐级审。"""
+
+    approvers: list[ApprovalLevelIn] = Field(default_factory=list, max_length=5)
+
+
+class PlanRestoreIn(Versioned):
+    from_version: int = Field(ge=1)
+
+
+class PlanTemplateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str = ""
+    # 从已有方案取结构；不给就用下面的字段
+    from_plan_id: str = ""
+    plan_type: Literal["matrix", "single_condition", "commissioned_test"] = "matrix"
+    recipe_id: str = ""
+    goal: str | None = None
+    factors: list[dict[str, Any]] | None = None
+    control: dict[str, Any] | None = None
+    repeats: int | None = Field(default=None, ge=1, le=12)
+    layout: Literal["sequential", "randomized"] | None = None
+    seed: int | None = None
+    design_space: dict[str, Any] | None = None
+    sample_count: int | None = Field(default=None, ge=0, le=96)
+    required_metrics: list[str] | None = None
+    resource_requirements: list[dict[str, Any]] | None = None
+
+
+class CommentIn(BaseModel):
+    target_type: Literal["plan", "sop_version", "recipe", "report_version"]
+    target_id: str
+    anchor: str = Field(default="", max_length=64)
+    body: str = Field(min_length=1, max_length=4000)
+
+
+class SopStepIn(BaseModel):
+    title: str
+    kind: Literal["device", "manual", "wait", "review"] = "manual"
+    capability: str = ""
+    params: dict[str, float] = {}
+    duration_min: float = Field(default=0, ge=0)
+    instructions: str = ""
+    checks: list[str] = []
+
+
+class SopStepsIn(Versioned):
+    steps: list[SopStepIn] = Field(max_length=200)
+
+
+class SopRestoreIn(BaseModel):
+    """从历史版本恢复：产生一个新的草稿版本，内容（附件、适用范围、结构化步骤）取自历史版本。"""
+
+    version: str = ""
+
+
+class SopRecipeIn(BaseModel):
+    name: str = ""
+    plate: int = Field(default=8, ge=1, le=96)
+
+
 class SimulateIn(BaseModel):
     """执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。"""
 
@@ -339,7 +408,10 @@ class GoldenBatchIn(Signed):
 
 class PlanCreateIn(BaseModel):
     name: str
-    recipe_id: str
+    # 套用模板时可以不给：取模板建议的方法
+    recipe_id: str = ""
+    # 方案模板：模板给缺省结构，本请求里显式给的字段优先
+    template_id: str = ""
     plan_type: Literal["matrix", "single_condition", "commissioned_test"] = "matrix"
     project_id: str = ""
     goal: str = ""

@@ -3,7 +3,7 @@ from .batch import Allocation, AnalysisTask, Batch, Result, Sample, ScheduleProp
 from .execution import AdapterExecution, Checkpoint, Command, ExecutorHeartbeat, Telemetry
 from .file import FileObject
 from .governance import (
-    AccessLog, Alarm, AuditEvent, ExceptionEvent, ExceptionRule, IdempotencyKey, PlanBatchLink,
+    AccessLog, Alarm, AuditEvent, Comment, ExceptionEvent, ExceptionRule, IdempotencyKey, PlanBatchLink,
 )
 from .identity import ESignature, RolePermissionSet, User, roles_of
 from .labware import Labware, LabwareMove, LabwareType, Location
@@ -16,7 +16,7 @@ from .organization import (
     Lab, Membership, Organization, Project, ProjectMember, ServiceIdentity,
 )
 from .people import Person, Qualification
-from .recipe import ExperimentTask, Plan, PlanProposal, PlanVersion, Recipe, TaskAssignment
+from .recipe import ExperimentTask, Plan, PlanProposal, PlanTemplate, PlanVersion, Recipe, TaskAssignment
 from .report import Report, ReportVersion
 from .resource import (
     Adapter, Asset, CalibrationRecord, Capability, Island, MaintenanceOrder, ResourceBooking, Station,
@@ -38,5 +38,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
+    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "Comment", "PlanTemplate", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

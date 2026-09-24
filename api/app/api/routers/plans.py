@@ -2,12 +2,34 @@ from fastapi import APIRouter
 
 from fastapi.responses import Response
 
-from ...schemas import DecisionIn, PlanCreateIn, PlanPatchIn, ProposalIn
+from ...schemas import DecisionIn, PlanCreateIn, PlanPatchIn, PlanRestoreIn, PlanSubmitIn, PlanTemplateIn, ProposalIn
 from ...services.plan_service import PlanService
 from ...services.proposal_service import ProposalService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
 
 router = APIRouter(prefix="/plans", tags=["plan"])
+
+
+@router.get("/approvers")
+def plan_approvers(db: DbSession, ctx: Ctx):
+    """可被指定为方案审批人的成员（有批准实验方案权限）。"""
+    return PlanService(db, ctx).approvers()
+
+
+@router.get("/templates")
+def list_plan_templates(db: DbSession, ctx: Ctx, include_retired: bool = False):
+    """方案模板库。新建方案时带 template_id 套用。"""
+    return PlanService(db, ctx).templates(include_retired)
+
+
+@router.post("/templates", status_code=201)
+def create_plan_template(payload: PlanTemplateIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit")):
+    return PlanService(db, ctx).create_template(payload.model_dump(exclude_none=True), user)
+
+
+@router.post("/templates/{template_id}/retire")
+def retire_plan_template(template_id: str, db: DbSession, user: CurrentUser, ctx=require("plan.edit")):
+    return PlanService(db, ctx).retire_template(template_id, user)
 
 
 @router.get("")
@@ -29,7 +51,13 @@ def get_plan(plan_id: str, db: DbSession, ctx: Ctx):
 
 @router.post("", status_code=201)
 def create_plan(payload: PlanCreateIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit")):
-    return PlanService(db, ctx).create(payload.model_dump(), user)
+    # 套用模板时只取请求里显式给的字段，其余用模板的
+    body = payload.model_dump(exclude_unset=True) if payload.template_id else payload.model_dump()
+    if not body.get("recipe_id") and not payload.template_id:
+        from ...core.errors import ValidationFailed
+
+        raise ValidationFailed("方案必须选择方法")
+    return PlanService(db, ctx).create(body, user)
 
 
 @router.patch("/{plan_id}")
@@ -58,8 +86,24 @@ def unlock_plan(plan_id: str, db: DbSession, user: CurrentUser, ctx=require("pla
 
 
 @router.post("/{plan_id}/submit")
-def submit_plan(plan_id: str, db: DbSession, user: CurrentUser, ctx=require("plan.submit")):
-    return PlanService(db, ctx).submit(plan_id, user)
+def submit_plan(
+    plan_id: str, db: DbSession, user: CurrentUser, payload: PlanSubmitIn | None = None, ctx=require("plan.submit"),
+):
+    """提交评审。可带多级审批（每级可指定审批人），逐级审，最后一级通过才算批准。"""
+    approvers = [row.model_dump() for row in payload.approvers] if payload else []
+    return PlanService(db, ctx).submit(plan_id, user, approvers)
+
+
+@router.get("/{plan_id}/diff")
+def diff_plan(plan_id: str, db: DbSession, ctx: Ctx, from_version: int, to_version: int | None = None):
+    """两个版本（或历史版本与当前内容）的字段级差异。"""
+    return PlanService(db, ctx).diff(plan_id, from_version, to_version)
+
+
+@router.post("/{plan_id}/restore")
+def restore_plan(plan_id: str, payload: PlanRestoreIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit")):
+    """把历史版本的内容恢复到当前草稿；历史版本快照不变，恢复后照常评审。"""
+    return PlanService(db, ctx).restore(plan_id, payload.from_version, user, payload.row_version)
 
 
 @router.post("/{plan_id}/decision")

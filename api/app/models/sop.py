@@ -38,6 +38,10 @@ class SopVersion(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     reject_reason: Mapped[str] = mapped_column(Text, default="")
+    # 数字 SOP：结构化步骤 [{title, kind, capability, params, duration_min, instructions, checks}]
+    steps: Mapped[list] = mapped_column(JSON, default=list)
+    # 从哪个历史版本恢复而来（恢复产生新版本，不改写历史版本）
+    restored_from: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     __table_args__ = (UniqueConstraint("sop_id", "version", name="uq_sop_version"),)

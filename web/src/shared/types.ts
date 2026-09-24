@@ -499,6 +499,32 @@ export type PlanSummary = {
 /** 任务中心与批次创建都读方案列表，这里给个短名。 */
 export type PlanRow = PlanSummary;
 
+export type ApprovalLevel = {
+  level: number;
+  label: string;
+  assignee_id: string;
+  assignee_name: string;
+  decided_by: string;
+  decided_by_name: string;
+  decided_at: string | null;
+  conclusion: '' | 'approved' | 'rejected';
+  reason: string;
+};
+
+export type PlanTemplateRow = {
+  id: string;
+  name: string;
+  description: string;
+  plan_type: string;
+  plan_type_label: string;
+  recipe_id: string;
+  body: Record<string, unknown>;
+  source_plan_id: string;
+  retired: boolean;
+};
+
+export type DiffRow = { field: string; label: string; before: string; after: string };
+
 export type PlanDetail = PlanSummary & {
   factors: Factor[];
   control: { label: string; cond: (number | string)[] } | null;
@@ -531,7 +557,10 @@ export type PlanDetail = PlanSummary & {
     approved_at: string | null;
     reject_reason: string;
     created_at: string;
+    approvals?: ApprovalLevel[];
   }[];
+  /** 当前版本的逐级审批进度 */
+  approvals: ApprovalLevel[];
   metrics: { id: string; code: string; name: string; version: string; unit: string; value_type: string }[];
   audit: AuditRow[];
 };
@@ -1429,6 +1458,16 @@ export type AnalysisTaskRow = {
 
 /* ---------- SOP ---------- */
 
+export type SopStep = {
+  title: string;
+  kind: 'device' | 'manual' | 'wait' | 'review';
+  capability: string;
+  params: Record<string, number>;
+  duration_min: number;
+  instructions: string;
+  checks: string[];
+};
+
 export type SopVersionRow = {
   id: string;
   sop_id: string;
@@ -1454,6 +1493,9 @@ export type SopVersionRow = {
   row_version: number;
   editable: boolean;
   ack_count: number;
+  /** 数字 SOP：结构化步骤 */
+  steps: SopStep[];
+  restored_from: string;
   acks?: { person_id: string; person_name: string; acked_at: string }[];
   using_recipes?: { id: string; name: string; version: string; state: string }[];
   audit?: AuditRow[];

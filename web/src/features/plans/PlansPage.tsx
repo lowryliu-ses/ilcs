@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../shared/api';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { MetricRow, PlanSummary, RecipeSummary } from '../../shared/types';
+import type { PlanTemplateRow, MetricRow, PlanSummary, RecipeSummary } from '../../shared/types';
 import { ConfirmDialog, Empty, Field, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 export function PlansPage() {
@@ -21,10 +21,16 @@ export function PlansPage() {
     layout: 'randomized', seed: 20260920, sample_count: 4,
   });
   const [requiredMetrics, setRequiredMetrics] = useState<string[]>([]);
+  const [templateId, setTemplateId] = useState('');
+  const templates = useQuery<PlanTemplateRow[]>('plans:templates', () => api.get<PlanTemplateRow[]>('/plans/templates'));
+  const template = templates.data?.find((row) => row.id === templateId);
 
   const create = useMutation(
     () =>
-      api.post<PlanSummary>('/plans', {
+      templateId
+        // 套用模板：只给名称与（可选的）方法，其余结构取自模板
+        ? api.post<PlanSummary>('/plans', { name: form.name, template_id: templateId, ...(form.recipe_id ? { recipe_id: form.recipe_id } : {}) })
+        : api.post<PlanSummary>('/plans', {
         ...form,
         // 非矩阵方案不带因子；样本数只对单条件方案有意义
         factors: [],
@@ -188,9 +194,27 @@ export function PlansPage() {
             </>
           }
         >
+          <Field label="从模板创建" hint={template ? `${template.plan_type_label} · ${template.description || '取模板里的因子、重复、布局、指标与资源需求'}` : '不选就是空白方案'}>
+            <select
+              value={templateId}
+              onChange={(event) => {
+                setTemplateId(event.target.value);
+                const picked = templates.data?.find((row) => row.id === event.target.value);
+                if (picked?.recipe_id) setForm({ ...form, recipe_id: picked.recipe_id });
+              }}
+            >
+              <option value="">不用模板</option>
+              {(templates.data ?? []).map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field label="名称">
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </Field>
+          {templateId ? null : (<>
           <Field label="方案类型" hint="类型决定校验分支：非矩阵方案不要求因子与水平">
             <select value={form.plan_type} onChange={(event) => setForm({ ...form, plan_type: event.target.value })}>
               <option value="matrix">矩阵实验</option>
@@ -227,6 +251,7 @@ export function PlansPage() {
               />
             </Field>
           ) : null}
+          </>)}
           <Field label="方法" hint="样品位数由方法决定，样本数不能超过它">
             <select value={form.recipe_id} onChange={(event) => setForm({ ...form, recipe_id: event.target.value })}>
               {(recipes.data ?? []).map((recipe) => (
@@ -236,6 +261,7 @@ export function PlansPage() {
               ))}
             </select>
           </Field>
+          {templateId ? null : (<>
           <Field label="研究目标">
             <textarea rows={2} value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} />
           </Field>
@@ -263,6 +289,7 @@ export function PlansPage() {
               />
             </Field>
           </div>
+          </>)}
           {create.error ? <div className="note bad">{create.error.message}</div> : null}
         </Modal>
       ) : null}

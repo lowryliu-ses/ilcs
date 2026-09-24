@@ -5,6 +5,7 @@ import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
+import { CommentsPanel } from '../../shared/comments';
 import type { BatchSummary, Paged, ReportContent, ReportTemplate, ReportVersionRow } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, Pager, Panel, Pill, useToast,
@@ -443,6 +444,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
               </Panel>
 
               <ReportExtras content={content} />
+              <CommentsPanel targetType="report_version" targetId={version.id} />
 
               {version.publish_snapshot ? (
                 <Panel title="发布快照">

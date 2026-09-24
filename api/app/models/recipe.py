@@ -130,8 +130,29 @@ class PlanVersion(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     signature_id: Mapped[str] = mapped_column(String, default="")
     reject_reason: Mapped[str] = mapped_column(Text, default="")
+    # 多级审批：[{level, label, assignee_id, decided_by, decided_at, conclusion, reason, signature_id}]
+    approvals: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     __table_args__ = (UniqueConstraint("plan_id", "version", name="uq_plan_version"),)
+
+
+class PlanTemplate(Base):
+    """方案模板：常用的方案结构（类型、因子与水平、重复、布局、指标、资源需求），新建方案时一键套用。"""
+
+    __tablename__ = "plan_templates"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, default="", index=True)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str] = mapped_column(Text, default="")
+    plan_type: Mapped[str] = mapped_column(String, default="matrix")
+    # 建议使用的方法（可空）；套用时方法仍由新建人选
+    recipe_id: Mapped[str] = mapped_column(String, default="")
+    body: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_plan_id: Mapped[str] = mapped_column(String, default="")
+    retired: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class ExperimentTask(Base):
