@@ -88,7 +88,7 @@ export function App() {
           {NAV.map(([group, items]) => (
             <div key={group}>
               <div className="nav-group">{group}</div>
-              {items.filter(([path]) => (path !== '/governance' || user.perms.includes('service.manage')) && (path !== '/integrations' || user.perms.includes('integration.manage'))).map(([path, label]) => (
+              {items.filter(([path]) => (path !== '/governance' || user.perms.includes('service.manage')) && (path !== '/integrations' || user.perms.includes('integration.manage')) && (path !== '/audit' || user.perms.includes('audit.read'))).map(([path, label]) => (
                 <NavLink key={path} to={path} className={({ isActive }) => (isActive ? 'active' : '')}>
                   {label}
                   {badges[path] ? (

@@ -8248,7 +8248,7 @@
     },
     "/api/audit": {
       "get": {
-        "description": "审计查询也在访问范围内：跨组织的记录读不到。",
+        "description": "审计查询也在访问范围内：跨组织的记录读不到。\n\n按对象查（target）是对象自己的变更历史，能看到对象的人都能看；浏览全量日志、按动作筛选要「浏览全量审计日志」权限。",
         "operationId": "audit_log_api_audit_get",
         "parameters": [
           {

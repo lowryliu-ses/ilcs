@@ -6,6 +6,9 @@ USERS = [
     ("operator", "操作员", "operator", "ilcs1234"),
     ("ehs", "EHS 专员", "ehs", "ilcs1234"),
     ("admin", "系统管理员", "admin", "ilcs1234"),
+    ("engineer", "自动化工程师", "automation_engineer", "ilcs1234"),
+    ("manager", "实验室经理", "lab_manager", "ilcs1234"),
+    ("auditor", "审计员", "auditor", "ilcs1234"),
 ]
 
 CAPABILITIES = [
@@ -286,6 +289,8 @@ PEOPLE = [
     dict(code="P-003", name="操作员", title="实验操作员", username="operator", contact="ext.103"),
     dict(code="P-004", name="EHS 专员", title="安全环保", username="ehs", contact="ext.104"),
     dict(code="P-005", name="系统管理员", title="系统管理", username="admin", contact="ext.105"),
+    dict(code="P-006", name="自动化工程师", title="设备与集成", username="engineer", contact="ext.106"),
+    dict(code="P-007", name="实验室经理", title="实验室运营", username="manager", contact="ext.107"),
 ]
 
 # 操作员拿全部设备能力资质；研究员只有称重与测试——分配到涂布步骤时会被资质挡住

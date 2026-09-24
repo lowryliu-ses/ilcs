@@ -379,7 +379,8 @@ function SecretModal({ result, onClose }: { result: SecretResult; onClose: () =>
 
 const ROLES: [RoleKey, string][] = [
   ['researcher', '研究员'], ['qa', 'QA 负责人'], ['operator', '操作员'],
-  ['ehs', 'EHS 专员'], ['admin', '系统管理员'],
+  ['ehs', 'EHS 专员'], ['automation_engineer', '自动化工程师'], ['lab_manager', '实验室经理'], ['auditor', '审计员'],
+  ['admin', '系统管理员'],
 ];
 
 function AccountForm({

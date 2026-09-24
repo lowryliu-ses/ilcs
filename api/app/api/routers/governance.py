@@ -29,7 +29,14 @@ def audit_log(
     db: DbSession, ctx: Ctx, paging: Paging, limit: int = 200, target: str | None = None,
     action: str | None = None, paged: bool = False,
 ):
-    """审计查询也在访问范围内：跨组织的记录读不到。"""
+    """审计查询也在访问范围内：跨组织的记录读不到。
+
+    按对象查（target）是对象自己的变更历史，能看到对象的人都能看；浏览全量日志、按动作筛选要「浏览全量审计日志」权限。
+    """
+    if not target and not ctx.has("audit.read"):
+        from ...core.errors import PermissionDenied
+
+        raise PermissionDenied("当前角色无权限：浏览全量审计日志", code="permission_denied")
     service = AuditService(db, ctx)
     if paged or action:
         rows, total = service.page(paging.offset, paging.page_size, target, action)

@@ -94,7 +94,7 @@ class ExceptionRule(Base):
 
 
 class AuditEvent(Base):
-    """仅追加。生产库上对应用角色 REVOKE UPDATE, DELETE。"""
+    """仅追加。数据库触发器拒绝任何 UPDATE / DELETE（迁移 0027），应用、脚本、手工 SQL 一视同仁。"""
 
     __tablename__ = "audit_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

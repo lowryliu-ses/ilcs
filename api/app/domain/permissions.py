@@ -17,21 +17,21 @@ PERMISSIONS: dict[str, list[str]] = {
     "recipe.submit": ["researcher", "admin"],
     "recipe.approve": ["qa", "admin"],
     "recipe.release": ["qa", "admin"],
-    "method.edit": ["researcher", "admin"],
+    "method.edit": ["researcher", "automation_engineer", "admin"],
     "method.release": ["qa", "admin"],
     "plan.edit": ["researcher", "admin"],
     "plan.submit": ["researcher", "admin"],
-    "plan.approve": ["qa", "admin"],
+    "plan.approve": ["qa", "lab_manager", "admin"],
     # ---------- 任务与执行 ----------
-    "task.create": ["researcher", "admin"],
-    "task.assign": ["researcher", "admin"],
+    "task.create": ["researcher", "lab_manager", "admin"],
+    "task.assign": ["researcher", "lab_manager", "admin"],
     "task.accept": ["operator", "researcher", "admin"],
-    "task.cancel": ["researcher", "admin"],
+    "task.cancel": ["researcher", "lab_manager", "admin"],
     "batch.create": ["operator", "admin"],
-    "batch.schedule": ["operator", "admin"],
+    "batch.schedule": ["operator", "lab_manager", "admin"],
     "batch.control": ["operator", "admin"],
-    "batch.recover": ["operator", "admin"],
-    "labware.move": ["operator", "admin"],
+    "batch.recover": ["operator", "automation_engineer", "admin"],
+    "labware.move": ["operator", "automation_engineer", "admin"],
     "step.submit": ["operator", "researcher", "admin"],
     "step.review": ["qa", "admin"],
     "batch.signal": ["operator", "researcher", "admin"],
@@ -45,15 +45,15 @@ PERMISSIONS: dict[str, list[str]] = {
     "inventory.post": ["operator", "researcher", "admin"],
     "inventory.reverse": ["qa", "admin"],
     # ---------- 资源 ----------
-    "station.edit": ["admin"],
-    "location.edit": ["admin"],
-    "asset.edit": ["admin"],
-    "booking.edit": ["operator", "admin"],
-    "maintenance.edit": ["operator", "admin"],
-    "environment.record": ["operator", "ehs", "admin"],
+    "station.edit": ["automation_engineer", "admin"],
+    "location.edit": ["automation_engineer", "admin"],
+    "asset.edit": ["automation_engineer", "admin"],
+    "booking.edit": ["operator", "automation_engineer", "lab_manager", "admin"],
+    "maintenance.edit": ["operator", "automation_engineer", "lab_manager", "admin"],
+    "environment.record": ["operator", "ehs", "automation_engineer", "lab_manager", "admin"],
     # ---------- 人员与资质 ----------
-    "person.edit": ["admin"],
-    "qualification.edit": ["admin", "ehs"],
+    "person.edit": ["lab_manager", "admin"],
+    "qualification.edit": ["admin", "ehs", "lab_manager"],
     # ---------- 数据与审核 ----------
     "metric.edit": ["researcher", "admin"],
     "analysis.create": ["researcher", "operator", "admin"],
@@ -65,29 +65,34 @@ PERMISSIONS: dict[str, list[str]] = {
     "sop.approve": ["qa", "admin"],
     "report.edit": ["researcher", "admin"],
     "report.submit": ["researcher", "admin"],
-    "report.approve": ["qa", "admin"],
+    "report.approve": ["qa", "lab_manager", "admin"],
     "report.publish": ["qa", "admin"],
-    "file.upload": ["researcher", "operator", "qa", "ehs", "admin"],
-    "alarm.ack": ["operator", "ehs", "admin"],
+    "file.upload": ["researcher", "operator", "qa", "ehs", "automation_engineer", "lab_manager", "admin"],
+    "alarm.ack": ["operator", "ehs", "automation_engineer", "lab_manager", "admin"],
     "alarm.shelve": ["ehs", "admin"],
-    "alarm.close": ["operator", "ehs", "admin"],
-    "exception.handle": ["operator", "qa", "admin"],
-    "exception.rules": ["admin"],
+    "alarm.close": ["operator", "ehs", "automation_engineer", "admin"],
+    "exception.handle": ["operator", "qa", "automation_engineer", "lab_manager", "admin"],
+    "exception.rules": ["automation_engineer", "admin"],
     "golden.set": ["qa", "admin"],
     "org.admin": ["admin"],
     "service.manage": ["admin"],
-    "integration.manage": ["admin"],
+    "integration.manage": ["automation_engineer", "admin"],
+    # 浏览全量审计日志（对象自己的变更历史随对象页面展示，不需要这项）
+    "audit.read": ["qa", "ehs", "automation_engineer", "lab_manager", "auditor", "admin"],
 }
 
 ADMIN = "admin"
 # 可分配给账号的角色（设备事件、后台推进器是系统主体，不是账号角色）
-ASSIGNABLE_ROLES = ("researcher", "qa", "operator", "ehs", "admin")
+ASSIGNABLE_ROLES = ("researcher", "qa", "operator", "ehs", "automation_engineer", "lab_manager", "auditor", "admin")
 
 ROLE_NAMES = {
     "researcher": "研究员",
     "qa": "QA 负责人",
     "operator": "操作员",
     "ehs": "EHS 专员",
+    "automation_engineer": "自动化工程师",
+    "lab_manager": "实验室经理",
+    "auditor": "审计员",
     "admin": "系统管理员",
     "device": "设备事件",
     "system": "后台推进器",
@@ -148,7 +153,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("系统治理", [
         ("org.admin", "账号、角色与权限管理"), ("service.manage", "服务身份管理"),
-        ("integration.manage", "出向事件订阅（Webhook）管理"),
+        ("integration.manage", "出向事件订阅（Webhook）管理"), ("audit.read", "浏览全量审计日志"),
     ]),
 ]
 PERMISSION_LABELS = {key: label for _, rows in PERMISSION_CATALOG for key, label in rows}
@@ -192,10 +197,12 @@ def effective_permissions(roles, matrix: dict[str, list[str]] | None = None) -> 
     roles = set(roles or [])
     if ADMIN in roles:
         return sorted(PERMISSIONS)
-    source = matrix if matrix is not None else default_matrix()
+    defaults = default_matrix()
+    source = matrix if matrix is not None else defaults
     granted: set[str] = set()
     for role in roles:
-        granted.update(source.get(role, []))
+        # 组织存过的矩阵里没有的角色（后来新增的出厂角色）按出厂默认
+        granted.update(source.get(role, defaults.get(role, [])))
     return sorted(granted & set(PERMISSIONS))
 
 

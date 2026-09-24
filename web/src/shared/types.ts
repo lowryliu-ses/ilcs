@@ -843,7 +843,8 @@ export type SchemaState = {
   compatible: boolean;
 };
 
-export type RoleKey = 'researcher' | 'qa' | 'operator' | 'ehs' | 'admin';
+export type RoleKey =
+  | 'researcher' | 'qa' | 'operator' | 'ehs' | 'automation_engineer' | 'lab_manager' | 'auditor' | 'admin';
 
 /** 组织的角色权限矩阵。系统管理员恒有全部权限，不在 matrix 里。 */
 export type RolePermissions = {
