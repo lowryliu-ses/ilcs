@@ -92,7 +92,7 @@ def classify_condition(condition_key: str, message: str = "") -> str:
         return "schedule"
     if key.startswith("gate:"):
         return "sample"
-    if key.startswith("branch:"):
+    if key.startswith("branch:") or key.startswith("data:"):
         return "data"
     if key.startswith("command:"):
         return classify(message)

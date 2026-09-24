@@ -1370,6 +1370,7 @@ class WorkflowService:
             "ended_at": run.ended_at.isoformat(timespec="seconds") if run.ended_at else None,
             "form": step.get("form") or [],
             "form_data": run.form_data or {},
+            "flags": run.flags or [],
             "requires_signature": bool(step.get("requires_signature")),
             "review_role": step.get("review_role", ""),
             "wait_for": step.get("wait_for") or {},

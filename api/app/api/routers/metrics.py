@@ -1,10 +1,27 @@
 from fastapi import APIRouter
 
-from ...schemas import MetricCreateIn, MetricPatchIn
+from ...schemas import DataRuleIn, DataRulePatchIn, MetricCreateIn, MetricPatchIn
+from ...services.data_rule_service import DataRuleService
 from ...services.metric_service import MetricService
 from ..deps import Ctx, CurrentUser, DbSession, require
 
 router = APIRouter(prefix="/metrics", tags=["metric"])
+
+
+@router.get("/data-rules")
+def list_data_rules(db: DbSession, ctx: Ctx):
+    """前后逻辑校验规则。回传与更正时按规则比对同一检测任务里的指标，冲突打标或拒收。"""
+    return DataRuleService(db, ctx).list()
+
+
+@router.post("/data-rules", status_code=201)
+def create_data_rule(payload: DataRuleIn, db: DbSession, user: CurrentUser, ctx=require("metric.edit")):
+    return DataRuleService(db, ctx).create(payload.model_dump(), user)
+
+
+@router.patch("/data-rules/{rule_id}")
+def update_data_rule(rule_id: str, payload: DataRulePatchIn, db: DbSession, user: CurrentUser, ctx=require("metric.edit")):
+    return DataRuleService(db, ctx).update(rule_id, payload.model_dump(exclude_unset=True), user)
 
 
 @router.get("")

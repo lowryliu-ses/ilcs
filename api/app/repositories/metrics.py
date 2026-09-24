@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from sqlalchemy import or_
 
-from ..models import IngestEvent, MetricDefinition, ResultReview, ResultValue
+from ..domain.dataquality import LogicRule
+from ..models import DataRule, IngestEvent, MetricDefinition, ResultReview, ResultValue
 from .base import ScopedRepository
 
 
@@ -141,3 +142,20 @@ class ResultReviewRepository(ScopedRepository[ResultReview]):
             .order_by(ResultReview.decided_at)
             .all()
         )
+
+
+class DataRuleRepository(ScopedRepository[DataRule]):
+    model = DataRule
+
+    def list(self) -> list[DataRule]:
+        return list(self.query().order_by(DataRule.created_at).all())
+
+    def enabled_specs(self) -> list[LogicRule]:
+        return [
+            LogicRule(
+                id=row.id, name=row.name, left=row.left_metric, op=row.op, right=row.right_metric or "",
+                value=row.right_value, factor=float(row.factor if row.factor is not None else 1.0),
+                offset=float(row.offset or 0.0), severity=row.severity,
+            )
+            for row in self.query().filter(DataRule.enabled.is_(True)).all()
+        ]

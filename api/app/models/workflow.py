@@ -38,6 +38,8 @@ class StepRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     form_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 设备回报对照方法输出规则的打标：[{code, message, key, well}]；不阻断流程，交数据审核
+    flags: Mapped[list] = mapped_column(JSON, default=list)
     conclusion: Mapped[str] = mapped_column(String, default="")
     reason: Mapped[Text] = mapped_column(Text, default="")
     submitted_by: Mapped[str] = mapped_column(String, default="")

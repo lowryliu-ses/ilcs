@@ -2,16 +2,17 @@
 
    两条规则决定了这一页为什么不是普通的增删改查：
    - 被结果引用过的版本不能改，只能修订出新版本。改了就等于回头篡改已采集数据的口径。
-   - 允许范围（min/max、可选值）是**录入校验**，不是质量判定。超范围的值根本进不来；
-     进得来的值是否有效，由数据复核的人判定。这两件事在界面上必须说清楚，否则会有人
-     把「在范围内」当成「合格」。 */
+   - 允许范围（min/max）不是质量判定。超范围的值照常入库、自动打标并置为可疑，交数据复核的人判定；
+     在范围内的值也仍然要复核。否则会有人把「在范围内」当成「合格」，或者让真实但异常的数据消失。
+   - 前后逻辑规则比较同一检测任务里的指标（如比容量不能超过面密度 × 系数），冲突时打标，
+     物理上不可能的组合可以设为整次拒收。 */
 import { useState } from 'react';
 
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { MetricRow } from '../../shared/types';
+import type { DataRuleRow, MetricRow } from '../../shared/types';
 import {
   ConfirmDialog, Field, ListState, Modal, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -54,7 +55,7 @@ export function MetricsPage() {
         <h1>指标定义</h1>
         <span className="small muted">
           检测任务声明要测哪些指标、结果回传按指标版本入账、统计按指标版本分组。
-          允许范围是录入校验，不是质量判定——值在范围内也仍然要复核。
+          允许范围不是质量判定：超范围的值照常入库并打标为可疑，在范围内的值也仍然要复核。
         </span>
       </div>
 
@@ -153,6 +154,8 @@ export function MetricsPage() {
           </table>
         ) : null}
       </Panel>
+
+      <DataRulesPanel metrics={rows} canEdit={can('metric.edit')} />
 
       {creating ? <MetricForm mode="create" onClose={() => setCreating(false)} /> : null}
       {editing ? <MetricForm mode="edit" metric={editing} onClose={() => setEditing(null)} /> : null}
@@ -391,4 +394,125 @@ function splitList(text: string): string[] {
 function nextVersion(current: string): string {
   const match = /^v(\d+)$/.exec(current.trim());
   return match ? `v${Number(match[1]) + 1}` : '';
+}
+
+const OPS: DataRuleRow['op'][] = ['<=', '<', '>=', '>', '==', '!='];
+
+/** 前后逻辑校验规则：同一检测任务里指标之间的约束。回传与更正时比对，冲突打标或整次拒收。 */
+function DataRulesPanel({ metrics, canEdit }: { metrics: MetricRow[]; canEdit: boolean }) {
+  const toast = useToast();
+  const rules = useQuery<DataRuleRow[]>('metrics:data-rules', () => api.get<DataRuleRow[]>('/metrics/data-rules'));
+  const codes = [...new Set(metrics.filter((row) => row.value_type === 'number').map((row) => row.code))];
+  const [form, setForm] = useState({
+    name: '', left_metric: '', op: '<=' as DataRuleRow['op'], right_metric: '', right_value: '', factor: '1', offset: '0',
+    severity: 'flag' as DataRuleRow['severity'],
+  });
+  const create = useMutation(
+    () =>
+      api.post('/metrics/data-rules', {
+        name: form.name, left_metric: form.left_metric, op: form.op, right_metric: form.right_metric,
+        right_value: form.right_metric ? null : form.right_value === '' ? null : Number(form.right_value),
+        factor: Number(form.factor) || 1, offset: Number(form.offset) || 0, severity: form.severity,
+      }),
+    {
+      invalidates: ['metrics:data-rules', 'audit'],
+      onSuccess: () => {
+        toast.push('规则已启用：之后的回传与更正按它比对');
+        setForm({ ...form, name: '' });
+      },
+    },
+  );
+  const toggle = useMutation(
+    (rule: DataRuleRow) => api.patch(`/metrics/data-rules/${rule.id}`, { enabled: !rule.enabled, row_version: rule.row_version }),
+    { invalidates: ['metrics:data-rules', 'audit'] },
+  );
+  return (
+    <Panel title={`前后逻辑规则（${rules.data?.length ?? 0}）`} flush>
+      <ListState loading={rules.loading && !rules.data} error={rules.error} empty={!rules.data?.length} emptyText="还没有逻辑规则" />
+      {rules.data?.length ? (
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>约束</th>
+              <th>冲突时</th>
+              <th>状态</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rules.data.map((rule) => (
+              <tr key={rule.id}>
+                <td>{rule.name}</td>
+                <td className="mono small">{rule.expression}</td>
+                <td className="small">{rule.severity_label}</td>
+                <td>
+                  <Pill state={rule.enabled ? 'running' : 'done'} label={rule.enabled ? '启用' : '停用'} />
+                </td>
+                <td className="row-end">
+                  {canEdit ? (
+                    <button className="btn sm" disabled={toggle.pending} onClick={() => toggle.run(rule).catch((error) => toast.push(error.message))}>
+                      {rule.enabled ? '停用' : '启用'}
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+      {canEdit ? (
+        <div className="panel-body">
+          <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <input placeholder="规则名称" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+            <select value={form.left_metric} onChange={(event) => setForm({ ...form, left_metric: event.target.value })}>
+              <option value="">左侧指标</option>
+              {codes.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+            <select value={form.op} onChange={(event) => setForm({ ...form, op: event.target.value as DataRuleRow['op'] })}>
+              {OPS.map((op) => (
+                <option key={op} value={op}>
+                  {op}
+                </option>
+              ))}
+            </select>
+            <select value={form.right_metric} onChange={(event) => setForm({ ...form, right_metric: event.target.value })}>
+              <option value="">常数</option>
+              {codes.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+            {form.right_metric ? (
+              <>
+                <span className="small">×</span>
+                <input style={{ width: 70 }} value={form.factor} onChange={(event) => setForm({ ...form, factor: event.target.value })} />
+                <span className="small">+</span>
+                <input style={{ width: 70 }} value={form.offset} onChange={(event) => setForm({ ...form, offset: event.target.value })} />
+              </>
+            ) : (
+              <input style={{ width: 90 }} placeholder="常数" value={form.right_value} onChange={(event) => setForm({ ...form, right_value: event.target.value })} />
+            )}
+            <select value={form.severity} onChange={(event) => setForm({ ...form, severity: event.target.value as DataRuleRow['severity'] })}>
+              <option value="flag">冲突打标交审核</option>
+              <option value="reject">冲突整次拒收</option>
+            </select>
+            <button
+              className="btn primary sm"
+              disabled={create.pending || !form.name.trim() || !form.left_metric || (!form.right_metric && form.right_value === '')}
+              onClick={() => create.run().catch((error) => toast.push(error.message))}
+            >
+              添加规则
+            </button>
+          </div>
+          <div className="tiny muted">整次拒收只用于物理上不可能的组合；其余冲突打标，让真实但异常的数据留下来由人判断。</div>
+        </div>
+      ) : null}
+    </Panel>
+  );
 }

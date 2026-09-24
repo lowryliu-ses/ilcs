@@ -5,6 +5,7 @@ import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
+import { FlagList } from '../../shared/flags';
 import type {
   AnalysisTaskRow, MetricRow, Paged, ResultValueRow, SampleRow,
 } from '../../shared/types';
@@ -140,6 +141,7 @@ export function DataReviewPage() {
                   </td>
                   <td>
                     <Pill state={row.quality} label={row.quality_label} />
+                    <FlagList flags={row.flags} />
                   </td>
                   <td>
                     <Pill state={row.review_state} label={row.review_label} />
@@ -150,6 +152,9 @@ export function DataReviewPage() {
                   <td className="small">
                     {PROVENANCE_LABEL[row.provenance] ?? row.provenance}
                     {row.entered_by_name ? <div className="tiny muted">{row.entered_by_name}</div> : null}
+                    {row.station_id || row.instrument ? (
+                      <div className="tiny muted mono">{[row.station_id, row.instrument].filter(Boolean).join(' · ')}</div>
+                    ) : null}
                     {row.provenance === 'legacy_unreviewed' ? (
                       <div className="tiny warn-text">历史质量标记不等于审核</div>
                     ) : null}

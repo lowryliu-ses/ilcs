@@ -4,7 +4,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -82,6 +82,11 @@ class ResultValue(Base):
     not_measured_reason: Mapped[str] = mapped_column(Text, default="")
     quality: Mapped[str] = mapped_column(String, default="unassessed")
     review_state: Mapped[str] = mapped_column(String, default="pending")
+    # 自动打标：越界、逻辑冲突。[{code, message, rule_id?}]；不改变值，交审核下结论
+    flags: Mapped[list] = mapped_column(JSON, default=list)
+    # 测出这个值的设备：工位（如有）与回传声明的仪器序列号
+    station_id: Mapped[str] = mapped_column(String, default="")
+    instrument: Mapped[str] = mapped_column(String, default="")
     # legacy_unreviewed 标记历史迁移数据，不伪造审核人
     provenance: Mapped[str] = mapped_column(String, default="device")
     entered_by: Mapped[str] = mapped_column(String, default="")
@@ -108,3 +113,28 @@ class ResultReview(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     signature_id: Mapped[str] = mapped_column(String, default="")
     decided_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class DataRule(Base):
+    """前后逻辑校验规则：左指标 op 右指标 × factor + offset（或常数）。同一检测任务内比较。
+
+    级别 flag 打标交审核；reject 整次拒收——只用于物理上不可能的组合（如库仑效率超过 100%）。
+    """
+
+    __tablename__ = "data_rules"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String)
+    # 指标代码（不绑版本：指标修订后规则照样适用）
+    left_metric: Mapped[str] = mapped_column(String)
+    op: Mapped[str] = mapped_column(String, default="<=")
+    right_metric: Mapped[str] = mapped_column(String, default="")
+    right_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    factor: Mapped[float] = mapped_column(Float, default=1.0)
+    offset: Mapped[float] = mapped_column(Float, default=0.0)
+    severity: Mapped[str] = mapped_column(String, default="flag")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)

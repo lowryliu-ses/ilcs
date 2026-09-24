@@ -1275,6 +1275,8 @@ export type StepRunRow = {
   ended_at: string | null;
   form: FormField[];
   form_data: { values?: Record<string, unknown>; checks?: Record<string, boolean>; note?: string; [key: string]: unknown };
+  /** 设备回报对照方法输出规则的打标（越界、缺必报项）；不阻断流程 */
+  flags?: DataFlag[];
   requires_signature: boolean;
   review_role: string;
   wait_for: { mode?: string; event?: string };
@@ -1324,6 +1326,25 @@ export type MetricRow = {
   created_at: string;
 };
 
+export type DataFlag = { code: string; message: string; rule_id?: string; key?: string; well?: string };
+
+export type DataRuleRow = {
+  id: string;
+  name: string;
+  left_metric: string;
+  op: '<' | '<=' | '>' | '>=' | '==' | '!=';
+  right_metric: string;
+  right_value: number | null;
+  factor: number;
+  offset: number;
+  severity: 'flag' | 'reject';
+  severity_label: string;
+  enabled: boolean;
+  note: string;
+  expression: string;
+  row_version: number;
+};
+
 export type ResultValueRow = {
   id: string;
   analysis_task_id: string;
@@ -1352,6 +1373,10 @@ export type ResultValueRow = {
   entered_by: string;
   entered_by_name: string;
   row_version: number;
+  /** 自动打标：越界、逻辑冲突。不改变值，交审核下结论 */
+  flags: DataFlag[];
+  station_id: string;
+  instrument: string;
   official: boolean;
   reviews: {
     id: string;

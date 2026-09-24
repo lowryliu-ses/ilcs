@@ -793,12 +793,17 @@ class StationService:
             )
         command_id = payload.get("command_id") or adapter.current_command_id or ""
         batch_id = ""
+        command = batch = None
         if command_id:
             command = self.db.get(Command, command_id)
             if command is not None and command.station_id == station_id:
                 batch = self.db.get(Batch, command.batch_id)
                 batch_id = batch.id if batch is not None else ""
+            else:
+                command = None
         origin = f"real:{adapter.driver}" if adapter.kind == "real" else "simulation"
+        from .telemetry import context as telemetry_context
+
         rows = [
             {
                 "id": uid(),
@@ -807,6 +812,10 @@ class StationService:
                 "quality": point.get("quality") or "good", "origin": origin,
                 "device_ts": as_utc(point["device_ts"]), "event_id": payload["event_id"],
                 "received_at": moment,
+                # 归属：指令、步骤、值守人；设备按孔位或样本号报时归到样本
+                **telemetry_context(
+                    self.db, batch, command, well=point.get("well") or "", sample_id=point.get("sample_id") or "",
+                ),
             }
             for point in points
         ]

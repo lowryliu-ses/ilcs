@@ -342,7 +342,8 @@ class BatchService:
             "telemetry": [
                 {"station_id": t.station_id, "metric": t.metric, "setpoint": t.setpoint,
                  "value": t.value, "quality": t.quality, "origin": t.origin,
-                 "device_ts": t.device_ts.isoformat(timespec="seconds")}
+                 "device_ts": t.device_ts.isoformat(timespec="seconds"),
+                 "step_id": t.step_id, "command_id": t.command_id, "operator": t.operator, "sample_id": t.sample_id}
                 for t in self.telemetry.latest_per_metric(batch.id)
             ],
             "gate": self.gate.status(),
@@ -403,6 +404,8 @@ class BatchService:
                 "setpoint": point.setpoint,
                 "quality": point.quality,
                 "origin": point.origin,
+                "step_id": point.step_id,
+                "sample_id": point.sample_id,
             })
         return grouped
 

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { api, idempotencyKey } from '../../shared/api';
+import { FlagList } from '../../shared/flags';
 import { clock, num, params as formatParams, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
@@ -206,6 +207,7 @@ export function BatchDetailPage() {
                 <td>
                   <Pill state={step.state} label={step.run?.state_label ?? stepLabel(step.state)} />
                   {step.run?.reason ? <div className="tiny muted">{step.run.reason}</div> : null}
+                  <FlagList flags={step.run?.flags} />
                 </td>
                 <td className="row-end">
                   {step.run && step.kind === 'manual' && ['ready', 'running'].includes(step.run.state) && can('step.submit') ? (

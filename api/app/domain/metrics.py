@@ -25,19 +25,16 @@ def validate_rules(value_type: str, rules: dict) -> list[str]:
 def check_value(
     value_type: str, unit: str, rules: dict, value: Any, submitted_unit: str,
 ) -> list[str]:
-    """校验一个回传值。允许范围不通过是校验失败，不是「质量不合格」的结论。"""
+    """校验一个回传值的格式：类型、单位、枚举、空文本。这些不通过说明值本身不成立，整次拒收。
+
+    超出允许范围不在这里：越界的值是真实测出来的，入库并打标（`dataquality.range_flags`），交审核下结论。
+    """
     problems: list[str] = []
     if submitted_unit and unit and submitted_unit != unit:
         problems.append(f"单位 {submitted_unit} 与指标标准单位 {unit} 不一致")
     if value_type == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             problems.append(f"值 {value!r} 不是数值")
-        else:
-            low, high = rules.get("min"), rules.get("max")
-            if isinstance(low, (int, float)) and value < low:
-                problems.append(f"值 {value} 低于允许范围下限 {low}")
-            if isinstance(high, (int, float)) and value > high:
-                problems.append(f"值 {value} 高于允许范围上限 {high}")
     elif value_type == "text":
         if not isinstance(value, str) or not value.strip():
             problems.append("文本指标的值不能为空")

@@ -287,6 +287,38 @@ class DeviceMethodPatchIn(Versioned):
     note: str | None = None
 
 
+class DataRuleIn(BaseModel):
+    """前后逻辑校验：左指标 op 右指标 × factor + offset，或左指标 op 常数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    left_metric: str
+    op: Literal["<", "<=", ">", ">=", "==", "!="] = "<="
+    right_metric: str = ""
+    right_value: float | None = None
+    factor: float = 1.0
+    offset: float = 0.0
+    severity: Literal["flag", "reject"] = "flag"
+    enabled: bool = True
+    note: str = ""
+
+
+class DataRulePatchIn(Versioned):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    left_metric: str | None = None
+    op: Literal["<", "<=", ">", ">=", "==", "!="] | None = None
+    right_metric: str | None = None
+    right_value: float | None = None
+    factor: float | None = None
+    offset: float | None = None
+    severity: Literal["flag", "reject"] | None = None
+    enabled: bool | None = None
+    note: str | None = None
+
+
 class SimulateIn(BaseModel):
     """执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。"""
 
@@ -777,6 +809,8 @@ class ResultIngestIn(BaseModel):
     parser_version: str = ""
     raw_file_id: str = ""
     instrument_serial: str = ""
+    # 测出这些值的工位（可选）；服务身份须在 stations 授权范围内
+    station_id: str = ""
     metrics: list[MetricValueIn]
 
 
@@ -786,6 +820,8 @@ class ManualResultIn(BaseModel):
     collected_at: datetime | None = None
     parser_version: str = ""
     raw_file_id: str = ""
+    station_id: str = ""
+    instrument_serial: str = ""
     metrics: list[MetricValueIn]
 
 
@@ -968,6 +1004,9 @@ class TelemetryPointIn(BaseModel):
     setpoint: float | None = None
     device_ts: datetime
     quality: Literal["good", "bad", "uncertain"] = "good"
+    # 可选：设备按孔位或样本报的点，归到本批次对应样本；整板遥测不填
+    well: str = Field(default="", max_length=16)
+    sample_id: str = Field(default="", max_length=64)
 
 
 class TelemetryIn(BaseModel):

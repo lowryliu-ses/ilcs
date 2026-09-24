@@ -11,7 +11,7 @@ from .material import (
     InventoryEvent, InventoryLedger, Lot, Material, Reservation, WasteTank,
 )
 from .method import DeviceMethod
-from .metric import IngestEvent, MetricDefinition, ResultReview, ResultValue
+from .metric import DataRule, IngestEvent, MetricDefinition, ResultReview, ResultValue
 from .organization import (
     Lab, Membership, Organization, Project, ProjectMember, ServiceIdentity,
 )
@@ -38,5 +38,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
+    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

@@ -20,6 +20,7 @@ from ..core.errors import (
     NotFound, PermissionDenied, StateConflict, ValidationFailed,
 )
 from ..domain.access import same_person, service_may_submit_task
+from ..domain import dataquality
 from ..domain.metrics import check_value, collected
 from ..models import (
     AnalysisTask, IngestEvent, MetricDefinition, ResultReview, ResultValue, Sample, User,
@@ -28,7 +29,7 @@ from ..repositories.batches import AnalysisTaskRepository, SampleRepository
 from ..repositories.files import FileRepository
 from ..repositories.governance import AccessLogRepository, UserRepository
 from ..repositories.metrics import (
-    IngestEventRepository, MetricRepository, ResultReviewRepository, ResultValueRepository,
+    DataRuleRepository, IngestEventRepository, MetricRepository, ResultReviewRepository, ResultValueRepository,
 )
 from ..repositories.samples import PhysicalSampleRepository
 from .audit_service import AuditService
@@ -223,6 +224,19 @@ class AnalysisService:
                     f"仪器序列号 {serial} 与授权设备不一致", code="serial_mismatch"
                 )
 
+        # 测出这些值的工位：声明了就必须是本组织的工位，服务身份还要在它的工位授权范围内
+        station_id = (payload.get("station_id") or "").strip()
+        if station_id:
+            from ..repositories.resources import StationRepository
+
+            if StationRepository(self.db, self.ctx).get(station_id) is None:
+                self._reject("station_not_found", f"工位 {station_id} 不存在")
+                raise NotFound(f"工位 {station_id} 不存在或不在当前组织范围内")
+            allowed_stations = (self.ctx.scopes or {}).get("stations") if self.ctx.subject_kind == SERVICE else None
+            if isinstance(allowed_stations, list) and allowed_stations and station_id not in allowed_stations:
+                self._reject("station_not_authorized", f"服务身份未被授权代表工位 {station_id}")
+                raise PermissionDenied(f"该服务身份未被授权代表工位 {station_id}", code="station_not_authorized")
+
         metrics = payload.get("metrics") or []
         if not metrics:
             raise ValidationFailed("回传至少要有一个指标", code="metrics_required")
@@ -288,8 +302,15 @@ class AnalysisService:
                 continue
             prepared.append(
                 {"definition": definition, "value": row["value"], "reason": "",
-                 "unit": row.get("unit") or definition.unit}
+                 "unit": row.get("unit") or definition.unit,
+                 # 越界不拒收：入库打标，质量置可疑，交审核下结论
+                 "flags": dataquality.range_flags(
+                     definition.value_type, definition.rules or {}, row["value"], definition.code,
+                 )}
             )
+
+        if not problems:
+            problems.extend(self._logic_check(current, prepared))
 
         if problems:
             self._reject("ingest_rejected", "；".join(p["label"] for p in problems)[:480])
@@ -333,9 +354,11 @@ class AnalysisService:
                 unit=row["unit"], collected_at=payload.get("collected_at") or now(),
                 raw_file_id=raw_file_id, parser_version=payload.get("parser_version", ""),
                 result_version=version, not_measured_reason=row["reason"],
-                quality="unassessed", review_state="pending",
+                quality="suspect" if row.get("flags") else "unassessed", review_state="pending",
                 provenance="device" if self.ctx.subject_kind == SERVICE else "manual",
                 entered_by="" if self.ctx.subject_kind == SERVICE else self.ctx.subject_id,
+                flags=list(row.get("flags") or []), station_id=station_id,
+                instrument=(payload.get("instrument_serial") or "").strip(),
             )
             self.db.add(value)
             written.append(value)
@@ -356,6 +379,7 @@ class AnalysisService:
                     "result_version": value.result_version,
                     "quality": value.quality, "review_state": value.review_state,
                     "not_measured_reason": value.not_measured_reason,
+                    "flags": value.flags or [],
                 }
                 for value in written
             ],
@@ -370,10 +394,49 @@ class AnalysisService:
             detail=(
                 f"事件 {source}/{event_id}；{len(written)} 项指标；"
                 f"原始文件 {raw_file_id or '无'}；解析版本 {payload.get('parser_version') or '—'}"
+                + (f"；工位 {station_id}" if station_id else "")
+                + (
+                    f"；自动打标 {sum(1 for value in written if value.flags)} 项（越界 / 逻辑冲突，已置可疑）"
+                    if any(value.flags for value in written) else ""
+                )
             ),
         )
         self.db.commit()
         return response
+
+    def _logic_check(self, current: dict[str, ResultValue], prepared: list[dict]) -> list[dict]:
+        """前后逻辑校验：用本任务已有的当前值加上本次提交的值，按组织的逻辑规则比对。
+
+        只判至少涉及一个本次新值的规则（只涉及旧值的冲突早先已经判过）。级别 reject 的冲突整次拒收，
+        级别 flag 的给本次涉及的新值打标。返回拒收问题；打标直接写进 prepared。
+        """
+        rules = DataRuleRepository(self.db, self.ctx).enabled_specs()
+        if not rules:
+            return []
+        values: dict[str, float] = {}
+        for value in current.values():
+            definition = self.metrics.get(value.metric_definition_id)
+            if definition is not None and value.value_num is not None:
+                values[definition.code] = float(value.value_num)
+        fresh: dict[str, dict] = {}
+        for row in prepared:
+            definition = row["definition"]
+            if definition.value_type == "number" and row["value"] is not None:
+                values[definition.code] = float(row["value"])
+                fresh[definition.code] = row
+        problems: list[dict] = []
+        for rule, message in dataquality.violations(rules, values):
+            involved = [code for code in (rule.left, rule.right) if code and code in fresh]
+            if not involved:
+                continue
+            if rule.severity == "reject":
+                problems.append({"key": f"rule:{rule.id}", "label": f"逻辑冲突（拒收）：{message}"})
+                continue
+            for code in involved:
+                fresh[code]["flags"] = [
+                    *(fresh[code].get("flags") or []), dataquality.flag("logic", message, rule_id=rule.id),
+                ]
+        return problems
 
     def _reject(self, code: str, reason: str) -> None:
         """拒绝事件另写访问日志，不制造成功业务审计。"""
@@ -410,6 +473,8 @@ class AnalysisService:
                 "collected_at": payload.get("collected_at"),
                 "parser_version": payload.get("parser_version", ""),
                 "raw_file_id": payload.get("raw_file_id", ""),
+                "station_id": payload.get("station_id", ""),
+                "instrument_serial": payload.get("instrument_serial", ""),
                 "metrics": payload.get("metrics") or [],
             },
             source_label=f"manual:{user.id}",
@@ -443,6 +508,17 @@ class AnalysisService:
         )
         if errors and not (payload.get("not_measured_reason") or "").strip():
             raise ValidationFailed("；".join(errors))
+        # 更正后的值同样打标：越界、与本任务其他指标逻辑冲突
+        measured = not (payload.get("not_measured_reason") or "").strip()
+        pending = [{
+            "definition": definition, "value": payload.get("value") if measured else None,
+            "flags": dataquality.range_flags(definition.value_type, definition.rules or {}, payload.get("value"), definition.code)
+            if measured else [],
+        }]
+        others = {key: row for key, row in self.values.current_for_task(source.analysis_task_id).items() if key != definition.id}
+        refused = self._logic_check(others, pending)
+        if refused:
+            raise StateConflict("更正后的值与本任务其他指标逻辑冲突，已拒绝", {"blocked": refused}, code="logic_rejected")
         version = self.values.max_version(source.analysis_task_id, definition.id) + 1
         revision = ResultValue(
             org_id=self.ctx.org_id, analysis_task_id=source.analysis_task_id,
@@ -460,8 +536,9 @@ class AnalysisService:
             parser_version=payload.get("parser_version", "") or source.parser_version,
             result_version=version, revises_id=source.id,
             not_measured_reason=(payload.get("not_measured_reason") or ""),
-            quality="unassessed", review_state="pending", provenance="correction",
-            entered_by=user.id,
+            quality="suspect" if pending[0]["flags"] else "unassessed", review_state="pending", provenance="correction",
+            entered_by=user.id, flags=list(pending[0]["flags"]),
+            station_id=source.station_id, instrument=source.instrument,
         )
         self.db.add(revision)
         self.db.flush()
@@ -585,6 +662,9 @@ class AnalysisService:
                 "系统来源" if value.provenance == "device" else ""
             ),
             "row_version": value.row_version,
+            "flags": value.flags or [],
+            "station_id": value.station_id,
+            "instrument": value.instrument,
             # 正式统计要三条同时成立
             "official": value.review_state == "approved" and value.quality == "valid"
             and not value.superseded_by_id,

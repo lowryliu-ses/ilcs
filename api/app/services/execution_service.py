@@ -17,10 +17,11 @@ from ..adapters import AdapterError, AdapterUnreachable, CommandRequest, adapter
 from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
-from ..domain import workflow
+from ..domain import dataquality, workflow
 from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
 from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
+from .telemetry import context as telemetry_context
 from ..repositories.execution import (
     DISPATCHING, MOTION, AdapterExecutionRepository, CheckpointRepository, CommandRepository,
 )
@@ -430,6 +431,7 @@ class ExecutionService:
         ScheduleService(self.db, self.ctx).release_unused(batch, command.step_index, now())
 
         self.record_telemetry(batch, command, step, result)
+        self.check_outputs(batch, command, step, checkpoint, result.delivered or {})
         from .consumption_service import ConsumptionService
 
         consumption = ConsumptionService(self.db, self.ctx).book(
@@ -463,9 +465,34 @@ class ExecutionService:
         self.db.commit()
         workflow.process_event(event.id)
 
+    def check_outputs(self, batch: Batch, command: Command, step: dict, checkpoint: Checkpoint, delivered: dict) -> list[dict]:
+        """设备回报对照设备方法的输出规则：缺必报项、越界都打标并报一条数据异常报警。
+
+        不阻断流程——值是设备真实回报的，要不要剔除由数据审核（或下游质检关卡）决定。
+        """
+        outputs = ((step.get("method") or {}).get("outputs")) or []
+        flags = dataquality.output_flags(outputs, delivered)
+        if not flags:
+            return []
+        checkpoint.payload = {**(checkpoint.payload or {}), "flags": flags}
+        run = self._run_for(command, batch)
+        if run is not None:
+            run.flags = [*(run.flags or []), *flags]
+        method = step.get("method") or {}
+        self.alarms.raise_alarm(
+            3, "batch", batch.id,
+            f"{batch.id} 第 {command.step_index + 1} 步「{step.get('name')}」设备回报与方法 "
+            f"{method.get('code', '')} v{method.get('version', '')} 输出规则不符：{flags[0]['message']}"
+            + (f" 等 {len(flags)} 项" if len(flags) > 1 else ""),
+            response="数据已照常入库并打标；在数据审核里确认是否剔除，必要时从该步骤重做",
+            condition_key=f"data:{batch.id}:{command.id}:outputs",
+        )
+        return flags
+
     def record_telemetry(self, batch: Batch, command: Command, step: dict, result) -> None:
-        """保存真实遥测；只有模拟适配器才生成模拟曲线。"""
+        """保存真实遥测；只有模拟适配器才生成模拟曲线。每个点带指令、步骤、值守人与（能确定时的）样本。"""
         finished = result.device_ts or now()
+        owner = telemetry_context(self.db, batch, command)
         if result.origin != "simulation":
             if result.telemetry:
                 for metric, value, setpoint in result.telemetry:
@@ -479,6 +506,7 @@ class ExecutionService:
                             quality=result.quality,
                             origin=result.origin,
                             device_ts=finished,
+                            **owner,
                         )
                     )
             # 真实设备没有回传遥测就是“无数据”，不能用设定值合成一条真实曲线。
@@ -503,6 +531,7 @@ class ExecutionService:
                         quality=result.quality,
                         origin=result.origin,
                         device_ts=finished - timedelta(minutes=offset_min),
+                        **owner,
                     )
                 )
 

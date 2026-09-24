@@ -99,4 +99,10 @@ class Telemetry(Base):
     device_ts: Mapped[datetime] = mapped_column(DateTime, default=now)
     # 设备上报批次的稳定 ID；同一 (工位, 事件, 指标) 只入库一次
     event_id: Mapped[str] = mapped_column(String, default="")
+    # 归属：哪条指令、哪一步、谁在值守（批次操作员）、哪个样本（设备按孔位报或批次只有一个样本时）
+    command_id: Mapped[str] = mapped_column(String, default="")
+    step_id: Mapped[str] = mapped_column(String, default="")
+    step_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    operator: Mapped[str] = mapped_column(String, default="")
+    sample_id: Mapped[str] = mapped_column(String, default="")
     received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

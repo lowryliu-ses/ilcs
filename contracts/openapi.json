@@ -1125,6 +1125,224 @@
         "title": "CommandVerifyIn",
         "type": "object"
       },
+      "DataRuleIn": {
+        "additionalProperties": false,
+        "description": "前后逻辑校验：左指标 op 右指标 × factor + offset，或左指标 op 常数。",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "factor": {
+            "default": 1.0,
+            "title": "Factor",
+            "type": "number"
+          },
+          "left_metric": {
+            "title": "Left Metric",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0.0,
+            "title": "Offset",
+            "type": "number"
+          },
+          "op": {
+            "default": "<=",
+            "enum": [
+              "<",
+              "<=",
+              ">",
+              ">=",
+              "==",
+              "!="
+            ],
+            "title": "Op",
+            "type": "string"
+          },
+          "right_metric": {
+            "default": "",
+            "title": "Right Metric",
+            "type": "string"
+          },
+          "right_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right Value"
+          },
+          "severity": {
+            "default": "flag",
+            "enum": [
+              "flag",
+              "reject"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "left_metric"
+        ],
+        "title": "DataRuleIn",
+        "type": "object"
+      },
+      "DataRulePatchIn": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Factor"
+          },
+          "left_metric": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Left Metric"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
+          "op": {
+            "anyOf": [
+              {
+                "enum": [
+                  "<",
+                  "<=",
+                  ">",
+                  ">=",
+                  "==",
+                  "!="
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Op"
+          },
+          "right_metric": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right Metric"
+          },
+          "right_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Right Value"
+          },
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "enum": [
+                  "flag",
+                  "reject"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Severity"
+          }
+        },
+        "title": "DataRulePatchIn",
+        "type": "object"
+      },
       "DecisionIn": {
         "description": "审批 / 审核的统一结论输入。不接受任意目标状态。",
         "properties": {
@@ -2369,6 +2587,11 @@
             "title": "Event Id",
             "type": "string"
           },
+          "instrument_serial": {
+            "default": "",
+            "title": "Instrument Serial",
+            "type": "string"
+          },
           "metrics": {
             "items": {
               "$ref": "#/components/schemas/MetricValueIn"
@@ -2389,6 +2612,11 @@
           "sample_id": {
             "default": "",
             "title": "Sample Id",
+            "type": "string"
+          },
+          "station_id": {
+            "default": "",
+            "title": "Station Id",
             "type": "string"
           }
         },
@@ -3820,6 +4048,11 @@
           "sample_id": {
             "default": "",
             "title": "Sample Id",
+            "type": "string"
+          },
+          "station_id": {
+            "default": "",
+            "title": "Station Id",
             "type": "string"
           },
           "task_id": {
@@ -5286,6 +5519,12 @@
             "title": "Quality",
             "type": "string"
           },
+          "sample_id": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Sample Id",
+            "type": "string"
+          },
           "setpoint": {
             "anyOf": [
               {
@@ -5300,6 +5539,12 @@
           "value": {
             "title": "Value",
             "type": "number"
+          },
+          "well": {
+            "default": "",
+            "maxLength": 16,
+            "title": "Well",
+            "type": "string"
           }
         },
         "required": [
@@ -14099,6 +14344,190 @@
           }
         ],
         "summary": "Create Metric",
+        "tags": [
+          "metric"
+        ]
+      }
+    },
+    "/api/metrics/data-rules": {
+      "get": {
+        "description": "前后逻辑校验规则。回传与更正时按规则比对同一检测任务里的指标，冲突打标或拒收。",
+        "operationId": "list_data_rules_api_metrics_data_rules_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Data Rules",
+        "tags": [
+          "metric"
+        ]
+      },
+      "post": {
+        "operationId": "create_data_rule_api_metrics_data_rules_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataRuleIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Data Rule",
+        "tags": [
+          "metric"
+        ]
+      }
+    },
+    "/api/metrics/data-rules/{rule_id}": {
+      "patch": {
+        "operationId": "update_data_rule_api_metrics_data_rules__rule_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "title": "Rule Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataRulePatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Data Rule",
         "tags": [
           "metric"
         ]
