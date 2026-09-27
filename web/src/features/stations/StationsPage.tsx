@@ -338,6 +338,7 @@ export function StationsPage() {
                 </td>
                 <td className="small">
                   {capability.recovery.retryable ? '可重试' : '不可重试'}
+                  {capability.recovery.cleanAfter ? <div className="tiny warn-text">用后需清洗确认</div> : null}
                   {capability.recovery.sideEffect ? (
                     <div className="tiny muted">{capability.recovery.sideEffect}</div>
                   ) : null}
@@ -1005,6 +1006,14 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
           />
           可重试（重做本步不产生不可逆副作用）
         </label>
+        <label className="check" title="做完后工位转为待清洗；在工位页确认已清洗之前，别的批次的动作不投递">
+          <input
+            type="checkbox"
+            checked={!!recovery.cleanAfter}
+            onChange={(event) => setRecovery((current) => ({ ...current, cleanAfter: event.target.checked }))}
+          />
+          用后需清洗确认（确认前不给别的批次用）
+        </label>
       </div>
 
       <div className="grid cols-2">
@@ -1444,6 +1453,11 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
           <input type="checkbox" checked={!!recovery.retryable}
             onChange={(e) => setRecovery((c) => ({ ...c, retryable: e.target.checked }))} />
           可重试
+        </label>
+        <label className="check" title="做完后工位转为待清洗；确认已清洗之前别的批次的动作不投递">
+          <input type="checkbox" checked={!!recovery.cleanAfter}
+            onChange={(e) => setRecovery((c) => ({ ...c, cleanAfter: e.target.checked }))} />
+          用后需清洗确认
         </label>
       </div>
       <div className="grid cols-2">

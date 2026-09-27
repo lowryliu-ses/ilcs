@@ -555,34 +555,39 @@ class WorkflowService:
         return released
 
     def _plate_busy(self, batch: Batch, run: StepRun, rows: list[StepRun] | None = None) -> bool:
-        """批次绑定了载具时，同一时刻只能有一个设备步骤在用它：一块板不能同时在两台设备上。"""
+        """同一块板同一时刻只能有一个设备步骤在用：一块板不能同时在两台设备上。
+
+        批次绑定了多块板时按步骤的载具角色分开算：用不同板的设备步骤可以并行。
+        """
+        from ..domain.steps import labware_role
         from .transfer_service import TransferService
 
-        if TransferService(self.db, self.ctx).for_batch(batch.id) is None:
+        role = labware_role(run.step_snapshot or {})
+        if TransferService(self.db, self.ctx).for_batch(batch.id, role) is None:
             return False
         rows = rows if rows is not None else self.runs.for_batch(batch.id)
         return any(
             row.id != run.id and row.kind == DEVICE and row.state in {workflow.READY, workflow.RUNNING}
+            and labware_role(row.step_snapshot or {}) == role
             for row in rows
         )
 
     def _release_waiting_devices(self, batch: Batch, rows: list[StepRun], finished: StepRun) -> None:
-        """设备步骤结束后，把因载具被占而等着的并行设备步骤开起来（按步骤顺序一次一个）。"""
+        """设备步骤结束后，把因载具被占而等着的并行设备步骤开起来：每块板按步骤顺序一次一个。"""
         if finished.kind != DEVICE or batch.state != "running":
             return
         waiting = [row for row in rows if row.kind == DEVICE and row.state == workflow.PENDING]
+        from .batch_service import BatchService
+
         for row in waiting:
             if self._plate_busy(batch, row, rows):
-                break
+                continue
             row.state = workflow.READY
             row.row_version = int(row.row_version or 0) + 1
-            from .batch_service import BatchService
-
             BatchService(self.db, self.ctx).issue_command(batch, "dispatch", row.step_index, step_run_id=row.id)
             self.audit.record(
                 None, "并行设备步骤开始", batch.id, detail=f"第 {row.step_index + 1} 步：载具已空出，开始投递",
             )
-            break
 
     @staticmethod
     def _join_epoch(rows: list[StepRun], step_id: str) -> int:
@@ -919,7 +924,22 @@ class WorkflowService:
             )
         if loop_to:
             return self._loop_back(batch, run, index, loop_to, done + 1)
-        return self._advance(run, batch)
+        outcome = self._advance(run, batch)
+        # 路径定了：没走的分支时间窗已归还，按实际路径重算尚未开出的尾段
+        self._roll(batch, f"条件分支「{name}」选择出口「{case_label(step, case)}」")
+        return outcome
+
+    def _roll(self, batch: Batch, reason: str) -> None:
+        """滚动重排只是更新预测：失败时记日志、不挡流程推进（保存点里做，数据库错误也只撤销它自己）。"""
+        import logging
+
+        from .schedule_service import ScheduleService
+
+        try:
+            with self.db.begin_nested():
+                ScheduleService(self.db, self.ctx).roll_forward(batch, reason)
+        except Exception:
+            logging.getLogger("ilcs.workflow").warning("滚动重排失败：%s", batch.id, exc_info=True)
 
     def _loop_back(self, batch: Batch, run: StepRun, index: int, target_id: str, rounds: int) -> dict:
         """回环：回环体（目标到分支之间的上游步骤）与分支本身的记录作废，从目标重做。"""
@@ -943,7 +963,10 @@ class WorkflowService:
             after=f"回到第 {target + 1} 步（第 {new_run.attempt} 次）",
             detail=f"{(run.step_snapshot or {}).get('name')}：第 {rounds} 次回环；{voided} 条记录保留并标为作废",
         )
-        return {**self.enter(batch, new_run, target), "loop": rounds}
+        outcome = self.enter(batch, new_run, target)
+        # 回环把后续步骤整体推后：按回环后的实际路径重算尚未开出的尾段
+        self._roll(batch, f"分支第 {rounds} 次回环")
+        return {**outcome, "loop": rounds}
 
     def _branch_hold(self, batch: Batch, run: StepRun, reason: str) -> dict:
         """判据缺失或回环到上限：分支留在待判定，批次保持，等有权限的人选出口。"""
@@ -1146,12 +1169,31 @@ class WorkflowService:
     # ---------- 样本拆分 ----------
 
     def _split_samples(self, batch: Batch, run: StepRun) -> dict:
+        """样本拆分节点开出。
+
+        系统内分组（logical，缺省）立即登记子样本并推进；实体分装（physical）只把节点停在待办，
+        等分装完成后按实际孔位确认（`confirm_split`）——系统不替人假设子样本落在了哪个孔。
+        """
+        from ..domain.steps import split_mode
+
+        if split_mode(run.step_snapshot or {}) == "physical":
+            run.started_at = run.started_at or now()
+            run.reason = "等待实体分装确认：按实际分装结果登记每个子样本的孔位后推进"
+            return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_split": True}
+        return self._register_split(batch, run)
+
+    def _register_split(
+        self, batch: Batch, run: StepRun, placements: dict[tuple[str, int], str] | None = None,
+        labware=None, container: str = "", note: str = "", user: User | None = None,
+    ) -> dict:
         """每个在用样本拆出 N 个子样本：登记子物理样本（谱系指向母样），生成子运行分配。
 
-        母样本的运行分配标为已拆分，之后的步骤、检测与统计都落在子样本上；
-        子样本继承条件分组，等于把重复数放大 N 倍。
+        母样本的运行分配标为已拆分，之后的步骤、检测与统计都落在子样本上；子样本继承条件分组，
+        等于把重复数放大 N 倍。`placements` 给了就按实际分装的孔位登记（落到 `labware` 这块板上时
+        同时占用孔位、写结构化位置）；没给就是系统内分组，孔位记为「母样孔位-序号」。
         """
         from ..models import PhysicalSample
+        from .sample_service import SampleService
 
         split = (run.step_snapshot or {}).get("split") or {}
         count = int(split.get("count") or 0)
@@ -1159,38 +1201,139 @@ class WorkflowService:
         suffix = "" if run.attempt == 1 else f"r{run.attempt}"
         parents = self._active_samples(batch)
         children: list[str] = []
+        slots = SampleService(self.db, self.ctx)
         for sample in parents:
-            container = f"{sample.container_id}-{run.step_id}{suffix}"
+            target = container or f"{sample.container_id}-{run.step_id}{suffix}"
             for number in range(1, count + 1):
+                well = placements[(sample.id, number)] if placements is not None else f"{sample.well}-{number}"
                 physical_id = f"{sample.physical_sample_id or sample.id}-{run.step_id}{suffix}-{number}"
                 if self.db.get(PhysicalSample, physical_id) is None:
                     self.db.add(PhysicalSample(
                         id=physical_id, org_id=batch.org_id, barcode=physical_id,
                         source=f"批次 {batch.id} 第 {run.step_index + 1} 步拆分", sample_type=child_type,
-                        parent_id=sample.physical_sample_id or None, current_location=container,
+                        parent_id=sample.physical_sample_id or None,
+                        current_location=f"{labware.barcode} · {well}" if labware is not None else target,
                         custodian=batch.operator, lifecycle_state="in_use", origin="batch_generated",
                         created_by=self.ctx.subject_id,
                     ))
+                    self.db.flush()
                 child = Sample(
                     id=f"{sample.id}-{number}{suffix}", org_id=batch.org_id, physical_sample_id=physical_id,
-                    batch_id=batch.id, container_id=container, well=f"{sample.well}-{number}",
+                    batch_id=batch.id, container_id=target, well=well,
                     position=sample.position * count + number, condition_group=sample.condition_group,
                     condition_label=sample.condition_label, repeat=(sample.repeat - 1) * count + number,
                     levels=sample.levels, is_control=sample.is_control, state="running",
                 )
                 self.db.add(child)
+                if labware is not None:
+                    self.db.flush()
+                    occupancy = slots.occupy_slot(target, well, physical_id, child.id)
+                    occupancy.labware_id = labware.id
+                    physical = self.db.get(PhysicalSample, physical_id)
+                    physical.labware_id, physical.well, physical.location_id = labware.id, well, None
                 children.append(child.id)
             sample.state = "split"
             sample.flag_note = f"第 {run.step_index + 1} 步拆分为 {count} 个{child_type}"
         self.db.flush()
-        run.form_data = {"parents": len(parents), "count": count, "child_type": child_type,
-                         "children": children}
-        self._close_run(run, workflow.COMPLETED, f"{len(parents)} 个样本各拆分为 {count} 个{child_type}")
+        run.form_data = {
+            "parents": len(parents), "count": count, "child_type": child_type, "children": children,
+            **({"physical": True, "labware": labware.barcode if labware is not None else "", "note": note}
+               if placements is not None else {}),
+        }
+        if user is not None:
+            run.submitted_by = user.id
+        self._close_run(run, workflow.COMPLETED, (
+            f"{len(parents)} 个样本各分装为 {count} 个{child_type}"
+            + (f"，落在 {labware.barcode}" if labware is not None else "")
+            if placements is not None else f"{len(parents)} 个样本各拆分为 {count} 个{child_type}"
+        ))
         self.audit.record(
-            None, "样本拆分", batch.id, before=f"{len(parents)} 个样本", after=f"{len(children)} 个{child_type}",
-            detail="子样本谱系指向母样，继承条件分组；母样运行分配标为已拆分",
+            user, "实体分装确认" if placements is not None else "样本拆分", batch.id,
+            before=f"{len(parents)} 个样本", after=f"{len(children)} 个{child_type}",
+            detail=(
+                "子样本按实际分装孔位登记，谱系指向母样，继承条件分组"
+                + (f"；载具 {labware.barcode}" if labware is not None else "")
+                + (f"；{note}" if note else "")
+                if placements is not None else "子样本谱系指向母样，继承条件分组；母样运行分配标为已拆分"
+            ),
         )
         return self._advance(run, batch)
+
+    def confirm_split(self, step_run_id: str, payload: dict, user: User) -> dict:
+        """实体分装确认：按实际分装结果给每个子样本登记孔位，孔位落定后流程才推进。
+
+        每个在用母样本的每一份都要有孔位，一份一个孔、不能重复；写了载具角色就落到批次按该角色
+        绑定的板上（占用孔位，别的批次不能再用这些孔）。
+        """
+        import re
+
+        from ..domain.steps import split_mode
+        from ..models import LabwareType
+        from .identity_service import user_may
+        from .transfer_service import TransferService
+
+        run = self.runs.lock(step_run_id)
+        if run is None:
+            raise NotFound("步骤实例不存在")
+        if run.kind != SPLIT or split_mode(run.step_snapshot or {}) != "physical":
+            raise StateConflict("该步骤不是实体分装节点")
+        if run.state != workflow.READY:
+            raise StateConflict(f"分装节点已是 {workflow.STATE_LABEL.get(run.state, run.state)}，不需要确认")
+        if not user_may(self.ctx, user, "step.submit"):
+            raise PermissionDenied("当前账号不能提交流程记录（step.submit）")
+        batch = self.batches.lock(run.batch_id)
+        if batch is None:
+            raise NotFound("批次不存在")
+        if batch.state != "running":
+            raise StateConflict(f"批次状态为 {batch.state}，不能确认分装")
+        split = (run.step_snapshot or {}).get("split") or {}
+        count = int(split.get("count") or 0)
+        parents = self._active_samples(batch)
+        placements: dict[tuple[str, int], str] = {}
+        for row in payload.get("placements") or []:
+            key = (str(row.get("parent_sample_id") or ""), int(row.get("number") or 0))
+            well = str(row.get("well") or "").strip().upper()
+            if key in placements:
+                raise ValidationFailed(f"{key[0]} 的第 {key[1]} 份重复登记")
+            placements[key] = well
+        expected = {(sample.id, number) for sample in parents for number in range(1, count + 1)}
+        missing = sorted(expected - placements.keys())
+        extra = sorted(placements.keys() - expected)
+        if missing or extra:
+            raise ValidationFailed(
+                "分装孔位要覆盖每个在用母样本的每一份，且只能是这些：" + "；".join(
+                    ([f"缺 {parent} 第 {number} 份" for parent, number in missing[:5]])
+                    + ([f"多出 {parent} 第 {number} 份" for parent, number in extra[:5]])
+                ),
+                code="split_placements_incomplete",
+            )
+        wells = [well for well in placements.values()]
+        if any(not well for well in wells):
+            raise ValidationFailed("每一份都要写实际孔位")
+        role = str(payload.get("labware_role") or "").strip()
+        labware = None
+        container = ""
+        if role or payload.get("use_labware"):
+            labware = TransferService(self.db, self.ctx).for_batch(batch.id, role)
+            if labware is None:
+                raise StateConflict(f"批次没有以角色「{role or '主载具'}」绑定载具", code="labware_role_missing")
+            kind = self.db.get(LabwareType, labware.type_id)
+            rows, cols = (kind.rows, kind.cols) if kind else (1, len(wells))
+            for well in wells:
+                match = re.fullmatch(r"([A-Z])(\d+)", well)
+                if not match or ord(match.group(1)) - 65 >= rows or not 1 <= int(match.group(2)) <= cols:
+                    raise ValidationFailed(f"{well} 不是 {labware.barcode}（{rows}×{cols}）上的孔位")
+            from ..domain.labware import container_of
+
+            container = f"{container_of(batch.id)}:{role or 'main'}"
+        if len(set(wells)) != len(wells):
+            raise ValidationFailed("一个孔位只能放一份子样本")
+        outcome = self._register_split(
+            batch, run, placements, labware=labware, container=container,
+            note=(payload.get("note") or "").strip(), user=user,
+        )
+        self.db.commit()
+        return {"step_run": self.run_out(run), "advance": outcome}
 
     def _retire_split_children(self, run: StepRun) -> None:
         if run.kind != SPLIT:

@@ -179,3 +179,30 @@ def test_stream_pushes_changes_for_own_organization(client, operator, running_ba
     assert "event: hello" in body and "event: bye" in body
     assert running_batch in body
     assert "B-LEAK" not in body, "别的组织的变更不能推给本组织"
+
+
+def test_only_one_executor_process_dispatches_at_a_time():
+    """执行器按会话级 advisory lock 主备：第二个进程拿不到锁就待命，不会与第一个同时对账、投递。
+
+    指令领取、对账、轮询都按「只有我在处理这些指令」写的；多副本部署靠这把锁保证同一时刻只有一个在工作，
+    主副本退出或断线后待命的副本接管。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "executor" / "main.py"
+    spec = importlib.util.spec_from_file_location("ilcs_executor_main_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    first = module.acquire_singleton()
+    assert first, "第一个执行器拿到锁"
+    try:
+        module._Stop.requested = True
+        assert module.acquire_singleton() is False, "锁被占着时第二个执行器待命，不工作"
+    finally:
+        module._Stop.requested = False
+        first.close()
+    takeover = module.acquire_singleton()
+    assert takeover, "主副本退出后待命的副本接管"
+    takeover.close()

@@ -126,6 +126,9 @@ class TaskService:
             "inherited_depends_on": [
                 ref for ref in self.effective_dependencies(task) if ref not in (task.depends_on or [])
             ],
+            "dependency_gate": task.dependency_gate or task_rules.DEFAULT_GATE,
+            "dependency_gate_label": task_rules.gate_label(task.dependency_gate),
+            "latest_plan_version": (latest.version if (latest := self.plan_versions.latest_approved(task.plan_id)) else None),
             "children": [
                 {"id": child.id, "title": child.title, "batch_id": child.batch_id,
                  "state": (child_state := self.derive_state(child)),
@@ -208,21 +211,25 @@ class TaskService:
 
     # ---------- 任务树与依赖 ----------
 
-    def effective_dependencies(self, task: ExperimentTask) -> list[str]:
-        """这个任务真正要等的上游：自己声明的，加上每一层父任务声明的。
+    def effective_edges(self, task: ExperimentTask) -> list[tuple[str, str]]:
+        """这个任务真正要等的上游与各自的放行条件：自己声明的，加上每一层父任务声明的。
 
-        拆分只是把一个任务切成几份执行，不能借此绕过父任务的外部依赖。环检测、排程下限、
-        开跑检查、改依赖时的在途限制都按这一份算。
+        继承来的依赖沿用声明它的那个任务的放行条件。拆分只是把一个任务切成几份执行，
+        不能借此绕过父任务的外部依赖。
         """
-        refs = list(task.depends_on or [])
+        edges = [(ref, task.dependency_gate or task_rules.DEFAULT_GATE) for ref in task.depends_on or []]
         for ancestor in self.ancestors(task):
-            refs.extend(ancestor.depends_on or [])
-        return list(dict.fromkeys(refs))
+            edges.extend((ref, ancestor.dependency_gate or task_rules.DEFAULT_GATE) for ref in ancestor.depends_on or [])
+        return list(dict.fromkeys(edges))
+
+    def effective_dependencies(self, task: ExperimentTask) -> list[str]:
+        """这个任务真正要等的上游（含继承）。环检测、排程下限、开跑检查、改依赖时的在途限制都按这一份算。"""
+        return list(dict.fromkeys(ref for ref, _ in self.effective_edges(task)))
 
     def dependency_blockers(self, task: ExperimentTask) -> list[dict]:
-        """还没满足的上游：上游任务的批次运行没结束（父任务要全部子任务结束）或已被取消。"""
+        """还没满足的上游：没到放行条件（运行结束 / 数据复核通过 / 报告发布；父任务要全部子任务满足）或已取消。"""
         rows: list[dict] = []
-        for upstream_id in self.effective_dependencies(task):
+        for upstream_id, gate in self.effective_edges(task):
             upstream = self.tasks.get(upstream_id)
             if upstream is None:
                 rows.append({"task_id": upstream_id, "label": f"上游任务 {upstream_id} 不存在或不在本组织"})
@@ -230,10 +237,13 @@ class TaskService:
             state = self.derive_state(upstream)
             if state == "cancelled":
                 rows.append({"task_id": upstream_id, "label": f"上游任务 {upstream_id} 已取消：请移除这条依赖或改依赖别的任务"})
-            elif state not in task_rules.RUN_FINISHED:
+            elif not task_rules.gate_satisfied(gate, state):
                 rows.append({
-                    "task_id": upstream_id,
-                    "label": f"上游任务 {upstream_id}「{upstream.title}」{STATE_LABEL.get(state, state)}，运行结束后本任务才能开跑",
+                    "task_id": upstream_id, "gate": gate,
+                    "label": (
+                        f"上游任务 {upstream_id}「{upstream.title}」{STATE_LABEL.get(state, state)}，"
+                        f"{task_rules.gate_label(gate)}后本任务才能开跑"
+                    ),
                 })
         return rows
 
@@ -276,10 +286,12 @@ class TaskService:
                 found.append((row, None))
         return found
 
-    def set_dependencies(self, task_id: str, depends_on: list[str], user: User) -> dict:
+    def set_dependencies(self, task_id: str, depends_on: list[str], user: User, gate: str | None = None) -> dict:
         task = self.tasks.get(task_id)
         if not task:
             raise NotFound("实验任务不存在")
+        if gate is not None and gate not in task_rules.GATES:
+            raise ValidationFailed(f"放行条件只能是 {'、'.join(task_rules.GATES)}")
         wanted = list(dict.fromkeys(ref.strip() for ref in depends_on or [] if ref and ref.strip()))
         for ref in wanted:
             if self.tasks.get(ref) is None:
@@ -307,12 +319,31 @@ class TaskService:
                     code="batch_in_flight",
                 )
         before = list(task.depends_on or [])
+        before_gate = task.dependency_gate or task_rules.DEFAULT_GATE
+        stricter = gate is not None and (
+            len(task_rules.GATES[gate][1]) < len(task_rules.GATES[before_gate][1])
+        )
+        if stricter and not set(wanted) - set(before):
+            # 放行条件收紧同样等于给已下发的批次追加前置
+            dispatched = [
+                (leaf, batch) for leaf, batch in self.leaf_batches([task.id])
+                if batch is not None and batch.state not in {"planned", "scheduled"}
+            ]
+            if dispatched:
+                raise StateConflict(
+                    f"批次 {dispatched[0][1].id} 已下发，不能再收紧上游的放行条件", code="batch_in_flight",
+                )
         task.depends_on = wanted
+        if gate is not None:
+            task.dependency_gate = gate
         task.updated_at = now()
         self.tasks.bump(task)
         self.audit.record(
             user, "设置任务依赖", task.id, before="、".join(before) or "无", after="、".join(wanted) or "无",
-            detail="上游任务的批次运行结束后，本任务的批次才能下发", object_version=task.row_version,
+            detail=f"上游任务{task_rules.gate_label(task.dependency_gate)}后，本任务的批次才能下发"
+                   + (f"（放行条件 {task_rules.gate_label(before_gate)} → {task_rules.gate_label(gate)}）"
+                      if gate is not None and gate != before_gate else ""),
+            object_version=task.row_version,
         )
         self.db.commit()
         return self.out(task, detail=True)
@@ -361,6 +392,55 @@ class TaskService:
             row = self.tasks.get(row.parent_id)
             hops += 1
         return False
+
+    def migrate_version(self, task_id: str, reason: str, user: User) -> dict:
+        """把任务显式迁移到方案当前的批准版本。
+
+        任务建立时锁定批准版本，之后的方案修订不会静默改变它；要按新版本执行只能走这里，留审计。
+        已经建了批次的任务不能迁移：批次快照已按旧版本冻结，换版本要先终止旧批次、另建任务。
+        父任务连同它还没建批次的后代一起迁移；已建批次的后代保持原版本，结果里列出来。
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            raise NotFound("实验任务不存在")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValidationFailed("迁移方案版本必须写明原因")
+        if task.state == "cancelled":
+            raise StateConflict("已取消的任务不能迁移方案版本", code="task_cancelled")
+        if task.batch_id:
+            raise StateConflict(
+                f"任务已绑定批次 {task.batch_id}，批次快照按 v{task.plan_version} 冻结，不能迁移；"
+                f"要按新版本执行请终止旧批次、另建任务",
+                code="task_already_has_batch",
+            )
+        version = self.plan_versions.latest_approved(task.plan_id)
+        if version is None:
+            raise StateConflict("方案没有批准版本", code="plan_not_approved")
+        if version.id == task.plan_version_id:
+            raise StateConflict(f"任务已经是最新批准版本 v{version.version}", code="task_version_current")
+        family = [task, *(row for row in (self.tasks.get(ref) for ref in sorted(self._descendant_ids(task.id))) if row)]
+        moved, kept = [], []
+        for row in family:
+            if row.state == "cancelled":
+                continue
+            if row.batch_id:
+                kept.append({"task_id": row.id, "batch_id": row.batch_id, "plan_version": row.plan_version})
+                continue
+            before = row.plan_version
+            row.plan_version, row.plan_version_id = version.version, version.id
+            row.updated_at = now()
+            self.tasks.bump(row)
+            moved.append({"task_id": row.id, "from": before, "to": version.version})
+        self.audit.record(
+            user, "迁移任务方案版本", task.id, before=f"v{moved[0]['from']}" if moved else "—", after=f"v{version.version}",
+            detail=f"{reason}；迁移 {len(moved)} 个任务" + (
+                f"；{len(kept)} 个已建批次的子任务保持原版本（{'、'.join(row['task_id'] for row in kept)}）" if kept else ""
+            ),
+            object_version=task.row_version,
+        )
+        self.db.commit()
+        return {**self.out(task, detail=True), "migrated": moved, "kept": kept}
 
     def decompose(self, task_id: str, payload: dict, user: User) -> dict:
         """把任务拆成子任务：按样本分份（每份不超过 chunk_size，默认按方法的样品位），或拆成 N 份。
@@ -466,6 +546,10 @@ class TaskService:
             if self.tasks.get(ref) is None:
                 raise NotFound(f"上游任务 {ref} 不存在或不在本组织")
         task.depends_on = wanted
+        gate = payload.get("dependency_gate") or task_rules.DEFAULT_GATE
+        if gate not in task_rules.GATES:
+            raise ValidationFailed(f"放行条件只能是 {'、'.join(task_rules.GATES)}")
+        task.dependency_gate = gate
         self.tasks.add(task)
         self.audit.record(
             user, "建立实验任务", task.id, before="—", after="待分配",

@@ -2096,6 +2096,12 @@
           "labware_id": {
             "title": "Labware Id",
             "type": "string"
+          },
+          "role": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Role",
+            "type": "string"
           }
         },
         "required": [
@@ -5530,6 +5536,66 @@
         "title": "SplitChildIn",
         "type": "object"
       },
+      "SplitConfirmIn": {
+        "description": "实体分装确认：每个母样本的每一份落在哪个孔。写了载具角色就落到批次按该角色绑定的板上。",
+        "properties": {
+          "labware_role": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Labware Role",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/SplitPlacementIn"
+            },
+            "title": "Placements",
+            "type": "array"
+          },
+          "use_labware": {
+            "default": false,
+            "title": "Use Labware",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "placements"
+        ],
+        "title": "SplitConfirmIn",
+        "type": "object"
+      },
+      "SplitPlacementIn": {
+        "properties": {
+          "number": {
+            "maximum": 96.0,
+            "minimum": 1.0,
+            "title": "Number",
+            "type": "integer"
+          },
+          "parent_sample_id": {
+            "title": "Parent Sample Id",
+            "type": "string"
+          },
+          "well": {
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Well",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parent_sample_id",
+          "number",
+          "well"
+        ],
+        "title": "SplitPlacementIn",
+        "type": "object"
+      },
       "StationCreateIn": {
         "properties": {
           "adapter_config": {
@@ -5881,6 +5947,16 @@
       },
       "TaskCreateIn": {
         "properties": {
+          "dependency_gate": {
+            "default": "run_completed",
+            "enum": [
+              "run_completed",
+              "data_validated",
+              "released"
+            ],
+            "title": "Dependency Gate",
+            "type": "string"
+          },
           "depends_on": {
             "default": [],
             "items": {
@@ -5999,9 +6075,39 @@
             },
             "title": "Depends On",
             "type": "array"
+          },
+          "gate": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run_completed",
+                  "data_validated",
+                  "released"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gate"
           }
         },
         "title": "TaskDependenciesIn",
+        "type": "object"
+      },
+      "TaskMigrateIn": {
+        "description": "把任务显式迁移到方案当前的批准版本。必须写原因，留审计。",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "TaskMigrateIn",
         "type": "object"
       },
       "TelemetryIn": {
@@ -9168,6 +9274,7 @@
     },
     "/api/batches/{batch_id}/labware": {
       "delete": {
+        "description": "解绑载具；role 为空解绑主载具，否则解绑该角色的板。",
         "operationId": "unbind_labware_api_batches__batch_id__labware_delete",
         "parameters": [
           {
@@ -9176,6 +9283,16 @@
             "required": true,
             "schema": {
               "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Role",
               "type": "string"
             }
           },
@@ -12736,7 +12853,7 @@
     },
     "/api/experiment-tasks/{task_id}/dependencies": {
       "put": {
-        "description": "设置上游任务（完成—开始）。成环、依赖自己的子任务、已下发批次再加上游都拒绝。",
+        "description": "设置上游任务与放行条件。成环（含从父任务继承的依赖）、依赖自己的子任务、已下发批次再加上游都拒绝。",
         "operationId": "set_task_dependencies_api_experiment_tasks__task_id__dependencies_put",
         "parameters": [
           {
@@ -12801,6 +12918,78 @@
           }
         ],
         "summary": "Set Task Dependencies",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/migrate-version": {
+      "post": {
+        "description": "把任务显式迁移到方案当前的批准版本（连同还没建批次的子任务）。已建批次的任务不能迁移。",
+        "operationId": "migrate_task_version_api_experiment_tasks__task_id__migrate_version_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskMigrateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Migrate Task Version",
         "tags": [
           "task"
         ]
@@ -21599,6 +21788,59 @@
         ]
       }
     },
+    "/api/schedule/due-windows": {
+      "get": {
+        "description": "硬时限倒计时：前驱都已结束、自己还没开工的带硬时限步骤，按剩余时间排序。按依赖图算。",
+        "operationId": "due_windows_api_schedule_due_windows_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Due Windows",
+        "tags": [
+          "schedule"
+        ]
+      }
+    },
     "/api/schedule/optimize": {
       "post": {
         "operationId": "optimize_api_schedule_optimize_post",
@@ -24436,6 +24678,94 @@
           }
         ],
         "summary": "Review Step",
+        "tags": [
+          "workflow"
+        ]
+      }
+    },
+    "/api/step-runs/{step_run_id}/split": {
+      "post": {
+        "description": "实体分装确认：按实际分装结果登记每个子样本的孔位，孔位落定后流程才推进。",
+        "operationId": "confirm_split_api_step_runs__step_run_id__split_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "step_run_id",
+            "required": true,
+            "schema": {
+              "title": "Step Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SplitConfirmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Confirm Split",
         "tags": [
           "workflow"
         ]

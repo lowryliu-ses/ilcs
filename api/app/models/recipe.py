@@ -182,6 +182,8 @@ class ExperimentTask(Base):
     parent_id: Mapped[str] = mapped_column(String, default="", index=True)
     # 上游任务编号：它们的批次运行结束后本任务才能下发（完成—开始约束）
     depends_on: Mapped[list] = mapped_column(JSON, default=list)
+    # 上游怎样才算满足：run_completed 运行结束 / data_validated 数据复核通过 / released 报告发布放行
+    dependency_gate: Mapped[str] = mapped_column(String, default="run_completed")
     sample_ids: Mapped[list] = mapped_column(JSON, default=list)
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=2)

@@ -396,6 +396,15 @@ def gate_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -
     return issues
 
 
+SPLIT_MODES = ("logical", "physical")
+
+
+def split_mode(step: dict[str, Any]) -> str:
+    """样本拆分的方式：logical 只在系统里登记分组（立即完成）；physical 要等实际分装的孔位确认后才推进。"""
+    mode = ((step or {}).get("split") or {}).get("mode") or "logical"
+    return mode if mode in SPLIT_MODES else "logical"
+
+
 def split_issues(step: dict[str, Any]) -> list[str]:
     split = (step or {}).get("split") or {}
     count = split.get("count")
@@ -404,6 +413,37 @@ def split_issues(step: dict[str, Any]) -> list[str]:
         issues.append("拆分份数必须是 2–96 的整数")
     if not str(split.get("child_type") or "").strip():
         issues.append("必须写明子样本类型（如 扣电、极片）")
+    if split.get("mode") not in (None, "", *SPLIT_MODES):
+        issues.append("拆分方式只能是 logical（系统内分组）或 physical（实体分装，确认孔位后推进）")
+    return issues
+
+
+def assist_capabilities(step: dict[str, Any]) -> list[str]:
+    """这一步执行期间要一并占用的协同资源（按能力声明，如机械臂、配套设备、放置位）。"""
+    return [str(cap) for cap in ((step or {}).get("assist") or []) if str(cap or "").strip()]
+
+
+def labware_role(step: dict[str, Any]) -> str:
+    """这一步用哪块载具：空串是批次的主载具；多块板并行时按角色取板。"""
+    return str((step or {}).get("labware") or "").strip()
+
+
+def assist_issues(step: dict[str, Any], capabilities: dict[str, dict]) -> list[str]:
+    raw = (step or {}).get("assist")
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list):
+        return ["协同资源必须是能力编号列表"]
+    issues: list[str] = []
+    caps = assist_capabilities(step)
+    if len(caps) != len(set(caps)):
+        issues.append("协同资源重复声明了同一种能力")
+    for cap in caps:
+        spec = capabilities.get(cap)
+        if spec is None:
+            issues.append(f"协同资源的能力 {cap} 未登记")
+        elif spec.get("retired"):
+            issues.append(f"协同资源的能力「{spec.get('name') or cap}」已停用")
     return issues
 
 

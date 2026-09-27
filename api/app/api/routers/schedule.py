@@ -24,6 +24,14 @@ def queue(db: DbSession, ctx: Ctx):
     return ScheduleService(db, ctx).queue()
 
 
+@router.get("/schedule/due-windows")
+def due_windows(db: DbSession, ctx: Ctx):
+    """硬时限倒计时：前驱都已结束、自己还没开工的带硬时限步骤，按剩余时间排序。按依赖图算。"""
+    from ...services.batch_service import BatchService
+
+    return sorted(BatchService(db, ctx).due_windows(), key=lambda row: row["remaining_min"])
+
+
 @router.post("/schedule/optimize")
 def optimize(payload: OptimizeIn, db: DbSession, user: CurrentUser, ctx=require("batch.schedule")):
     return ScheduleService(db, ctx).optimize_preview(payload.batch_ids, payload.start_from, payload.mode)

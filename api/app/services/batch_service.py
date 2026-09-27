@@ -244,6 +244,9 @@ class BatchService:
         batch = self._require(batch_id)
         steps = self.steps_of(batch)
         allocations = self.allocations.for_batch(batch.id)
+        # 承诺窗口与预测窗口：分支没定的下游、冻结期之后的时间窗只是预测
+        marks = self.schedule.forecast_marks(batch)
+        moment = now()
         checkpoints = {c.step_index: c for c in self.checkpoints.for_batch(batch.id)}
         capability_names = self.capabilities.names()
         recoveries = {c.id: c.recovery for c in self.capabilities.list()}
@@ -256,6 +259,7 @@ class BatchService:
         for index, step in enumerate(steps):
             work = next((a for a in allocations if a.step_index == index and a.kind == WORK), None)
             transfer = next((a for a in allocations if a.step_index == index and a.kind == "transfer"), None)
+            assists = [a.station_id for a in allocations if a.step_index == index and a.kind == "assist"]
             checkpoint = checkpoints.get(index)
             step_id = step_id_of(step, index)
             attempts = runs_by_step.get(step_id, [])
@@ -289,6 +293,13 @@ class BatchService:
                     "planned_start": work.starts_at.isoformat(timespec="minutes") if work else None,
                     "planned_end": work.ends_at.isoformat(timespec="minutes") if work else None,
                     "transfer_station_id": transfer.station_id if transfer else None,
+                    # 协同工位、载具角色、拆分方式：编辑器里的配置在批次页上也要看得见
+                    "assist_station_ids": assists,
+                    "assist": step.get("assist") or [],
+                    "labware": step.get("labware") or "",
+                    "split": step.get("split") or {},
+                    # 承诺窗口还是预测窗口（分支未定的下游、冻结期之后）
+                    "forecast_reason": self.schedule.forecast_of(work, marks, moment) if work else marks.get(index, ""),
                     "checkpoint_id": checkpoint.id if checkpoint else None,
                     "actual_end": checkpoint.created_at.isoformat(timespec="seconds") if checkpoint else None,
                     "attempts": [self.workflow.run_out(row) for row in attempts],
@@ -303,7 +314,9 @@ class BatchService:
             "plan_snapshot": batch.plan_snapshot,
             "sop_snapshot": batch.sop_snapshot or {},
             "steps": step_rows,
-            "allocations": [self.schedule.allocation_out(a) for a in allocations],
+            "allocations": [
+                self.schedule.allocation_out(a, self.schedule.forecast_of(a, marks, moment)) for a in allocations
+            ],
             "samples": self.sample_rows(batch.id),
             "reservations": self.materials.list_reservations(batch.id),
             "inventory_ledger": self.materials.inventory.ledger_for_batch(batch.id),
@@ -313,12 +326,16 @@ class BatchService:
             "graph_mode": dag.graph_mode(steps),
             "subflows": batch.recipe_snapshot.get("subflows") or [],
             "labware": self._labware_out(batch),
+            "labware_all": self._labware_all(batch),
             "commands": [
                 {
                     "id": c.id, "type": c.type, "state": c.state, "station_id": c.station_id,
                     "step_index": c.step_index, "step_run_id": c.step_run_id,
                     "delivery_state": c.delivery_state, "after_command_id": c.after_command_id,
                     "checkpoint_id": c.checkpoint_id, "error": c.error,
+                    # 控制指令针对的动作、续跑接续的动作；转运搬的板；一并占用的协同工位
+                    "target_command_id": c.target_command_id, "labware_id": c.labware_id,
+                    "assist_station_ids": list(c.assist_station_ids or []),
                     "created_at": c.created_at.isoformat(timespec="seconds"),
                 }
                 for c in self.commands.for_batch(batch.id)
@@ -350,6 +367,13 @@ class BatchService:
             "preflight": self.preflight(batch, user, manual_review=False) if batch.state == "scheduled" else None,
             "can_control": self.ctx.has("batch.control"),
         }
+
+    def _labware_all(self, batch: Batch) -> list[dict]:
+        """批次绑定的全部载具（多块板并行时按角色列出，主载具在前）。"""
+        from .transfer_service import TransferService
+
+        transfers = TransferService(self.db, self.ctx)
+        return [transfers.labware_out(row) for row in transfers.bound(batch.id)]
 
     def _labware_out(self, batch: Batch) -> dict | None:
         from .transfer_service import TransferService
@@ -1030,6 +1054,13 @@ class BatchService:
             # 矩阵条件：一条指令带全部孔位的参数，设备按孔位执行；步骤里的固定参数是未覆盖孔位的缺省值
             params["wells"] = wells
         target_station = station_id if station_id is not None else (allocation.station_id if allocation else "")
+        from ..domain.steps import assist_capabilities
+
+        # 协同资源：排程时与主设备同一时段预约的其他工位，随这条动作一起取得、一起释放
+        assist_ids = [
+            row.station_id for row in self.allocations.for_batch(batch.id)
+            if row.step_index == step_index and row.kind == "assist"
+        ] if command_type in DISPATCHING and capability is None else []
         command = Command(
             org_id=batch.org_id or self.ctx.org_id,
             batch_id=batch.id,
@@ -1045,9 +1076,17 @@ class BatchService:
             step_index=step_index,
             not_before=not_before,
             target_command_id=target_command_id,
+            assist_station_ids=assist_ids,
         )
         self.db.add(command)
         self.db.flush()
+        if command_type in DISPATCHING and capability is None and assist_capabilities(step) and not assist_ids:
+            self._refuse_unsent(
+                batch, command,
+                f"第 {step_index + 1} 步需要协同资源 {'、'.join(assist_capabilities(step))}，排程里没有预约：先重排这一步，"
+                f"不能只占到主设备就开工",
+            )
+            return command
         if command_type in DISPATCHING and target_station:
             from .transfer_service import TransferService
 
@@ -1477,10 +1516,13 @@ class BatchService:
         commands = self.commands.for_batch(batch.id)
         issued = []
         for other in self.runs.open_runs(batch.id):
-            if other.id == main.id or other.kind != DEVICE or other.state not in {"ready", "running"}:
+            if other.id == main.id or other.kind != DEVICE or other.state not in {"pending", "ready", "running"}:
                 continue
             if any(c.step_run_id == other.id and c.state in live for c in commands):
                 # 这一支的动作还在队列、在途或等现场核查：不重复下发
+                continue
+            if other.state == "pending" and self.workflow._plate_busy(batch, other):
+                # 等载具的分支：板空出来时由推进器按顺序开出
                 continue
             other.state = "ready"
             other.row_version = int(other.row_version or 0) + 1
@@ -1949,6 +1991,8 @@ class BatchService:
             "expiring_qualifications": self.people.expiring(),
             "manual_todos": self.workflow.review_todos(),
             "waste": [t for t in self.materials.list_waste() if t["over_threshold"]],
+            # 带硬时限、前驱已结束、还没开工的步骤：交班时最要紧的倒计时
+            "due_windows": sorted(self.due_windows(), key=lambda row: row["remaining_min"]),
         }
 
     def due_windows(self) -> list[dict]:

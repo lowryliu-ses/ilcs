@@ -127,6 +127,13 @@ export type StepRow = {
   planned_start: string | null;
   planned_end: string | null;
   transfer_station_id: string | null;
+  /** 这一步一并占用的协同工位；声明的协同能力；用哪块载具（角色）；拆分配置 */
+  assist_station_ids?: string[];
+  assist?: string[];
+  labware?: string;
+  split?: { count?: number; child_type?: string; mode?: 'logical' | 'physical' };
+  /** 非空表示计划时间窗只是预测（分支未定的下游、冻结期之后） */
+  forecast_reason?: string;
   checkpoint_id: string | null;
   actual_end: string | null;
   /** 同一步的历次尝试；审核退回会生成新的一次 */
@@ -142,6 +149,8 @@ export type Recovery = {
   retryable?: boolean;
   sideEffect?: string;
   verify?: string[];
+  /** 做完（或可能做过）后设备转为待清洗，清洗确认前不给别的批次用 */
+  cleanAfter?: boolean;
 };
 
 /** 运行分配：样本 × 批次 × 孔位 × 条件组。物理样本见下方 `SampleRow`。 */
@@ -215,8 +224,10 @@ export type BatchDetail = BatchSummary & {
   step_runs: StepRunRow[];
   workflow_events: WorkflowEventRow[];
   commands: CommandRow[];
-  /** 绑定的载具；未绑定时为空，此时不做位置追踪与转运 */
+  /** 绑定的主载具；未绑定时为空，此时不做位置追踪与转运 */
   labware: LabwareRow | null;
+  /** 绑定的全部载具（多块板并行时按角色列出，主载具角色为空、排在前面） */
+  labware_all: LabwareRow[];
   checkpoints: { id: string; step_index: number; state: string; created_at: string; payload: Record<string, unknown> }[];
   alarms: { id: string; severity: number; state: string; message: string; condition_active: boolean }[];
   audit: AuditRow[];
@@ -270,9 +281,13 @@ export type Preflight = {
 export type Allocation = {
   step_index: number;
   station_id: string;
-  kind: 'work' | 'transfer' | 'clean';
+  /** assist：协同资源，与主设备同起同止一并占用 */
+  kind: 'work' | 'transfer' | 'clean' | 'assist';
   starts_at: string;
   ends_at: string;
+  /** 预测窗口（分支未定的下游、冻结期之后）；false 为承诺窗口 */
+  forecast?: boolean;
+  forecast_reason?: string;
 };
 
 export type CommandRow = {
@@ -291,6 +306,12 @@ export type CommandRow = {
   updated_at?: string;
   /** 前置指令（转运）；它完成前本指令不投递 */
   after_command_id?: string;
+  /** 保持 / 终止要停的动作，或续跑 / 重试接续的那个被保持的动作 */
+  target_command_id?: string;
+  /** 转运搬的是哪块板 */
+  labware_id?: string;
+  /** 这条动作一并占用的协同工位 */
+  assist_station_ids?: string[];
 };
 
 export type RecoveryOption = { id: string; label: string; allowed: boolean; reason: string; impact: string };
@@ -460,8 +481,12 @@ export type RecipeStep = {
     rework_to?: string;
     max_rework?: number;
   };
-  /** 样本拆分：每个样本拆出 count 个子样本 */
-  split?: { count?: number; child_type?: string };
+  /** 样本拆分：每个样本拆出 count 个子样本；physical 时要按实际分装孔位确认后才推进 */
+  split?: { count?: number; child_type?: string; mode?: 'logical' | 'physical' };
+  /** 协同资源：执行期间与主设备一并占用的能力（机械臂、配套设备、放置位） */
+  assist?: string[];
+  /** 用哪块载具（按角色）；空为主载具 */
+  labware?: string;
   /** 前驱步骤（依赖图）。任何一步声明了它，流程按依赖图推进；未声明的步骤依赖上一行 */
   after?: string[];
   /** 前驱是条件分支时，本步在它的哪个出口上 */
@@ -891,6 +916,8 @@ export type ScheduleBoard = {
       starts_at: string;
       ends_at: string;
       uncertain: boolean;
+      forecast?: boolean;
+      forecast_reason?: string;
     }[];
   }[];
   conflicts: { station_id: string; a: { batch_id: string }; b: { batch_id: string }; overlap_min: number }[];
@@ -1281,11 +1308,35 @@ export type TaskRow = {
   row_version: number;
   /** 任务树：父任务编号，顶层为空 */
   parent_id: string;
-  /** 上游任务：它们的批次运行结束后本任务才能下发 */
+  /** 上游任务：满足放行条件后本任务才能下发 */
   depends_on: string[];
+  /** 从父任务继承来的上游（拆分出来的子任务同样要等它们） */
+  inherited_depends_on: string[];
+  /** 上游怎样才算满足：运行结束 / 数据复核通过 / 报告发布放行 */
+  dependency_gate: DependencyGate;
+  dependency_gate_label: string;
+  /** 方案当前的最新批准版本；高于 plan_version 时可以显式迁移 */
+  latest_plan_version: number | null;
   children: { id: string; title: string; batch_id: string; state: string; state_label: string }[];
   /** 还没满足的上游 */
   blocked_by: { task_id: string; label: string }[];
+};
+
+export type DependencyGate = 'run_completed' | 'data_validated' | 'released';
+
+export const DEPENDENCY_GATE_LABEL: Record<DependencyGate, string> = {
+  run_completed: '运行结束',
+  data_validated: '数据复核通过',
+  released: '报告发布放行',
+};
+
+export type DueWindow = {
+  batch_id: string;
+  step_index: number;
+  step_name: string;
+  max_gap_min: number;
+  deadline: string;
+  remaining_min: number;
 };
 
 export type TaskDetail = TaskRow & {
@@ -1855,6 +1906,8 @@ export type LabwareRow = {
   rows: number;
   cols: number;
   batch_id: string;
+  /** 在批次里的角色：空为主载具 */
+  role?: string;
   batch_active: boolean;
   location_id: string;
   state: string;

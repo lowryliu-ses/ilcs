@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ...schemas import CancelIn, TaskAssignIn, TaskCreateIn, TaskDecomposeIn, TaskDependenciesIn
+from ...schemas import CancelIn, TaskAssignIn, TaskCreateIn, TaskDecomposeIn, TaskDependenciesIn, TaskMigrateIn
 from ...services.task_service import TaskService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, Paging, require
 
@@ -80,5 +80,13 @@ def decompose_task(
 def set_task_dependencies(
     task_id: str, payload: TaskDependenciesIn, db: DbSession, user: CurrentUser, ctx=require("task.assign"),
 ):
-    """设置上游任务（完成—开始）。成环、依赖自己的子任务、已下发批次再加上游都拒绝。"""
-    return TaskService(db, ctx).set_dependencies(task_id, payload.depends_on, user)
+    """设置上游任务与放行条件。成环（含从父任务继承的依赖）、依赖自己的子任务、已下发批次再加上游都拒绝。"""
+    return TaskService(db, ctx).set_dependencies(task_id, payload.depends_on, user, payload.gate)
+
+
+@router.post("/{task_id}/migrate-version")
+def migrate_task_version(
+    task_id: str, payload: TaskMigrateIn, db: DbSession, user: CurrentUser, ctx=require("task.assign"),
+):
+    """把任务显式迁移到方案当前的批准版本（连同还没建批次的子任务）。已建批次的任务不能迁移。"""
+    return TaskService(db, ctx).migrate_version(task_id, payload.reason, user)

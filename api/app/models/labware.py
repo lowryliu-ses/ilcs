@@ -58,6 +58,8 @@ class Labware(Base):
     type_id: Mapped[str] = mapped_column(ForeignKey("labware_types.id"))
     # 当前绑定的批次；批次结束后保留为「最近一次使用」
     batch_id: Mapped[str] = mapped_column(String, default="", index=True)
+    # 在批次里的角色：空串是主载具（批次样本所在的板）；多块板并行时步骤按角色取板
+    role: Mapped[str] = mapped_column(String, default="")
     location_id: Mapped[str | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
     # idle | in_use | lost（部分执行 / 核查后位置不可信）| retired
     state: Mapped[str] = mapped_column(String, default="idle")

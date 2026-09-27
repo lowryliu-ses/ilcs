@@ -1,8 +1,8 @@
 # 验收记录：AC-01 至 AC-40
 
-更新日期：2026-09-22。对应《实验室平台开发需求文档》v1.0 第 7 节。
+更新日期：2026-09-27（核心链路评审整改见下文专节）。对应《实验室平台开发需求文档》v1.0 第 7 节。
 
-自动化用例位置以 `api/` 为根，只在 PostgreSQL 16 上运行（2026-09-23：**297 passed**，无跳过）。PostgreSQL 并发用例用真实独立连接验证幂等锁、资产预约行锁、工作流 `SKIP LOCKED` 与库存并发预留；另有故障注入验证业务写入与幂等响应记录同事务回滚，并断言全新空库迁移只建结构、不生成组织或演示业务数据。端到端链路另由 `scripts/smoke.py` 验证（只走 HTTP，可对部署环境跑）。
+自动化用例位置以 `api/` 为根，只在 PostgreSQL 16 上运行（2026-09-27：**500 passed**，无跳过）。PostgreSQL 并发用例用真实独立连接验证幂等锁、资产预约行锁、工作流 `SKIP LOCKED` 与库存并发预留；另有故障注入验证业务写入与幂等响应记录同事务回滚，并断言全新空库迁移只建结构、不生成组织或演示业务数据。端到端链路另由 `scripts/smoke.py` 验证（只走 HTTP，可对部署环境跑）。
 
 「证据」列里写「手工」的项，是无法在单元 / 集成层面证明的操作性要求（迁移演练、备份恢复、真实设备），本文如实标注做了什么、没做什么。**没有把未做的事写成通过。**
 
@@ -82,6 +82,32 @@
 - 完全由自动化用例覆盖：AC-03 至 AC-27、AC-29 至 AC-36、AC-39（其中 AC-07 含故障注入与 PostgreSQL 真并发，AC-12、AC-17、AC-25 含 PostgreSQL 真并发）。
 - 自动化 + 手工共同覆盖：AC-01、AC-02、AC-38、AC-40。
 - **未验证**：AC-37，阻塞于 DEC-02。
+
+## 核心链路评审整改（2026-09-26 评审，2026-09-27 完成）
+
+评审报告：`output/reviews/2026-09-26/核心链路设计评审.md`。每项先写成在未修复代码上失败的用例，修复后通过；
+`CR` 为回归用例 `tests/api/test_core_chain_review.py`，`EXT` 为 `tests/api/test_automation_extensions.py`，`SCH` 为 `tests/domain/test_scheduling.py`。
+
+| 条目 | 场景 | 证据 | 结论 |
+|---|---|---|---|
+| R1 | 两台设备并行，A 确认终止、B 超时 | CR `test_abort_stops_every_acting_device_and_waits_for_each_confirmation`、`test_abort_whose_target_already_finished_is_confirmed_without_calling_the_device` | 通过。逐设备下发与确认，B 未确认时批次不终止、B 的占用不释放，新任务投不进 B |
+| R1 | 保持的可暂停判定、逐设备保持、保持后续跑 / 重试 | CR `test_hold_judges_pausability_by_the_step_on_the_device_and_resumes_it`、`test_hold_is_refused_when_any_acting_device_cannot_pause`、`test_hold_reaches_every_acting_device_and_resume_continues_all`、`test_hold_confirmed_by_site_check_then_resumes`、`test_retry_after_hold_restarts_the_step_in_place_of_the_held_action` | 通过。看每个在动作步骤的能力；保持确认前不能续跑；续跑接续被保持的动作，同一动作只完成一次 |
+| R2 | 结果未知、超时、多通道超发、维护与校准中途变化 | CR `test_unknown_action_keeps_the_station_for_other_batches`、`test_timed_out_action_keeps_the_station`、`test_multi_channel_station_never_runs_more_actions_than_channels`、`test_station_in_maintenance_refuses_new_actions`、`test_calibration_failed_mid_run_refuses_the_next_action` | 通过 |
+| R3 | 依赖图上较后序号的步骤已在运行时手动重排 | CR `test_manual_reschedule_leaves_live_dag_steps_alone` | 通过 |
+| R4 | 任务锁定版本、取消的任务、别的方案的任务 | CR `test_batch_follows_the_plan_version_pinned_by_its_task`、`test_cancelled_or_foreign_task_cannot_produce_a_batch`；EXT `test_task_migrates_to_the_new_approved_version_explicitly` | 通过。升级走显式迁移并留审计 |
+| R5 | 父任务依赖传递、继承成环、父任务改依赖 | CR `test_children_inherit_the_parent_upstream`、`test_parent_cannot_gain_upstream_after_a_child_batch_is_running`；EXT `test_dependency_gate_distinguishes_run_data_and_release` | 通过。放行条件区分运行结束 / 数据复核通过 / 报告发布 |
+| R6 | 同工位多通道、多工位共用资产、维护占满 | SCH `test_asset_capacity_counts_*`、`test_asset_load_is_peak_concurrency_not_the_number_of_windows`、`test_maintenance_booking_fills_the_asset`；CR `test_station_channels_cannot_exceed_asset_capacity` | 通过。迁移 `0030` 对齐历史配置 |
+| R7 | 尾部静置、优化完成时间、同板 / 不同板分叉 | CR `test_trailing_wait_pushes_the_downstream_start`、`test_optimizer_completion_includes_trailing_wait`；SCH `test_step_ends_include_the_trailing_wait`、`test_exclusive_carrier_keeps_parallel_device_branches_apart`、`test_steps_on_different_plates_are_not_serialized` | 通过 |
+| R8 | 上一批已完成、清洗未确认 | CR `test_station_needing_cleaning_waits_for_confirmation_even_after_the_batch_is_done` | 通过。按能力配置 `cleanAfter`，缺省关闭 |
+| R9 | 两批换序、建议生成后新增维护 | CR `test_swapping_two_batches_applies_as_one_replacement`、`test_proposal_is_stale_when_maintenance_lands_on_its_windows` | 通过 |
+| 补充 | 并行静置不推迟计划开始、硬时限倒计时按依赖图 | CR `test_parallel_wait_does_not_push_the_planned_start_back`、`test_due_windows_follow_the_graph_not_the_first_open_step`；EXT `test_due_windows_are_served_and_included_in_handover` | 通过。倒计时接口 `GET /schedule/due-windows`，交班摘要带上 |
+| 第三批 | 放置位竞争（真实并发连接） | EXT `test_two_batches_racing_for_one_free_nest_get_one_winner` | 通过 |
+| 第三批 | 实体分装、分装到第二块板 | EXT `test_physical_split_waits_for_confirmed_placements`、`test_physical_split_lands_on_a_second_plate` | 通过 |
+| 第三批 | 协同资源 | EXT `test_assist_resource_is_booked_and_acquired_with_the_device`、`test_assist_capability_must_be_registered`；SCH `test_assist_resource_*`、`test_busy_assist_resource_delays_the_device_step`、`test_missing_assist_capability_fails_with_reason` | 通过 |
+| 第三批 | 多载具并行、未绑定角色不顶替 | EXT `test_steps_on_different_plates_run_in_parallel`、`test_step_cannot_borrow_the_main_plate_for_an_unbound_role` | 通过 |
+| 第三批 | 分支 / 回环滚动排程、承诺与预测窗口 | EXT `test_branch_downstream_is_forecast_until_decided_then_rolled` | 通过 |
+| 第三批 | 执行器多实例 | `tests/api/test_concurrent_executor.py::test_only_one_executor_process_dispatches_at_a_time` | 通过。执行器本来就以会话级 advisory lock 单活，API 不投递指令 |
+| 第三批 | 与真实设备联合验收 | 手工 | **未执行**：需要真实设备到位；协议模拟器上的联调用例（`test_multi_protocol_pilot.py`、`test_sila2_pilot.py`）通过 |
 
 ## 待业务决策（原文 DEC 段）仍未关闭的项
 

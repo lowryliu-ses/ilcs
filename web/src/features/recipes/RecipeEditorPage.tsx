@@ -900,6 +900,18 @@ function StepProperties({
               onChange={(event) => onSet((current) => void (current.split = { ...current.split, child_type: event.target.value }))}
             />
           </Field>
+          <Field label="拆分方式" hint="实体分装要在批次页按实际分装结果确认孔位后才推进；系统内分组立即完成">
+            <select
+              value={step.split?.mode ?? 'logical'}
+              disabled={readOnly}
+              onChange={(event) =>
+                onSet((current) => void (current.split = { ...current.split, mode: event.target.value as 'logical' | 'physical' }))
+              }
+            >
+              <option value="logical">系统内分组（立即登记）</option>
+              <option value="physical">实体分装（确认孔位后推进）</option>
+            </select>
+          </Field>
         </div>
       ) : null}
 
@@ -917,6 +929,49 @@ function StepProperties({
         </Field>
       ) : null}
 
+      {kind === 'device' ? (
+        <>
+          <Field label="协同资源" hint="执行期间与主设备一并占用的其他能力（机械臂、配套设备、放置位）：排程同一时段一起预约，投递时一起取得">
+            <div className="dep-list">
+              {capabilities
+                .filter((row) => row.id !== step.cap && !row.retired)
+                .map((row) => (
+                  <label key={row.id} className="check">
+                    <input
+                      type="checkbox"
+                      disabled={readOnly}
+                      checked={(step.assist ?? []).includes(row.id)}
+                      onChange={(event) =>
+                        onSet((current) => {
+                          const next = new Set(current.assist ?? []);
+                          if (event.target.checked) next.add(row.id);
+                          else next.delete(row.id);
+                          if (next.size) current.assist = [...next];
+                          else delete current.assist;
+                        })
+                      }
+                    />
+                    {row.name} <span className="tiny muted mono">{row.id}</span>
+                  </label>
+                ))}
+            </div>
+          </Field>
+          <Field label="载具角色" hint="留空用批次的主载具；多块板并行时写角色名（如 B），批次页按角色绑定对应的板">
+            <input
+              value={step.labware ?? ''}
+              readOnly={readOnly}
+              placeholder="主载具"
+              onChange={(event) =>
+                onSet((current) => {
+                  const value = event.target.value.trim();
+                  if (value) current.labware = value;
+                  else delete current.labware;
+                })
+              }
+            />
+          </Field>
+        </>
+      ) : null}
       {kind === 'device' ? (
         <Field label="消耗物料">
           <label className="small">

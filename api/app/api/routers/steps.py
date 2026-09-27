@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from ...schemas import BranchDecisionIn, GateDecisionIn, StepReviewIn, StepSubmitIn
+from ...schemas import BranchDecisionIn, GateDecisionIn, SplitConfirmIn, StepReviewIn, StepSubmitIn
 from ...services.workflow_service import WorkflowService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
 
@@ -78,3 +78,17 @@ def decide_gate(
     if replay is not None:
         return replay
     return guard.remember(WorkflowService(db, ctx).decide_gate(step_run_id, body, user))
+
+
+@router.post("/{step_run_id}/split")
+def confirm_split(
+    step_run_id: str, payload: SplitConfirmIn, db: DbSession, guard: IdempotencyGuard,
+    user: CurrentUser, ctx=require("step.submit"),
+):
+    """实体分装确认：按实际分装结果登记每个子样本的孔位，孔位落定后流程才推进。"""
+    body = payload.model_dump()
+    guard.bind(ctx, body).required()
+    replay = guard.replay()
+    if replay is not None:
+        return replay
+    return guard.remember(WorkflowService(db, ctx).confirm_split(step_run_id, body, user))

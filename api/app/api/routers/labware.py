@@ -100,9 +100,12 @@ def labware_moves(labware_id: str, db: DbSession, ctx: Ctx):
 def bind_labware(
     batch_id: str, payload: LabwareBindIn, db: DbSession, user: CurrentUser, ctx=require("labware.move"),
 ):
-    return TransferService(db, ctx).bind(batch_id, payload.labware_id, user)
+    return TransferService(db, ctx).bind(batch_id, payload.labware_id, user, payload.role)
 
 
 @router.delete("/batches/{batch_id}/labware")
-def unbind_labware(batch_id: str, db: DbSession, user: CurrentUser, ctx=require("labware.move")):
-    return TransferService(db, ctx).unbind(batch_id, user)
+def unbind_labware(
+    batch_id: str, db: DbSession, user: CurrentUser, role: str = "", ctx=require("labware.move"),
+):
+    """解绑载具；role 为空解绑主载具，否则解绑该角色的板。"""
+    return TransferService(db, ctx).unbind(batch_id, user, role)

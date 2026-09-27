@@ -6,6 +6,12 @@
 
 位置追踪按批次启用：批次绑定了载具才转运，没绑定的批次行为与之前完全一致。
 `ILCS_LABWARE_REQUIRED=1` 时下发要求先绑定载具（全自动产线应打开）。
+
+一个批次可以绑定多块板：主载具（角色为空）装批次样本，其他角色的板由步骤的 `labware` 指定；
+用不同板的设备步骤可以并行，用同一块板的一个接一个。
+
+放置位的分配是全站串行的：「查空位 → 写在途转运 / 扫码放置 / 确认送达」在同一把事务锁里，
+两个批次不会同时选中同一个空位。
 """
 from __future__ import annotations
 
@@ -74,6 +80,12 @@ class TransferService:
                 taken.setdefault(destination, f"在途 {command.id[:8]}")
         return taken
 
+    def _lock_locations(self) -> None:
+        """放置位分配的事务锁：随提交释放。并发的第二个事务醒来后重读占用，看到前一个的在途目的位置。"""
+        from ..core.db import serialize
+
+        serialize(self.db, "labware:locations")
+
     def _kind_of(self, labware: Labware) -> str:
         kind = self.db.get(LabwareType, labware.type_id)
         return kind.kind if kind else "plate"
@@ -104,13 +116,33 @@ class TransferService:
             found.append(CarrierSpec(id=station.id, usable=not why, why_not=why, busy=busy))
         return found
 
-    def for_batch(self, batch_id: str) -> Labware | None:
+    def for_batch(self, batch_id: str, role: str = "") -> Labware | None:
+        """批次按角色绑定的载具；角色为空是主载具。"""
         return (
             self.labware.query()
-            .filter(Labware.batch_id == batch_id, Labware.state != "retired")
+            .filter(Labware.batch_id == batch_id, Labware.role == (role or ""), Labware.state != "retired")
             .order_by(Labware.created_at.desc())
             .first()
         )
+
+    def bound(self, batch_id: str) -> list[Labware]:
+        """批次绑定的全部载具，主载具在前。"""
+        return list(
+            self.labware.query()
+            .filter(Labware.batch_id == batch_id, Labware.state != "retired")
+            .order_by(Labware.role, Labware.created_at)
+            .all()
+        )
+
+    def roles(self, batch_id: str) -> set[str]:
+        return {row.role or "" for row in self.bound(batch_id)}
+
+    @staticmethod
+    def step_role(batch: Batch, step_index: int) -> str:
+        from ..domain.steps import labware_role, normalize
+
+        steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
+        return labware_role(steps[step_index]) if 0 <= step_index < len(steps) else ""
 
     def _in_transit(self, labware: Labware) -> Command | None:
         return next((c for c in self._open_transfers() if c.labware_id == labware.id), None)
@@ -118,9 +150,19 @@ class TransferService:
     # ---------- 转运计划与指令 ----------
 
     def plan_for_step(self, batch: Batch, step_index: int, station_id: str):
-        """设备步骤开始前：要不要转运、能不能转运。返回 (载具, 计划)；没绑定载具返回 (None, None)。"""
-        labware = self.for_batch(batch.id)
+        """设备步骤开始前：要不要转运、能不能转运。返回 (载具, 计划)；没绑定载具返回 (None, None)。
+
+        步骤写了载具角色就搬那块板；角色声明了却没绑定对应的板时计划不成立（不能拿主载具顶替）。
+        """
+        role = self.step_role(batch, step_index)
+        labware = self.for_batch(batch.id, role)
         if labware is None:
+            if role and self.bound(batch.id):
+                from ..domain.labware import TransferPlan
+
+                return self.for_batch(batch.id), TransferPlan(
+                    needed=True, blocked=[f"第 {step_index + 1} 步要用角色「{role}」的载具，批次没有绑定这块板"],
+                )
             return None, None
         specs = self._location_specs()
         current = next((spec for spec in specs if spec.id == labware.location_id), None)
@@ -148,7 +190,7 @@ class TransferService:
     def require_ready(self, batch: Batch, step_index: int, station_id: str) -> None:
         """下发 / 恢复前的检查：不能转运就不签名、不下发，把原因原样给界面。"""
         labware, plan = self.plan_for_step(batch, step_index, station_id)
-        if labware is None:
+        if labware is None and plan is None:
             if settings.labware_required:
                 raise StateConflict(
                     "批次没有绑定载具：全自动产线要求先扫码绑定板 / 托盘",
@@ -164,11 +206,12 @@ class TransferService:
 
     def prepare(self, batch: Batch, step_index: int, station_id: str, step_run_id: str):
         """需要时生成转运指令。返回 (转运指令或 None, 阻塞原因)。"""
+        self._lock_locations()
         labware, plan = self.plan_for_step(batch, step_index, station_id)
-        if labware is None or plan is None or not plan.needed:
+        if plan is None or not plan.needed:
             return None, ""
-        if not plan.ok:
-            return None, "；".join(plan.blocked)
+        if not plan.ok or labware is None:
+            return None, "；".join(plan.blocked) or "载具不可用"
         source = self.db.get(Location, plan.source)
         destination = self.db.get(Location, plan.destination)
         allocation = (
@@ -234,6 +277,7 @@ class TransferService:
 
     def complete(self, command: Command, *, source: str = "transfer", by: str = "", note: str = "") -> str:
         """转运已完成（设备回执或现场核查）：写移位记录、更新载具位置。返回不一致原因（空 = 正常）。"""
+        self._lock_locations()
         labware = self.db.get(Labware, command.labware_id) if command.labware_id else None
         destination = ((command.params or {}).get("to") or {}).get("location_id")
         if labware is None or not destination:
@@ -296,6 +340,7 @@ class TransferService:
             raise NotFound("载具不存在")
         if (payload.get("barcode") or "").strip() != labware.barcode:
             raise ValidationFailed("扫到的条码与载具不一致", code="barcode_mismatch")
+        self._lock_locations()
         target_id = payload.get("to_location_id") or None
         destination = self.db.get(Location, target_id) if target_id else None
         occupied_by = ""
@@ -341,7 +386,7 @@ class TransferService:
             self.db.commit()
         return self.labware_out(labware)
 
-    def bind(self, batch_id: str, labware_id: str, user: User) -> dict:
+    def bind(self, batch_id: str, labware_id: str, user: User, role: str = "") -> dict:
         from ..repositories.batches import BatchRepository
 
         batch = BatchRepository(self.db, self.ctx).get(batch_id)
@@ -358,6 +403,22 @@ class TransferService:
             other = self.db.get(Batch, labware.batch_id)
             if other is not None and other.state not in ENDED_BATCH_STATES:
                 raise StateConflict(f"载具已绑定在用批次 {other.id}", code="labware_in_use")
+        role = (role or "").strip()
+        if labware.batch_id == batch.id and (labware.role or "") != role and labware.state != "retired":
+            raise StateConflict(
+                f"载具已以角色「{labware.role or '主载具'}」绑定在本批次，先解绑再换角色", code="labware_role_taken",
+            )
+        if role:
+            # 其他角色的板：不装批次样本（样本在主载具上，实体分装时再落到这块板），只登记角色
+            previous = self.for_batch(batch.id, role)
+            if previous is not None and previous.id != labware.id:
+                previous.batch_id, previous.role = "", ""
+            labware.batch_id, labware.role = batch.id, role
+            labware.row_version = int(labware.row_version or 0) + 1
+            self.audit.record(user, "绑定载具", batch.id, after=f"{labware.barcode}（角色 {role}）",
+                              detail=f"当前位置 {labware.location_id or '未上线'}；步骤按角色「{role}」取这块板")
+            self.db.commit()
+            return self.labware_out(labware)
         kind = self.db.get(LabwareType, labware.type_id)
         from ..models import Sample
 
@@ -371,6 +432,7 @@ class TransferService:
         if previous is not None and previous.id != labware.id:
             previous.batch_id = ""
         labware.batch_id = batch.id
+        labware.role = ""
         # 样本的孔位占用与结构化位置指向这块实体载具
         linked = SampleService(self.db, self.ctx).link_labware(container_of(batch.id), labware)
         labware.row_version = int(labware.row_version or 0) + 1
@@ -379,7 +441,7 @@ class TransferService:
         self.db.commit()
         return self.labware_out(labware)
 
-    def unbind(self, batch_id: str, user: User) -> dict:
+    def unbind(self, batch_id: str, user: User, role: str = "") -> dict:
         from ..repositories.batches import BatchRepository
 
         batch = BatchRepository(self.db, self.ctx).get(batch_id)
@@ -387,15 +449,17 @@ class TransferService:
             raise NotFound("批次不存在")
         if batch.state not in {"planned", "scheduled"}:
             raise StateConflict("批次已下发，不能解绑载具")
-        labware = self.for_batch(batch.id)
+        labware = self.for_batch(batch.id, role)
         if labware is None:
             return {"unbound": False}
         from ..domain.labware import container_of
         from .sample_service import SampleService
 
         labware.batch_id = ""
-        SampleService(self.db, self.ctx).link_labware(container_of(batch.id), None)
-        self.audit.record(user, "解绑载具", batch.id, before=labware.barcode)
+        labware.role = ""
+        if not role:
+            SampleService(self.db, self.ctx).link_labware(container_of(batch.id), None)
+        self.audit.record(user, "解绑载具", batch.id, before=labware.barcode + (f"（角色 {role}）" if role else ""))
         self.db.commit()
         return {"unbound": True}
 
@@ -427,6 +491,7 @@ class TransferService:
         location = self.db.get(Location, location_id)
         if location is None:
             raise NotFound("位置不存在")
+        self._lock_locations()
         occupied = self._occupied()
         if not active and location_id in occupied:
             raise StateConflict(f"{location_id} 上有载具或正有转运送过来（{occupied[location_id]}），不能停用")
@@ -475,6 +540,7 @@ class TransferService:
             "type_name": kind.name if kind else labware.type_id,
             "rows": kind.rows if kind else 1, "cols": kind.cols if kind else 1,
             "batch_id": labware.batch_id,
+            "role": labware.role or "",
             "batch_active": bool(batch and batch.state not in ENDED_BATCH_STATES),
             "location_id": labware.location_id or "", "state": labware.state,
             "in_transit": (

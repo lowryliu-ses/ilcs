@@ -10,6 +10,23 @@ ORDER = ("unassigned", "pending_accept", "accepted", "running", "data_review", "
 # 上游任务到了这些状态，就算「运行已结束」：数据复核与报告不挡下游开工
 RUN_FINISHED = {"data_review", "reporting", "done"}
 
+# 上游怎样才算满足。运行结束、数据复核通过、报告发布放行是三件不同的事：下游只需要上游的样品
+# 做完就能开工时用第一种；要用上游经过复核的数据做决定时用第二种；要等上游结论正式放行时用第三种。
+GATES: dict[str, tuple[str, frozenset[str]]] = {
+    "run_completed": ("运行结束", frozenset(RUN_FINISHED)),
+    "data_validated": ("数据复核通过", frozenset({"reporting", "done"})),
+    "released": ("报告发布放行", frozenset({"done"})),
+}
+DEFAULT_GATE = "run_completed"
+
+
+def gate_label(gate: str) -> str:
+    return GATES.get(gate or DEFAULT_GATE, GATES[DEFAULT_GATE])[0]
+
+
+def gate_satisfied(gate: str, upstream_state: str) -> bool:
+    return upstream_state in GATES.get(gate or DEFAULT_GATE, GATES[DEFAULT_GATE])[1]
+
 
 def dependency_issues(task_id: str, wanted: list[str], edges: dict[str, list[str]]) -> list[str]:
     """给 task_id 设上游 wanted 会不会出问题。`edges` 是现有的「任务 → 它的上游」。"""

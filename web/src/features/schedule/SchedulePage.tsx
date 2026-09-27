@@ -5,7 +5,7 @@ import { api } from '../../shared/api';
 import { clock, dateOf, minutes } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { Gate, OptimizePreview, QueueRow, ScheduleBoard, ScheduleProposalRow } from '../../shared/types';
+import type { DueWindow, Gate, OptimizePreview, QueueRow, ScheduleBoard, ScheduleProposalRow } from '../../shared/types';
 import { Empty, GateBanner, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 const LANE_MINUTES = 8 * 60;
@@ -104,6 +104,7 @@ export function SchedulePage() {
   const board = useQuery<ScheduleBoard>('schedule:board', () => api.get<ScheduleBoard>('/schedule/board'), 10000);
   const queue = useQuery<QueueRow[]>('schedule:queue', () => api.get<QueueRow[]>('/schedule/queue'), 10000);
   const gate = useQuery<Gate>('gate', () => api.get<Gate>('/gate'), 15000);
+  const due = useQuery<DueWindow[]>('schedule:due', () => api.get<DueWindow[]>('/schedule/due-windows'), 15000);
   const [selected, setSelected] = useState<string[]>([]);
   const [preview, setPreview] = useState<OptimizePreview | null>(null);
   const [mode, setMode] = useState<OptimizePreview['mode']>('optimize');
@@ -196,6 +197,37 @@ export function SchedulePage() {
         </div>
       ) : null}
 
+      {due.data?.length ? (
+        <Panel title={`硬时限倒计时（${due.data.length}）`} flush>
+          <table>
+            <thead>
+              <tr>
+                <th>批次</th>
+                <th>步骤</th>
+                <th>时限</th>
+                <th>最晚开工</th>
+                <th className="num">剩余 min</th>
+              </tr>
+            </thead>
+            <tbody>
+              {due.data.map((row) => (
+                <tr key={`${row.batch_id}-${row.step_index}`}>
+                  <td className="mono small">
+                    <Link to={`/batches/${row.batch_id}`}>{row.batch_id}</Link>
+                  </td>
+                  <td className="small">第 {row.step_index + 1} 步 {row.step_name}</td>
+                  <td className="small">前驱结束后 {row.max_gap_min} min 内</td>
+                  <td className="small mono">{clock(row.deadline)}</td>
+                  <td className={`num ${row.remaining_min < 0 ? 'bad-text' : row.remaining_min <= 5 ? 'warn-text' : ''}`}>
+                    {row.remaining_min}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      ) : null}
+
       <ProposalsPanel
         rows={proposals.data ?? []}
         can={can('batch.schedule')}
@@ -227,14 +259,14 @@ export function SchedulePage() {
                   return (
                     <div
                       key={`${item.batch_id}-${item.step_index}-${index}`}
-                      className={`chip ${item.kind}${item.uncertain ? ' uncertain' : ''}`}
+                      className={`chip ${item.kind}${item.uncertain ? ' uncertain' : ''}${item.forecast ? ' forecast' : ''}`}
                       style={{ left: `${laneOffset(item.starts_at)}%`, width: `${width}%` }}
-                      title={`${item.batch_id}｜第 ${item.step_index + 1} 步 ${item.step_name ?? ''}｜${clock(item.starts_at)} → ${clock(item.ends_at)}${item.uncertain ? '｜其后安排仅为预测' : ''}`}
+                      title={`${item.batch_id}｜第 ${item.step_index + 1} 步 ${item.step_name ?? ''}${item.kind === 'assist' ? '（协同资源）' : ''}｜${clock(item.starts_at)} → ${clock(item.ends_at)}${item.uncertain ? '｜其后安排仅为预测' : ''}${item.forecast ? `｜预测：${item.forecast_reason}` : ''}`}
                     >
                       {/* 窄条写不下文字，留给悬浮提示，避免半个字符的噪声 */}
                       {width >= 4 ? (
                         <span>
-                          {item.kind === 'clean' ? '清洗' : item.kind === 'transfer' ? '转运' : `#${item.batch_id.split('-').pop()}`}
+                          {item.kind === 'clean' ? '清洗' : item.kind === 'transfer' ? '转运' : item.kind === 'assist' ? `协同 #${item.batch_id.split('-').pop()}` : `#${item.batch_id.split('-').pop()}`}
                         </span>
                       ) : null}
                       {item.hard?.maxGapMin && width >= 6 ? <em className="hard">硬</em> : null}

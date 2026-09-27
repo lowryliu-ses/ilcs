@@ -46,6 +46,8 @@ class Command(Base):
     labware_id: Mapped[str] = mapped_column(String, default="")
     # 保持 / 终止 / 续跑针对的动作指令：控制指令只确认它自己的目标，不代表同批次别的设备
     target_command_id: Mapped[str] = mapped_column(String, default="")
+    # 协同资源：这一步执行期间一并占用的其他工位（机械臂、放置位、配套设备），随本指令一起取得、一起释放
+    assist_station_ids: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ExecutorHeartbeat(Base):

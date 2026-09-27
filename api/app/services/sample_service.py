@@ -485,9 +485,17 @@ class SampleService:
         return occupancy
 
     def release_slots(self, container_id: str) -> int:
-        """释放孔位占用（批次结束 / 终止 / 删除）。样本随之从载具上解开，最后所在的载具孔位留作文本位置。"""
+        """释放孔位占用（批次结束 / 终止 / 删除）。样本随之从载具上解开，最后所在的载具孔位留作文本位置。
+
+        实体分装落到其他角色载具上的孔位（容器号「批次容器:角色」）一并释放。
+        """
+        from sqlalchemy import or_
+
         released = 0
-        for row in self.slots.query().filter_by(container_id=container_id, released_at=None).all():
+        for row in self.slots.query().filter(
+            or_(SlotOccupancy.container_id == container_id, SlotOccupancy.container_id.like(f"{container_id}:%")),
+            SlotOccupancy.released_at.is_(None),
+        ).all():
             row.released_at = now()
             released += 1
             sample = self.db.get(PhysicalSample, row.physical_sample_id)

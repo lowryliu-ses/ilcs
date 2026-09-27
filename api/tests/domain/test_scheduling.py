@@ -153,3 +153,54 @@ def test_exclusive_carrier_keeps_parallel_device_branches_apart():
     first, second = sorted((a for a in planned if a.kind == WORK), key=lambda a: a.starts_at)
     assert second.starts_at >= first.ends_at + timedelta(minutes=10), "板要先从上一台设备搬过来"
     assert any(a.kind == TRANSFER and a.step_index == 1 for a in planned)
+
+
+# ---------- 协同资源与多载具（评审第三批）----------
+
+ROBOT_A = StationSpec(id="ARM-A", limits={"cap.robot": {}})
+ROBOT_B = StationSpec(id="ARM-B", limits={"cap.robot": {}})
+
+
+def test_assist_resource_is_booked_for_the_same_window():
+    """主设备与协同资源同起同止：机械臂在整个匀浆期间都被占着。"""
+    step = {**MIX_STEP, "assist": ["cap.robot"]}
+    allocations = plan_steps([step], T0, context(stations=[MIXER_A, ROBOT_A], clean_min=0))
+    work = next(a for a in allocations if a.kind == WORK)
+    assist = next(a for a in allocations if a.kind == "assist")
+    assert (assist.station_id, assist.starts_at, assist.ends_at) == ("ARM-A", work.starts_at, work.ends_at)
+
+
+def test_busy_assist_resource_delays_the_device_step():
+    """唯一的机械臂在忙：主设备空着也要等，凑齐了一起开工，不会只占到一半。"""
+    step = {**MIX_STEP, "assist": ["cap.robot"]}
+    busy = {"ARM-A": [Interval(T0, T0 + timedelta(minutes=45))]}
+    allocations = plan_steps([step], T0, context(stations=[MIXER_A, ROBOT_A], busy=busy, clean_min=0))
+    work = next(a for a in allocations if a.kind == WORK)
+    assert work.starts_at == T0 + timedelta(minutes=45)
+
+
+def test_second_assist_station_is_used_when_the_first_is_busy():
+    step = {**MIX_STEP, "assist": ["cap.robot"]}
+    busy = {"ARM-A": [Interval(T0, T0 + timedelta(hours=2))]}
+    allocations = plan_steps([step], T0, context(stations=[MIXER_A, ROBOT_A, ROBOT_B], busy=busy, clean_min=0))
+    assist = next(a for a in allocations if a.kind == "assist")
+    assert (assist.station_id, assist.starts_at) == ("ARM-B", T0)
+
+
+def test_missing_assist_capability_fails_with_reason():
+    step = {**MIX_STEP, "assist": ["cap.robot"]}
+    with pytest.raises(SchedulingError) as error:
+        plan_steps([step], T0, context(stations=[MIXER_A], clean_min=0))
+    assert "协同资源 cap.robot 没有可用工位" in error.value.message
+
+
+def test_steps_on_different_plates_are_not_serialized():
+    """两块板各自互斥：同一块板上的步骤一个接一个，不同板上的步骤可以并行。"""
+    mix = {**MIX_STEP, "step_id": "mix", "after": []}
+    coat = {**COAT_STEP, "step_id": "coat", "after": [], "labware": "B"}
+    planned = plan_steps([mix, coat], T0, context(clean_min=0), exclusive_carrier={"", "B"})
+    starts = sorted(a.starts_at for a in planned if a.kind == WORK)
+    assert starts == [T0, T0]
+    same = plan_steps([mix, {**coat, "labware": ""}], T0, context(clean_min=0), exclusive_carrier={""})
+    first, second = sorted((a for a in same if a.kind == WORK), key=lambda a: a.starts_at)
+    assert second.starts_at >= first.ends_at

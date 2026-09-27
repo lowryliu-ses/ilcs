@@ -183,6 +183,8 @@ class CommandRepository(ScopedRepository[Command]):
         在途与已保持的动作按批次是否结束判断（批次结束前逐台确认过停止或完成）；结果未知的
         动作不看批次状态——设备可能仍在动作，只有现场核查给出结论后才释放。
         """
+        from sqlalchemy import func, or_
+
         ids = sorted({station_id for station_id in station_ids if station_id})
         if not ids:
             return []
@@ -190,17 +192,22 @@ class CommandRepository(ScopedRepository[Command]):
             self.db.query(Command, Batch.state)
             .outerjoin(Batch, Batch.id == Command.batch_id)
             .filter(
-                Command.station_id.in_(ids),
+                # 主工位在其中，或把其中某台当协同资源一并占着
+                or_(Command.station_id.in_(ids), func.json_array_length(Command.assist_station_ids) > 0),
                 Command.type.in_(sorted(MOTION)),
                 Command.state.in_([*ENGAGED_STATES, *UNSETTLED_STATES]),
             )
             .order_by(Command.created_at)
             .all()
         )
+        wanted = set(ids)
         return [
             command for command, batch_state in rows
-            if (command.state in ENGAGED_STATES and batch_state not in _BATCH_ENDED)
-            or (command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent")
+            if (command.station_id in wanted or wanted & set(command.assist_station_ids or []))
+            and (
+                (command.state in ENGAGED_STATES and batch_state not in _BATCH_ENDED)
+                or (command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent")
+            )
         ]
 
     def ever_delivered_for_run(self, step_run_id: str) -> bool:

@@ -505,6 +505,8 @@ class TaskCreateIn(BaseModel):
     # 任务树与依赖：挂在哪个父任务下、依赖哪些上游任务
     parent_id: str = ""
     depends_on: list[str] = []
+    # 上游怎样才算满足：运行结束 / 数据复核通过 / 报告发布放行
+    dependency_gate: Literal["run_completed", "data_validated", "released"] = "run_completed"
 
 
 class TaskDecomposeIn(BaseModel):
@@ -517,6 +519,14 @@ class TaskDecomposeIn(BaseModel):
 
 class TaskDependenciesIn(BaseModel):
     depends_on: list[str] = []
+    # 不传就保持原放行条件
+    gate: Literal["run_completed", "data_validated", "released"] | None = None
+
+
+class TaskMigrateIn(BaseModel):
+    """把任务显式迁移到方案当前的批准版本。必须写原因，留审计。"""
+
+    reason: str
 
 
 class TaskAssignIn(Versioned):
@@ -605,6 +615,22 @@ class GateDecisionIn(Signed):
 
     conclusion: Literal["approved", "rejected"]
     reason: str
+
+
+class SplitPlacementIn(BaseModel):
+    parent_sample_id: str
+    number: int = Field(ge=1, le=96)
+    well: str = Field(min_length=1, max_length=20)
+
+
+class SplitConfirmIn(BaseModel):
+    """实体分装确认：每个母样本的每一份落在哪个孔。写了载具角色就落到批次按该角色绑定的板上。"""
+
+    placements: list[SplitPlacementIn]
+    labware_role: str = Field(default="", max_length=40)
+    # 不写角色也可以落到主载具上
+    use_labware: bool = False
+    note: str = ""
 
 
 class BranchDecisionIn(Versioned):
@@ -1175,6 +1201,8 @@ class LabwareMoveIn(BaseModel):
 
 class LabwareBindIn(BaseModel):
     labware_id: str
+    # 空串是主载具（装批次样本）；多块板并行时给其他板一个角色，步骤按 labware 取板
+    role: str = Field(default="", max_length=40)
 
 
 class LocationCreateIn(BaseModel):

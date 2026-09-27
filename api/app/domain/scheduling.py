@@ -3,17 +3,20 @@
 纯函数：输入步骤、工位、现有占用，输出步骤级分配或失败原因。数据模型是步骤级的，
 将来换成 CP-SAT 求解器不需要改这个模型，只替换 `plan_steps` 的实现。
 """
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 from .capability import StationSpec, station_fits
 from .graph import predecessors
-from .steps import needs_station
+from .steps import assist_capabilities, labware_role, needs_station
 
 WORK = "work"
 TRANSFER = "transfer"
 CLEAN = "clean"
+# 协同资源：主设备执行期间一并占用的其他工位（机械臂、配套设备、放置位）
+ASSIST = "assist"
 
 
 @dataclass(frozen=True)
@@ -166,6 +169,56 @@ def _candidates(context: SchedulingContext, step: dict[str, Any], index: int) ->
     return usable
 
 
+def _assist_candidates(
+    context: SchedulingContext, step: dict[str, Any], index: int, capability: str, exclude: set[str],
+) -> list[StationSpec]:
+    probe = {"cap": capability, "params": {}}
+    usable = [
+        s for s in context.stations
+        if s.id not in exclude and station_fits(s, probe) and s.healthy
+        and (context.allow_unclean or s.clean)
+        and s.id not in context.held_station_ids and s.id not in context.unavailable_station_ids
+    ]
+    if not usable:
+        raise SchedulingError(
+            f"第 {index + 1} 步「{step.get('name')}」需要的协同资源 {capability} 没有可用工位", index,
+        )
+    return usable
+
+
+def _with_assists(
+    context: SchedulingContext, step: dict[str, Any], index: int, main: StationSpec, begin: datetime,
+    duration: timedelta,
+) -> tuple[datetime, list[StationSpec]]:
+    """主设备与每种协同资源在同一时段都空着的最早时刻，以及选中的协同工位。
+
+    协同资源与主设备一起取得、一起释放：任何一种凑不齐，这一步就整体往后排，不会只占到一半。
+    """
+    options = {
+        capability: _assist_candidates(context, step, index, capability, {main.id})
+        for capability in assist_capabilities(step)
+    }
+    for _ in range(500):
+        chosen: list[StationSpec] = []
+        latest = begin
+        for capability, stations in options.items():
+            free = [s for s in stations if s.id not in {c.id for c in chosen}]
+            if not free:
+                raise SchedulingError(
+                    f"第 {index + 1} 步「{step.get('name')}」的协同资源 {capability} 没有另一台可用工位", index,
+                )
+            when, station = min(((earliest_free(context, s.id, begin, duration), s) for s in free),
+                                key=lambda pair: (pair[0], pair[1].id))
+            chosen.append(station)
+            latest = max(latest, when)
+        if latest == begin:
+            return begin, chosen
+        begin = earliest_free(context, main.id, latest, duration)
+    raise SchedulingError(
+        f"第 {index + 1} 步「{step.get('name')}」主设备与协同资源在可见时间范围内凑不到同一时段", index,
+    )
+
+
 def candidate_station_ids(context: SchedulingContext, step: dict[str, Any], index: int) -> list[str]:
     """这一步当前可以排上去的工位（能力、参数范围、健康、清洗、保持、可用性都过了）。"""
     return [station.id for station in _candidates(context, step, index)]
@@ -175,7 +228,7 @@ def plan_steps(
     steps: list[dict[str, Any]], start_from: datetime, context: SchedulingContext,
     *, first_index: int = 0, previous_end: datetime | None = None,
     previous_station: str | None = None, step_ends: dict[int, datetime] | None = None,
-    exclusive_carrier: bool = False,
+    exclusive_carrier: bool | Collection[str] = False,
 ) -> list[PlannedAllocation]:
     """按步骤资源需求排程。
 
@@ -189,8 +242,12 @@ def plan_steps(
     `step_ends` 传入时填上每一步（含不占工位的步骤）的计划结束：批次完成看它们的最大值，
     设备时间窗之后的静置、培养、冷却同样是工艺时间。
 
-    `exclusive_carrier`：批次绑定了一块载具时，设备步骤与运行时一样一次只能有一个在用这块板——
-    并行分支上的设备步骤按步骤顺序一个接一个排，板换设备要排转运。
+    `exclusive_carrier`：批次绑定了载具时，设备步骤与运行时一样一次只能有一个在用同一块板——
+    用同一块板的设备步骤按步骤顺序一个接一个排，板换设备要排转运。传 True 表示只有主载具；
+    传角色集合表示这些角色各有一块板（步骤按 `labware` 取板，没写的用主载具），不同板上的步骤可以并行。
+
+    步骤声明了协同资源（`assist`）时，主设备与每种协同资源要在同一时段都空着，协同工位记一段
+    `assist` 时间窗，与主设备的时间窗同起同止。
     """
     allocations: list[PlannedAllocation] = []
     not_before = start_from
@@ -200,9 +257,10 @@ def plan_steps(
     # 每一步结束的时刻与结束后载具所在的工位：后继从最晚结束的那个前驱接手
     ends: dict[int, datetime] = {}
     where: dict[int, str | None] = {}
-    # 独占载具时这块板上一次设备动作结束的时刻与所在工位
-    plate_free: datetime | None = None
-    plate_at: str | None = None
+    # 独占载具时每块板（按角色）上一次设备动作结束的时刻与所在工位
+    roles = {""} if exclusive_carrier is True else set(exclusive_carrier or ())
+    plate_free: dict[str, datetime] = {}
+    plate_at: dict[str, str] = {}
 
     for index, step in enumerate(steps):
         if index < first_index:
@@ -225,9 +283,13 @@ def plan_steps(
         # 硬时限从前驱结束起算；独占载具时开工还要等板从上一次设备动作上空出来，并从那台设备搬过来
         gap_from = previous_end
         ready_from = previous_end
-        if exclusive_carrier and plate_free is not None:
-            ready_from = max(previous_end, plate_free)
-            previous_station = plate_at
+        role = labware_role(step)
+        if role in roles and role in plate_free:
+            ready_from = max(previous_end, plate_free[role])
+            previous_station = plate_at[role]
+        elif role in roles and role:
+            # 另一块板第一次上设备：它不在前驱所在的工位上
+            previous_station = None
 
         best: tuple[datetime, StationSpec, bool] | None = None
         for station in candidates:
@@ -256,6 +318,10 @@ def plan_steps(
             if transfer.ends_at > begin:
                 begin = earliest_free(context, station.id, transfer.ends_at, duration)
 
+        helpers: list[StationSpec] = []
+        if assist_capabilities(step):
+            begin, helpers = _with_assists(context, step, index, station, begin, duration)
+
         # 硬时限必须在转运把开工时间往后推之后再判：先判后推会放过转运车忙导致的超时
         hard = step.get("hard") or {}
         if "maxGapMin" in hard:
@@ -270,6 +336,10 @@ def plan_steps(
         work = PlannedAllocation(index, station.id, begin, begin + duration, WORK)
         allocations.append(work)
         _occupy(context, work)
+        for helper in helpers:
+            assist = PlannedAllocation(index, helper.id, begin, begin + duration, ASSIST)
+            allocations.append(assist)
+            _occupy(context, assist)
 
         next_step = next(
             (steps[i] for i in range(index + 1, len(steps)) if needs_station(steps[i])), None
@@ -284,7 +354,8 @@ def plan_steps(
 
         ends[index] = work.ends_at
         where[index] = station.id
-        plate_free, plate_at = work.ends_at, station.id
+        if role in roles:
+            plate_free[role], plate_at[role] = work.ends_at, station.id
 
     if step_ends is not None:
         step_ends.update(ends)

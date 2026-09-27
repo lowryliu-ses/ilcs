@@ -247,6 +247,10 @@ tr.current td { background: var(--accent-soft); }
 .chip.transfer { background: repeating-linear-gradient(135deg, var(--s-planned) 0 4px, color-mix(in srgb, var(--s-planned) 55%, transparent) 4px 8px); color: var(--ink); }
 .chip.clean { background: repeating-linear-gradient(135deg, transparent 0 3px, color-mix(in srgb, var(--muted) 35%, transparent) 3px 6px); border-style: dashed; color: var(--muted); }
 .chip.uncertain { opacity: .6; border-style: dashed; }
+/* 协同资源：与主设备同一时段一并占用 */
+.chip.assist { background: repeating-linear-gradient(90deg, var(--s-scheduled) 0 6px, color-mix(in srgb, var(--s-scheduled) 60%, transparent) 6px 12px); }
+/* 预测窗口：分支未定的下游、冻结期之后，按实际进度滚动更新 */
+.chip.forecast { opacity: .55; border-style: dashed; border-color: currentColor; }
 .chip .hard { font-style: normal; margin-left: 6px; padding: 0 3px; border: 1px solid currentColor; border-radius: 3px; font-size: 10px; }
 
 /* ---------- 样品孔位与结果 ---------- */

@@ -76,7 +76,9 @@ class ScheduleService:
             allocation = self.allocations.work_step(batch.id, batch.current_step)
             if allocation:
                 held.add(allocation.station_id)
-            held.update(command.station_id for command in commands.possibly_acting(batch.id, MOTION))
+            for command in commands.possibly_acting(batch.id, MOTION):
+                held.add(command.station_id)
+                held.update(command.assist_station_ids or [])
         return held
 
     def _busy(self, exclude_batch_ids: set[str] | None) -> dict[str, list[Interval]]:
@@ -95,11 +97,11 @@ class ScheduleService:
             )
         return busy
 
-    def carrier_exclusive(self, batch: Batch) -> bool:
-        """批次绑定了载具：运行时同一块板一次只在一台设备上，排程也按这个排。"""
+    def carrier_roles(self, batch: Batch) -> set[str]:
+        """批次绑定的载具角色：运行时同一块板一次只在一台设备上，排程也按这个排（空集合表示没绑定）。"""
         from .transfer_service import TransferService
 
-        return TransferService(self.db, self.ctx).for_batch(batch.id) is not None
+        return TransferService(self.db, self.ctx).roles(batch.id)
 
     def context(
         self, exclude_batch_ids: set[str] | None = None, prefer: str | None = None, allow_unclean: bool = True
@@ -336,7 +338,7 @@ class ScheduleService:
         try:
             planned = plan_steps(
                 steps, begin, self.context({batch.id}, prefer), step_ends=ends,
-                exclusive_carrier=self.carrier_exclusive(batch),
+                exclusive_carrier=self.carrier_roles(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
@@ -482,7 +484,7 @@ class ScheduleService:
         try:
             planned = plan_steps(
                 steps, begin, self.context({batch.id}), step_ends=ends,
-                exclusive_carrier=self.carrier_exclusive(batch),
+                exclusive_carrier=self.carrier_roles(batch),
             )
         except SchedulingError as error:
             return {"ok": False, "reason": error.message, "step_index": error.step_index, "path": []}
@@ -534,10 +536,114 @@ class ScheduleService:
             )
         return sorted(rows, key=lambda r: (r["priority"], r["batch_id"]))
 
+    def forecast_marks(self, batch: Batch) -> dict[int, str]:
+        """哪些步骤的时间窗只是预测：它们在一个还没定出口的条件分支下游（走不走这条路还不知道）。"""
+        from ..domain import graph
+        from ..domain.steps import BRANCH, kind_of, step_id_of
+        from ..repositories.workflow import StepRunRepository
+
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        if not graph.graph_mode(steps):
+            return {}
+        latest = {}
+        for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id):
+            if run.state not in {"superseded", "cancelled"}:
+                latest[run.step_id] = run
+        marks: dict[int, str] = {}
+        for index, step in enumerate(steps):
+            if kind_of(step) != BRANCH:
+                continue
+            run = latest.get(step_id_of(step, index))
+            if run is not None and run.state == "completed":
+                continue
+            for later in sorted(graph.descendants(steps, index)):
+                marks.setdefault(later, f"取决于第 {index + 1} 步「{step.get('name')}」的分支结果")
+        return marks
+
+    @staticmethod
+    def forecast_of(allocation: Allocation, marks: dict[int, str], moment: datetime) -> str:
+        """这段时间窗是承诺还是预测：分支没定的下游、冻结期之后的远期都只是预测。空串表示承诺。"""
+        if allocation.step_index in marks:
+            return marks[allocation.step_index]
+        if allocation.starts_at > moment + timedelta(minutes=settings.schedule_freeze_min):
+            return f"远期预测（{settings.schedule_freeze_min / 60:g} 小时之后），按实际进度滚动更新"
+        return ""
+
+    def roll_forward(self, batch: Batch, reason: str) -> dict:
+        """分支定了路径或发生回环后，按实际路径重算还没开出的尾段（短期冻结、远期滚动）。
+
+        只移动本批次自己未来的时间窗、只排进别人没占的空档，不挤占任何人的预约——与「按实际进度
+        提前」同一个原则；排不下就不写，报警交给调度。已开出的步骤（执行中、保持、结果未知、已完成）一概不动。
+        """
+        from ..repositories.workflow import StepRunRepository
+
+        if batch.state not in {"running", "paused", "fault"}:
+            return {"rolled": False}
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        opened = {
+            run.step_index for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
+            if run.state not in {"superseded", "cancelled"}
+        }
+        from_step = max(opened) + 1 if opened else 0
+        if from_step >= len(steps) or not any(needs_station(step) for step in steps[from_step:]):
+            return {"rolled": False}
+        lock_schedule(self.db)
+        protected = [a for a in self.allocations.for_batch(batch.id) if a.step_index < from_step]
+        anchor, anchor_station = self._tail_anchor(batch, steps, from_step, protected)
+        context = self.context({batch.id})
+        for allocation in protected:
+            context.busy.setdefault(allocation.station_id, []).append(Interval(allocation.starts_at, allocation.ends_at))
+        begin = max(now(), anchor) if anchor else now()
+        try:
+            planned = plan_steps(
+                steps, begin, context, first_index=from_step, previous_end=anchor, previous_station=anchor_station,
+                exclusive_carrier=self.carrier_roles(batch),
+            )
+        except SchedulingError as error:
+            self._roll_alarm(batch, f"{reason}后尾段重排不成立：{error.message}")
+            return {"rolled": False, "reason": error.message}
+        asset_of_station = {station.id: station.asset_id for station in self.stations.list() if station.asset_id}
+        savepoint = self.db.begin_nested()
+        try:
+            self.allocations.delete_from_step(batch.id, from_step)
+            self.db.add_all([
+                Allocation(
+                    batch_id=batch.id, step_index=item.step_index, station_id=item.station_id,
+                    asset_id=asset_of_station.get(item.station_id, ""),
+                    starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind,
+                )
+                for item in planned
+            ])
+            self.db.flush()
+            self._refuse_overlaps(batch.id)
+        except StateConflict as error:
+            savepoint.rollback()
+            self._roll_alarm(batch, f"{reason}后尾段重排与其他占用冲突：{error.message}")
+            return {"rolled": False, "reason": error.message}
+        savepoint.commit()
+        work = [item for item in planned if item.kind == WORK]
+        self.audit.record(
+            None, "滚动重排", batch.id, before=f"自第 {from_step + 1} 步",
+            after=(f"{work[0].starts_at:%m-%d %H:%M} 起" if work else "无设备步骤"),
+            detail=f"{reason}：按实际路径重算尚未开出的 {len(work)} 个设备步骤，只用空档、不挤占其他批次",
+        )
+        return {"rolled": True, "from_step": from_step, "steps": len(work)}
+
+    def _roll_alarm(self, batch: Batch, message: str) -> None:
+        from .alarm_service import AlarmService
+
+        AlarmService(self.db, self.ctx).raise_alarm(
+            severity=3, source_type="batch", source_id=batch.id, message=message[:500],
+            response="在排程页重排该批次尚未开出的步骤，或请求重排建议", owner="调度", origin="system",
+            condition_key=f"batch:{batch.id}:roll_forward",
+        )
+
     def board(self) -> dict:
-        """步骤级资源泳道。保持中工位标注释放时间未知，其后安排仅为预测。"""
+        """步骤级资源泳道。保持中工位标注释放时间未知，其后安排仅为预测；分支未定的下游、冻结期之后也只是预测。"""
         held = self.held_station_ids()
         batches = {b.id: b for b in self.batches.active()}
+        marks = {batch_id: self.forecast_marks(batch) for batch_id, batch in batches.items()}
+        moment = now()
         lanes: dict[str, list[dict]] = {station.id: [] for station in self.stations.list()}
         for allocation in (
             self.db.query(Allocation).filter(Allocation.batch_id.in_(list(batches) or [""])).all()
@@ -545,6 +651,7 @@ class ScheduleService:
             batch = batches[allocation.batch_id]
             steps = normalize(batch.recipe_snapshot.get("steps") or [])
             step = steps[allocation.step_index] if allocation.step_index < len(steps) else {}
+            forecast = self.forecast_of(allocation, marks[batch.id], moment)
             lanes.setdefault(allocation.station_id, []).append(
                 {
                     "batch_id": allocation.batch_id,
@@ -557,6 +664,8 @@ class ScheduleService:
                     "starts_at": allocation.starts_at.isoformat(timespec="minutes"),
                     "ends_at": allocation.ends_at.isoformat(timespec="minutes"),
                     "uncertain": allocation.station_id in held,
+                    "forecast": bool(forecast),
+                    "forecast_reason": forecast,
                 }
             )
         return {
@@ -669,7 +778,7 @@ class ScheduleService:
             if floor is not None:
                 external_floor[b.id] = floor
 
-        exclusive = {b.id: self.carrier_exclusive(b) for b in batches}
+        exclusive = {b.id: self.carrier_roles(b) for b in batches}
 
         def evaluate(order: tuple[str, ...]) -> optimizer.Candidate:
             """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。
@@ -888,7 +997,7 @@ class ScheduleService:
             planned = plan_steps(
                 steps, max(start_from, anchor) if anchor else start_from, context,
                 first_index=from_step, previous_end=anchor, previous_station=anchor_station,
-                exclusive_carrier=self.carrier_exclusive(batch),
+                exclusive_carrier=self.carrier_roles(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
@@ -1035,7 +1144,7 @@ class ScheduleService:
         return anchor, station
 
     @staticmethod
-    def allocation_out(allocation: Allocation) -> dict:
+    def allocation_out(allocation: Allocation, forecast: str = "") -> dict:
         return {
             "step_index": allocation.step_index,
             "station_id": allocation.station_id,
@@ -1044,4 +1153,8 @@ class ScheduleService:
             "ends_at": allocation.ends_at.isoformat(timespec="minutes"),
             "transfer": allocation.kind == TRANSFER,
             "clean": allocation.kind == CLEAN,
+            "assist": allocation.kind == "assist",
+            # 空串表示承诺窗口；否则是预测，写明为什么（分支未定、冻结期之后）
+            "forecast": bool(forecast),
+            "forecast_reason": forecast,
         }

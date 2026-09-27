@@ -13,7 +13,7 @@ from .environment import requirement_issues
 from .graph import ancestors, critical_path_min, graph_issues, graph_mode
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
-    branch_issues, notify_issues,
+    assist_issues, branch_issues, notify_issues,
     consumes_materials, gate_issues, kind_of, manual_issues, needs_station, resource_demand, review_issues,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
@@ -68,6 +68,9 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
 
     if kind == DEVICE:
         issues.extend(device_issues(step, capabilities))
+        issues.extend(assist_issues(step, capabilities))
+    elif step.get("assist"):
+        issues.append("只有设备步骤可以声明协同资源")
     elif kind == MANUAL:
         issues.extend(manual_issues(step))
     elif kind == WAIT:
@@ -156,6 +159,8 @@ def validate_steps(
                 "review_role": step.get("review_role", ""),
                 "gate": step.get("gate") or {},
                 "split": step.get("split") or {},
+                "assist": step.get("assist") or [],
+                "labware": step.get("labware") or "",
                 "branch": step.get("branch") or {},
                 "subflow": step.get("subflow") or {},
                 "method": step.get("method") or {},

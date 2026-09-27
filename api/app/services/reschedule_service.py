@@ -147,7 +147,7 @@ class RescheduleService:
             candidates = [begin_default, *([floor] if floor else []), *(planned_end[ref] for ref in upstream[batch_id] if ref in planned_end)]
             begin = max(candidates)
             ends: dict = {}
-            exclusive = self.schedule.carrier_exclusive(batch)
+            exclusive = self.schedule.carrier_roles(batch)
             try:
                 if from_step == 0:
                     planned = plan_steps(steps, begin, context, step_ends=ends, exclusive_carrier=exclusive)

@@ -8,7 +8,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import { useSession } from '../../shared/session';
 import type {
-  BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
+  AssignmentRow, BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
 import { FlowGraph, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
@@ -54,6 +54,7 @@ export function BatchDetailPage() {
   const [viewing, setViewing] = useState<StepRunRow | null>(null);
   const [verifying, setVerifying] = useState<BatchDetail['commands'][number] | null>(null);
   const [gateDeciding, setGateDeciding] = useState<StepRunRow | null>(null);
+  const [splitting, setSplitting] = useState<StepRow | null>(null);
   const [branchDeciding, setBranchDeciding] = useState<StepRunRow | null>(null);
   const [skipping, setSkipping] = useState<StepRow | null>(null);
   const [signaling, setSignaling] = useState<string | null>(null);
@@ -193,9 +194,16 @@ export function BatchDetailPage() {
                 <td className="mono">
                   {step.needs_station ? step.station_id ?? '—' : <span className="muted">不占工位</span>}
                   {step.transfer_station_id ? <div className="tiny muted">转运 {step.transfer_station_id}</div> : null}
+                  {step.assist_station_ids?.length ? (
+                    <div className="tiny muted" title="协同资源：与主设备同一时段一并占用">协同 {step.assist_station_ids.join('、')}</div>
+                  ) : null}
+                  {step.labware ? <div className="tiny muted">载具角色 {step.labware}</div> : null}
                 </td>
                 <td className="small mono">
                   {step.needs_station ? `${clock(step.planned_start)} → ${clock(step.planned_end)}` : '—'}
+                  {step.forecast_reason ? (
+                    <div><span className="tag" title={step.forecast_reason}>预测</span></div>
+                  ) : null}
                 </td>
                 <td className="small mono">
                   {step.actual_end ? time(step.actual_end) : step.run?.ended_at ? time(step.run.ended_at) : '—'}
@@ -223,6 +231,12 @@ export function BatchDetailPage() {
                   {step.run && step.kind === 'gate' && step.run.state === 'ready' && can('step.review') ? (
                     <button className="btn sm primary" onClick={() => setGateDeciding(step.run)}>
                       质检判定
+                    </button>
+                  ) : null}
+                  {step.run && step.kind === 'split' && step.split?.mode === 'physical' && step.run.state === 'ready'
+                    && data.state === 'running' && can('step.submit') ? (
+                    <button className="btn sm primary" onClick={() => setSplitting(step)}>
+                      确认分装
                     </button>
                   ) : null}
                   {step.run && step.kind === 'wait' && step.run.state === 'waiting' ? (
@@ -406,7 +420,7 @@ export function BatchDetailPage() {
             <Empty>尚未下发指令</Empty>
           )}
         </Panel>
-        <LabwarePanel batchId={batchId} state={data.state} labware={data.labware} />
+        <LabwarePanel batchId={batchId} state={data.state} labware={data.labware} bound={data.labware_all ?? []} />
       </div>
 
       <div className="grid cols-2">
@@ -521,6 +535,16 @@ export function BatchDetailPage() {
 
       {gateDeciding ? (
         <GateDecisionDialog run={gateDeciding} onClose={() => setGateDeciding(null)} invalidates={invalidates} />
+      ) : null}
+      {splitting?.run ? (
+        <SplitConfirmDialog
+          run={splitting.run}
+          step={splitting}
+          samples={data.samples}
+          labware={data.labware_all ?? []}
+          onClose={() => setSplitting(null)}
+          invalidates={invalidates}
+        />
       ) : null}
       {branchDeciding ? (
         <BranchDecisionDialog
@@ -1386,21 +1410,32 @@ function reservationLabel(state: string): string {
 }
 
 /* 绑定的载具与它的位置。绑定后每个设备步骤前系统先把板送到工位（转运指令），位置只按回执或扫码更新。 */
-function LabwarePanel({ batchId, state, labware }: { batchId: string; state: string; labware: LabwareRow | null }) {
+function LabwarePanel({
+  batchId, state, labware, bound,
+}: { batchId: string; state: string; labware: LabwareRow | null; bound: LabwareRow[] }) {
   const { can } = useSession();
   const toast = useToast();
   const [choosing, setChoosing] = useState(false);
+  const [role, setRole] = useState('');
   const editable = ['planned', 'scheduled'].includes(state) && can('labware.move');
   const candidates = useQuery<LabwareRow[]>(choosing ? 'labware:bindable' : null, () => api.get<LabwareRow[]>('/labware'));
   const invalidates = [`batches:${batchId}`, 'floor', 'labware'];
-  const bind = useMutation((labwareId: string) => api.post(`/batches/${batchId}/labware`, { labware_id: labwareId }), {
-    invalidates,
-    onSuccess: () => {
-      toast.push('载具已绑定');
-      setChoosing(false);
+  const bind = useMutation(
+    (labwareId: string) => api.post(`/batches/${batchId}/labware`, { labware_id: labwareId, role: role.trim() }),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push('载具已绑定');
+        setChoosing(false);
+        setRole('');
+      },
     },
-  });
-  const unbind = useMutation(() => api.remove(`/batches/${batchId}/labware`), { invalidates, onSuccess: () => toast.push('已解绑') });
+  );
+  const unbind = useMutation(
+    (roleName: string) => api.remove(`/batches/${batchId}/labware${roleName ? `?role=${encodeURIComponent(roleName)}` : ''}`),
+    { invalidates, onSuccess: () => toast.push('已解绑') },
+  );
+  const others = bound.filter((row) => row.role);
   const usable = (candidates.data ?? []).filter((row) => !row.batch_active && !['retired', 'lost'].includes(row.state));
   return (
     <Panel
@@ -1412,7 +1447,7 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
               {labware ? '更换' : '绑定载具'}
             </button>
             {labware ? (
-              <button className="btn sm" onClick={() => unbind.run().catch((error) => toast.push(error.message))}>
+              <button className="btn sm" onClick={() => unbind.run('').catch((error) => toast.push(error.message))}>
                 解绑
               </button>
             ) : null}
@@ -1437,10 +1472,33 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
           </div>
         </div>
       ) : (
-        <div className="small muted">未绑定载具：不做位置追踪，换工位按排程时间窗处理。</div>
+        <div className="small muted">未绑定主载具：不做位置追踪，换工位按排程时间窗处理。</div>
       )}
+      {others.length ? (
+        <div className="small" style={{ marginTop: 8 }}>
+          <b>其他载具（按角色）</b>
+          <ul className="tiny">
+            {others.map((row) => (
+              <li key={row.id}>
+                角色 <b>{row.role}</b>：<span className="mono">{row.barcode}</span> · {row.type_name} · {row.location_id || '未上线'}
+                {row.in_transit ? <span className="warn-text">（转运在途 → {row.in_transit.to}）</span> : null}
+                {editable ? (
+                  <button className="btn sm" onClick={() => unbind.run(row.role ?? '').catch((error) => toast.push(error.message))}>
+                    解绑
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <div className="tiny muted">步骤写了载具角色就用对应的板；用不同板的设备步骤可以同时进行，用同一块板的一个接一个。</div>
+        </div>
+      ) : null}
       {choosing ? (
         usable.length ? (
+          <div className="row">
+          <Field label="角色" hint="留空绑定为主载具（装批次样本）；多块板并行时给其他板起个角色名，如 B">
+            <input value={role} onChange={(event) => setRole(event.target.value)} placeholder="主载具" />
+          </Field>
           <select defaultValue="" onChange={(event) => event.target.value && bind.run(event.target.value).catch((error) => toast.push(error.message))}>
             <option value="">选择空闲载具…</option>
             {usable.map((row) => (
@@ -1449,6 +1507,7 @@ function LabwarePanel({ batchId, state, labware }: { batchId: string; state: str
               </option>
             ))}
           </select>
+          </div>
         ) : (
           <Empty>没有空闲载具：先在「现场监控」登记</Empty>
         )
@@ -1580,6 +1639,130 @@ function StepActions({
       {run?.reason ? <span className="small muted">{run.reason}</span> : null}
       <span className="row">{actions.length ? actions : <span className="tiny muted">当前没有可执行的操作</span>}</span>
     </div>
+  );
+}
+
+/* 实体分装确认：每个母样本的每一份落在哪个孔。孔位落定后流程才推进；可以落到按角色绑定的板上。 */
+function SplitConfirmDialog({
+  run,
+  step,
+  samples,
+  labware,
+  onClose,
+  invalidates,
+}: {
+  run: StepRunRow;
+  step: StepRow;
+  samples: AssignmentRow[];
+  labware: LabwareRow[];
+  onClose: () => void;
+  invalidates: string[];
+}) {
+  const toast = useToast();
+  const count = step.split?.count ?? 0;
+  const parents = samples.filter((row) => !['failed', 'split'].includes(row.state));
+  const keys = parents.flatMap((sample) => Array.from({ length: count }, (_, index) => ({ sample, number: index + 1 })));
+  const [target, setTarget] = useState<string>('__none__');
+  const plate = labware.find((row) => (row.role ?? '') === target);
+  const suggest = (plateRow: LabwareRow | undefined) =>
+    Object.fromEntries(
+      keys.map(({ sample, number }, position) => {
+        const well = plateRow
+          ? `${String.fromCharCode(65 + Math.floor(position / plateRow.cols))}${(position % plateRow.cols) + 1}`
+          : `${sample.well}-${number}`;
+        return [`${sample.id}#${number}`, well];
+      }),
+    );
+  const [wells, setWells] = useState<Record<string, string>>(() => suggest(undefined));
+  const [note, setNote] = useState('');
+  const confirm = useMutation(
+    () =>
+      api.post(
+        `/step-runs/${run.id}/split`,
+        {
+          placements: keys.map(({ sample, number }) => ({
+            parent_sample_id: sample.id, number, well: (wells[`${sample.id}#${number}`] ?? '').trim(),
+          })),
+          labware_role: target === '__none__' ? '' : target,
+          use_labware: target !== '__none__',
+          note,
+        },
+        true,
+      ),
+    {
+      invalidates,
+      onSuccess: () => {
+        toast.push('分装已确认，流程继续');
+        onClose();
+      },
+    },
+  );
+  return (
+    <Modal
+      title={`确认分装 · ${step.name}`}
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={confirm.pending || !keys.length} onClick={() => confirm.run().catch(() => undefined)}>
+            确认 {keys.length} 份
+          </button>
+        </>
+      }
+    >
+      <div className="note">
+        每个在用样本分装为 {count} 份{step.split?.child_type ? ` ${step.split.child_type}` : ''}。按实际分装结果填写孔位：
+        系统不替人假设子样本落在了哪个孔，孔位落定后流程才推进。
+      </div>
+      <Field label="落到哪块载具">
+        <select
+          value={target}
+          onChange={(event) => {
+            const next = event.target.value;
+            setTarget(next);
+            setWells(suggest(labware.find((row) => (row.role ?? '') === next)));
+          }}
+        >
+          <option value="__none__">不落到载具（只登记孔位）</option>
+          {labware.map((row) => (
+            <option key={row.id} value={row.role ?? ''}>
+              {row.role ? `角色 ${row.role}` : '主载具'} · {row.barcode}（{row.rows}×{row.cols}）
+            </option>
+          ))}
+        </select>
+      </Field>
+      {plate ? <div className="tiny muted">孔位按 {plate.rows}×{plate.cols} 的行列命名（A1、A2…），落到这块板上会占用这些孔。</div> : null}
+      <table>
+        <thead>
+          <tr>
+            <th>母样本</th>
+            <th>份</th>
+            <th>孔位</th>
+          </tr>
+        </thead>
+        <tbody>
+          {keys.map(({ sample, number }) => (
+            <tr key={`${sample.id}#${number}`}>
+              <td className="small mono">{sample.id}</td>
+              <td className="small">{number}</td>
+              <td>
+                <input
+                  value={wells[`${sample.id}#${number}`] ?? ''}
+                  onChange={(event) => setWells({ ...wells, [`${sample.id}#${number}`]: event.target.value })}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <Field label="备注（如分装设备回报编号）">
+        <input value={note} onChange={(event) => setNote(event.target.value)} />
+      </Field>
+      {confirm.error ? <div className="small bad-text">{confirm.error.message}</div> : null}
+    </Modal>
   );
 }
 

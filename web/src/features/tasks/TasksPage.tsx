@@ -5,7 +5,8 @@ import { api, pageQuery } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { Paged, PersonRow, PlanRow, StepRunRow, TaskDetail, TaskRow } from '../../shared/types';
+import { DEPENDENCY_GATE_LABEL } from '../../shared/types';
+import type { DependencyGate, Paged, PersonRow, PlanRow, StepRunRow, TaskDetail, TaskRow } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, NumberInput, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -227,6 +228,7 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
   const detail = useQuery<TaskDetail>(`tasks:${taskId}`, () => api.get<TaskDetail>(`/experiment-tasks/${taskId}`));
   const [assigning, setAssigning] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [migrating, setMigrating] = useState(false);
 
   const accept = useMutation(() => api.post(`/experiment-tasks/${taskId}/accept`), {
     invalidates: ['tasks', 'dashboard'],
@@ -241,7 +243,19 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
     },
   });
 
+  const migrate = useMutation(
+    (reason: string) => api.post(`/experiment-tasks/${taskId}/migrate-version`, { reason }),
+    {
+      invalidates: ['tasks', 'dashboard'],
+      onSuccess: () => {
+        toast.push('已迁移到最新批准版本');
+        setMigrating(false);
+      },
+    },
+  );
+
   const task = detail.data;
+  const newer = !!task && task.latest_plan_version != null && task.latest_plan_version > task.plan_version;
 
   return (
     <Modal title={`任务 · ${taskId}`} onClose={onClose} wide>
@@ -258,7 +272,10 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
             <div className="metric">
               <span className="metric-label">方案版本</span>
               <strong className="metric-value">v{task.plan_version}</strong>
-              <span className="metric-hint">{task.plan_id}</span>
+              <span className="metric-hint">
+                {task.plan_id}
+                {newer ? <span className="warn-text">（已有批准版本 v{task.latest_plan_version}，任务仍按 v{task.plan_version} 执行）</span> : null}
+              </span>
             </div>
             <div className="metric">
               <span className="metric-label">执行人</span>
@@ -285,6 +302,11 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
             {task.batch_id ? (
               <button className="btn sm" onClick={() => navigate(`/batches/${task.batch_id}`)}>
                 打开批次
+              </button>
+            ) : null}
+            {newer && can('task.assign') && !task.batch_id && task.state !== 'cancelled' ? (
+              <button className="btn sm" onClick={() => setMigrating(true)}>
+                迁移到 v{task.latest_plan_version}
               </button>
             ) : null}
             {can('task.cancel') && task.state !== 'cancelled' ? (
@@ -362,6 +384,22 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
 
       {assigning && task ? (
         <AssignDialog task={task} onClose={() => setAssigning(false)} />
+      ) : null}
+      {migrating && task ? (
+        <ConfirmDialog
+          title={`迁移方案版本 · ${taskId}`}
+          confirmLabel={`迁移到 v${task.latest_plan_version}`}
+          reasonLabel="迁移原因"
+          pending={migrate.pending}
+          error={migrate.error?.message}
+          onConfirm={(reason) => migrate.run(reason).catch(() => undefined)}
+          onClose={() => setMigrating(false)}
+        >
+          <div className="note">
+            任务建立时锁定了 v{task.plan_version}，方案之后的修订不会静默改变它。迁移后按 v{task.latest_plan_version} 建批次；
+            还没建批次的子任务一起迁移，已建批次的子任务保持原版本。
+          </div>
+        </ConfirmDialog>
       ) : null}
       {cancelling ? (
         <ConfirmDialog
@@ -541,6 +579,7 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
   const [sequential, setSequential] = useState(false);
   const [editing, setEditing] = useState(false);
   const [deps, setDeps] = useState<string[]>(task.depends_on);
+  const [gate, setGate] = useState<DependencyGate>(task.dependency_gate ?? 'run_completed');
   const candidates = useQuery<Paged<TaskRow>>('tasks:all', () => api.get<Paged<TaskRow>>('/experiment-tasks?page_size=200'));
   const invalidates = ['tasks', 'dashboard', 'batches', 'schedule'];
   const decompose = useMutation(
@@ -560,7 +599,7 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
       },
     },
   );
-  const saveDeps = useMutation(() => api.put(`/experiment-tasks/${task.id}/dependencies`, { depends_on: deps }), {
+  const saveDeps = useMutation(() => api.put(`/experiment-tasks/${task.id}/dependencies`, { depends_on: deps, gate }), {
     invalidates,
     onSuccess: () => {
       toast.push('依赖已更新');
@@ -604,7 +643,10 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
         ) : null}
         <div className="small">
           <b>上游任务：</b>
-          {task.depends_on.length ? task.depends_on.join('、') : '无'}
+          {task.depends_on.length ? `${task.depends_on.join('、')}（${task.dependency_gate_label}后放行）` : '无'}
+          {task.inherited_depends_on?.length ? (
+            <span className="tiny muted">；从父任务继承 {task.inherited_depends_on.join('、')}</span>
+          ) : null}
           {task.blocked_by.length ? (
             <ul className="tiny warn-text">
               {task.blocked_by.map((row) => (
@@ -617,7 +659,7 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
         </div>
         <div className="row">
           {can('task.assign') ? (
-            <button className="btn sm" onClick={() => { setDeps(task.depends_on); setEditing(!editing); }}>
+            <button className="btn sm" onClick={() => { setDeps(task.depends_on); setGate(task.dependency_gate ?? 'run_completed'); setEditing(!editing); }}>
               {editing ? '收起' : '编辑依赖'}
             </button>
           ) : null}
@@ -629,7 +671,14 @@ function TaskStructure({ task, onOpen }: { task: TaskDetail; onOpen: (id: string
         </div>
         {editing ? (
           <div className="deps">
-            <div className="tiny muted">完成—开始：勾选的任务的批次运行结束后，本任务的批次才能下发；排程也会排在它们之后。</div>
+            <div className="tiny muted">完成—开始：勾选的任务满足放行条件后，本任务的批次才能下发；排程也会排在它们之后。拆出来的子任务继承这些依赖。</div>
+            <Field label="放行条件" hint="运行结束：样品做完即可；数据复核通过：要用复核过的数据做决定；报告发布放行：等正式结论">
+              <select value={gate} onChange={(event) => setGate(event.target.value as DependencyGate)}>
+                {(Object.keys(DEPENDENCY_GATE_LABEL) as DependencyGate[]).map((key) => (
+                  <option key={key} value={key}>{DEPENDENCY_GATE_LABEL[key]}</option>
+                ))}
+              </select>
+            </Field>
             <div className="dep-list">
               {others.map((row) => (
                 <label key={row.id} className="check">

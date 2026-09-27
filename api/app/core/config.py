@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     heartbeat_degraded_sec: int = 5
     heartbeat_stale_sec: int = 300
     schedule_expiry_min: int = 30
+    # 短期冻结、远期滚动：开始时刻在这么多分钟之后的时间窗只算预测，按实际进度滚动更新
+    schedule_freeze_min: int = 240
     # 按时开工：设备动作最多比排程时间窗提前这么多分钟投递
     early_start_tolerance_min: float = 15
     # 环境读数的有效期：超过这么久没更新的读数不作为放行依据

@@ -165,14 +165,24 @@ class ExecutionService:
         维护 / 校准预约占满整台资产。续跑 / 重试接续的是它自己针对的那个被保持的动作，不另占一份。
         """
         from ..core.db import serialize
+
+        stations = [
+            station for station in (
+                self.db.get(Station, station_id)
+                for station_id in dict.fromkeys([command.station_id, *(command.assist_station_ids or [])])
+            )
+            if station is not None
+        ]
+        # 同一台设备上「数占用 → 领取」串行：并发执行器不会各自看到同一个空位；锁随领取的提交释放。
+        # 协同资源与主设备一起取得，按固定顺序加锁，两条指令交叉等待时不会死锁
+        for key in sorted({station.asset_id or station.id for station in stations}):
+            serialize(self.db, f"occupancy:{key}")
+        exempt = {command.id, command.target_command_id}
+        return any(self._station_full(station, exempt) for station in stations)
+
+    def _station_full(self, station: Station, exempt: set[str]) -> bool:
         from ..models import Asset
 
-        station = self.db.get(Station, command.station_id)
-        if station is None:
-            return False
-        # 同一台设备上「数占用 → 领取」串行：并发执行器不会各自看到同一个空位；锁随领取的提交释放
-        serialize(self.db, f"occupancy:{station.asset_id or station.id}")
-        exempt = {command.id, command.target_command_id}
         on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
         if len(on_station) >= max(1, int(station.channels or 1)):
             return True
@@ -210,6 +220,11 @@ class ExecutionService:
         from ..domain.resources import Window, calibration_blockers
         from ..models import Asset
 
+        for helper_id in command.assist_station_ids or []:
+            helper = self.db.get(Station, helper_id)
+            problem = self._helper_blocker(helper, helper_id)
+            if problem:
+                return f"协同资源{problem}；动作指令未投递，不自动重试"
         station = self.db.get(Station, command.station_id)
         if station is None:
             return ""
@@ -232,6 +247,21 @@ class ExecutionService:
         window = Window(moment, moment + timedelta(minutes=max(0.0, float(step.get("dur") or 0))))
         problems = calibration_blockers(self._asset_spec(asset), command.capability, window)
         return f"{problems[0]}；动作指令未投递，不自动重试" if problems else ""
+
+    def _helper_blocker(self, helper: Station | None, helper_id: str) -> str:
+        """协同工位此刻能不能用：不存在、停用、故障 / 离线、所属资产维护或退役都不行。"""
+        from ..models import Asset
+
+        if helper is None:
+            return f" {helper_id} 不存在"
+        if helper.retired:
+            return f" {helper.id} 已停用"
+        if helper.status in {"fault", "offline"}:
+            return f" {helper.id} 处于{'故障' if helper.status == 'fault' else '离线'}状态"
+        asset = self.db.get(Asset, helper.asset_id) if helper.asset_id else None
+        if asset is not None and asset.state in {"maintenance", "retired"}:
+            return f" {helper.id} 所属资产 {asset.asset_no} {'处于维护状态' if asset.state == 'maintenance' else '已退役'}"
+        return ""
 
     def _asset_spec(self, asset):
         """资产的校准规格。资产与工位一样是跨组织共享的物理对象，校准记录不按组织过滤。"""
