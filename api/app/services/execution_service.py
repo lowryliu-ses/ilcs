@@ -18,7 +18,7 @@ from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
 from ..domain import dataquality, workflow
-from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
+from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of
 from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from .telemetry import context as telemetry_context
@@ -160,9 +160,12 @@ class ExecutionService:
     def _occupied(self, command: Command) -> bool:
         """工位通道或所属资产此刻是否已被占满。
 
-        占用按设备侧事实算，不按计划时间窗：在途、已保持、结果未知且可能已送达的动作都占着设备，
+        占用按设备侧事实算，不按计划时间窗：在途、已保持、结果未知且设备可能仍在动作的动作都占着设备，
         计划时间到了只是投递的必要条件之一。工位按通道数计，多个工位共用的资产按容量计，
         维护 / 校准预约占满整台资产。续跑 / 重试接续的是它自己针对的那个被保持的动作，不另占一份。
+
+        资产按份数计，与排程同一个口径：一条动作在这台资产上占几个工位（主工位 + 协同工位）就算几份，
+        新动作自己要的份数一并算进去——只看「还剩不剩一份」会放行一条要两份的协同动作。
         """
         from ..core.db import serialize
 
@@ -178,21 +181,30 @@ class ExecutionService:
         for key in sorted({station.asset_id or station.id for station in stations}):
             serialize(self.db, f"occupancy:{key}")
         exempt = {command.id, command.target_command_id}
-        return any(self._station_full(station, exempt) for station in stations)
+        if any(self._channels_full(station, exempt) for station in stations):
+            return True
+        demand: dict[str, int] = {}
+        for station in stations:
+            if station.asset_id:
+                demand[station.asset_id] = demand.get(station.asset_id, 0) + 1
+        return any(self._asset_full(asset_id, units, exempt) for asset_id, units in demand.items())
 
-    def _station_full(self, station: Station, exempt: set[str]) -> bool:
+    def _channels_full(self, station: Station, exempt: set[str]) -> bool:
+        on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
+        return len(on_station) >= max(1, int(station.channels or 1))
+
+    def _asset_full(self, asset_id: str, demand: int, exempt: set[str]) -> bool:
+        """资产此刻压着的份数加上新动作要的份数，是否超过容量。"""
         from ..models import Asset
 
-        on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
-        if len(on_station) >= max(1, int(station.channels or 1)):
-            return True
-        if not station.asset_id:
-            return False
-        asset = self.db.get(Asset, station.asset_id)
+        asset = self.db.get(Asset, asset_id)
         capacity = max(1, int(asset.capacity or 1)) if asset is not None else 1
-        mapped = [row[0] for row in self.db.query(Station.id).filter(Station.asset_id == station.asset_id).all()]
-        load = len([c for c in self.commands.occupying(mapped) if c.id not in exempt])
-        return load + self._booked_now(station.asset_id, capacity) >= capacity
+        mapped = {row[0] for row in self.db.query(Station.id).filter(Station.asset_id == asset_id).all()}
+        load = sum(
+            len(mapped & {c.station_id, *(c.assist_station_ids or [])})
+            for c in self.commands.occupying(sorted(mapped)) if c.id not in exempt
+        )
+        return load + self._booked_now(asset_id, capacity) + demand > capacity
 
     def _booked_now(self, asset_id: str, capacity: int) -> int:
         """此刻压在资产上的人工 / 维护 / 校准预约份数。排程产生的占用由指令本身表达，不重复计。"""
@@ -282,26 +294,51 @@ class ExecutionService:
         )
 
     def _awaiting_clean(self, batch: Batch, command: Command) -> bool:
-        """用过、需要清洗的设备在确认清洗之前不给别的批次用；同一批次的后续步骤可以接着用。"""
-        station = self.db.get(Station, command.station_id)
-        if station is None or station.clean or station.dirty_batch_id == batch.id:
-            return False
-        who = f"批次 {station.dirty_batch_id} 用后" if station.dirty_batch_id else "标为未清洗，"
-        self.alarms.raise_alarm(
-            severity=3, source_type="batch", source_id=batch.id,
-            message=f"{station.id} {who}待清洗确认；{batch.id} 第 {command.step_index + 1} 步排队等待",
-            response="完成清洗后在工位页确认就绪（已清洗），排队的动作随即投递",
-            owner="操作员", origin="system", condition_key=f"station:{station.id}:awaiting_clean",
-        )
-        return True
+        """用过、需要清洗的设备在确认清洗之前不给别的批次用；同一批次的后续步骤可以接着用。
+
+        主工位与协同工位一视同仁：协同资源与主设备一起取得，其中任何一台待清洗，整条动作都排队等。
+        """
+        waiting = False
+        for station_id in dict.fromkeys([command.station_id, *(command.assist_station_ids or [])]):
+            station = self.db.get(Station, station_id)
+            if station is None or station.clean or station.dirty_batch_id == batch.id:
+                continue
+            who = f"批次 {station.dirty_batch_id} 用后" if station.dirty_batch_id else "标为未清洗，"
+            role = "" if station_id == command.station_id else "协同资源 "
+            self.alarms.raise_alarm(
+                severity=3, source_type="batch", source_id=batch.id,
+                message=f"{role}{station.id} {who}待清洗确认；{batch.id} 第 {command.step_index + 1} 步排队等待",
+                response="完成清洗后在工位页确认就绪（已清洗），排队的动作随即投递",
+                owner="操作员", origin="system", condition_key=f"station:{station.id}:awaiting_clean",
+            )
+            waiting = True
+        return waiting
 
     def _soil(self, batch: Batch, command: Command) -> None:
-        """需要清洗的动作做过（或可能做过）之后，工位转为待清洗，记下用过它的批次。"""
+        """需要清洗的动作做过（或可能做过）之后，工位转为待清洗，记下用过它的批次。
+
+        协同工位按它在这一步里承担的协同能力判断：该能力的恢复规则要求清洗，协同工位同样转为待清洗。
+        """
         if command.type not in DISPATCHING:
             return
-        if not (self.capabilities.recovery_of(command.capability) or {}).get("cleanAfter"):
+        if (self.capabilities.recovery_of(command.capability) or {}).get("cleanAfter"):
+            self._mark_dirty(batch, command.station_id)
+        helpers = command.assist_station_ids or []
+        if not helpers:
             return
-        station = self.db.get(Station, command.station_id)
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        step = steps[command.step_index] if command.step_index < len(steps) else {}
+        needs_cleaning = {
+            capability for capability in assist_capabilities(step)
+            if (self.capabilities.recovery_of(capability) or {}).get("cleanAfter")
+        }
+        for helper_id in helpers:
+            helper = self.db.get(Station, helper_id)
+            if helper is not None and needs_cleaning & set((helper.limits or {}).keys()):
+                self._mark_dirty(batch, helper_id)
+
+    def _mark_dirty(self, batch: Batch, station_id: str) -> None:
+        station = self.db.get(Station, station_id)
         if station is None:
             return
         station.clean = False
@@ -426,6 +463,7 @@ class ExecutionService:
             return
         except AdapterError as exc:
             ledger.state = "failed"
+            command.outcome = "failed"
             self.fault(batch, command, f"适配器明确失败：{exc}", delivery="delivered")
             self._release(record, command)
             return
@@ -462,17 +500,26 @@ class ExecutionService:
             command.updated_at = now()
             self._take_over(command)
             return
-        self._release(record, command)
+        # 设备收到了指令却说不清做成没有：动作可能仍在进行。投递是确定的，结论不确定——
+        # 与网络超时一样保留占用（含工位上的当前指令），现场核查给出结论后才释放
+        unknown = result.state == "unknown"
+        if not unknown:
+            self._release(record, command)
         if command.overdue_at is not None:
             self.alarms.resolve_condition(
                 f"command:{command.id}:overdue", f"指令 {command.id} 已给出结论 {result.state}",
             )
         if result.state != "done":
             ledger.state = result.state
+            command.outcome = "unknown" if unknown else "failed"
             # 设备报失败也可能已经动过：需要清洗的设备照样转为待清洗
             self._soil(batch, command)
             self.fault(
-                batch, command, result.error or f"设备回执状态 {result.state}",
+                batch, command,
+                result.error or (
+                    "设备已收到指令，但回报结论未知；动作可能仍在进行，保留占用，转人工核查，不自动重试"
+                    if unknown else f"设备回执状态 {result.state}"
+                ),
                 delivery="delivered",
             )
             return
@@ -542,6 +589,10 @@ class ExecutionService:
 
         别的设备上的动作要等它们各自的终止确认（或现场核查）：一台设备停了不代表整批都停了。
         全部可能在动作的目标都有了结论，批次才转为已终止并释放残余。
+
+        「还剩谁」在批次锁内按最新数据判断：两台设备的终止回执由不同线程同时处理时，锁外各自看到的
+        都是对方提交之前的「终止中」，都会选择继续等，批次就永远停在终止中。本台的更新先落库再取锁，
+        后拿到锁的一方一定看得见先提交的一方。
         """
         from ..models import Adapter
         from .transfer_service import TransferService
@@ -558,27 +609,48 @@ class ExecutionService:
                 TransferService(self.db, self.ctx).lost_by_command(acting, "转运途中终止，载具位置未知")
             elif delivered:
                 self._soil(batch, acting)
+        self.db.flush()
+        batch = self.batches.lock(batch.id) or batch
+        if batch.state in {"aborted", "done"}:
+            return  # 另一台设备的回执已经收尾
+        self._finalize_abort(batch, command, len(stopped))
+
+    def finish_abort_if_stopped(self, batch_id: str, user=None, *, skip_locked: bool = False) -> dict:
+        """终止中的批次：全部可能在动作的目标都已有结论就收尾。执行器兜底与界面「重新汇总终止」共用。
+
+        `skip_locked`：批次正被别人锁着（正在处理它的回执）就这一轮跳过，执行器控制回路不等任何锁。
+        """
+        batch = self.batches.lock(batch_id, skip_locked=skip_locked)
+        if batch is None or batch.state != "aborting":
+            return {"state": batch.state if batch is not None else "", "finished": False, "waiting_stations": []}
+        waiting = self._finalize_abort(batch, None, 0, user=user)
+        return {"state": batch.state, "finished": not waiting, "waiting_stations": waiting}
+
+    def _finalize_abort(self, batch: Batch, command: Command | None, stopped: int, user=None) -> list[str]:
+        """调用方已持有批次锁。还有终止没确认、或还有动作可能在进行就继续等，返回在等的工位；否则收尾。"""
+        own = command.id if command is not None else ""
         pending = [
-            row for row in self.commands.for_batch(batch.id)
-            if row.type == "abort" and row.id != command.id
+            row for row in self.commands.for_batch(batch.id, fresh=True)
+            if row.type == "abort" and row.id != own
             and row.state in {"sent", "accepted", "running", "unknown", "manual"}
         ]
-        acting_left = self.commands.possibly_acting(batch.id, MOTION)
+        acting_left = self.commands.possibly_acting(batch.id, MOTION, fresh=True)
         if pending or acting_left:
             waiting = sorted({row.station_id for row in pending} | {row.station_id for row in acting_left})
-            self.audit.record(
-                None, "设备确认终止", batch.id, before="终止中", after="部分设备已停止",
-                command_id=command.id,
-                detail=(
-                    f"{command.station_id} 终止回执已确认，{len(stopped)} 条动作随之结束；"
-                    f"仍等待 {'、'.join(waiting)} 确认停止，批次暂不终止"
-                ),
-            )
-            return
+            if command is not None:
+                self.audit.record(
+                    None, "设备确认终止", batch.id, before="终止中", after="部分设备已停止",
+                    command_id=command.id,
+                    detail=(
+                        f"{command.station_id} 终止回执已确认，{stopped} 条动作随之结束；"
+                        f"仍等待 {'、'.join(waiting)} 确认停止，批次暂不终止"
+                    ),
+                )
+            return waiting
         batch.state = "aborted"
         closed = 0
         for row in self.commands.for_batch(batch.id):
-            if row.id != command.id and row.state in {"unknown", "manual"}:
+            if row.id != own and row.state in {"unknown", "manual"}:
                 # 设备没见过或已明确失败的指令：随批次终止结束，不再挂在结果未知清单里
                 row.state = "cancelled"
                 row.error = (row.error + "；" if row.error else "") + "随批次终止结束"
@@ -586,15 +658,22 @@ class ExecutionService:
                 closed += 1
         from .workflow_service import WorkflowService
 
-        WorkflowService(self.db, self.ctx).close_out(batch)
-        self.audit.record(
-            None, "设备确认终止", batch.id, before="终止中", after="已终止",
-            command_id=command.id,
-            detail=(
-                f"设备侧终止回执已确认；{len(stopped)} 条动作指令随之结束，全部设备都已确认停止"
-                + (f"；{closed} 条未送达的指令随批次结束" if closed else "")
-            ),
-        )
+        WorkflowService(self.db, self.ctx).close_out(batch, user)
+        leftover = f"；{closed} 条未送达的指令随批次结束" if closed else ""
+        if command is not None:
+            self.audit.record(
+                None, "设备确认终止", batch.id, before="终止中", after="已终止", command_id=command.id,
+                detail=f"设备侧终止回执已确认；{stopped} 条动作指令随之结束，全部设备都已确认停止{leftover}",
+            )
+        else:
+            self.audit.record(
+                user, "终止汇总收尾", batch.id, before="终止中", after="已终止",
+                detail=(
+                    "全部设备都已确认停止（或现场核查已有结论），批次仍停在终止中："
+                    f"{'人工重新汇总' if user is not None else '执行器兜底'}补做收尾{leftover}"
+                ),
+            )
+        return []
 
     @staticmethod
     def _release(record, command: Command) -> None:
@@ -698,7 +777,7 @@ class ExecutionService:
         self._soil(batch, command)
         from .schedule_service import ScheduleService
 
-        ScheduleService(self.db, self.ctx).release_unused(batch, command.step_index, now())
+        ScheduleService(self.db, self.ctx).release_unused(batch, command.step_index, now(), command.started_at)
 
         self.record_telemetry(batch, command, step, result)
         self.check_outputs(batch, command, step, checkpoint, result.delivered or {})
@@ -888,6 +967,7 @@ class ExecutorLoop:
         polled = self.poll_running()
         overdue = self.check_timeouts()
         executed = self.execute_pending(limit)
+        aborts_finished = self.finish_hanging_aborts()
         advanced = self.advance()
         from .integration_service import deliver_due
 
@@ -906,13 +986,17 @@ class ExecutorLoop:
             "alarms_raised": stations["raised"] + assets["raised"],
             "alarms_cleared": stations["cleared"] + assets["cleared"],
             "webhooks_sent": webhooks["sent"],
+            "aborts_finished": aborts_finished,
             "at": now().isoformat(timespec="seconds"),
         }
 
     def execute_pending(
         self, limit: int = 50, station_id: str | None = None, dispatch_open: bool | None = None,
     ) -> int:
-        """投递已到点的队列指令。执行门只算一次：门关着时动作指令不进候选。"""
+        """投递已到点的队列指令。执行门只算一次：门关着时动作指令不进候选。
+
+        每条指令处理完就提交：终止回执在批次锁内汇总，这把锁不能带到下一条指令的设备 I/O 里。
+        """
         if dispatch_open is None:
             dispatch_open = bool(GateService(self.db).status()["open"])
         executed = 0
@@ -920,8 +1004,22 @@ class ExecutorLoop:
             service = ExecutionService(self.db, system_context(command.org_id, "执行器"))
             if service.execute(command):
                 executed += 1
+            self.db.commit()
         self.db.commit()
         return executed
+
+    def finish_hanging_aborts(self) -> int:
+        """兜底：终止中的批次，所有目标都已有结论却没收尾（并发回执、进程在收尾前退出），这里补上。
+
+        只碰数据库；别人正锁着的批次这一轮跳过，控制回路不等锁。
+        """
+        finished = 0
+        for batch_id, org_id in self.db.query(Batch.id, Batch.org_id).filter(Batch.state == "aborting").all():
+            service = ExecutionService(self.db, system_context(org_id, "执行器终止汇总"))
+            outcome = service.finish_abort_if_stopped(batch_id, skip_locked=True)
+            self.db.commit()
+            finished += int(outcome["finished"])
+        return finished
 
     def station_pass(self, station_id: str, *, limit: int = 50, dispatch_open: bool | None = None) -> dict:
         """一台工位的一轮设备侧工作：探测、对账、轮询、超时、投递。
@@ -953,9 +1051,11 @@ class ExecutorLoop:
         stations = monitor.stations()
         assets = monitor.calibrations() if monitor_assets else {"raised": 0, "cleared": 0}
         self.db.commit()
+        aborts_finished = self.finish_hanging_aborts()
         return {
             "alarms_raised": stations["raised"] + assets["raised"],
             "alarms_cleared": stations["cleared"] + assets["cleared"],
+            "aborts_finished": aborts_finished,
         }
 
     def stations_needing_work(self) -> set[str]:
@@ -1107,6 +1207,8 @@ class ExecutorLoop:
                 continue
             finished = result.state not in {"accepted", "running"}
             service.settle(batch, command, ledger, record, result)
+            # 逐条提交：终止回执在批次锁内汇总，锁不能带到下一条指令的设备查询里
+            self.db.commit()
             if finished and result.state == "done":
                 completed += 1
         self.db.commit()
@@ -1207,6 +1309,7 @@ class ExecutorLoop:
             # 设备侧能按原 command_id 给出结论：复用原命令身份继续，不重复动作
             command.delivery_state = "delivered"
             service.settle(batch, command, ledger, record, found)
+            self.db.commit()
             if found.state not in {"accepted", "running", "done"}:
                 mismatches += 1
         # 在途命令与设备侧当前命令不一致同样挂起

@@ -34,7 +34,7 @@ from ..domain.steps import (
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
 from ..repositories.batches import AllocationRepository, BatchRepository, ResultRepository, SampleRepository
 from ..repositories.execution import (
-    DISPATCHING, MOTION, CheckpointRepository, CommandRepository, TelemetryRepository,
+    DISPATCHING, MOTION, CheckpointRepository, CommandRepository, TelemetryRepository, outcome_unknown,
 )
 from ..repositories.governance import AlarmRepository
 from ..repositories.materials import ReservationRepository
@@ -331,7 +331,9 @@ class BatchService:
                 {
                     "id": c.id, "type": c.type, "state": c.state, "station_id": c.station_id,
                     "step_index": c.step_index, "step_run_id": c.step_run_id,
-                    "delivery_state": c.delivery_state, "after_command_id": c.after_command_id,
+                    # 投递事实与设备给出的结论分开：outcome 为 unknown 表示设备收到了却说不清做成没有
+                    "delivery_state": c.delivery_state, "outcome": c.outcome,
+                    "after_command_id": c.after_command_id,
                     "checkpoint_id": c.checkpoint_id, "error": c.error,
                     # 控制指令针对的动作、续跑接续的动作；转运搬的板；一并占用的协同工位
                     "target_command_id": c.target_command_id, "labware_id": c.labware_id,
@@ -1049,8 +1051,8 @@ class BatchService:
             self.schedule.realign(batch, step_index, now())
             not_before = allocation.starts_at - timedelta(minutes=settings.early_start_tolerance_min)
         params = dict(step.get("params") or {})
-        wells = (batch.plan_snapshot or {}).get("condition_params", {}).get(step_id_of(step, step_index)) if step else None
-        if wells and command_type in DISPATCHING:
+        wells = self._well_params(batch, step, step_index) if step and command_type in DISPATCHING else None
+        if wells:
             # 矩阵条件：一条指令带全部孔位的参数，设备按孔位执行；步骤里的固定参数是未覆盖孔位的缺省值
             params["wells"] = wells
         target_station = station_id if station_id is not None else (allocation.station_id if allocation else "")
@@ -1099,6 +1101,37 @@ class BatchService:
                 self._refuse_unsent(batch, command, f"载具不能送到 {target_station}：{blocker}")
             self.db.flush()
         return command
+
+    def _well_params(self, batch: Batch, step: dict, step_index: int) -> dict | None:
+        """矩阵条件的逐孔参数：按这一步用的那块板上此刻在途的样本生成，键是设备认的孔位。
+
+        建批次时冻结的是方案的条件（因子水平与作用目标），孔位不能冻结：实体分装会把子样落到另一块板的
+        别的孔上，布局放不进板型时实体孔位也与布局孔位不同。子样本继承母样的水平，条件跟着样本走。
+        板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
+        """
+        from ..domain.labware import container_of
+        from ..domain.matrix import step_condition
+        from ..domain.steps import labware_role
+
+        step_id = step_id_of(step, step_index)
+        frozen = ((batch.plan_snapshot or {}).get("condition_params") or {}).get(step_id)
+        if not frozen:
+            return None
+        factors = (batch.plan_snapshot or {}).get("factors") or []
+        base, role = container_of(batch.id), labware_role(step)
+        containers = [f"{base}:{role}"] if role else [base, f"{base}:main"]
+        samples = {sample.id: sample for sample in self.samples.for_batch(batch.id)}
+        projected: dict[str, dict] = {}
+        for slot in self.db.query(SlotOccupancy).filter(
+            SlotOccupancy.container_id.in_(containers), SlotOccupancy.released_at.is_(None),
+        ).all():
+            sample = samples.get(slot.assignment_id)
+            values = step_condition(factors, step_id, list(sample.levels or [])) if sample is not None else {}
+            if values:
+                projected[slot.labware_well or slot.well] = values
+        if projected:
+            return projected
+        return None if role else dict(frozen)
 
     def _refuse_unsent(self, batch: Batch, command: Command, reason: str) -> None:
         """指令没离开系统就判为不能投递：记入幂等台账，批次挂起报警。不提交——由调用方的事务决定。"""
@@ -1267,11 +1300,11 @@ class BatchService:
                         reason="" if cause_cleared else "异常原因未消除",
                         impact="流程节点已全部完成，确认设备与样品状态后结束批次",
                     )
+        unsettled = [c for c in self.commands.for_batch(batch.id) if c.state in {"unknown", "manual"}]
         unknown_commands = [
-            {"id": c.id, "delivery_state": c.delivery_state, "error": c.error, "state": c.state,
-             "type": c.type}
-            for c in self.commands.for_batch(batch.id)
-            if c.state in {"unknown", "manual"}
+            {"id": c.id, "delivery_state": c.delivery_state, "outcome": c.outcome, "error": c.error,
+             "state": c.state, "type": c.type}
+            for c in unsettled
         ]
         partial = [c for c in self.commands.for_batch(batch.id) if c.state == "partial"]
         if partial:
@@ -1322,11 +1355,9 @@ class BatchService:
             "options": options,
             "flow_complete": flow_complete,
             "unknown_commands": unknown_commands,
-            # 结果未知的命令必须先人工核查，界面上禁止一键盲目重试
-            "blind_retry_allowed": not any(
-                c["delivery_state"] == "maybe_sent" or c["state"] == "manual"
-                for c in unknown_commands
-            ),
+            # 结果未知的命令必须先人工核查，界面上禁止一键盲目重试：可能已送达的，和设备收到后
+            # 自己回报「结论未知」的，都可能仍在动作
+            "blind_retry_allowed": not any(outcome_unknown(c) or c.state == "manual" for c in unsettled),
             "gate": self.gate.status(),
         }
 
@@ -1398,7 +1429,13 @@ class BatchService:
         from .schedule_service import lock_schedule
 
         lock_schedule(self.db)
-        self.allocations.shift_from_step(batch.id, batch.current_step, shift)
+        # 被保持的每一步（并行时可能不止当前这一步）时间窗延长，它们还没开出的后继跟着后移；
+        # 另一条分支上已开出的步骤、与它们无关的步骤不动
+        held = {
+            command.step_index for command in self.commands.for_batch(batch.id)
+            if command.state == "held" and command.type in DISPATCHING
+        } | {batch.current_step}
+        self.schedule.extend_after_hold(batch, held, shift)
         overlaps = [
             row for row in self.schedule.conflicts()
             if batch.id in {row["a"]["batch_id"], row["b"]["batch_id"]}
@@ -1972,6 +2009,27 @@ class BatchService:
             )
         self.db.commit()
         return {**self.summary_out(batch), "pending_material_return": pending}
+
+    def reconcile_abort(self, batch_id: str, user: User) -> dict:
+        """重新汇总终止：终止中的批次按最新的停止确认重新判断。
+
+        全部设备都已确认停止（或现场核查已有结论）就收尾；否则返回仍在等待确认的工位，说明在等谁。
+        执行器每一轮也会兜底做同样的汇总，这里给现场一个可以立刻看结论的入口。不改变终止的决定，
+        不需要再次签名；已经终止的批次重复调用照常返回。
+        """
+        if not self.ctx.has("batch.control"):
+            raise PermissionDenied("当前角色不能终止批次")
+        batch = self._require_locked(batch_id)
+        if batch.state not in {"aborting", "aborted"}:
+            raise StateConflict(
+                f"批次处于「{STATE_LABEL.get(batch.state, batch.state)}」，只有终止中的批次需要重新汇总",
+                code="batch_not_aborting",
+            )
+        from .execution_service import ExecutionService
+
+        outcome = ExecutionService(self.db, self.ctx).finish_abort_if_stopped(batch.id, user)
+        self.db.commit()
+        return {**self.summary_out(batch), "waiting_stations": outcome["waiting_stations"]}
 
     # ---------- 交班摘要 ----------
 

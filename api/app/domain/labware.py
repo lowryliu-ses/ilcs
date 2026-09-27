@@ -144,6 +144,19 @@ def container_of(batch_id: str) -> str:
     return f"PL-{batch_id.replace('B-', '')}"
 
 
+def normalize_well(well: str) -> str:
+    """孔位名规范化：去空白、转大写、去掉列号的前导零（a01、A01 都记为 A1）。
+
+    同一个孔只能有一种写法，否则唯一约束与重复校验会把同一个孔当成两个。不是「字母 + 数字」格式的
+    （系统内分组的「A1-1」）只去空白、转大写。
+    """
+    import re
+
+    text = (well or "").strip().upper()
+    match = re.fullmatch(r"([A-Z]+)0*(\d+)", text)
+    return f"{match.group(1)}{int(match.group(2))}" if match else text
+
+
 def well_fits(rows: int, cols: int, well: str) -> bool:
     """孔位名（A1、H12）是否落在载具的行列里。"""
     import re

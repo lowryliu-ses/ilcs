@@ -9,6 +9,24 @@ import pytest
 
 
 @pytest.fixture()
+def fresh_app_modules():
+    """用例要按当下的环境重新导入 app.*：先卸载，用完把会话开始时导入的那一套放回去。
+
+    不放回的话，后面用例的请求走的是会话级应用（旧模块里的类与异常处理器），函数里延迟导入的服务却来自
+    重新导入的新模块：新模块抛出的 StateConflict 不是异常处理器登记的那个类，409 会变成未处理异常。
+    """
+    import sys
+
+    saved = {name: module for name, module in sys.modules.items() if name.startswith("app.")}
+    for name in saved:
+        del sys.modules[name]
+    yield
+    for name in [n for n in list(sys.modules) if n.startswith("app.")]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+
+@pytest.fixture()
 def scratch_database():
     """同一 PostgreSQL 实例上的一次性空库，用完删除。验证「空库」行为不能借用测试主库。"""
     from sqlalchemy import create_engine, text
@@ -131,18 +149,15 @@ def test_production_configuration_rejects_placeholders():
     assert any("FILE_CLEANUP_BATCH_SIZE" in issue for issue in cleanup_issues)
 
 
-def test_startup_does_not_create_tables_or_seed(scratch_database):
+def test_startup_does_not_create_tables_or_seed(scratch_database, fresh_app_modules):
     """空库启动不建表、不播种，只报告版本不兼容。"""
     import importlib
     import os
-    import sys
 
     from fastapi.testclient import TestClient
 
     original = os.environ.get("ILCS_DATABASE_URL")
     os.environ["ILCS_DATABASE_URL"] = scratch_database
-    for name in [n for n in list(sys.modules) if n.startswith("app.")]:
-        del sys.modules[name]
     try:
         import app.main as main
 
@@ -168,17 +183,10 @@ def test_startup_does_not_create_tables_or_seed(scratch_database):
             os.environ.pop("ILCS_DATABASE_URL", None)
         else:
             os.environ["ILCS_DATABASE_URL"] = original
-        for name in [n for n in list(sys.modules) if n.startswith("app.")]:
-            del sys.modules[name]
 
 
-def test_migration_reconciliation_report_passes_on_the_seeded_database():
+def test_migration_reconciliation_report_passes_on_the_seeded_database(fresh_app_modules):
     """AC-01：迁移核对逐项给出结论。"""
-    import importlib
-    import sys
-
-    for name in [n for n in list(sys.modules) if n.startswith("app.")]:
-        del sys.modules[name]
     from app.core.db import SessionLocal
     from app.services.migration_report_service import MigrationReportService
 

@@ -16,20 +16,33 @@ UNSETTLED_STATES = ("unknown", "manual")
 _BATCH_ENDED = ("done", "aborted")
 
 
-def still_occupying(command: Command) -> bool:
-    """这条动作指令是否可能仍占着设备：在途、已保持，或结果未知且可能已送达。"""
-    return command.state in ENGAGED_STATES or (
-        command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent"
+def outcome_unknown(command: Command) -> bool:
+    """没有结论、而设备可能仍在动作：可能已送达的无结论指令，或设备收到后明确回报「结论未知」的指令。
+
+    投递事实与动作结论分开看：设备回执说「收到了、但不知道做成没有」，投递是确定的，结论不确定，
+    与网络超时（可能送达）一样要保留占用、现场核查；设备明确回报失败（已停下）不在其中。
+    """
+    return command.state in UNSETTLED_STATES and (
+        command.delivery_state == "maybe_sent"
+        or (command.delivery_state == "delivered" and command.outcome == "unknown")
     )
+
+
+def still_occupying(command: Command) -> bool:
+    """这条动作指令是否可能仍占着设备：在途、已保持，或结果未知且设备可能仍在动作。"""
+    return command.state in ENGAGED_STATES or outcome_unknown(command)
 
 
 class CommandRepository(ScopedRepository[Command]):
     model = Command
 
-    def for_batch(self, batch_id: str) -> list[Command]:
-        return list(
-            self.query().filter(Command.batch_id == batch_id).order_by(Command.created_at).all()
-        )
+    def for_batch(self, batch_id: str, *, fresh: bool = False) -> list[Command]:
+        """`fresh`：按库里（本事务可见）的最新值重新填充已加载的对象。取得批次锁之后重新判断时用，
+        否则身份映射里别的会话提交之前读到的旧值会原样返回。"""
+        query = self.query().filter(Command.batch_id == batch_id)
+        if fresh:
+            query = query.populate_existing()
+        return list(query.order_by(Command.created_at).all())
 
     def recent(self, limit: int = 50) -> list[Command]:
         return list(self.query().order_by(Command.created_at.desc()).limit(limit).all())
@@ -166,22 +179,19 @@ class CommandRepository(ScopedRepository[Command]):
             .all()
         )
 
-    def possibly_acting(self, batch_id: str, types: set[str]) -> list[Command]:
-        """设备侧可能仍在动作的指令：在途、已保持，或结果未知 / 人工核查中且可能已送达。"""
-        return [
-            command
-            for command in self.db.query(Command)
-            .filter(Command.batch_id == batch_id, Command.type.in_(sorted(types)))
-            .order_by(Command.created_at)
-            .all()
-            if still_occupying(command)
-        ]
+    def possibly_acting(self, batch_id: str, types: set[str], *, fresh: bool = False) -> list[Command]:
+        """设备侧可能仍在动作的指令：在途、已保持，或结果未知 / 人工核查中且设备可能仍在动作。"""
+        query = self.db.query(Command).filter(Command.batch_id == batch_id, Command.type.in_(sorted(types)))
+        if fresh:
+            query = query.populate_existing()
+        return [command for command in query.order_by(Command.created_at).all() if still_occupying(command)]
 
     def occupying(self, station_ids) -> list[Command]:
         """这些工位上实际占着设备的动作指令。工位是跨组织共享的物理资源，不按组织过滤。
 
         在途与已保持的动作按批次是否结束判断（批次结束前逐台确认过停止或完成）；结果未知的
         动作不看批次状态——设备可能仍在动作，只有现场核查给出结论后才释放。
+        一条动作占着它的主工位与全部协同工位；资产负载按份数算由调用方负责（见执行服务）。
         """
         from sqlalchemy import func, or_
 
@@ -206,7 +216,7 @@ class CommandRepository(ScopedRepository[Command]):
             if (command.station_id in wanted or wanted & set(command.assist_station_ids or []))
             and (
                 (command.state in ENGAGED_STATES and batch_state not in _BATCH_ENDED)
-                or (command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent")
+                or outcome_unknown(command)
             )
         ]
 

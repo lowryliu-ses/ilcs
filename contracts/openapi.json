@@ -9098,6 +9098,68 @@
         ]
       }
     },
+    "/api/batches/{batch_id}/abort/reconcile": {
+      "post": {
+        "description": "终止中的批次重新汇总：全部设备都已确认停止（或现场核查已有结论）就收尾，否则返回仍在等待的工位。\n\n结果只取决于库里的停止确认，重复调用没有副作用，不需要幂等键与签名。",
+        "operationId": "reconcile_abort_api_batches__batch_id__abort_reconcile_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reconcile Abort",
+        "tags": [
+          "batch"
+        ]
+      }
+    },
     "/api/batches/{batch_id}/dispatch": {
       "post": {
         "operationId": "dispatch_api_batches__batch_id__dispatch_post",

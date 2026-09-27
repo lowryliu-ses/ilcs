@@ -664,10 +664,14 @@ class WorkflowService:
         run.started_at = run.started_at or now()
 
         if gate.get("scope") == "sample":
+            from .sample_service import SampleService
+
             wells = delivered.get("wells") or {}
+            # 设备按实体孔位回报：与下发逐孔参数同一个口径（布局放进不同板型、分装到别的孔都照样对得上）
+            positions = SampleService(self.db, self.ctx).device_wells(batch.id)
             values, failed, undecided = {}, [], []
             for sample in self._active_samples(batch):
-                value = (wells.get(sample.well) or {}).get(field)
+                value = (wells.get(positions.get(sample.id, sample.well)) or {}).get(field)
                 values[sample.well] = value
                 verdict = workflow.judge(value, low, high)
                 if verdict is True:
@@ -1227,8 +1231,9 @@ class WorkflowService:
                 self.db.add(child)
                 if labware is not None:
                     self.db.flush()
-                    occupancy = slots.occupy_slot(target, well, physical_id, child.id)
-                    occupancy.labware_id = labware.id
+                    self._hand_over_parent_well(sample, labware, well)
+                    # 载具 + 实体孔位由数据库唯一约束：别的在途样本还在那个孔里就拒绝，不管它记在哪个容器号下
+                    slots.occupy_slot(target, well, physical_id, child.id, labware_id=labware.id, labware_well=well)
                     physical = self.db.get(PhysicalSample, physical_id)
                     physical.labware_id, physical.well, physical.location_id = labware.id, well, None
                 children.append(child.id)
@@ -1259,14 +1264,31 @@ class WorkflowService:
         )
         return self._advance(run, batch)
 
+    def _hand_over_parent_well(self, parent: Sample, labware, well: str) -> None:
+        """子样留在母样自己的孔里（整管分装）：母样的在途占用就此交接给子样，母样从这个孔位上解开。"""
+        from ..models import PhysicalSample, SlotOccupancy
+
+        current = self.db.query(SlotOccupancy).filter(
+            SlotOccupancy.labware_id == labware.id, SlotOccupancy.labware_well == well,
+            SlotOccupancy.released_at.is_(None), SlotOccupancy.assignment_id == parent.id,
+        ).first()
+        if current is None:
+            return
+        current.released_at = now()
+        physical = self.db.get(PhysicalSample, current.physical_sample_id)
+        if physical is not None and physical.labware_id == labware.id:
+            physical.current_location = f"{labware.barcode} · {well}（已分装为子样本）"
+            physical.labware_id, physical.well = None, ""
+        self.db.flush()
+
     def confirm_split(self, step_run_id: str, payload: dict, user: User) -> dict:
         """实体分装确认：按实际分装结果给每个子样本登记孔位，孔位落定后流程才推进。
 
-        每个在用母样本的每一份都要有孔位，一份一个孔、不能重复；写了载具角色就落到批次按该角色
-        绑定的板上（占用孔位，别的批次不能再用这些孔）。
+        每个在用母样本的每一份都要有孔位，一份一个孔、不能重复（孔位先规范化：A01 与 A1 是同一个孔）；
+        写了载具角色就落到批次按该角色绑定的板上（占用孔位，别的在途样本不能再用这些孔）。子样可以留在
+        母样自己的孔里（母样的占用交接给它），不能放进别的在途样本占着的孔。
         """
-        import re
-
+        from ..domain.labware import normalize_well, well_fits
         from ..domain.steps import split_mode
         from ..models import LabwareType
         from .identity_service import user_may
@@ -1292,7 +1314,7 @@ class WorkflowService:
         placements: dict[tuple[str, int], str] = {}
         for row in payload.get("placements") or []:
             key = (str(row.get("parent_sample_id") or ""), int(row.get("number") or 0))
-            well = str(row.get("well") or "").strip().upper()
+            well = normalize_well(str(row.get("well") or ""))
             if key in placements:
                 raise ValidationFailed(f"{key[0]} 的第 {key[1]} 份重复登记")
             placements[key] = well
@@ -1311,6 +1333,8 @@ class WorkflowService:
         if any(not well for well in wells):
             raise ValidationFailed("每一份都要写实际孔位")
         role = str(payload.get("labware_role") or "").strip()
+        if role == "main":
+            role = ""  # 「main」就是主载具
         labware = None
         container = ""
         if role or payload.get("use_labware"):
@@ -1320,8 +1344,7 @@ class WorkflowService:
             kind = self.db.get(LabwareType, labware.type_id)
             rows, cols = (kind.rows, kind.cols) if kind else (1, len(wells))
             for well in wells:
-                match = re.fullmatch(r"([A-Z])(\d+)", well)
-                if not match or ord(match.group(1)) - 65 >= rows or not 1 <= int(match.group(2)) <= cols:
+                if not well_fits(rows, cols, well):
                     raise ValidationFailed(f"{well} 不是 {labware.barcode}（{rows}×{cols}）上的孔位")
             from ..domain.labware import container_of
 

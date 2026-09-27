@@ -293,6 +293,9 @@ export type Allocation = {
 export type CommandRow = {
   /** queued | maybe_sent | delivered | unreachable。maybe_sent 禁止盲目重试 */
   delivery_state?: string;
+  /** 设备给出的结论，与投递事实分开：failed 明确失败（已停下）；unknown 设备收到却说不清做成没有，
+   *  与 maybe_sent 一样保留占用、禁止盲目重试 */
+  outcome?: string;
   step_run_id?: string;
   id: string;
   batch_id?: string;

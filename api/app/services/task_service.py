@@ -75,20 +75,102 @@ class TaskService:
             return "running"
         if batch.state == "aborted":
             return "cancelled"
-        # 批次 done 只表示运行结束，任务继续往数据与报告阶段走
-        analysis_tasks = self.analysis.for_batch(batch.id)
-        if analysis_tasks:
-            task_ids = [row.id for row in analysis_tasks]
-            values = self.values.for_tasks(task_ids)
-            live = [row for row in values if not row.superseded_by_id]
-            if not live or any(row.review_state == "pending" for row in live):
-                return "data_review"
+        # 批次 done 只表示运行结束，任务继续往数据与报告阶段走。展示状态只看复核流程走没走完；
+        # 能不能作为下游开跑的依据另看 data_problems（审核通过不等于数据有效）
+        review = self._data_review(batch)
+        if review["tasks"] and not self._review_complete(review):
+            return "data_review"
         report = self.reports.query().filter_by(task_id=task.id).first()
         if report is not None:
             published = self.report_versions.published(report.id)
             if published is not None:
                 return "done"
         return "reporting"
+
+    def _data_review(self, batch) -> dict[str, list]:
+        """批次的数据阶段：有效检测任务，以及缺指标、待复核、被退回、判为无效的结果与没有检测任务的样本。
+
+        有效检测任务：没取消、没被重测任务取代（重测链只看最新一轮）。没有有效检测任务就没有数据阶段。
+        每个在用样本（没剔除、没拆分；拆分后看子样本）都要有有效检测任务。
+        """
+        from ..domain.metrics import collected
+
+        tasks = [row for row in self.analysis.for_batch(batch.id) if row.state != "cancelled"]
+        retested = {row.retest_of for row in tasks if row.retest_of}
+        live = [row for row in tasks if row.id not in retested]
+        review: dict[str, list] = {
+            "tasks": live, "missing": [], "pending": [], "rejected": [], "invalid": [], "uncovered": [],
+        }
+        if not live:
+            return review
+        # 每个指标的当前版本 = 最高版本且未被取代（与 current_for_task 同一规则），一次查完这个批次的
+        current_of: dict[str, dict] = {}
+        for value in self.values.for_tasks([row.id for row in live]):
+            if value.superseded_by_id:
+                continue
+            bucket = current_of.setdefault(value.analysis_task_id, {})
+            existing = bucket.get(value.metric_definition_id)
+            if existing is None or value.result_version > existing.result_version:
+                bucket[value.metric_definition_id] = value
+        for analysis in live:
+            current = current_of.get(analysis.id, {})
+            done, _ = collected(list(analysis.required_metrics or []), current)
+            if not done:
+                review["missing"].append(analysis)
+            for value in current.values():
+                if value.review_state == "pending":
+                    review["pending"].append(value)
+                elif value.review_state == "rejected":
+                    review["rejected"].append(value)
+                elif value.quality == "invalid":
+                    review["invalid"].append(value)
+        covered = {row.sample_id for row in live if row.sample_id}
+        review["uncovered"] = [
+            sample for sample in self.samples.for_batch(batch.id)
+            if sample.state not in {"failed", "split"} and sample.id not in covered
+        ]
+        return review
+
+    @staticmethod
+    def _review_complete(review: dict[str, list]) -> bool:
+        """复核流程走完：指标采齐、没有待复核或被退回的结果、每个在用样本都有检测任务。"""
+        return not (review["missing"] or review["pending"] or review["rejected"] or review["uncovered"])
+
+    def data_problems(self, task: ExperimentTask, _depth: int = 0) -> list[str]:
+        """「数据复核通过」还差什么；空表示可以作为下游开跑的依据。
+
+        独立计算，不从展示状态反推：复核流程走完之外，判为无效的数据也不能放行（审核通过只说明审过了）。
+        要继续就重测，或把这条依赖改成别的放行条件。父任务逐个检查它未取消的子任务。
+        """
+        children = self.tasks.children(task.id) if _depth < 8 else []
+        if children:
+            problems: list[str] = []
+            for child in children:
+                if self.derive_state(child) == "cancelled":
+                    continue
+                problems += [f"子任务 {child.id} {text}" for text in self.data_problems(child, _depth + 1)]
+            return problems
+        batch = self.batches.get(task.batch_id) if task.batch_id else None
+        if batch is None:
+            return ["还没有批次"]
+        if batch.state != "done":
+            return ["批次还没运行结束"]
+        review = self._data_review(batch)
+        if not review["tasks"]:
+            return []
+        problems = []
+        if review["uncovered"]:
+            names = "、".join(sample.id for sample in review["uncovered"][:3])
+            problems.append(f"{len(review['uncovered'])} 个在用样本没有检测任务（{names}）")
+        if review["missing"]:
+            problems.append(f"{len(review['missing'])} 个检测任务缺指标、未采齐")
+        if review["pending"]:
+            problems.append(f"{len(review['pending'])} 条结果待复核")
+        if review["rejected"]:
+            problems.append(f"{len(review['rejected'])} 条结果被退回，待重新录入或重测")
+        if review["invalid"]:
+            problems.append(f"{len(review['invalid'])} 条结果判为无效，重测或另行处置前不能作为下游依据")
+        return problems
 
     # ---------- 读 ----------
 
@@ -237,6 +319,15 @@ class TaskService:
             state = self.derive_state(upstream)
             if state == "cancelled":
                 rows.append({"task_id": upstream_id, "label": f"上游任务 {upstream_id} 已取消：请移除这条依赖或改依赖别的任务"})
+            elif gate == "data_validated" and (problems := self.data_problems(upstream)):
+                # 数据放行逐项核对事实，不拿展示状态当证据
+                rows.append({
+                    "task_id": upstream_id, "gate": gate,
+                    "label": (
+                        f"上游任务 {upstream_id}「{upstream.title}」{STATE_LABEL.get(state, state)}，"
+                        f"数据复核通过后本任务才能开跑：{'；'.join(problems[:3])}"
+                    ),
+                })
             elif not task_rules.gate_satisfied(gate, state):
                 rows.append({
                     "task_id": upstream_id, "gate": gate,
@@ -398,7 +489,8 @@ class TaskService:
 
         任务建立时锁定批准版本，之后的方案修订不会静默改变它；要按新版本执行只能走这里，留审计。
         已经建了批次的任务不能迁移：批次快照已按旧版本冻结，换版本要先终止旧批次、另建任务。
-        父任务连同它还没建批次的后代一起迁移；已建批次的后代保持原版本，结果里列出来。
+        父任务连同它还没建批次的同方案后代一起迁移；已建批次的后代保持原版本（kept），挂在下面的
+        别的方案的任务保持它自己方案的版本（skipped），结果里都列出来。
         """
         task = self.tasks.get(task_id)
         if not task:
@@ -420,9 +512,13 @@ class TaskService:
         if version.id == task.plan_version_id:
             raise StateConflict(f"任务已经是最新批准版本 v{version.version}", code="task_version_current")
         family = [task, *(row for row in (self.tasks.get(ref) for ref in sorted(self._descendant_ids(task.id))) if row)]
-        moved, kept = [], []
+        moved, kept, skipped = [], [], []
         for row in family:
             if row.state == "cancelled":
+                continue
+            if row.plan_id != task.plan_id:
+                # 别的方案的任务：它的版本只能来自它自己的方案，写入这个方案的版本会让它再也建不了批次
+                skipped.append({"task_id": row.id, "plan_id": row.plan_id, "plan_version": row.plan_version})
                 continue
             if row.batch_id:
                 kept.append({"task_id": row.id, "batch_id": row.batch_id, "plan_version": row.plan_version})
@@ -436,11 +532,28 @@ class TaskService:
             user, "迁移任务方案版本", task.id, before=f"v{moved[0]['from']}" if moved else "—", after=f"v{version.version}",
             detail=f"{reason}；迁移 {len(moved)} 个任务" + (
                 f"；{len(kept)} 个已建批次的子任务保持原版本（{'、'.join(row['task_id'] for row in kept)}）" if kept else ""
+            ) + (
+                f"；{len(skipped)} 个别的方案的子任务不迁移（{'、'.join(row['task_id'] for row in skipped)}）"
+                if skipped else ""
             ),
             object_version=task.row_version,
         )
         self.db.commit()
-        return {**self.out(task, detail=True), "migrated": moved, "kept": kept}
+        return {**self.out(task, detail=True), "migrated": moved, "kept": kept, "skipped": skipped}
+
+    def _locked_content(self, task: ExperimentTask, plan):
+        """任务锁定的方案版本内容，与建批次同一个解析口径。早先没记版本的任务按方案本身。"""
+        if not task.plan_version_id:
+            return plan
+        version = self.plan_versions.get(task.plan_version_id)
+        if version is None or version.plan_id != plan.id or version.state != "approved":
+            raise StateConflict(
+                f"任务锁定的方案版本 v{task.plan_version} 已不是批准状态，不能按它拆分",
+                code="task_plan_version_invalid",
+            )
+        from .batch_service import BatchService
+
+        return BatchService._pinned_plan(plan, version)
 
     def decompose(self, task_id: str, payload: dict, user: User) -> dict:
         """把任务拆成子任务：按样本分份（每份不超过 chunk_size，默认按方法的样品位），或拆成 N 份。
@@ -462,8 +575,10 @@ class TaskService:
         plan = self.plans.get(task.plan_id)
         if plan is None:
             raise NotFound("实验方案不存在")
+        # 样本清单、流程与方案类型都取任务锁定的版本：方案之后的修订（哪怕还是草稿）不能借拆分混进来
+        content = self._locked_content(task, plan)
         samples = list(task.sample_ids or []) or (
-            list(plan.sample_ids or []) if plan.plan_type != "matrix" else []
+            list(content.sample_ids or []) if content.plan_type != "matrix" else []
         )
         parts = payload.get("parts")
         size = payload.get("chunk_size")
@@ -474,7 +589,7 @@ class TaskService:
                 else:
                     from ..repositories.recipes import RecipeRepository
 
-                    recipe = RecipeRepository(self.db, self.ctx).get(plan.recipe_id)
+                    recipe = RecipeRepository(self.db, self.ctx).get(content.recipe_id)
                     size = max(1, int(recipe.plate or 1)) if recipe else len(samples)
             groups = task_rules.chunks(samples, int(size))
         else:

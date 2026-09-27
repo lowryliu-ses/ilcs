@@ -38,6 +38,19 @@ export function BatchDetailPage() {
     invalidates: [`batches:${batchId}`, 'batches', 'schedule', 'dashboard', 'audit'],
     onSuccess: () => toast.push('已取消排程，工位时间窗已归还；物料预留保持不变'),
   });
+  // 终止中的批次：按最新的停止确认重新汇总。执行器每一轮也会兜底，这里给现场一个立刻看结论的入口
+  const reconcileAbort = useMutation(
+    () => api.post<{ state: string; waiting_stations: string[] }>(`/batches/${batchId}/abort/reconcile`),
+    {
+      invalidates: [`batches:${batchId}`, 'batches', 'schedule', 'dashboard', 'audit'],
+      onSuccess: (result) =>
+        toast.push(
+          result.waiting_stations.length
+            ? `仍在等待 ${result.waiting_stations.join('、')} 确认停止；确认后批次随即终止`
+            : '全部设备都已确认停止，批次已终止',
+        ),
+    },
+  );
   const removeBatch = useMutation(() => api.remove(`/batches/${batchId}`), {
     invalidates: ['batches', 'schedule', 'dashboard', 'reservations', 'lots', 'audit'],
     onSuccess: () => {
@@ -119,6 +132,16 @@ export function BatchDetailPage() {
           {!['done', 'aborted', 'aborting'].includes(data.state) ? (
             <button className="btn danger" onClick={() => setDialog('abort')}>
               终止评估
+            </button>
+          ) : null}
+          {data.state === 'aborting' && data.can_control ? (
+            <button
+              className="btn"
+              disabled={reconcileAbort.pending}
+              title="各设备的停止确认都到了却还停在终止中时，按最新结论收尾；否则列出仍在等待的设备"
+              onClick={() => reconcileAbort.run().catch((error) => toast.push(error.message))}
+            >
+              重新汇总终止
             </button>
           ) : null}
           {data.can_control && data.delete_blockers.length === 0 ? (

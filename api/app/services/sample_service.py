@@ -140,6 +140,7 @@ class SampleService:
             "slots": [
                 {
                     "container_id": row.container_id, "well": row.well, "labware_id": row.labware_id or "",
+                    "labware_well": row.labware_well,
                     "occupied_at": row.occupied_at.isoformat(timespec="seconds"),
                     "released_at": row.released_at.isoformat(timespec="seconds") if row.released_at else None,
                 }
@@ -464,11 +465,20 @@ class SampleService:
 
     def occupy_slot(
         self, container_id: str, well: str, physical_sample_id: str, assignment_id: str = "",
+        *, labware_id: str | None = None, labware_well: str = "",
     ) -> SlotOccupancy:
-        """占用在途孔位。唯一约束负责并发，不做「先查再插」。"""
+        """占用在途孔位。唯一约束负责并发，不做「先查再插」。
+
+        落在实体载具上时同时写载具与实体孔位：「同一块板的同一个孔只有一个在途样本」由数据库在插入时
+        约束，不管占用记在哪个容器号下。
+        """
+        from ..domain.labware import normalize_well
+
+        position = normalize_well(labware_well) if labware_id and labware_well else ""
         occupancy = SlotOccupancy(
             org_id=self.ctx.org_id, container_id=container_id, well=well,
             physical_sample_id=physical_sample_id, assignment_id=assignment_id,
+            labware_id=labware_id, labware_well=position,
         )
         self.db.add(occupancy)
         try:
@@ -476,13 +486,51 @@ class SampleService:
         except IntegrityError:
             self.db.rollback()
             live = self.slots.live(container_id, well)
+            where = f"容器 {container_id} 的孔位 {well}"
+            if live is None and position:
+                live = self.slots.live_on_labware(labware_id, position)
+                where = f"载具孔位 {position}"
             raise StateConflict(
-                f"容器 {container_id} 的孔位 {well} 已被在途样本 "
-                f"{live.physical_sample_id if live else '未知'} 占用",
+                f"{where} 已被在途样本 {live.physical_sample_id if live else '未知'} 占用",
                 {"blocked": [{"key": "slot", "label": "一个在途孔位同时只能分配给一个样本"}]},
                 code="slot_occupied",
             ) from None
         return occupancy
+
+    def device_wells(self, batch_id: str) -> dict[str, str]:
+        """每个运行分配在设备上的孔位：绑定了实体载具的是实体孔位，否则是布局孔位。
+
+        下发逐孔参数与逐样本读设备回报用同一个口径。系统内分组拆出的子样本没有自己的孔位占用，
+        跟着谱系上最近一个有孔位的母样（它们在同一个孔里）。
+        """
+        from sqlalchemy import or_
+
+        from ..domain.labware import container_of
+
+        base = container_of(batch_id)
+        wells = {
+            row.assignment_id: row.labware_well or row.well
+            for row in self.slots.query().filter(
+                or_(SlotOccupancy.container_id == base, SlotOccupancy.container_id.like(f"{base}:%")),
+                SlotOccupancy.released_at.is_(None),
+            ).all()
+            if row.assignment_id
+        }
+        samples = self.assignments.for_batch(batch_id)
+        by_physical = {sample.physical_sample_id: sample for sample in samples if sample.physical_sample_id}
+        for sample in samples:
+            if sample.id in wells:
+                continue
+            physical = self.samples.get(sample.physical_sample_id) if sample.physical_sample_id else None
+            for _ in range(8):
+                if physical is None or not physical.parent_id:
+                    break
+                parent = by_physical.get(physical.parent_id)
+                if parent is not None and parent.id in wells:
+                    wells[sample.id] = wells[parent.id]
+                    break
+                physical = self.samples.get(physical.parent_id)
+        return wells
 
     def release_slots(self, container_id: str) -> int:
         """释放孔位占用（批次结束 / 终止 / 删除）。样本随之从载具上解开，最后所在的载具孔位留作文本位置。
@@ -511,7 +559,7 @@ class SampleService:
 
         载具上原来的样本（上一次使用留下的关联）先解开：一块板同一时刻只装一批样本。
         """
-        from ..domain.labware import physical_wells
+        from ..domain.labware import normalize_well, physical_wells
         from ..models import Sample
 
         live = self.slots.query().filter_by(container_id=container_id, released_at=None).all()
@@ -534,6 +582,8 @@ class SampleService:
                 stale.well = ""
         for row in live:
             row.labware_id = labware.id if labware is not None else None
+            # 占用记下实体孔位：设备按它动作、回报，物理唯一性也按它约束
+            row.labware_well = normalize_well(mapping.get(row.well, row.well)) if labware is not None else ""
             sample = self.db.get(PhysicalSample, row.physical_sample_id)
             if sample is None:
                 continue

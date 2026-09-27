@@ -72,6 +72,18 @@ class SlotOccupancyRepository(ScopedRepository[SlotOccupancy]):
             .first()
         )
 
+    def live_on_labware(self, labware_id: str, labware_well: str) -> SlotOccupancy | None:
+        """实体载具某个孔位（已规范化）上的在途占用，不管它记在哪个容器号下。"""
+        return (
+            self.query()
+            .filter(
+                SlotOccupancy.labware_id == labware_id,
+                SlotOccupancy.labware_well == labware_well,
+                SlotOccupancy.released_at.is_(None),
+            )
+            .first()
+        )
+
     def for_sample(self, physical_sample_id: str) -> list[SlotOccupancy]:
         return list(
             self.query()

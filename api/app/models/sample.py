@@ -58,14 +58,23 @@ class SlotOccupancy(Base):
     assignment_id: Mapped[str] = mapped_column(String, default="")
     # 绑定了实体载具后指向它；container_id 仍是批次的虚拟板号
     labware_id: Mapped[str | None] = mapped_column(ForeignKey("labware.id"), nullable=True)
+    # 在实体载具上的孔位（规范化，A01 记为 A1）。container_id + well 是批次布局的逻辑孔位，布局放不进
+    # 板型时两者不同（2×4 布局放进 1×8 托盘：B1 落在 A5）；设备按这里的孔位动作、回报
+    labware_well: Mapped[str] = mapped_column(String, default="")
     occupied_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 部分唯一索引：只约束「在途」的占用。用完整唯一约束不管用——两种后端都不让
     # NULL 参与唯一比较，released_at 为 NULL 的两行照样能同时插进去。
+    # 逻辑孔位按容器约束；物理上按「实体载具 + 实体孔位」约束——同一块板的同一个孔只能有一个在途样本，
+    # 不管占用记在哪个容器号下（主载具、实体分装的「批次容器:角色」）
     __table_args__ = (
         Index(
             "uq_slot_live", "container_id", "well", unique=True,
             postgresql_where=text("released_at IS NULL"),
+        ),
+        Index(
+            "uq_slot_labware_live", "labware_id", "labware_well", unique=True,
+            postgresql_where=text("released_at IS NULL AND labware_id IS NOT NULL AND labware_well <> ''"),
         ),
     )
 

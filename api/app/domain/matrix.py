@@ -179,6 +179,21 @@ def condition_params(factors: list[dict], rows: list[dict]) -> dict[str, dict[st
     return result
 
 
+def step_condition(factors: list[dict], step_id: str, levels: list) -> dict:
+    """一个样本在某一步上的作用参数：它的因子水平落到因子指定的设备参数上。
+
+    与 condition_params 同一条规则，只是按样本而不按布局孔位：拆分出的子样本继承母样的水平，
+    落到哪个孔都带着自己的条件。
+    """
+    result: dict = {}
+    for position, factor in enumerate(factors):
+        target = factor.get("target") or {}
+        if target.get("step_id") != step_id or not target.get("param") or position >= len(levels or []):
+            continue
+        result[target["param"]] = levels[position]
+    return result
+
+
 def point_issues(factors: list[dict], points: list, design_space: dict) -> list[str]:
     """外部提案里的设计点是否落在已批准的设计空间内。逐点给出原因，不合格的点不会悄悄丢掉。"""
     names = [factor.get("name") for factor in factors]

@@ -29,6 +29,9 @@ class Command(Base):
     state: Mapped[str] = mapped_column(String, default="sent")
     # queued | maybe_sent | delivered | unreachable
     delivery_state: Mapped[str] = mapped_column(String, default="queued")
+    # 设备对动作给出的结论，与投递事实分开记：'' 还没有 / failed 设备明确失败或拒绝（已停下）/
+    # unknown 设备收到了指令却回报结论未知（动作可能仍在进行，占用保留到现场核查）
+    outcome: Mapped[str] = mapped_column(String, default="")
     step_index: Mapped[int] = mapped_column(Integer)
     checkpoint_id: Mapped[str] = mapped_column(String, default="")
     error: Mapped[str] = mapped_column(Text, default="")

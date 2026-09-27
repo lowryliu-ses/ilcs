@@ -173,6 +173,12 @@ class ScheduleService:
                 if row.ended_at
             ]
             return max(ended) if ended else now()
+        ends = self.step_ends(batch)
+        return max(ends.values()) if ends else None
+
+    def step_ends(self, batch: Batch) -> dict[int, datetime]:
+        """每一步的结束（实际或计划）：已结束的用实际结束，设备步骤用时间窗，等待用到期时刻，
+        其余从前驱结束加上时长。重排时范围之外的前驱按这里的结束接手。"""
         from ..domain import graph
         from ..domain import workflow as flow
         from ..domain.steps import step_id_of
@@ -206,7 +212,53 @@ class ScheduleService:
             if start is None:
                 continue
             ends[index] = start + timedelta(minutes=float(step.get("dur") or 0))
-        return max(ends.values()) if ends else None
+        return ends
+
+    def frozen_steps(self, batch: Batch) -> set[int]:
+        """已开出或已判定的步骤：有一条没作废的步骤实例（执行中、保持、结果未知、已完成、已跳过、
+        未走此分支…）。手动、自动与滚动重排都不动它们的时间窗——同一条冻结规则。"""
+        from ..domain import workflow as flow
+        from ..repositories.workflow import StepRunRepository
+
+        return {
+            run.step_index for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
+            if run.state not in flow.VOID_STATES
+        }
+
+    def _known_tail(
+        self, batch: Batch, steps: list[dict], keep: set[int], protected: list[Allocation],
+    ) -> tuple[dict[int, datetime], dict[int, str | None], dict[str, tuple[datetime, str]]]:
+        """重排范围之外的步骤（keep）：各自的结束、结束后载具所在的工位，以及每个载具角色最后一次
+        设备动作结束的时刻与工位。结束取这一步当前这次尝试的实际结束或计划结束（`step_ends`）：
+        回环重做时上一轮留下的检查点不代表这一轮已经做完。"""
+        from ..domain import graph
+        from ..domain.steps import labware_role
+
+        ends = self.step_ends(batch)
+        work = {a.step_index: a for a in protected if a.kind == WORK}
+        before = graph.predecessors(steps)
+        known_ends: dict[int, datetime] = {}
+        known_where: dict[int, str | None] = {}
+        for index in sorted(keep):
+            end = ends.get(index)
+            if end is None:
+                continue
+            known_ends[index] = end
+            if index in work:
+                known_where[index] = work[index].station_id
+            else:
+                parents = [parent for parent in before[index] if parent in known_ends]
+                known_where[index] = (
+                    known_where[max(parents, key=lambda parent: (known_ends[parent], parent))] if parents else None
+                )
+        plate_state: dict[str, tuple[datetime, str]] = {}
+        for index, allocation in work.items():
+            if index not in known_ends:
+                continue
+            role = labware_role(steps[index]) if index < len(steps) else ""
+            if role not in plate_state or known_ends[index] > plate_state[role][0]:
+                plate_state[role] = (known_ends[index], allocation.station_id)
+        return known_ends, known_where, plate_state
 
     def dependency_floor(self, batch: Batch, skip: set[str] | None = None) -> tuple[datetime | None, list[str]]:
         """任务上游决定的最早开工时刻，以及还定不下来的上游（没排程、没建批次、已终止）。
@@ -444,22 +496,32 @@ class ScheduleService:
                 code="asset_capacity_exceeded",
             )
 
-    def _asset_overloads(self, batch_id: str) -> list[str]:
-        """本批次的时间窗落在哪些资产的超容量时段里。资产是跨组织共享的物理对象，按全站占用算。"""
+    def _asset_overloads(self, batch_id: str, planned: list[PlannedAllocation] | None = None) -> list[str]:
+        """本批次的时间窗落在哪些资产的超容量时段里。资产是跨组织共享的物理对象，按全站占用算。
+
+        `planned` 给了就按这份还没写入的计划算（预览用）：本批次库里的旧时间窗不计。预览与写入前的
+        最后一道检查用同一个口径，不会出现「预览可行、应用失败」。
+        """
         from ..models import Asset, ResourceBooking, Station
 
         station_asset = {sid: aid for sid, aid in self.db.query(Station.id, Station.asset_id).all() if aid}
-        mine = [row for row in self.allocations.for_batch(batch_id) if row.station_id in station_asset]
+        rows = self.allocations.for_batch(batch_id) if planned is None else planned
+        mine = [row for row in rows if row.station_id in station_asset]
         found: list[str] = []
         for asset_id in sorted({station_asset[row.station_id] for row in mine}):
             asset = self.db.get(Asset, asset_id)
             capacity = max(1, asset.capacity if asset else 1)
             stations = [sid for sid, aid in station_asset.items() if aid == asset_id]
-            occupied = [
-                (Interval(row.starts_at, row.ends_at), 1)
-                for row in self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id)
-                .filter(Allocation.station_id.in_(stations), Batch.state.notin_(["done", "aborted"])).all()
-            ]
+            existing = self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id).filter(
+                Allocation.station_id.in_(stations), Batch.state.notin_(["done", "aborted"]),
+            )
+            if planned is not None:
+                existing = existing.filter(Allocation.batch_id != batch_id)
+            occupied = [(Interval(row.starts_at, row.ends_at), 1) for row in existing.all()]
+            if planned is not None:
+                occupied += [
+                    (Interval(row.starts_at, row.ends_at), 1) for row in mine if station_asset[row.station_id] == asset_id
+                ]
             for booking in self.db.query(ResourceBooking).filter(
                 ResourceBooking.asset_id == asset_id, ResourceBooking.state.in_(["pending", "confirmed"]),
                 ResourceBooking.kind != "schedule",
@@ -488,6 +550,12 @@ class ScheduleService:
             )
         except SchedulingError as error:
             return {"ok": False, "reason": error.message, "step_index": error.step_index, "path": []}
+        overloads = self._asset_overloads(batch.id, planned)
+        if overloads:
+            return {
+                "ok": False, "reason": f"排程结果超出共享资产容量：{overloads[0]}", "step_index": None,
+                "path": [self._planned_out(item, steps) for item in planned],
+            }
         finish = planned_finish(planned, ends)
         return {
             "ok": True,
@@ -573,31 +641,28 @@ class ScheduleService:
         """分支定了路径或发生回环后，按实际路径重算还没开出的尾段（短期冻结、远期滚动）。
 
         只移动本批次自己未来的时间窗、只排进别人没占的空档，不挤占任何人的预约——与「按实际进度
-        提前」同一个原则；排不下就不写，报警交给调度。已开出的步骤（执行中、保持、结果未知、已完成）一概不动。
+        提前」同一个原则；排不下就不写，报警交给调度。已开出或已判定的步骤（执行中、保持、结果未知、
+        已完成、已跳过、未走此分支）一概不动；重算的是其余全部还没开出的步骤，不是「最大序号之后」的
+        后缀——没走的分支、先开出的并行分支可能排在列表后面，按序号截断会漏掉已选路径上的步骤。
         """
-        from ..repositories.workflow import StepRunRepository
-
         if batch.state not in {"running", "paused", "fault"}:
             return {"rolled": False}
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
-        opened = {
-            run.step_index for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
-            if run.state not in {"superseded", "cancelled"}
-        }
-        from_step = max(opened) + 1 if opened else 0
-        if from_step >= len(steps) or not any(needs_station(step) for step in steps[from_step:]):
+        frozen = self.frozen_steps(batch)
+        replan = [index for index in range(len(steps)) if index not in frozen]
+        if not any(needs_station(steps[index]) for index in replan):
             return {"rolled": False}
+        from_step = replan[0]
         lock_schedule(self.db)
-        protected = [a for a in self.allocations.for_batch(batch.id) if a.step_index < from_step]
-        anchor, anchor_station = self._tail_anchor(batch, steps, from_step, protected)
+        protected = [a for a in self.allocations.for_batch(batch.id) if a.step_index not in replan]
+        known_ends, known_where, plate_state = self._known_tail(batch, steps, frozen, protected)
         context = self.context({batch.id})
         for allocation in protected:
             context.busy.setdefault(allocation.station_id, []).append(Interval(allocation.starts_at, allocation.ends_at))
-        begin = max(now(), anchor) if anchor else now()
         try:
             planned = plan_steps(
-                steps, begin, context, first_index=from_step, previous_end=anchor, previous_station=anchor_station,
-                exclusive_carrier=self.carrier_roles(batch),
+                steps, now(), context, first_index=from_step, frozen=frozen, known_ends=known_ends,
+                known_where=known_where, plate_state=plate_state, exclusive_carrier=self.carrier_roles(batch),
             )
         except SchedulingError as error:
             self._roll_alarm(batch, f"{reason}后尾段重排不成立：{error.message}")
@@ -605,7 +670,7 @@ class ScheduleService:
         asset_of_station = {station.id: station.asset_id for station in self.stations.list() if station.asset_id}
         savepoint = self.db.begin_nested()
         try:
-            self.allocations.delete_from_step(batch.id, from_step)
+            self.allocations.delete_steps(batch.id, replan)
             self.db.add_all([
                 Allocation(
                     batch_id=batch.id, step_index=item.step_index, station_id=item.station_id,
@@ -624,7 +689,7 @@ class ScheduleService:
         work = [item for item in planned if item.kind == WORK]
         self.audit.record(
             None, "滚动重排", batch.id, before=f"自第 {from_step + 1} 步",
-            after=(f"{work[0].starts_at:%m-%d %H:%M} 起" if work else "无设备步骤"),
+            after=(f"{min(item.starts_at for item in work):%m-%d %H:%M} 起" if work else "无设备步骤"),
             detail=f"{reason}：按实际路径重算尚未开出的 {len(work)} 个设备步骤，只用空档、不挤占其他批次",
         )
         return {"rolled": True, "from_step": from_step, "steps": len(work)}
@@ -966,28 +1031,21 @@ class ScheduleService:
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         if from_step < 0 or from_step >= len(steps):
             raise StateConflict("没有未执行的步骤需要重排")
-        protected = [
-            a for a in self.allocations.for_batch(batch.id) if a.step_index < from_step
-        ]
-        # 依赖图里序号靠后的步骤可以早已与靠前的并行开出：保护看的是全部开出过的步骤（执行中、保持、
-        # 结果未知、已完成、已下指令），不是「当前步骤」这一个下标。与重排建议用同一条规则
-        from ..repositories.workflow import StepRunRepository
-
-        opened = sorted({
-            run.step_index for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
-            if run.state not in {"superseded", "cancelled"}
-        })
-        if batch.state in {"running", "paused", "fault"} and (
-            from_step <= batch.current_step or any(index >= from_step for index in opened)
-        ):
-            last = max([batch.current_step, *opened])
+        # 依赖图里序号靠后的步骤可以早已与靠前的并行开出，也可能是没走的分支：冻结看的是全部开出或
+        # 判定过的步骤（执行中、保持、结果未知、已完成、已跳过、未走此分支），与滚动重排、按实际进度对齐
+        # 同一条规则。它们原地保留时间窗，其余第 from_step 步起还没开出的步骤重排
+        frozen = self.frozen_steps(batch) if batch.state in {"running", "paused", "fault"} else set()
+        if from_step in frozen:
             raise StateConflict(
-                f"第 {last + 1} 步已经开出（执行中、保持、结果未知或已完成），不能从第 {from_step + 1} 步重排；"
-                f"只能重排第 {last + 2} 步起还没开出的步骤",
+                f"第 {from_step + 1} 步已经开出或已判定（执行中、保持、结果未知、已完成、已跳过或未走此分支），"
+                f"不能从它重排；只能重排还没开出的步骤",
                 {"blocked": [{"key": "step", "label": "已开出的步骤保持原有占用与指令"}]},
                 code="step_in_progress",
             )
-        anchor, anchor_station = self._tail_anchor(batch, steps, from_step, protected)
+        replan = [index for index in range(from_step, len(steps)) if index not in frozen]
+        protected = [a for a in self.allocations.for_batch(batch.id) if a.step_index not in replan]
+        keep = {index for index in range(len(steps)) if index not in replan}
+        known_ends, known_where, plate_state = self._known_tail(batch, steps, keep, protected)
         context = self.context({batch.id})
         for allocation in protected:
             context.busy.setdefault(allocation.station_id, []).append(
@@ -995,9 +1053,8 @@ class ScheduleService:
             )
         try:
             planned = plan_steps(
-                steps, max(start_from, anchor) if anchor else start_from, context,
-                first_index=from_step, previous_end=anchor, previous_station=anchor_station,
-                exclusive_carrier=self.carrier_roles(batch),
+                steps, start_from, context, first_index=from_step, frozen=frozen, known_ends=known_ends,
+                known_where=known_where, plate_state=plate_state, exclusive_carrier=self.carrier_roles(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
@@ -1005,7 +1062,7 @@ class ScheduleService:
         asset_of_station = {
             station.id: station.asset_id for station in self.stations.list() if station.asset_id
         }
-        self.allocations.delete_from_step(batch.id, from_step)
+        self.allocations.delete_steps(batch.id, replan)
         for item in planned:
             self.db.add(
                 Allocation(
@@ -1043,10 +1100,15 @@ class ScheduleService:
     def realign(self, batch: Batch, step_index: int, actual_start: datetime) -> dict:
         """按实际进度对齐本批自这一步起的时间窗。
 
-        - 前面做得快：试着把剩余时间窗整体提前到现在；与别的批次冲突就不提前，
+        - 前面做得快：试着把剩余时间窗提前到现在；与别的批次冲突就不提前，
           指令等到原时间窗前的允许提前量再投递——不占用别人预约的设备。
-        - 前面做得慢：剩余时间窗整体后移。后移后与别的批次重叠时只报警，不自动挤占
+        - 前面做得慢：剩余时间窗后移。后移后与别的批次重叠时只报警，不自动挤占
           对方——谁让路是调度决定，不是算法决定。
+
+        「剩余」指这一步与它在图上的后继里还没开出的步骤：已开出的并行分支、与这一步无关的分支都不动
+        （按列表序号平移后缀，会把已经在跑的分支挪走，计划就不再表达实际占用）。每个后继至少跟着它的
+        前驱移动同样的量；提前时不早于它不在平移范围内的前驱结束。线性流程里后继就是后面的全部步骤，
+        与整体平移一致。
         """
         work = self.allocations.work_step(batch.id, step_index)
         if work is None:
@@ -1058,26 +1120,29 @@ class ScheduleService:
         ):
             return {"shifted_min": 0, "conflicts": []}
         lock_schedule(self.db)
-        self.allocations.shift_all_from_step(batch.id, step_index, delay)
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        shifts = self._realign_shifts(batch, steps, step_index, delay) if steps else {step_index: delay}
+        self.allocations.shift_steps(batch.id, shifts)
         self.db.flush()
         conflicts = self._cross_batch_overlaps(batch.id)
         minutes = delay.total_seconds() / 60
+        moved = len([index for index, value in shifts.items() if value])
         if delay < timedelta():
             if conflicts:
-                self.allocations.shift_all_from_step(batch.id, step_index, -delay)
+                self.allocations.shift_steps(batch.id, {index: -value for index, value in shifts.items()})
                 self.db.flush()
                 return {"shifted_min": 0, "conflicts": [], "waiting": True}
             self.audit.record(
                 None, "按实际进度提前", batch.id, before=f"第 {step_index + 1} 步计划开工",
                 after=f"提前 {-minutes:.0f} min",
-                detail=f"上游提前完成，第 {step_index + 1} 步起的时间窗整体提前；未与其他批次重叠",
+                detail=f"上游提前完成，第 {step_index + 1} 步及其后继共 {moved} 步的时间窗提前；未与其他批次重叠",
             )
             return {"shifted_min": round(minutes), "conflicts": []}
         self.audit.record(
             None, "按实际进度顺延", batch.id, before=f"第 {step_index + 1} 步计划开工",
             after=f"后移 {minutes:.0f} min",
             detail=(
-                f"第 {step_index + 1} 步起的时间窗整体后移"
+                f"第 {step_index + 1} 步及其后继共 {moved} 步的时间窗后移（已开出与无关的分支不动）"
                 + (f"；与 {len(conflicts)} 处其他批次占用重叠，已报警" if conflicts else "")
             ),
         )
@@ -1099,49 +1164,80 @@ class ScheduleService:
             )
         return {"shifted_min": round(minutes), "conflicts": conflicts}
 
-    def release_unused(self, batch: Batch, step_index: int, finished_at: datetime) -> None:
-        """设备提前完成：把这一步没用完的时间窗还回去，清洗缓冲跟着前移。"""
+    def _realign_shifts(
+        self, batch: Batch, steps: list[dict], step_index: int, delay: timedelta,
+    ) -> dict[int, timedelta]:
+        """这一步与它还没开出的后继各自平移多少。
+
+        按图的拓扑顺序（前驱序号总在前面）传递：每个后继至少与它在平移范围内的前驱移动同样的量，
+        原有的间隔（转运、清洗）不被压缩；提前时也不早于它不在范围内的前驱（另一条分支）结束。
+        """
+        from ..domain import graph
+
+        before = graph.predecessors(steps)
+        frozen = self.frozen_steps(batch) - {step_index}
+        affected = [step_index, *sorted(graph.descendants(steps, step_index) - frozen)]
+        starts = {row.step_index: row.starts_at for row in self.allocations.for_batch(batch.id) if row.kind == WORK}
+        ends = self.step_ends(batch) if delay < timedelta() else {}
+        shifts: dict[int, timedelta] = {}
+        for index in affected:
+            if index == step_index:
+                shifts[index] = delay
+                continue
+            candidates = [delay, *(shifts[parent] for parent in before[index] if parent in shifts)]
+            if index in starts:
+                candidates += [
+                    ends[parent] - starts[index] for parent in before[index] if parent not in shifts and parent in ends
+                ]
+            shifts[index] = max(candidates)
+        return shifts
+
+    def extend_after_hold(self, batch: Batch, held: set[int], minutes: float) -> None:
+        """保持后续跑 / 重试：被保持的步骤时间窗延长（保持期间设备仍占着），它们还没开出的后继跟着后移。
+
+        另一条分支上已开出的步骤、与被保持步骤无关的步骤不动。线性流程里就是当前步骤延长、后面全部后移。
+        """
+        from ..domain import graph
+
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        delta = timedelta(minutes=minutes)
+        frozen = self.frozen_steps(batch)
+        later: set[int] = set()
+        for index in held:
+            if index < len(steps):
+                later |= graph.descendants(steps, index)
+        later = {index for index in later - held if index not in frozen}
+        for allocation in self.allocations.for_batch(batch.id):
+            if allocation.step_index in held:
+                allocation.ends_at = allocation.ends_at + delta
+                if allocation.kind not in {WORK, "assist"}:
+                    allocation.starts_at = allocation.starts_at + delta
+            elif allocation.step_index in later:
+                allocation.starts_at = allocation.starts_at + delta
+                allocation.ends_at = allocation.ends_at + delta
+
+    def release_unused(
+        self, batch: Batch, step_index: int, finished_at: datetime, started_at: datetime | None = None,
+    ) -> None:
+        """设备提前完成：把这一步没用完的时间窗还回去，清洗缓冲跟着前移。
+
+        在计划时间窗开始之前就做完了（允许提前量内开工的短步骤）：工作时间窗改成实际的起止。
+        只把清洗挪到完成时刻、留下原来的工作窗，两段会叠在同一台设备上，之后这个批次的任何重排
+        都会被资产容量检查拒绝。协同工位的时间窗与主设备同起同止，一起处理。
+        """
         for allocation in self.allocations.for_batch(batch.id):
             if allocation.step_index != step_index:
                 continue
-            if allocation.kind == WORK and allocation.starts_at < finished_at < allocation.ends_at:
-                allocation.ends_at = finished_at
+            if allocation.kind in {WORK, "assist"}:
+                if allocation.starts_at < finished_at < allocation.ends_at:
+                    allocation.ends_at = finished_at
+                elif finished_at <= allocation.starts_at:
+                    allocation.starts_at = min(started_at or finished_at, finished_at)
+                    allocation.ends_at = finished_at
             elif allocation.kind == CLEAN and allocation.starts_at > finished_at:
                 duration = allocation.ends_at - allocation.starts_at
                 allocation.starts_at = finished_at
                 allocation.ends_at = finished_at + duration
-
-    def _tail_anchor(
-        self, batch: Batch, steps: list[dict], from_step: int, protected: list[Allocation],
-    ) -> tuple[datetime | None, str | None]:
-        """尾段的起点：上一步实际结束（有检查点或已完成的步骤实例）优先，否则按计划结束推算。"""
-        if from_step == 0:
-            return None, None
-        from ..repositories.execution import CheckpointRepository
-        from ..repositories.workflow import StepRunRepository
-
-        work = sorted(
-            (a for a in protected if a.kind == WORK), key=lambda a: (a.step_index, a.ends_at),
-        )
-        station = work[-1].station_id if work else None
-        previous = from_step - 1
-        checkpoint = CheckpointRepository(self.db).latest_for_step(batch.id, previous)
-        if checkpoint is not None:
-            return checkpoint.created_at, station
-        finished = [
-            run.ended_at for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
-            if run.step_index == previous and run.state == "completed" and run.ended_at
-        ]
-        if finished:
-            return max(finished), station
-        if not work:
-            return None, None
-        # 计划推算：最后一个受保护的设备时间窗结束，加上其后到本步之前那些不占工位步骤的时长
-        anchor = work[-1].ends_at
-        for index in range(work[-1].step_index + 1, from_step):
-            if not needs_station(steps[index]):
-                anchor += timedelta(minutes=float(steps[index].get("dur", 0) or 0))
-        return anchor, station
 
     @staticmethod
     def allocation_out(allocation: Allocation, forecast: str = "") -> dict:

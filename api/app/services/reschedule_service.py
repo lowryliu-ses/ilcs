@@ -91,13 +91,21 @@ class RescheduleService:
             if row.state not in {"superseded", "cancelled"}
         }
 
-    def _from_step(self, batch: Batch, steps: list[dict]) -> int | None:
-        """从哪一步起重排：未下发整体重排；已下发从「其后全部未开出」的第一步起，开出过的一步都不动。"""
+    def _replan(self, batch: Batch, steps: list[dict]) -> list[int]:
+        """重排哪些步骤：未下发整体重排；已下发重排全部还没开出的步骤，开出过或判定过的一步都不动。
+
+        与手动重排、滚动重排、按实际进度对齐同一条冻结规则。不能按「最大开出序号之后」截断：
+        先开出的并行分支、没走的分支可能排在列表后面，截断会漏掉已选路径上还没开出的步骤。
+        """
         if batch.state == "scheduled":
-            return 0
-        live = self._live_indices(batch)
-        start = max(live) + 1 if live else 0
-        return start if start < len(steps) else None
+            return list(range(len(steps)))
+        frozen = self.schedule.frozen_steps(batch)
+        return [index for index in range(len(steps)) if index not in frozen]
+
+    @staticmethod
+    def _replanned(plan: dict) -> set[int] | None:
+        """一份建议替换哪些步骤。早先生成的建议只记了起点，按起点之后全部算。"""
+        return set(plan["replan"]) if "replan" in plan else None
 
     def _before(self, batch: Batch) -> list[dict]:
         return [_window(row) for row in sorted(
@@ -123,23 +131,24 @@ class RescheduleService:
         unplanned: list[dict] = []
         planned_end: dict[str, datetime] = {}
         begin_default = now() + timedelta(minutes=5)
-        # 先把各批次要保护的时间窗（已开出的步骤）压进时间线，再逐个排尾段
-        plans: dict[str, tuple[list[dict], int, list[Allocation]]] = {}
+        # 先把各批次要保护的时间窗（已开出的步骤）压进时间线，再逐个排其余还没开出的步骤
+        plans: dict[str, tuple[list[dict], list[int], list[Allocation]]] = {}
         for batch_id in order:
             batch = by_id[batch_id]
             steps = normalize(batch.recipe_snapshot.get("steps") or [])
-            from_step = self._from_step(batch, steps)
-            if from_step is None:
+            replan = self._replan(batch, steps)
+            if not replan:
                 continue
-            protected = [row for row in self.allocations.for_batch(batch.id) if row.step_index < from_step]
+            protected = [row for row in self.allocations.for_batch(batch.id) if row.step_index not in replan]
             for row in protected:
                 context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
-            plans[batch_id] = (steps, from_step, protected)
+            plans[batch_id] = (steps, replan, protected)
         for batch_id in order:
             if batch_id not in plans:
                 continue
             batch = by_id[batch_id]
-            steps, from_step, protected = plans[batch_id]
+            steps, replan, protected = plans[batch_id]
+            from_step = replan[0]
             floor, missing = self.schedule.dependency_floor(batch, skip=affected_ids)
             if missing:
                 unplanned.append({"batch_id": batch.id, "reason": "；".join(missing)})
@@ -149,14 +158,14 @@ class RescheduleService:
             ends: dict = {}
             exclusive = self.schedule.carrier_roles(batch)
             try:
-                if from_step == 0:
+                if len(replan) == len(steps):
                     planned = plan_steps(steps, begin, context, step_ends=ends, exclusive_carrier=exclusive)
                 else:
-                    anchor, station = self.schedule._tail_anchor(batch, steps, from_step, protected)
+                    keep = {index for index in range(len(steps)) if index not in replan}
+                    known_ends, known_where, plate_state = self.schedule._known_tail(batch, steps, keep, protected)
                     planned = plan_steps(
-                        steps, max(begin, anchor) if anchor else begin, context,
-                        first_index=from_step, previous_end=anchor, previous_station=station,
-                        step_ends=ends, exclusive_carrier=exclusive,
+                        steps, begin, context, first_index=from_step, frozen=keep, known_ends=known_ends,
+                        known_where=known_where, plate_state=plate_state, step_ends=ends, exclusive_carrier=exclusive,
                     )
             except SchedulingError as error:
                 unplanned.append({"batch_id": batch.id, "reason": error.message})
@@ -167,8 +176,8 @@ class RescheduleService:
                  "ends_at": item.ends_at.isoformat(timespec="seconds")}
                 for item in planned
             ]
-            after[batch.id] = {"from_step": from_step, "allocations": rows}
-            old = [row for row in self.allocations.for_batch(batch.id) if row.step_index >= from_step and row.kind == WORK]
+            after[batch.id] = {"from_step": from_step, "replan": replan, "allocations": rows}
+            old = [row for row in self.allocations.for_batch(batch.id) if row.step_index in replan and row.kind == WORK]
             new = [item for item in planned if item.kind == WORK]
             # 完成时间按全部工艺时间算：设备做完之后的静置同样推迟下游与交期
             old_end = self.schedule.batch_end(batch)
@@ -260,7 +269,11 @@ class RescheduleService:
                 stale.append(f"{batch_id} 的时间线在建议生成后被改过")
                 continue
             from_step = int(proposal.after[batch_id]["from_step"])
-            if any(index >= from_step for index in self._live_indices(batch)):
+            replanned = self._replanned(proposal.after[batch_id])
+            opened = self._live_indices(batch)
+            if replanned is not None and opened & replanned:
+                stale.append(f"{batch_id} 第 {min(opened & replanned) + 1} 步在建议生成后已经开出")
+            elif replanned is None and any(index >= from_step for index in opened):
                 stale.append(f"{batch_id} 第 {from_step + 1} 步之后又有步骤开出")
         if stale:
             proposal.state = "stale"
@@ -320,8 +333,9 @@ class RescheduleService:
         }
         for batch_id, plan in proposal.after.items():
             from_step = int(plan["from_step"])
+            replanned = self._replanned(plan)
             for row in self.allocations.for_batch(batch_id):
-                if row.step_index >= from_step:
+                if (row.step_index in replanned) if replanned is not None else (row.step_index >= from_step):
                     self.db.delete(row)
         self.db.flush()
         for batch_id, plan in proposal.after.items():

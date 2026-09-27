@@ -193,6 +193,8 @@ def _with_assists(
     """主设备与每种协同资源在同一时段都空着的最早时刻，以及选中的协同工位。
 
     协同资源与主设备一起取得、一起释放：任何一种凑不齐，这一步就整体往后排，不会只占到一半。
+    评估每个候选时，主设备与已经选中的协同工位在这一时段的占用先临时记上：它们可能与候选同属一台
+    资产，份数要一起算——各自与原有时间线比较，会选中一个与主设备抢同一份容量的候选，而放过真正空着的。
     """
     options = {
         capability: _assist_candidates(context, step, index, capability, {main.id})
@@ -201,16 +203,25 @@ def _with_assists(
     for _ in range(500):
         chosen: list[StationSpec] = []
         latest = begin
-        for capability, stations in options.items():
-            free = [s for s in stations if s.id not in {c.id for c in chosen}]
-            if not free:
-                raise SchedulingError(
-                    f"第 {index + 1} 步「{step.get('name')}」的协同资源 {capability} 没有另一台可用工位", index,
-                )
-            when, station = min(((earliest_free(context, s.id, begin, duration), s) for s in free),
-                                key=lambda pair: (pair[0], pair[1].id))
-            chosen.append(station)
-            latest = max(latest, when)
+        slot = Interval(begin, begin + duration)
+        tentative = [main.id]
+        context.busy.setdefault(main.id, []).append(slot)
+        try:
+            for capability, stations in options.items():
+                free = [s for s in stations if s.id not in {c.id for c in chosen}]
+                if not free:
+                    raise SchedulingError(
+                        f"第 {index + 1} 步「{step.get('name')}」的协同资源 {capability} 没有另一台可用工位", index,
+                    )
+                when, station = min(((earliest_free(context, s.id, begin, duration), s) for s in free),
+                                    key=lambda pair: (pair[0], pair[1].id))
+                chosen.append(station)
+                latest = max(latest, when)
+                context.busy.setdefault(station.id, []).append(slot)
+                tentative.append(station.id)
+        finally:
+            for station_id in tentative:
+                context.busy[station_id].remove(slot)
         if latest == begin:
             return begin, chosen
         begin = earliest_free(context, main.id, latest, duration)
@@ -229,15 +240,21 @@ def plan_steps(
     *, first_index: int = 0, previous_end: datetime | None = None,
     previous_station: str | None = None, step_ends: dict[int, datetime] | None = None,
     exclusive_carrier: bool | Collection[str] = False,
+    frozen: Collection[int] = (), known_ends: dict[int, datetime] | None = None,
+    known_where: dict[int, str | None] | None = None,
+    plate_state: dict[str, tuple[datetime, str]] | None = None,
 ) -> list[PlannedAllocation]:
     """按步骤资源需求排程。
 
     人工、等待、审核节点不占工位（除非显式声明），但它们的时长照样往后推时间线——
     否则下游设备步骤会被排到一个「上一步还没做完」的时刻。
 
-    只重排后半段时传 `first_index`、`previous_end`（上一步实际或计划结束时刻）与
-    `previous_station`：尾段不能早于上一步结束开工，换工位要排转运，硬时限也从上一步
-    结束起算——而不是从操作员填的「期望开始时间」起算。
+    只重排一部分时，`first_index` 之前的步骤与 `frozen` 里的步骤（已开出、已判定）不排，它们的
+    实际或计划结束由 `known_ends` 给出、结束后载具所在的工位由 `known_where` 给出：每个待排步骤
+    从它在图上最晚结束的那个前驱接手——不能早于前驱结束开工，换工位要排转运，硬时限也从前驱结束
+    起算。并行图里「列表上的上一项」不一定是前驱，不能用一个「上一步完成时刻」概括。
+    `plate_state` 给出各载具角色上一次设备动作结束的时刻与所在工位（独占载具时用）。
+    没有给 `known_ends` 的老调用方式仍可用 `previous_end` / `previous_station` 表示范围之前的尾段。
 
     `step_ends` 传入时填上每一步（含不占工位的步骤）的计划结束：批次完成看它们的最大值，
     设备时间窗之后的静置、培养、冷却同样是工艺时间。
@@ -254,16 +271,23 @@ def plan_steps(
     tail_end = previous_end or start_from
     tail_station = previous_station
     before = predecessors(steps)
+    skipped = set(frozen)
     # 每一步结束的时刻与结束后载具所在的工位：后继从最晚结束的那个前驱接手
-    ends: dict[int, datetime] = {}
-    where: dict[int, str | None] = {}
+    ends: dict[int, datetime] = {
+        index: end for index, end in (known_ends or {}).items() if index < first_index or index in skipped
+    }
+    where: dict[int, str | None] = {index: (known_where or {}).get(index) for index in ends}
     # 独占载具时每块板（按角色）上一次设备动作结束的时刻与所在工位
     roles = {""} if exclusive_carrier is True else set(exclusive_carrier or ())
-    plate_free: dict[str, datetime] = {}
-    plate_at: dict[str, str] = {}
+    plate_free: dict[str, datetime] = {
+        role: moment for role, (moment, _) in (plate_state or {}).items() if role in roles
+    }
+    plate_at: dict[str, str] = {
+        role: station for role, (_, station) in (plate_state or {}).items() if role in roles
+    }
 
     for index, step in enumerate(steps):
-        if index < first_index:
+        if index < first_index or index in skipped:
             continue
         known = [parent for parent in before[index] if parent in ends]
         if known:

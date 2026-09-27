@@ -33,14 +33,15 @@ class BatchRepository(ScopedRepository[Batch]):
     def active(self) -> list[Batch]:
         return list(self.query().filter(Batch.state.notin_(TERMINAL_STATES)).all())
 
-    def lock(self, batch_id: str) -> Batch | None:
+    def lock(self, batch_id: str, *, skip_locked: bool = False) -> Batch | None:
         """取批次行锁并刷新内存中的旧值。
 
         保持 / 终止与执行器投递指令都先拿这把锁：否则「批次已保持」与「指令已发出」
         可以各自读到对方提交前的状态，排在队里的动作指令会在保持之后照发。
+        `skip_locked`：别人正锁着就不等，返回 None（执行器兜底扫描用，控制回路不能卡在锁上）。
         """
         query = self.query().filter(Batch.id == batch_id).populate_existing()
-        query = query.with_for_update()
+        query = query.with_for_update(skip_locked=skip_locked)
         return query.first()
 
     def ids_for_recipe(self, recipe_id: str) -> list[str]:
@@ -141,12 +142,15 @@ class AllocationRepository(Repository[Allocation]):
     def delete_for_batch(self, batch_id: str) -> None:
         self.db.query(Allocation).filter(Allocation.batch_id == batch_id).delete()
 
-    def delete_from_step(self, batch_id: str, step_index: int) -> int:
-        """只删未执行部分。加急与重排不能动已执行或不可中断的步骤。"""
+    def delete_steps(self, batch_id: str, step_indices) -> int:
+        """只删要重排的那些步骤的时间窗。已开出、已判定的步骤不在其中，原地保留。"""
+        indices = sorted(set(step_indices))
+        if not indices:
+            return 0
         return (
             self.db.query(Allocation)
-            .filter(Allocation.batch_id == batch_id, Allocation.step_index >= step_index)
-            .delete()
+            .filter(Allocation.batch_id == batch_id, Allocation.step_index.in_(indices))
+            .delete(synchronize_session="fetch")
         )
 
     def open_count_for_station(self, station_id: str) -> int:
@@ -184,26 +188,17 @@ class AllocationRepository(Repository[Allocation]):
         )
         return [row[0] for row in rows]
 
-    def shift_all_from_step(self, batch_id: str, step_index: int, delta) -> int:
-        """把第 step_index 步起的全部时间窗（含转运、清洗）整体后移。"""
+    def shift_steps(self, batch_id: str, shifts: dict) -> int:
+        """按步骤各自平移时间窗（含转运、清洗、协同）：{步骤下标: 平移量}。不在表里的步骤不动。"""
         moved = 0
         for allocation in self.for_batch(batch_id):
-            if allocation.step_index >= step_index:
-                allocation.starts_at = allocation.starts_at + delta
-                allocation.ends_at = allocation.ends_at + delta
-                moved += 1
-        return moved
-
-    def shift_from_step(self, batch_id: str, step_index: int, minutes: float) -> None:
-        from datetime import timedelta
-
-        delta = timedelta(minutes=minutes)
-        for allocation in self.for_batch(batch_id):
-            if allocation.step_index < step_index:
+            delta = shifts.get(allocation.step_index)
+            if not delta:
                 continue
+            allocation.starts_at = allocation.starts_at + delta
             allocation.ends_at = allocation.ends_at + delta
-            if allocation.step_index > step_index or allocation.kind != WORK:
-                allocation.starts_at = allocation.starts_at + delta
+            moved += 1
+        return moved
 
 
 class SampleRepository(ScopedRepository[Sample]):

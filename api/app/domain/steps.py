@@ -424,8 +424,9 @@ def assist_capabilities(step: dict[str, Any]) -> list[str]:
 
 
 def labware_role(step: dict[str, Any]) -> str:
-    """这一步用哪块载具：空串是批次的主载具；多块板并行时按角色取板。"""
-    return str((step or {}).get("labware") or "").strip()
+    """这一步用哪块载具：空串是批次的主载具（写「main」也是主载具）；多块板并行时按角色取板。"""
+    role = str((step or {}).get("labware") or "").strip()
+    return "" if role == "main" else role
 
 
 def assist_issues(step: dict[str, Any], capabilities: dict[str, dict]) -> list[str]:

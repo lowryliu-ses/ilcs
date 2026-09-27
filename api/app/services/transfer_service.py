@@ -404,6 +404,9 @@ class TransferService:
             if other is not None and other.state not in ENDED_BATCH_STATES:
                 raise StateConflict(f"载具已绑定在用批次 {other.id}", code="labware_in_use")
         role = (role or "").strip()
+        if role == "main":
+            # 实体分装落到主载具时容器号就是「批次容器:main」：第二块板再叫 main 会与主载具混在一起
+            raise ValidationFailed("角色名 main 保留给主载具：绑定主载具时不写角色，第二块板请换一个角色名")
         if labware.batch_id == batch.id and (labware.role or "") != role and labware.state != "retired":
             raise StateConflict(
                 f"载具已以角色「{labware.role or '主载具'}」绑定在本批次，先解绑再换角色", code="labware_role_taken",

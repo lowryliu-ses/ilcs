@@ -168,6 +168,15 @@ def abort(
     )
 
 
+@router.post("/{batch_id}/abort/reconcile")
+def reconcile_abort(batch_id: str, db: DbSession, user: CurrentUser, ctx=require("batch.control")):
+    """终止中的批次重新汇总：全部设备都已确认停止（或现场核查已有结论）就收尾，否则返回仍在等待的工位。
+
+    结果只取决于库里的停止确认，重复调用没有副作用，不需要幂等键与签名。
+    """
+    return BatchService(db, ctx).reconcile_abort(batch_id, user)
+
+
 @router.post("/{batch_id}/skip")
 def skip_step(
     batch_id: str, payload: SkipStepIn, db: DbSession, guard: IdempotencyGuard, user: CurrentUser,
