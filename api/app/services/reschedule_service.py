@@ -22,7 +22,7 @@ from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict
 from ..domain import tasks as task_rules
-from ..domain.scheduling import WORK, Interval, SchedulingError, plan_steps
+from ..domain.scheduling import WORK, Interval, SchedulingError, plan_steps, planned_finish
 from ..domain.steps import normalize
 from ..models import Allocation, Batch, ScheduleProposal, StepRun, User
 from ..repositories.batches import AllocationRepository, BatchRepository
@@ -34,6 +34,14 @@ TRIGGERS = {
     "manual": "人工请求", "dependency": "依赖冲突",
 }
 STATE_LABEL = {"pending": "待确认", "applied": "已应用", "dismissed": "已驳回", "stale": "已作废", "failed": "应用失败"}
+
+
+class _Stale(Exception):
+    """应用时按最终占用发现建议已不成立：只在本模块内传递，撤销保存点后转成 409。"""
+
+    def __init__(self, problems: list[str]):
+        super().__init__("；".join(problems))
+        self.problems = problems
 
 
 def _window(row: Allocation) -> dict:
@@ -138,14 +146,17 @@ class RescheduleService:
                 continue
             candidates = [begin_default, *([floor] if floor else []), *(planned_end[ref] for ref in upstream[batch_id] if ref in planned_end)]
             begin = max(candidates)
+            ends: dict = {}
+            exclusive = self.schedule.carrier_exclusive(batch)
             try:
                 if from_step == 0:
-                    planned = plan_steps(steps, begin, context)
+                    planned = plan_steps(steps, begin, context, step_ends=ends, exclusive_carrier=exclusive)
                 else:
                     anchor, station = self.schedule._tail_anchor(batch, steps, from_step, protected)
                     planned = plan_steps(
                         steps, max(begin, anchor) if anchor else begin, context,
                         first_index=from_step, previous_end=anchor, previous_station=station,
+                        step_ends=ends, exclusive_carrier=exclusive,
                     )
             except SchedulingError as error:
                 unplanned.append({"batch_id": batch.id, "reason": error.message})
@@ -159,8 +170,9 @@ class RescheduleService:
             after[batch.id] = {"from_step": from_step, "allocations": rows}
             old = [row for row in self.allocations.for_batch(batch.id) if row.step_index >= from_step and row.kind == WORK]
             new = [item for item in planned if item.kind == WORK]
-            old_end = max((row.ends_at for row in old), default=None)
-            new_end = max((item.ends_at for item in new), default=None)
+            # 完成时间按全部工艺时间算：设备做完之后的静置同样推迟下游与交期
+            old_end = self.schedule.batch_end(batch)
+            new_end = planned_finish(planned, ends)
             if new_end is not None:
                 planned_end[batch.id] = new_end
             old_station = {row.step_index: row.station_id for row in old}
@@ -258,23 +270,26 @@ class RescheduleService:
                 "重排建议已过期，请重新生成", {"blocked": [{"key": "stale", "label": text} for text in stale]},
                 code="proposal_stale",
             )
-        from ..repositories.resources import StationRepository
-
-        asset_of = {station.id: station.asset_id for station in StationRepository(self.db, self.ctx).list() if station.asset_id}
+        try:
+            with self.db.begin_nested():
+                self._replace(proposal)
+                problems = self._final_problems(proposal)
+                if problems:
+                    raise _Stale(problems)
+        except _Stale as stale:
+            # 建议生成后外部事实变了（新增维护、资产容量、工位不可用、别的批次占了同一时段）：
+            # 整份建议作废，时间线保持原样，提示重新计算
+            proposal.state = "stale"
+            proposal.note = "；".join(stale.problems)
+            if not auto:
+                self.db.commit()
+            raise StateConflict(
+                "重排建议已过期，请重新生成",
+                {"blocked": [{"key": "stale", "label": text} for text in stale.problems]},
+                code="proposal_stale",
+            ) from None
         for batch_id, plan in proposal.after.items():
             from_step = int(plan["from_step"])
-            for row in self.allocations.for_batch(batch_id):
-                if row.step_index >= from_step:
-                    self.db.delete(row)
-            self.db.flush()
-            for row in plan["allocations"]:
-                self.db.add(Allocation(
-                    batch_id=batch_id, step_index=row["step_index"], station_id=row["station_id"],
-                    asset_id=asset_of.get(row["station_id"], ""), kind=row["kind"],
-                    starts_at=datetime.fromisoformat(row["starts_at"]), ends_at=datetime.fromisoformat(row["ends_at"]),
-                ))
-            self.db.flush()
-            self.schedule._refuse_overlaps(batch_id)
             change = (proposal.impact or {}).get(batch_id) or {}
             self.audit.record(
                 user, "按重排建议重排", batch_id, before=change.get("old_end") or "—", after=change.get("new_end") or "—",
@@ -291,6 +306,47 @@ class RescheduleService:
         if not auto:
             self.db.commit()
         return self.out(proposal)
+
+    def _replace(self, proposal: ScheduleProposal) -> None:
+        """整组替换：先把所有受影响批次的可替换尾段一起移走，再写入整份建议。
+
+        逐批「删旧 → 写新 → 检查」时，第一个批次的新时间窗会撞上后面批次还没删的旧时间窗，
+        一个整体可行的换序（A、B 互换）就被拒绝了。
+        """
+        from ..repositories.resources import StationRepository
+
+        asset_of = {
+            station.id: station.asset_id for station in StationRepository(self.db, self.ctx).list() if station.asset_id
+        }
+        for batch_id, plan in proposal.after.items():
+            from_step = int(plan["from_step"])
+            for row in self.allocations.for_batch(batch_id):
+                if row.step_index >= from_step:
+                    self.db.delete(row)
+        self.db.flush()
+        for batch_id, plan in proposal.after.items():
+            for row in plan["allocations"]:
+                self.db.add(Allocation(
+                    batch_id=batch_id, step_index=row["step_index"], station_id=row["station_id"],
+                    asset_id=asset_of.get(row["station_id"], ""), kind=row["kind"],
+                    starts_at=datetime.fromisoformat(row["starts_at"]), ends_at=datetime.fromisoformat(row["ends_at"]),
+                ))
+        self.db.flush()
+
+    def _final_problems(self, proposal: ScheduleProposal) -> list[str]:
+        """按写入后的最终占用检查一次：工位通道、共享资产容量（含维护 / 校准预约）与工位可用性。"""
+        problems: list[str] = []
+        for batch_id in proposal.after:
+            try:
+                self.schedule._refuse_overlaps(batch_id)
+            except StateConflict as error:
+                detail = error.detail if isinstance(error.detail, dict) else {}
+                labels = [row["label"] for row in detail.get("blocked", [])]
+                problems.extend(labels or [error.message])
+        unavailable = self.schedule._unavailable_stations()
+        used = {row["station_id"] for plan in proposal.after.values() for row in plan["allocations"]}
+        problems.extend(unavailable[station_id] for station_id in sorted(used) if station_id in unavailable)
+        return list(dict.fromkeys(problems))
 
     def dismiss(self, proposal_id: str, note: str, user: User) -> dict:
         if not self.ctx.has("batch.schedule"):

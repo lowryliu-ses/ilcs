@@ -329,8 +329,9 @@ ASSETS = [
          location="岛 #4", stations=["ST-05"], capacity=1, cal_days=365),
     dict(asset_no="AS-0007", name="手套箱组装台", model="GB-ASM", serial="GB-001",
          location="岛 #5", stations=["ST-06"], capacity=1, cal_days=365),
+    # 8 通道充放电柜：资产容量与工位通道数一致，同一时刻最多 8 份作业
     dict(asset_no="AS-0008", name="电性能测试柜", model="EC-TESTER", serial="EC-TESTER-0001",
-         location="岛 #6", stations=["ST-07"], capacity=1, cal_days=365),
+         location="岛 #6", stations=["ST-07"], capacity=8, cal_days=365),
     # 手工工作台：没有适配器，也明确不适用校准
     dict(asset_no="AS-0009", name="称量工作台", model="BENCH-W", serial="", location="备料间",
          stations=[], capacity=1, cal_days=0, calibration_applicable=False,

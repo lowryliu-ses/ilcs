@@ -122,6 +122,10 @@ class TaskService:
             "priority": task.priority,
             "parent_id": task.parent_id or "",
             "depends_on": list(task.depends_on or []),
+            # 从父任务继承来的上游：拆分出来的子任务同样要等它们
+            "inherited_depends_on": [
+                ref for ref in self.effective_dependencies(task) if ref not in (task.depends_on or [])
+            ],
             "children": [
                 {"id": child.id, "title": child.title, "batch_id": child.batch_id,
                  "state": (child_state := self.derive_state(child)),
@@ -204,10 +208,21 @@ class TaskService:
 
     # ---------- 任务树与依赖 ----------
 
+    def effective_dependencies(self, task: ExperimentTask) -> list[str]:
+        """这个任务真正要等的上游：自己声明的，加上每一层父任务声明的。
+
+        拆分只是把一个任务切成几份执行，不能借此绕过父任务的外部依赖。环检测、排程下限、
+        开跑检查、改依赖时的在途限制都按这一份算。
+        """
+        refs = list(task.depends_on or [])
+        for ancestor in self.ancestors(task):
+            refs.extend(ancestor.depends_on or [])
+        return list(dict.fromkeys(refs))
+
     def dependency_blockers(self, task: ExperimentTask) -> list[dict]:
         """还没满足的上游：上游任务的批次运行没结束（父任务要全部子任务结束）或已被取消。"""
         rows: list[dict] = []
-        for upstream_id in task.depends_on or []:
+        for upstream_id in self.effective_dependencies(task):
             upstream = self.tasks.get(upstream_id)
             if upstream is None:
                 rows.append({"task_id": upstream_id, "label": f"上游任务 {upstream_id} 不存在或不在本组织"})
@@ -223,8 +238,8 @@ class TaskService:
         return rows
 
     def upstream_batches(self, task: ExperimentTask) -> list:
-        """上游任务对应的批次（父任务展开到叶子）。排程据此算下游最早开工时刻。"""
-        return self.leaf_batches(list(task.depends_on or []))
+        """上游任务对应的批次（含从父任务继承的上游，父任务展开到叶子）。排程据此算下游最早开工时刻。"""
+        return self.leaf_batches(self.effective_dependencies(task))
 
     def ancestors(self, task: ExperimentTask) -> list[ExperimentTask]:
         chain: list[ExperimentTask] = []
@@ -274,12 +289,23 @@ class TaskService:
             f"{ref} 是本任务的子任务，父任务不能依赖自己的子任务" for ref in wanted
             if self._is_descendant(ref, task.id)
         ]
+        issues += [text for text in self._inherited_cycles(task.id, wanted) if text not in issues]
         if issues:
             raise StateConflict("依赖设置不成立", {"blocked": [{"key": "dependency", "label": text} for text in issues]},
                                 code="task_dependency_invalid")
-        batch = self.batches.get(task.batch_id) if task.batch_id else None
-        if batch is not None and batch.state not in {"planned", "scheduled"} and set(wanted) - set(task.depends_on or []):
-            raise StateConflict("批次已下发，不能再给它加上游依赖", code="batch_in_flight")
+        if set(wanted) - set(task.depends_on or []):
+            # 子任务继承父任务的依赖：给父任务加上游，等于给它每个后代的批次加上游
+            dispatched = [
+                (leaf, batch) for leaf, batch in self.leaf_batches([task.id])
+                if batch is not None and batch.state not in {"planned", "scheduled"}
+            ]
+            if dispatched:
+                leaf, batch = dispatched[0]
+                raise StateConflict(
+                    "批次已下发，不能再给它加上游依赖" if leaf.id == task.id
+                    else f"子任务 {leaf.id} 的批次 {batch.id} 已下发，不能再给父任务加上游依赖（子任务继承父任务的依赖）",
+                    code="batch_in_flight",
+                )
         before = list(task.depends_on or [])
         task.depends_on = wanted
         task.updated_at = now()
@@ -290,6 +316,41 @@ class TaskService:
         )
         self.db.commit()
         return self.out(task, detail=True)
+
+    def _inherited_cycles(self, task_id: str, wanted: list[str]) -> list[str]:
+        """算上继承的依赖会不会成环。
+
+        本任务和它的全部后代都要等 wanted；从 wanted 出发沿「要等谁」往上走——每个任务要等它的有效
+        上游，父任务还要等它的全部子任务——走回本任务或它的任一后代就是环。
+        """
+        targets = {task_id} | self._descendant_ids(task_id)
+        issues: list[str] = []
+        for start in wanted:
+            stack, seen = [start], set()
+            while stack:
+                current = stack.pop()
+                if current in targets:
+                    issues.append(f"依赖 {start} 会形成环：{start} 直接、间接或通过父任务依赖本任务或它的子任务")
+                    break
+                if current in seen:
+                    continue
+                seen.add(current)
+                row = self.tasks.get(current)
+                if row is None:
+                    continue
+                stack.extend(self.effective_dependencies(row))
+                stack.extend(child.id for child in self.tasks.children(row.id))
+        return issues
+
+    def _descendant_ids(self, task_id: str) -> set[str]:
+        found: set[str] = set()
+        pending = [task_id]
+        while pending and len(found) < 1000:
+            for child in self.tasks.children(pending.pop()):
+                if child.id not in found:
+                    found.add(child.id)
+                    pending.append(child.id)
+        return found
 
     def _is_descendant(self, candidate: str, ancestor: str) -> bool:
         row = self.tasks.get(candidate)

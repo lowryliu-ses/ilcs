@@ -366,6 +366,9 @@ class StationService:
         # 提示里不说是被哪个组织占用，免得泄露别的组织的台账。
         if self.db.get(Station, payload["id"]) is not None:
             raise StateConflict(f"工位标识 {payload['id']} 已被占用，请换一个标识", code="station_id_taken")
+        self._require_channels_fit(
+            payload["id"], max(1, int(payload.get("channels") or 1)), payload.get("asset_id", ""),
+        )
         signature = self.identity.consume_signature(signature_id, user, "登记新工位")
         station = Station(
             id=payload["id"], org_id=self.ctx.org_id, asset_id=payload.get("asset_id", ""),
@@ -543,6 +546,11 @@ class StationService:
         rejected = [k for k in changes if k not in allowed]
         if rejected:
             raise DomainError(f"这些字段不能在这里修改：{'、'.join(rejected)}；能力极限请用极限编辑并签名")
+        if "channels" in changes or "asset_id" in changes:
+            self._require_channels_fit(
+                station.id, int(changes.get("channels", station.channels) or 1),
+                changes.get("asset_id", station.asset_id),
+            )
         before = {k: getattr(station, k) for k in changes}
         for key, value in changes.items():
             setattr(station, key, value)
@@ -553,6 +561,20 @@ class StationService:
         )
         self.db.commit()
         return {"id": station_id}
+
+    def _require_channels_fit(self, station_id: str, channels: int, asset_id: str) -> None:
+        """工位通道数不能超过所属资产容量：资产同一时刻最多承接 capacity 份作业，排程与执行都按它计。"""
+        from ..repositories.resources import AssetRepository
+
+        if not asset_id:
+            return
+        asset = AssetRepository(self.db, self.ctx).get(asset_id)
+        if asset is not None and channels > max(1, asset.capacity):
+            raise StateConflict(
+                f"工位 {station_id} 有 {channels} 个并行通道，超过资产 {asset.asset_no} 的容量 {asset.capacity}："
+                f"资产同一时刻最多承接 {asset.capacity} 份作业，请先调大资产容量或减少通道数",
+                code="channels_exceed_asset_capacity",
+            )
 
     def set_station_retired(self, station_id: str, retired: bool, user: User) -> dict:
         """停用 / 启用工位。一律不删：历史工步分配与检查点都指向它。"""
@@ -650,10 +672,22 @@ class StationService:
         if status not in {"idle", "running", "fault", "offline"}:
             raise DomainError("工位状态无效")
         before = f"{station.status}, clean={station.clean}"
+        used_by = station.dirty_batch_id
         station.clean = clean
         station.status = status
+        if clean:
+            # 清洗确认：这台设备重新可以给别的批次用，等清洗的排队动作随即投递
+            station.dirty_batch_id = ""
+            from .alarm_service import AlarmService
+
+            AlarmService(self.db, self.ctx).resolve_condition(
+                f"station:{station_id}:awaiting_clean", f"{user.display_name} 确认 {station_id} 已清洗",
+            )
         self.stations.bump(station)
-        self.audit.record(user, "确认工位就绪状态", station_id, before=before, after=f"{status}, clean={clean}")
+        self.audit.record(
+            user, "确认工位就绪状态", station_id, before=before, after=f"{status}, clean={clean}",
+            detail=f"批次 {used_by} 用后的清洗已确认" if clean and used_by else "",
+        )
         self.db.commit()
         return {
             "id": station_id, "status": station.status, "clean": station.clean,

@@ -1298,6 +1298,7 @@ function commandLabel(state: string): string {
     {
       sent: '已发送', accepted: '设备已接受', running: '执行中', done: '已完成', unknown: '结果未知',
       manual: '人工核查中', cancelled: '已撤回', not_executed: '确认未执行', partial: '确认部分执行',
+      held: '设备已保持', superseded: '已由续跑接续',
     }[state] ?? state
   );
 }

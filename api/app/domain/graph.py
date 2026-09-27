@@ -273,6 +273,21 @@ def all_completed(steps: list[dict[str, Any]], completed: set[str]) -> bool:
 
 
 
+def lead_min(steps: list[dict[str, Any]], index: int) -> float:
+    """第 index 步开工之前必须做完的最长一串前驱的时长（分钟）。
+
+    顺序流程就是它前面所有步骤的时长之和；依赖图里只算它的前驱链，与它并行的步骤不算在前面。
+    """
+    before = predecessors(steps)
+    longest: dict[int, float] = {}
+    for position in range(index + 1):
+        longest[position] = max(
+            (longest[parent] + float(steps[parent].get("dur") or 0) for parent in before[position]),
+            default=0.0,
+        )
+    return longest.get(index, 0.0)
+
+
 def critical_path_min(steps: list[dict[str, Any]]) -> float:
     """按计划时长算的最长路径（分钟）。并行分支不再把总时长简单相加；条件分支按最长的那条算。"""
     before = predecessors(steps)

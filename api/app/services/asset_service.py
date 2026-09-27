@@ -268,6 +268,17 @@ class AssetService:
                 "标记「不适用校准」必须写明理由",
                 code="calibration_exempt_reason_required",
             )
+        if "capacity" in changes:
+            wider = [
+                station for station in self.stations.for_asset(asset.id)
+                if (station.channels or 1) > max(1, int(changes["capacity"] or 1))
+            ]
+            if wider:
+                raise StateConflict(
+                    f"工位 {wider[0].id} 有 {wider[0].channels} 个并行通道，资产容量不能低于它："
+                    f"排程与执行按资产容量统一计数，容量调小会让通道用不上",
+                    code="channels_exceed_asset_capacity",
+                )
         before = {key: getattr(asset, key) for key in changes}
         for key, value in changes.items():
             setattr(asset, key, value)
@@ -286,6 +297,12 @@ class AssetService:
         station = self.stations.get(station_id)
         if not station:
             raise NotFound("工位不存在")
+        if (station.channels or 1) > max(1, asset.capacity):
+            raise StateConflict(
+                f"工位 {station.id} 有 {station.channels} 个并行通道，超过资产 {asset.asset_no} 的容量 {asset.capacity}："
+                f"请先调大资产容量",
+                code="channels_exceed_asset_capacity",
+            )
         before = station.asset_id
         station.asset_id = asset.id
         self.audit.record(
@@ -402,15 +419,23 @@ class AssetService:
 
     def impacted_allocations(self, asset_id: str, window: Window) -> list[dict]:
         """维护插入会影响哪些已排程工步。不静默移动正在执行或不可中断的步骤。"""
+        from ..repositories.workflow import StepRunRepository
+
         station_ids = {s.id for s in self.stations.for_asset(asset_id)}
+        runs = StepRunRepository(self.db, self.ctx)
         rows = []
         for batch in self.batches.active():
+            # 并行分支时开着的步骤不止「当前步骤」一个：设备上正在执行、保持或结果未知的每一步都不自动移动
+            opened = {
+                run.step_index for run in runs.for_batch(batch.id)
+                if run.state in {"ready", "running", "waiting", "unknown"}
+            }
             for allocation in self.allocations.for_batch(batch.id):
                 if allocation.station_id not in station_ids:
                     continue
                 if not Window(allocation.starts_at, allocation.ends_at).overlaps(window):
                     continue
-                executing = batch.state == "running" and allocation.step_index == batch.current_step
+                executing = batch.state in {"running", "paused", "fault"} and allocation.step_index in opened
                 rows.append(
                     {
                         "batch_id": batch.id,

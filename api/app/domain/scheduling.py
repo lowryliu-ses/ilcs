@@ -82,25 +82,38 @@ def _station_free(context: SchedulingContext, station_id: str, not_before: datet
     raise SchedulingError(f"{station_id} 在可见时间范围内没有空闲通道", -1)
 
 
-def _asset_load(context: SchedulingContext, asset_id: str, station_id: str, window: Interval):
-    """窗口内压在这台资产上的占用：预约 + 同资产其他工位的时间窗。返回 (份数, 最早结束时刻)。
-
-    份数按重叠区间直接相加，是并发量的上界：宁可多等一会儿，也不把容量排超。
-    """
-    load = 0
-    ends: list[datetime] = []
-    for interval, units in context.asset_bookings.get(asset_id, []):
+def peak_load(occupied: list[tuple[Interval, int]], window: Interval) -> int:
+    """窗口内同一时刻压着的最大份数。前后错开的两段占用不叠加；一段结束的时刻另一段才开始也不叠加。"""
+    events: list[tuple[datetime, int]] = []
+    for interval, units in occupied:
         if interval.start < window.end and interval.end > window.start:
-            load += units
-            ends.append(interval.end)
-    for other, mapped in context.station_asset.items():
-        if mapped != asset_id or other == station_id:
+            events.append((max(interval.start, window.start), units))
+            events.append((min(interval.end, window.end), -units))
+    # 同一时刻先结束再开始
+    events.sort(key=lambda event: (event[0], event[1]))
+    running = peak = 0
+    for _, delta in events:
+        running += delta
+        peak = max(peak, running)
+    return peak
+
+
+def _asset_load(context: SchedulingContext, asset_id: str, window: Interval):
+    """窗口内压在这台资产上的占用：预约 + 映射到它的全部工位（含本工位）的时间窗。
+
+    返回 (同一时刻的最大份数, 最早结束时刻)。工位通道数与资产容量是两道独立的约束：
+    本工位的并行作业同样占资产容量，不能因为工位通道约束另算了就把它排除在外。
+    """
+    occupied = list(context.asset_bookings.get(asset_id, []))
+    for station_id, mapped in context.station_asset.items():
+        if mapped != asset_id:
             continue
-        for interval in context.busy.get(other, []):
-            if interval.start < window.end and interval.end > window.start:
-                load += 1
-                ends.append(interval.end)
-    return load, (min(ends) if ends else None)
+        occupied.extend((interval, 1) for interval in context.busy.get(station_id, []))
+    ends = [
+        interval.end for interval, _ in occupied
+        if interval.start < window.end and interval.end > window.start
+    ]
+    return peak_load(occupied, window), (min(ends) if ends else None)
 
 
 def earliest_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
@@ -112,7 +125,7 @@ def earliest_free(context: SchedulingContext, station_id: str, not_before: datet
         if not asset_id:
             return cursor
         capacity = max(1, context.asset_capacity.get(asset_id, 1))
-        load, first_end = _asset_load(context, asset_id, station_id, Interval(cursor, cursor + duration))
+        load, first_end = _asset_load(context, asset_id, Interval(cursor, cursor + duration))
         if load + 1 <= capacity or first_end is None:
             return cursor
         cursor = max(first_end, cursor + timedelta(seconds=1))
@@ -161,7 +174,8 @@ def candidate_station_ids(context: SchedulingContext, step: dict[str, Any], inde
 def plan_steps(
     steps: list[dict[str, Any]], start_from: datetime, context: SchedulingContext,
     *, first_index: int = 0, previous_end: datetime | None = None,
-    previous_station: str | None = None,
+    previous_station: str | None = None, step_ends: dict[int, datetime] | None = None,
+    exclusive_carrier: bool = False,
 ) -> list[PlannedAllocation]:
     """按步骤资源需求排程。
 
@@ -171,6 +185,12 @@ def plan_steps(
     只重排后半段时传 `first_index`、`previous_end`（上一步实际或计划结束时刻）与
     `previous_station`：尾段不能早于上一步结束开工，换工位要排转运，硬时限也从上一步
     结束起算——而不是从操作员填的「期望开始时间」起算。
+
+    `step_ends` 传入时填上每一步（含不占工位的步骤）的计划结束：批次完成看它们的最大值，
+    设备时间窗之后的静置、培养、冷却同样是工艺时间。
+
+    `exclusive_carrier`：批次绑定了一块载具时，设备步骤与运行时一样一次只能有一个在用这块板——
+    并行分支上的设备步骤按步骤顺序一个接一个排，板换设备要排转运。
     """
     allocations: list[PlannedAllocation] = []
     not_before = start_from
@@ -180,6 +200,9 @@ def plan_steps(
     # 每一步结束的时刻与结束后载具所在的工位：后继从最晚结束的那个前驱接手
     ends: dict[int, datetime] = {}
     where: dict[int, str | None] = {}
+    # 独占载具时这块板上一次设备动作结束的时刻与所在工位
+    plate_free: datetime | None = None
+    plate_at: str | None = None
 
     for index, step in enumerate(steps):
         if index < first_index:
@@ -199,13 +222,19 @@ def plan_steps(
             where[index] = previous_station
             continue
         candidates = _candidates(context, step, index)
+        # 硬时限从前驱结束起算；独占载具时开工还要等板从上一次设备动作上空出来，并从那台设备搬过来
+        gap_from = previous_end
+        ready_from = previous_end
+        if exclusive_carrier and plate_free is not None:
+            ready_from = max(previous_end, plate_free)
+            previous_station = plate_at
 
         best: tuple[datetime, StationSpec, bool] | None = None
         for station in candidates:
             needs_transfer = previous_station is not None and station.id != previous_station
             ready_at = max(
                 not_before,
-                previous_end + (timedelta(minutes=context.transfer_min) if needs_transfer else timedelta()),
+                ready_from + (timedelta(minutes=context.transfer_min) if needs_transfer else timedelta()),
             )
             begin = earliest_free(context, station.id, ready_at, duration)
             if best is None or begin < best[0] or (begin == best[0] and station.id < best[1].id):
@@ -217,9 +246,9 @@ def plan_steps(
             transfer_duration = timedelta(minutes=context.transfer_min)
             carrier = min(
                 context.transfer_station_ids,
-                key=lambda sid: (earliest_free(context, sid, previous_end, transfer_duration), sid),
+                key=lambda sid: (earliest_free(context, sid, ready_from, transfer_duration), sid),
             )
-            transfer_start = earliest_free(context, carrier, previous_end, transfer_duration)
+            transfer_start = earliest_free(context, carrier, ready_from, transfer_duration)
             transfer = PlannedAllocation(index, carrier, transfer_start, transfer_start + transfer_duration, TRANSFER)
             allocations.append(transfer)
             _occupy(context, transfer)
@@ -230,7 +259,7 @@ def plan_steps(
         # 硬时限必须在转运把开工时间往后推之后再判：先判后推会放过转运车忙导致的超时
         hard = step.get("hard") or {}
         if "maxGapMin" in hard:
-            gap_min = (begin - previous_end).total_seconds() / 60
+            gap_min = (begin - gap_from).total_seconds() / 60
             if gap_min > float(hard["maxGapMin"]):
                 raise SchedulingError(
                     f"第 {index + 1} 步「{step.get('name')}」硬时限 {hard['maxGapMin']} min 无法满足："
@@ -255,8 +284,17 @@ def plan_steps(
 
         ends[index] = work.ends_at
         where[index] = station.id
+        plate_free, plate_at = work.ends_at, station.id
 
+    if step_ends is not None:
+        step_ends.update(ends)
     return allocations
+
+
+def planned_finish(allocations: list[PlannedAllocation], step_ends: dict[int, datetime]) -> datetime | None:
+    """一次排程的计划完成：全部步骤（含不占工位的等待）结束的最晚时刻。"""
+    candidates = [*step_ends.values(), *(a.ends_at for a in allocations if a.kind == WORK)]
+    return max(candidates) if candidates else None
 
 
 def makespan(allocations: list[PlannedAllocation]) -> timedelta:

@@ -9,6 +9,18 @@ DISPATCHING = {"dispatch", "resume", "retry"}
 # 会让设备物理动作的指令：实验动作 + 转运。执行门、联锁、保持撤回、工位忙闲都按它判；
 # 转运不在 DISPATCHING 里——它完成只是把板送到位，不代表步骤完成
 MOTION = DISPATCHING | {"transfer"}
+# 设备侧确定被占着的动作：在途，或设备已确认保持在动作中间
+ENGAGED_STATES = ("accepted", "running", "held")
+# 没有结论的动作：结果未知、人工核查中。可能已送达时同样占着设备
+UNSETTLED_STATES = ("unknown", "manual")
+_BATCH_ENDED = ("done", "aborted")
+
+
+def still_occupying(command: Command) -> bool:
+    """这条动作指令是否可能仍占着设备：在途、已保持，或结果未知且可能已送达。"""
+    return command.state in ENGAGED_STATES or (
+        command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent"
+    )
 
 
 class CommandRepository(ScopedRepository[Command]):
@@ -155,14 +167,40 @@ class CommandRepository(ScopedRepository[Command]):
         )
 
     def possibly_acting(self, batch_id: str, types: set[str]) -> list[Command]:
-        """设备侧可能仍在动作的指令：在途，或结果未知且可能已送达。"""
+        """设备侧可能仍在动作的指令：在途、已保持，或结果未知 / 人工核查中且可能已送达。"""
         return [
             command
             for command in self.db.query(Command)
             .filter(Command.batch_id == batch_id, Command.type.in_(sorted(types)))
+            .order_by(Command.created_at)
             .all()
-            if command.state in {"accepted", "running"}
-            or (command.state == "unknown" and command.delivery_state == "maybe_sent")
+            if still_occupying(command)
+        ]
+
+    def occupying(self, station_ids) -> list[Command]:
+        """这些工位上实际占着设备的动作指令。工位是跨组织共享的物理资源，不按组织过滤。
+
+        在途与已保持的动作按批次是否结束判断（批次结束前逐台确认过停止或完成）；结果未知的
+        动作不看批次状态——设备可能仍在动作，只有现场核查给出结论后才释放。
+        """
+        ids = sorted({station_id for station_id in station_ids if station_id})
+        if not ids:
+            return []
+        rows = (
+            self.db.query(Command, Batch.state)
+            .outerjoin(Batch, Batch.id == Command.batch_id)
+            .filter(
+                Command.station_id.in_(ids),
+                Command.type.in_(sorted(MOTION)),
+                Command.state.in_([*ENGAGED_STATES, *UNSETTLED_STATES]),
+            )
+            .order_by(Command.created_at)
+            .all()
+        )
+        return [
+            command for command, batch_state in rows
+            if (command.state in ENGAGED_STATES and batch_state not in _BATCH_ENDED)
+            or (command.state in UNSETTLED_STATES and command.delivery_state == "maybe_sent")
         ]
 
     def ever_delivered_for_run(self, step_run_id: str) -> bool:

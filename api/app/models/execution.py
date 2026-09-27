@@ -44,6 +44,8 @@ class Command(Base):
     after_command_id: Mapped[str] = mapped_column(String, default="", index=True)
     # 转运指令搬的是哪块板
     labware_id: Mapped[str] = mapped_column(String, default="")
+    # 保持 / 终止 / 续跑针对的动作指令：控制指令只确认它自己的目标，不代表同批次别的设备
+    target_command_id: Mapped[str] = mapped_column(String, default="")
 
 
 class ExecutorHeartbeat(Base):

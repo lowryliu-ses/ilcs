@@ -18,7 +18,9 @@ from ..domain.scheduling import (
     SchedulingContext,
     SchedulingError,
     makespan,
+    peak_load,
     plan_steps,
+    planned_finish,
 )
 from ..domain.steps import needs_station, normalize, resource_demand
 from ..models import Allocation, Batch, User
@@ -62,19 +64,49 @@ class ScheduleService:
     # ---------- 上下文 ----------
 
     def held_station_ids(self) -> set[str]:
+        """保持 / 故障中的批次占着、释放时间未知的工位。
+
+        不只是出问题的那一步：并行分支上设备侧仍被占着的每一台（在途、已保持、结果未知）都算。
+        """
+        from ..repositories.execution import MOTION, CommandRepository
+
+        commands = CommandRepository(self.db, self.ctx)
         held = set()
         for batch in self.batches.by_state(*HELD_STATES):
             allocation = self.allocations.work_step(batch.id, batch.current_step)
             if allocation:
                 held.add(allocation.station_id)
+            held.update(command.station_id for command in commands.possibly_acting(batch.id, MOTION))
         return held
+
+    def _busy(self, exclude_batch_ids: set[str] | None) -> dict[str, list[Interval]]:
+        """工位时间线：未结束批次的时间窗，加上待清洗设备的预计清洗占用。
+
+        批次完成时它剩下的清洗时间窗会随收尾释放；设备在清洗确认前实际不会给别的批次用，
+        排程也不能把它当成空闲。
+        """
+        busy = self.allocations.busy_timeline(exclude_batch_ids)
+        moment = now()
+        for station in self.stations.list():
+            if station.clean or station.dirty_batch_id in (exclude_batch_ids or set()):
+                continue
+            busy.setdefault(station.id, []).append(
+                Interval(moment, moment + timedelta(minutes=max(1, settings.clean_min))),
+            )
+        return busy
+
+    def carrier_exclusive(self, batch: Batch) -> bool:
+        """批次绑定了载具：运行时同一块板一次只在一台设备上，排程也按这个排。"""
+        from .transfer_service import TransferService
+
+        return TransferService(self.db, self.ctx).for_batch(batch.id) is not None
 
     def context(
         self, exclude_batch_ids: set[str] | None = None, prefer: str | None = None, allow_unclean: bool = True
     ) -> SchedulingContext:
         return SchedulingContext(
             stations=self.stations.specs(),
-            busy=self.allocations.busy_timeline(exclude_batch_ids),
+            busy=self._busy(exclude_batch_ids),
             held_station_ids=self.held_station_ids(),
             # 失联 / 心跳超时的设备、处于维护或已退役资产上的工位不承接新排程
             unavailable_station_ids=self._unavailable_stations(),
@@ -125,7 +157,12 @@ class ScheduleService:
         return ExperimentTaskRepository(self.db, self.ctx).get(batch.task_id) if batch.task_id else None
 
     def batch_end(self, batch: Batch) -> datetime | None:
-        """批次结束（或计划结束）的时刻：已完成看最后一步的实际结束，其余看设备时间窗的计划结束。"""
+        """批次结束（或计划结束）的时刻。
+
+        已完成看最后一步的实际结束。其余按步骤依赖往后推：已结束的步骤用实际结束，设备步骤用时间窗，
+        不占工位的等待 / 人工 / 审核步骤从前驱结束起加上时长——设备做完之后的静置、培养、冷却
+        同样是工艺时间，下游开工与交期都要等它们。
+        """
         if batch.state == "done":
             from ..models import StepRun
 
@@ -134,8 +171,40 @@ class ScheduleService:
                 if row.ended_at
             ]
             return max(ended) if ended else now()
-        work = [a for a in self.allocations.for_batch(batch.id) if a.kind == WORK]
-        return max((a.ends_at for a in work), default=None)
+        from ..domain import graph
+        from ..domain import workflow as flow
+        from ..domain.steps import step_id_of
+        from ..repositories.workflow import StepRunRepository
+
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        work = {a.step_index: a for a in self.allocations.for_batch(batch.id) if a.kind == WORK}
+        latest = {}
+        for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id):
+            if run.state not in flow.VOID_STATES:
+                latest[run.step_id] = run
+        origin = batch.planned_start_at
+        if origin is None and work:
+            first = min(work)
+            origin = work[first].starts_at - timedelta(minutes=graph.lead_min(steps, first))
+        before = graph.predecessors(steps)
+        ends: dict[int, datetime] = {}
+        for index, step in enumerate(steps):
+            run = latest.get(step_id_of(step, index))
+            if run is not None and run.ended_at and run.state in {flow.COMPLETED, flow.SKIPPED, flow.NOT_TAKEN}:
+                ends[index] = run.ended_at
+                continue
+            if index in work:
+                ends[index] = work[index].ends_at
+                continue
+            if run is not None and run.kind == "wait" and run.state in flow.OPEN_STATES and run.due_at:
+                ends[index] = run.due_at
+                continue
+            parents = [ends[parent] for parent in before[index] if parent in ends]
+            start = max(parents) if parents else (run.started_at if run is not None and run.started_at else origin)
+            if start is None:
+                continue
+            ends[index] = start + timedelta(minutes=float(step.get("dur") or 0))
+        return max(ends.values()) if ends else None
 
     def dependency_floor(self, batch: Batch, skip: set[str] | None = None) -> tuple[datetime | None, list[str]]:
         """任务上游决定的最早开工时刻，以及还定不下来的上游（没排程、没建批次、已终止）。
@@ -145,11 +214,15 @@ class ScheduleService:
         from .task_service import TaskService
 
         task = self._task_of(batch)
-        if task is None or not task.depends_on:
+        if task is None:
+            return None, []
+        service = TaskService(self.db, self.ctx)
+        # 自己声明的上游加上从父任务继承的上游
+        if not service.effective_dependencies(task):
             return None, []
         floor: datetime | None = None
         missing: list[str] = []
-        for upstream, upstream_batch in TaskService(self.db, self.ctx).upstream_batches(task):
+        for upstream, upstream_batch in service.upstream_batches(task):
             if upstream_batch is None:
                 missing.append(f"上游任务 {upstream.id} 还没有建批次")
                 continue
@@ -169,7 +242,7 @@ class ScheduleService:
         from .task_service import TaskService
 
         task = self._task_of(batch)
-        if task is None or not task.depends_on:
+        if task is None:
             return []
         return [row.id for _, row in TaskService(self.db, self.ctx).upstream_batches(task) if row is not None]
 
@@ -233,19 +306,6 @@ class ScheduleService:
         if bom and not self.materials.bom_satisfied(batch.id, bom):
             raise StateConflict("物料预留不完整，排程前必须先完成预留")
         demand = resource_demand(steps)
-        if demand["needs_station"] == 0:
-            # 全是人工 / 等待 / 审核节点：没有工位要占，直接进入已排程
-            self.allocations.delete_for_batch(batch.id)
-            batch.state = "scheduled"
-            batch.current_step = 0
-            self.audit.record(
-                user, "排程批次", batch.id, before="计划", after="已排程",
-                detail=f"{demand['total']} 步全部不占工位，无需资源预约",
-            )
-            self.db.flush()
-            self._book_people(batch, start_from or (now() + timedelta(minutes=5)))
-            return []
-
         begin = start_from or (now() + timedelta(minutes=5))
         floor, missing = self.dependency_floor(batch)
         if missing:
@@ -255,10 +315,29 @@ class ScheduleService:
                 code="dependency_unscheduled",
             )
         if floor is not None and floor > begin:
-            # 完成—开始：上游计划（或实际）结束之前不开工
+            # 完成—开始：上游计划（或实际）结束之前不开工；纯人工流程同样如此
             begin = floor
+        # 计划开始记下来：不占工位的起点步骤与纯人工流程据此推算完成时间
+        batch.planned_start_at = begin
+        if demand["needs_station"] == 0:
+            # 全是人工 / 等待 / 审核节点：没有工位要占，直接进入已排程
+            self.allocations.delete_for_batch(batch.id)
+            batch.state = "scheduled"
+            batch.current_step = 0
+            self.audit.record(
+                user, "排程批次", batch.id, before="计划", after="已排程",
+                detail=f"{demand['total']} 步全部不占工位，无需资源预约；{begin:%m-%d %H:%M} 起",
+            )
+            self.db.flush()
+            self._book_people(batch, begin)
+            return []
+
+        ends: dict = {}
         try:
-            planned = plan_steps(steps, begin, self.context({batch.id}, prefer))
+            planned = plan_steps(
+                steps, begin, self.context({batch.id}, prefer), step_ends=ends,
+                exclusive_carrier=self.carrier_exclusive(batch),
+            )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
 
@@ -280,19 +359,22 @@ class ScheduleService:
         batch.state = "scheduled"
         batch.current_step = 0
         work = [item for item in planned if item.kind == WORK]
+        finish = planned_finish(planned, ends)
         self.audit.record(
             user, "排程批次", batch.id, before="计划", after="已排程",
             detail=(
                 f"{len(work)}/{demand['needs_station']} 个需占用步骤已预约，"
                 f"{work[0].starts_at:%m-%d %H:%M} 起，跨度 "
                 f"{makespan(planned).total_seconds() / 60:.0f} min"
+                + (f"，含不占工位步骤计划完成于 {finish:%m-%d %H:%M}" if finish is not None else "")
                 + (f"；上游任务结束于 {floor:%m-%d %H:%M}，不早于它开工" if floor is not None else "")
             ),
         )
         self.db.flush()
         self._book_people(batch, begin)
         if allow_proposals:
-            self._urgent_insert(batch, max(item.ends_at for item in work) if work else None)
+            # 交期按全部工艺时间判断：设备做完之后的静置同样要算进来
+            self._urgent_insert(batch, planned_finish(planned, ends))
         return rows
 
     def _book_people(self, batch: Batch, begin: datetime | None) -> None:
@@ -330,7 +412,11 @@ class ScheduleService:
     # ---------- 读 ----------
 
     def _refuse_overlaps(self, batch_id: str) -> None:
-        """写入前的最后一道守门：锁内求解本不该与别的批次重叠，重叠了就拒绝而不是照写。"""
+        """写入前的最后一道守门：锁内求解本不该与别的批次重叠，重叠了就拒绝而不是照写。
+
+        工位通道与资产容量是两道独立的约束：同一资产映射的全部工位的时间窗，加上维护 / 校准 /
+        人工预约，同一时刻不能超过资产容量——与排程求解用同一个口径。
+        """
         clashes = [
             row for row in self._overlaps()
             if batch_id in {row["a"]["batch_id"], row["b"]["batch_id"]}
@@ -348,19 +434,65 @@ class ScheduleService:
                 ]},
                 code="allocation_overlap",
             )
+        overloads = self._asset_overloads(batch_id)
+        if overloads:
+            raise StateConflict(
+                "排程结果超出共享资产容量，已拒绝写入",
+                {"blocked": [{"key": "asset_capacity", "label": text} for text in overloads]},
+                code="asset_capacity_exceeded",
+            )
+
+    def _asset_overloads(self, batch_id: str) -> list[str]:
+        """本批次的时间窗落在哪些资产的超容量时段里。资产是跨组织共享的物理对象，按全站占用算。"""
+        from ..models import Asset, ResourceBooking, Station
+
+        station_asset = {sid: aid for sid, aid in self.db.query(Station.id, Station.asset_id).all() if aid}
+        mine = [row for row in self.allocations.for_batch(batch_id) if row.station_id in station_asset]
+        found: list[str] = []
+        for asset_id in sorted({station_asset[row.station_id] for row in mine}):
+            asset = self.db.get(Asset, asset_id)
+            capacity = max(1, asset.capacity if asset else 1)
+            stations = [sid for sid, aid in station_asset.items() if aid == asset_id]
+            occupied = [
+                (Interval(row.starts_at, row.ends_at), 1)
+                for row in self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id)
+                .filter(Allocation.station_id.in_(stations), Batch.state.notin_(["done", "aborted"])).all()
+            ]
+            for booking in self.db.query(ResourceBooking).filter(
+                ResourceBooking.asset_id == asset_id, ResourceBooking.state.in_(["pending", "confirmed"]),
+                ResourceBooking.kind != "schedule",
+            ).all():
+                units = capacity if booking.kind in {"maintenance", "calibration"} else 1
+                occupied.append((Interval(booking.starts_at, booking.ends_at), units))
+            for row in mine:
+                if station_asset[row.station_id] != asset_id:
+                    continue
+                if peak_load(occupied, Interval(row.starts_at, row.ends_at)) > capacity:
+                    found.append(
+                        f"{row.station_id} 所属资产 {asset.asset_no if asset else asset_id} 在 "
+                        f"{row.starts_at:%m-%d %H:%M} 起的时段超出容量 {capacity}"
+                    )
+                    break
+        return found
 
     def dry_run(self, batch: Batch, start_from: datetime | None = None) -> dict:
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         begin = as_utc(start_from) or (now() + timedelta(minutes=5))
+        ends: dict = {}
         try:
-            planned = plan_steps(steps, begin, self.context({batch.id}))
+            planned = plan_steps(
+                steps, begin, self.context({batch.id}), step_ends=ends,
+                exclusive_carrier=self.carrier_exclusive(batch),
+            )
         except SchedulingError as error:
             return {"ok": False, "reason": error.message, "step_index": error.step_index, "path": []}
+        finish = planned_finish(planned, ends)
         return {
             "ok": True,
             "reason": "",
             "step_index": None,
             "makespan_min": round(makespan(planned).total_seconds() / 60),
+            "finish_at": finish.isoformat(timespec="minutes") if finish else None,
             "path": [self._planned_out(item, steps) for item in planned],
         }
 
@@ -537,28 +669,34 @@ class ScheduleService:
             if floor is not None:
                 external_floor[b.id] = floor
 
+        exclusive = {b.id: self.carrier_exclusive(b) for b in batches}
+
         def evaluate(order: tuple[str, ...]) -> optimizer.Candidate:
-            """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。"""
+            """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。
+
+            完成时间按全部工艺时间算（含设备之后的静置等不占工位的步骤），拖期与下游起点都以它为准。
+            """
             if not task_rules.respects(order, upstream):
                 return optimizer.Candidate(order, False, reason="违反任务依赖：下游批次排在了上游之前")
             context = self.context(selected, allow_unclean=True)
             plans: dict[str, list[PlannedAllocation]] = {}
+            completion: dict[str, datetime] = {}
             for batch_id in order:
                 start_at = max([begin, *([external_floor[batch_id]] if batch_id in external_floor else []),
-                                *[max((a.ends_at for a in plans[ref] if a.kind == WORK), default=begin)
-                                  for ref in upstream[batch_id] if ref in plans]])
+                                *[completion[ref] for ref in upstream[batch_id] if ref in completion]])
+                ends: dict = {}
                 try:
-                    plans[batch_id] = plan_steps(steps_by_batch[batch_id], start_at, context)
+                    plans[batch_id] = plan_steps(
+                        steps_by_batch[batch_id], start_at, context, step_ends=ends,
+                        exclusive_carrier=exclusive[batch_id],
+                    )
                 except SchedulingError as error:
                     return optimizer.Candidate(order, False, reason=f"{batch_id}: {error.message}")
+                completion[batch_id] = planned_finish(plans[batch_id], ends) or start_at
             work_items = [a for planned in plans.values() for a in planned if a.kind == WORK]
             if not work_items:
                 return optimizer.Candidate(order, True, 0, 0, "所选批次都不占工位，无需优化顺序", {"plans": {}})
-            finish = max(a.ends_at for a in work_items)
-            completion = {
-                batch_id: max((a.ends_at for a in planned if a.kind == WORK), default=begin)
-                for batch_id, planned in plans.items()
-            }
+            finish = max(completion.values())
             weighted = sum(weight[b] * (completion[b] - begin).total_seconds() / 60 for b in order)
             lateness = {
                 b: round(max(0.0, (completion[b] - due[b]).total_seconds() / 60)) if due[b] else 0 for b in order
@@ -722,10 +860,22 @@ class ScheduleService:
         protected = [
             a for a in self.allocations.for_batch(batch.id) if a.step_index < from_step
         ]
-        if batch.state in {"running", "paused", "fault"} and from_step <= batch.current_step:
+        # 依赖图里序号靠后的步骤可以早已与靠前的并行开出：保护看的是全部开出过的步骤（执行中、保持、
+        # 结果未知、已完成、已下指令），不是「当前步骤」这一个下标。与重排建议用同一条规则
+        from ..repositories.workflow import StepRunRepository
+
+        opened = sorted({
+            run.step_index for run in StepRunRepository(self.db, self.ctx).for_batch(batch.id)
+            if run.state not in {"superseded", "cancelled"}
+        })
+        if batch.state in {"running", "paused", "fault"} and (
+            from_step <= batch.current_step or any(index >= from_step for index in opened)
+        ):
+            last = max([batch.current_step, *opened])
             raise StateConflict(
-                f"第 {batch.current_step + 1} 步正在执行或保持占用，不能从第 {from_step + 1} 步重排",
-                {"blocked": [{"key": "step", "label": "正在执行的步骤保持占用"}]},
+                f"第 {last + 1} 步已经开出（执行中、保持、结果未知或已完成），不能从第 {from_step + 1} 步重排；"
+                f"只能重排第 {last + 2} 步起还没开出的步骤",
+                {"blocked": [{"key": "step", "label": "已开出的步骤保持原有占用与指令"}]},
                 code="step_in_progress",
             )
         anchor, anchor_station = self._tail_anchor(batch, steps, from_step, protected)
@@ -738,6 +888,7 @@ class ScheduleService:
             planned = plan_steps(
                 steps, max(start_from, anchor) if anchor else start_from, context,
                 first_index=from_step, previous_end=anchor, previous_station=anchor_station,
+                exclusive_carrier=self.carrier_exclusive(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error

@@ -134,9 +134,15 @@ def reset_runtime():
             session.query(Command).filter(
                 Command.batch_id == batch.id, Command.state == "sent", Command.delivery_state == "queued",
             ).update({"state": "cancelled", "delivery_state": "not_sent"}, synchronize_session=False)
+        # 上一用例留在设备上的动作（在途、已保持、结果未知）一律结束：执行器按实际占用投递，
+        # 不清掉它们，后面用例的动作会被一台「仍被占着」的设备挡住
+        session.query(Command).filter(
+            Command.state.in_(["accepted", "running", "held", "unknown", "manual"]),
+        ).update({"state": "cancelled"}, synchronize_session=False)
         for station in session.query(Station).all():
             station.status = "idle"
             station.clean = True
+            station.dirty_batch_id = ""
         for adapter in session.query(Adapter).all():
             adapter.connected = True
             adapter.site_interlock = False

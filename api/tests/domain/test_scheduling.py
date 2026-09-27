@@ -76,3 +76,80 @@ def test_out_of_limit_parameter_has_no_capable_station():
         plan_steps([hot_step], T0, context())
 
     assert "没有可承接工位" in error.value.message
+
+
+# ---------- 资产容量（评审 R6）----------
+
+CYCLER = StationSpec(id="CYC", channels=2, limits={"cap.test": {}})
+CYCLER_B = StationSpec(id="CYC-B", channels=1, limits={"cap.test": {}})
+TEST_STEP = {"name": "充放电", "cap": "cap.test", "dur": 10}
+
+
+def test_asset_capacity_counts_parallel_work_on_the_same_station():
+    """工位有 2 个通道、资产容量为 1：同工位已有的作业同样占资产容量，不能再并行一份。"""
+    ctx = SchedulingContext(
+        stations=[CYCLER], busy={"CYC": [Interval(T0, T0 + timedelta(minutes=30))]},
+        station_asset={"CYC": "ASSET"}, asset_capacity={"ASSET": 1}, clean_min=0,
+    )
+    work = next(a for a in plan_steps([TEST_STEP], T0, ctx) if a.kind == WORK)
+    assert work.starts_at == T0 + timedelta(minutes=30)
+
+
+def test_asset_capacity_counts_every_mapped_station():
+    """两个工位映射同一资产（容量 2）：各有一份在跑时，第三份哪个工位都不能接。"""
+    busy = {"CYC": [Interval(T0, T0 + timedelta(minutes=30))], "CYC-B": [Interval(T0, T0 + timedelta(minutes=30))]}
+    ctx = SchedulingContext(
+        stations=[CYCLER, CYCLER_B], busy=busy, station_asset={"CYC": "ASSET", "CYC-B": "ASSET"},
+        asset_capacity={"ASSET": 2}, clean_min=0,
+    )
+    work = next(a for a in plan_steps([TEST_STEP], T0, ctx) if a.kind == WORK)
+    assert work.starts_at == T0 + timedelta(minutes=30)
+
+
+def test_asset_load_is_peak_concurrency_not_the_number_of_windows():
+    """窗口里有两段前后错开的占用，同一时刻只占 1 份：容量 2 时新作业可以立即开始。"""
+    busy = {"CYC-B": [Interval(T0, T0 + timedelta(minutes=10)),
+                      Interval(T0 + timedelta(minutes=15), T0 + timedelta(minutes=25))]}
+    ctx = SchedulingContext(
+        stations=[CYCLER, CYCLER_B], busy=busy, station_asset={"CYC": "ASSET", "CYC-B": "ASSET"},
+        asset_capacity={"ASSET": 2}, clean_min=0,
+    )
+    work = next(a for a in plan_steps([{**TEST_STEP, "dur": 30}], T0, ctx) if a.kind == WORK)
+    assert (work.station_id, work.starts_at) == ("CYC", T0)
+
+
+def test_maintenance_booking_fills_the_asset():
+    ctx = SchedulingContext(
+        stations=[CYCLER], station_asset={"CYC": "ASSET"}, asset_capacity={"ASSET": 2}, clean_min=0,
+        asset_bookings={"ASSET": [(Interval(T0, T0 + timedelta(hours=1)), 2)]},
+    )
+    work = next(a for a in plan_steps([TEST_STEP], T0, ctx) if a.kind == WORK)
+    assert work.starts_at == T0 + timedelta(hours=1)
+
+
+# ---------- 完整工艺时间与载具互斥（评审 R7）----------
+
+
+def test_step_ends_include_the_trailing_wait():
+    """设备 60 min 之后还要静置 60 min：批次完成在 120 min，不在设备时间窗结束时。"""
+    ends: dict = {}
+    allocations = plan_steps(
+        [MIX_STEP, {"name": "静置", "kind": "wait", "dur": 60}], T0, context(clean_min=0), step_ends=ends,
+    )
+    work = next(a for a in allocations if a.kind == WORK)
+    assert ends[0] == work.ends_at
+    assert ends[1] == work.ends_at + timedelta(minutes=60)
+    assert max(ends.values()) == T0 + timedelta(minutes=120)
+
+
+def test_exclusive_carrier_keeps_parallel_device_branches_apart():
+    """同一块板上的两个并行设备分支：不绑载具时可以并行；绑定后排程与运行时一样一个一个来，并排转运。"""
+    mix = {**MIX_STEP, "step_id": "mix", "after": []}
+    coat = {**COAT_STEP, "step_id": "coat", "after": []}
+    free = [a for a in plan_steps([mix, coat], T0, context(clean_min=0)) if a.kind == WORK]
+    assert [a.starts_at for a in free] == [T0, T0]
+
+    planned = plan_steps([mix, coat], T0, context(clean_min=0), exclusive_carrier=True)
+    first, second = sorted((a for a in planned if a.kind == WORK), key=lambda a: a.starts_at)
+    assert second.starts_at >= first.ends_at + timedelta(minutes=10), "板要先从上一台设备搬过来"
+    assert any(a.kind == TRANSFER and a.step_index == 1 for a in planned)

@@ -121,11 +121,8 @@ class BatchService:
         """
         if first_work is None:
             return None
-        lead = sum(
-            float(step.get("dur") or 0) for step in steps[: first_work.step_index]
-            if not needs_station(step)
-        )
-        return first_work.starts_at - timedelta(minutes=lead)
+        # 依赖图里与首个设备步骤并行的步骤不在它前面：只算它的前驱链
+        return first_work.starts_at - timedelta(minutes=dag.lead_min(steps, first_work.step_index))
 
     def _station_ids(self, batch: Batch, from_step: int = 0) -> set[str]:
         """本批次（自某一步起）占用的设备工位。执行门按它们判定单台设备的失联 / 超时。"""
@@ -472,28 +469,24 @@ class BatchService:
         plan = self.plans.get(plan_id)
         if not plan:
             raise NotFound("实验方案不存在")
-        if plan.state != "locked":
-            raise StateConflict("只能基于已锁定结构的实验方案创建批次")
-        if plan.approval_state != "approved":
-            raise StateConflict(
-                "方案尚未批准，不能创建正式批次",
-                {"blocked": [{"key": "plan", "label": "矩阵锁定只是结构冻结，不等于已审批"}]},
-                code="plan_not_approved",
-            )
-        recipe = self.recipes.get(plan.recipe_id)
-        if not recipe:
-            raise NotFound("流程不存在")
-        if recipe.state != "released" or recipe.needs_revision:
-            raise StateConflict("只能从有效的已发布流程创建批次")
 
         from .task_service import TaskService
 
         task_service = TaskService(self.db, self.ctx)
         task = None
+        version = None
         if task_id:
+            # 有任务时方案与版本都由任务决定：请求里的方案只能与之一致，不能指到别的方案或版本上
             task = self.tasks.get(task_id)
             if task is None:
                 raise NotFound("实验任务不存在")
+            if task.state == "cancelled":
+                raise StateConflict("任务已取消，不能再产生执行批次", code="task_cancelled")
+            if task.plan_id != plan.id:
+                raise StateConflict(
+                    f"任务 {task.id} 属于方案 {task.plan_id}，不能按方案 {plan.id} 建批次",
+                    code="task_plan_mismatch",
+                )
             if task.batch_id:
                 raise StateConflict(
                     f"该任务已绑定批次 {task.batch_id}，同一任务不产生重复批次",
@@ -506,8 +499,35 @@ class BatchService:
                     {"blocked": [{"key": "task", "label": "任务已拆成子任务，状态由子任务汇总"}]},
                     code="task_has_children",
                 )
+            if task.plan_version_id:
+                version = self.plan_versions.get(task.plan_version_id)
+                if version is None or version.plan_id != plan.id or version.state != "approved":
+                    raise StateConflict(
+                        f"任务锁定的方案版本 v{task.plan_version} 已不是批准状态，不能按它执行",
+                        code="task_plan_version_invalid",
+                    )
+        if version is None:
+            # 没有任务（或早先的任务没记版本）：按方案当前的批准版本，方案必须已锁定、已批准
+            if plan.state != "locked":
+                raise StateConflict("只能基于已锁定结构的实验方案创建批次")
+            if plan.approval_state != "approved":
+                raise StateConflict(
+                    "方案尚未批准，不能创建正式批次",
+                    {"blocked": [{"key": "plan", "label": "矩阵锁定只是结构冻结，不等于已审批"}]},
+                    code="plan_not_approved",
+                )
+            version = self.plan_versions.latest_approved(plan.id)
+            content = plan
+        else:
+            # 任务锁定的批准版本：方案内容取版本快照。方案之后修订（哪怕 v2 已批准）都不影响这个任务，
+            # 升级只能显式迁移任务；修订期间方案退回草稿，这个任务照样按 v1 执行
+            content = self._pinned_plan(plan, version)
+        recipe = self.recipes.get(content.recipe_id)
+        if not recipe:
+            raise NotFound("流程不存在")
+        if recipe.state != "released" or recipe.needs_revision:
+            raise StateConflict("只能从有效的已发布流程创建批次")
 
-        version = self.plan_versions.latest_approved(plan.id)
         batch = Batch(
             id=self.batches.next_id(now()),
             org_id=self.ctx.org_id,
@@ -519,19 +539,19 @@ class BatchService:
             operator=user.display_name,
             note=note,
             recipe_snapshot=self._freeze_recipe(recipe),
-            plan_snapshot=self._freeze_plan(plan),
+            plan_snapshot=self._freeze_plan(content),
             sop_snapshot=self.sops.snapshot_for(recipe.sop_version_id) if recipe.sop_version_id else {},
         )
         self.batches.add(batch)
         bom = batch.recipe_snapshot.get("bom") or []
         if bom:
             self.materials.reserve_for_batch(batch.id, bom, user)
-        rows = self._generate_samples(batch, plan, task.sample_ids if task is not None else None)
-        if plan.plan_type == "matrix":
+        rows = self._generate_samples(batch, content, task.sample_ids if task is not None else None)
+        if content.plan_type == "matrix":
             from ..domain.matrix import condition_params
 
             # 按孔位冻结因子作用参数：之后方案怎么改，这个批次的设备参数都不变
-            expanded = condition_params(plan.factors or [], rows)
+            expanded = condition_params(content.factors or [], rows)
             if expanded:
                 batch.plan_snapshot = {**batch.plan_snapshot, "condition_params": expanded}
         self.plans.link_batch(plan.id, batch.id)
@@ -593,6 +613,21 @@ class BatchService:
                 "frozen_at": now().isoformat(timespec="seconds"),
             }
         )
+
+    @staticmethod
+    def _pinned_plan(plan, version):
+        """方案在某个批准版本时的内容：批准时冻结的快照；版本里没记的字段（项目、轮次）取方案本身。"""
+        from types import SimpleNamespace
+
+        snapshot = dict(version.snapshot or {})
+        fields = (
+            "name", "plan_type", "goal", "repeats", "layout", "seed", "factors", "control", "design_points",
+            "sample_count", "sample_ids", "required_metrics", "recipe_id",
+        )
+        view = {key: getattr(plan, key) for key in (*fields, "id", "round_no", "project_id")}
+        view.update({key: snapshot[key] for key in fields if key in snapshot})
+        view["version"] = version.version
+        return SimpleNamespace(**view)
 
     @staticmethod
     def _freeze_plan(plan) -> dict:
@@ -709,6 +744,7 @@ class BatchService:
         released = len(self.allocations.for_batch(batch.id))
         self.allocations.delete_for_batch(batch.id)
         batch.state = "planned"
+        batch.planned_start_at = None
         self.audit.record(
             user, "取消排程", batch.id, before="已排程", after="计划",
             detail=f"归还 {released} 个工位时间窗；物料预留保持不变",
@@ -903,11 +939,15 @@ class BatchService:
         return rows
 
     def _dependency_blockers(self, task) -> list[str] | None:
-        if task is None or not task.depends_on:
+        if task is None:
             return None
         from .task_service import TaskService
 
-        return [row["label"] for row in TaskService(self.db, self.ctx).dependency_blockers(task)]
+        service = TaskService(self.db, self.ctx)
+        # 子任务没有自己的依赖时也要看父任务的：拆分不能绕过父任务的上游
+        if not service.effective_dependencies(task):
+            return None
+        return [row["label"] for row in service.dependency_blockers(task)]
 
     def dispatch(self, batch_id: str, manual_review: bool, reason: str, signature_id: str, user: User) -> dict:
         if not self.ctx.has("batch.control"):
@@ -965,7 +1005,7 @@ class BatchService:
 
     def issue_command(
         self, batch: Batch, command_type: str, step_index: int, step_run_id: str = "",
-        *, station_id: str | None = None, capability: str | None = None,
+        *, station_id: str | None = None, capability: str | None = None, target_command_id: str = "",
     ) -> Command:
         """生成一条设备指令。
 
@@ -973,6 +1013,7 @@ class BatchService:
         转运指令并把它设为本指令的前置：板没被确认送到，设备收不到动作。转运计划不成立（位置
         未知、放置位满、没有可用承运工位）时本指令直接判为未投递并挂起批次，原因写清楚。
         保持 / 终止可以指定工位：在途的是转运时，要停的是承运工位而不是步骤工位。
+        `target_command_id`：保持 / 终止要停的动作，或续跑 / 重试要接续的那个被保持的动作。
         """
         steps = self.steps_of(batch)
         step = steps[step_index] if step_index < len(steps) else {}
@@ -1003,6 +1044,7 @@ class BatchService:
             delivery_state="queued",
             step_index=step_index,
             not_before=not_before,
+            target_command_id=target_command_id,
         )
         self.db.add(command)
         self.db.flush()
@@ -1037,14 +1079,6 @@ class BatchService:
             raise StateConflict("只有运行中批次可请求保持")
         # 保持是安全动作：执行门关闭（心跳超时、联锁）时恰恰最需要它，不受执行门限制
         run = self.runs.current(batch.id)
-
-        def device_acting() -> list:
-            # 设备在动作：有在途动作指令，或当前设备步骤已被设备接受
-            in_flight = self.commands.in_flight_for_batch(batch.id, DISPATCHING)
-            if in_flight or (run is not None and run.kind == DEVICE and run.state == "running"):
-                return in_flight or [None]
-            return []
-
         moving = [c for c in self.commands.in_flight_for_batch(batch.id, {"transfer"})]
         if moving:
             # 板搬到一半停下既不在起点也不在终点；转运不可保持，只能等它完成或终止
@@ -1052,13 +1086,24 @@ class BatchService:
                 f"载具转运进行中（{moving[0].station_id}），不能保持：等转运完成后再保持，或直接终止",
                 code="transfer_in_progress",
             )
-        recovery_rules = self._recovery_rules(batch)
-        if device_acting() and not recovery_rules.get("pausable", False):
+        # 可暂停看的是真正在设备上动作的每一步，不是「当前步骤」：并行时当前步骤可能是静置，
+        # 也可能是可保持的一步，而另一台设备上正跑着不可中断的注液封口
+        acting = self._hold_targets(batch)
+        steps = self.steps_of(batch)
+        refused = []
+        for target in acting:
+            rules = self.capabilities.recovery_of(target["capability"])
+            if not rules.get("pausable", False):
+                name = (steps[target["step_index"]] if target["step_index"] < len(steps) else {}).get("name", "")
+                refused.append(
+                    f"第 {target['step_index'] + 1} 步「{name}」（{target['station_id']}）能力不允许保持："
+                    f"{rules.get('sideEffect') or '不可中断'}"
+                )
+        if refused:
             raise StateConflict(
-                f"当前步骤能力不允许保持：{recovery_rules.get('sideEffect', '不可中断')}",
+                refused[0], {"blocked": [{"key": "capability", "label": text} for text in refused]},
             )
         withdrawn = self._withdraw_queued(batch, "批次请求保持，未投递的动作指令撤回")
-        acting = device_acting()
         batch.state = "paused"
         batch.held_at = now()
         batch.note = f"操作员请求保持{'：' + reason if reason else ''}"
@@ -1078,29 +1123,57 @@ class BatchService:
             )
             self.db.commit()
             return {**self.summary_out(batch), "device_hold_command_id": "", "withdrawn": withdrawn}
-        # 并行分支时「当前步骤」不一定是在设备上的那一步：保持发给真正在动作的指令所在步骤与工位
-        target = acting[0]
-        command = self.issue_command(
-            batch, "hold", target.step_index if target is not None else batch.current_step,
-            step_run_id=(target.step_run_id if target is not None else (run.id if run else "")),
-            station_id=target.station_id if target is not None else None,
-        )
+        # 每台在动作的设备各发一条保持，各自确认；并行分支时「当前步骤」不一定是在设备上的那一步
+        commands = [
+            self.issue_command(
+                batch, "hold", target["step_index"], step_run_id=target["step_run_id"],
+                station_id=target["station_id"] or None, target_command_id=target["command_id"],
+            )
+            for target in acting
+        ]
+        # 恢复评估针对设备上被保持的那一步（与故障时一样），不是最靠前的开放步骤
+        batch.current_step = acting[0]["step_index"]
         self.audit.record(
-            user, "请求保持", batch.id, before="运行中", after="已保持", command_id=command.id,
+            user, "请求保持", batch.id, before="运行中", after="已保持", command_id=commands[0].id,
             detail=(
-                f"按能力保持规程「{recovery_rules.get('hold', '')}」执行；检查点已保留"
-                + (f"；保持针对在途指令 {acting[0].id}" if acting[0] is not None else "")
+                "；".join(
+                    f"{target['station_id']} 按能力保持规程「{self.capabilities.recovery_of(target['capability']).get('hold', '')}」执行"
+                    + (f"，针对在途指令 {target['command_id']}" if target["command_id"] else "")
+                    for target in acting
+                )
+                + "；检查点已保留，设备是否停住以各自的保持回执为准"
             ),
         )
         self.db.commit()
         # 批次已不再推进新动作，但设备是否真的停住以保持指令的回执为准
-        return {**self.summary_out(batch), "device_hold_command_id": command.id, "withdrawn": withdrawn}
+        return {
+            **self.summary_out(batch), "device_hold_command_id": commands[0].id,
+            "device_hold_command_ids": [command.id for command in commands], "withdrawn": withdrawn,
+        }
 
-    def _recovery_rules(self, batch: Batch) -> dict:
+    def _hold_targets(self, batch: Batch) -> list[dict]:
+        """保持要发给谁：每一条在途的实验动作；设备已接受步骤但指令不在途时，按运行中的设备步骤。"""
+        in_flight = sorted(
+            self.commands.in_flight_for_batch(batch.id, DISPATCHING), key=lambda c: (c.step_index, c.created_at),
+        )
+        if in_flight:
+            return [
+                {"command_id": c.id, "step_index": c.step_index, "step_run_id": c.step_run_id,
+                 "station_id": c.station_id, "capability": c.capability}
+                for c in in_flight
+            ]
         steps = self.steps_of(batch)
-        if batch.current_step >= len(steps):
-            return {}
-        return self.capabilities.recovery_of(steps[batch.current_step].get("cap", ""))
+        targets = []
+        for run in self.runs.open_runs(batch.id):
+            if run.kind != DEVICE or run.state != "running":
+                continue
+            allocation = self.allocations.work_step(batch.id, run.step_index)
+            step = steps[run.step_index] if run.step_index < len(steps) else {}
+            targets.append({
+                "command_id": "", "step_index": run.step_index, "step_run_id": run.id,
+                "station_id": allocation.station_id if allocation else "", "capability": step.get("cap", ""),
+            })
+        return targets
 
     # ---------- 恢复 ----------
 
@@ -1167,6 +1240,18 @@ class BatchService:
             for option in options:
                 if option["id"] in {recovery.RESUME, recovery.RETRY}:
                     option.update(allowed=False, reason="存在现场确认「部分执行」的指令，只能终止")
+        holding = [
+            c for c in self.commands.for_batch(batch.id)
+            if c.type == "hold" and c.state in {"sent", "accepted", "running"}
+        ]
+        if holding:
+            # 已请求保持 ≠ 设备已确认保持：设备还没停住就续跑，等于在一个没确认的状态上继续驱动它
+            for option in options:
+                if option["id"] in {recovery.RESUME, recovery.RETRY}:
+                    option.update(
+                        allowed=False,
+                        reason=f"设备保持尚未确认（{'、'.join(sorted({c.station_id for c in holding}))}）",
+                    )
         steps = self.steps_of(batch)
         current = steps[batch.current_step] if batch.current_step < len(steps) else {}
         blockers = self._blind_blockers(batch)
@@ -1324,6 +1409,12 @@ class BatchService:
                 batch, index, assignee_user_id=(task.assignee_user_id if task else user.id),
             )
         elif run is None or strategy == recovery.RETRY:
+            if run is not None and run.state in {"ready", "running"}:
+                # 保持中的这一步整体重做：旧实例作废（记录保留），由新实例接续设备上被保持的动作
+                run.state = "superseded"
+                run.ended_at = now()
+                run.reason = (run.reason + "；" if run.reason else "") + "恢复评估选择重试，本次执行作废"
+                run.row_version = int(run.row_version or 0) + 1
             run = self.workflow.open_step(
                 batch, batch.current_step,
                 assignee_user_id=(task.assignee_user_id if task else user.id),
@@ -1333,12 +1424,9 @@ class BatchService:
             run.row_version = int(run.row_version or 0) + 1
         command = None
         if run.kind == DEVICE:
-            # 这一步的动作指令从未送达设备（保持时还在队列里就被撤回）：续跑就是首次下发，
-            # 不能给设备发一个它从没见过的动作的「继续」
-            command_type = strategy
-            if strategy == recovery.RESUME and not self.commands.ever_delivered_for_run(run.id):
-                command_type = "dispatch"
-            command = self.issue_command(batch, command_type, run.step_index, step_run_id=run.id)
+            command = self._reissue(batch, run, strategy)
+        # 依赖图里一起被保持的其他设备分支：只续跑当前步骤，其余分支会永远停在保持里
+        others = self._resume_other_branches(batch, run) if dag.graph_mode(steps) else []
         checkpoint = self.checkpoints.latest_for_step(batch.id, max(0, batch.current_step - 1))
         self.audit.record(
             user, f"恢复：{option['label']}", batch.id, sign=True, meaning=signature.meaning,
@@ -1352,11 +1440,52 @@ class BatchService:
                     f"；后移后与 {len(overlaps)} 个其他占用重叠，需在排程页处理"
                     if overlaps else ""
                 )
+                + (
+                    f"；并行分支第 {'、'.join(str(c.step_index + 1) for c in others)} 步一并续跑"
+                    if others else ""
+                )
             ),
         )
         self._settle_exceptions(batch, f"恢复评估：{option['label']}", user)
         self.db.commit()
         return self.summary_out(batch)
+
+    def _reissue(self, batch: Batch, run, strategy: str) -> Command:
+        """恢复时给一个设备步骤重新发指令。
+
+        设备上有这一步被保持的动作：新指令指明接续它（设备接受后旧指令到此为止，不会各完成一次）。
+        这一步的动作指令从未送达设备（保持时还在队列里就被撤回）：续跑就是首次下发，
+        不能给设备发一个它从没见过的动作的「继续」。
+        """
+        held = next(
+            (
+                c for c in reversed(self.commands.for_batch(batch.id))
+                if c.step_index == run.step_index and c.state == "held" and c.type in DISPATCHING
+            ),
+            None,
+        )
+        command_type = strategy
+        if strategy == recovery.RESUME and held is None and not self.commands.ever_delivered_for_run(run.id):
+            command_type = "dispatch"
+        return self.issue_command(
+            batch, command_type, run.step_index, step_run_id=run.id, target_command_id=held.id if held else "",
+        )
+
+    def _resume_other_branches(self, batch: Batch, main) -> list[Command]:
+        """一起被保持的其他设备分支：动作被保持、或保持时还在队列里被撤回的，续跑时一并接续。"""
+        live = {"sent", "accepted", "running", "unknown", "manual"}
+        commands = self.commands.for_batch(batch.id)
+        issued = []
+        for other in self.runs.open_runs(batch.id):
+            if other.id == main.id or other.kind != DEVICE or other.state not in {"ready", "running"}:
+                continue
+            if any(c.step_run_id == other.id and c.state in live for c in commands):
+                # 这一支的动作还在队列、在途或等现场核查：不重复下发
+                continue
+            other.state = "ready"
+            other.row_version = int(other.row_version or 0) + 1
+            issued.append(self._reissue(batch, other, recovery.RESUME))
+        return issued
 
     # ---------- 跳过与从指定节点重做 ----------
 
@@ -1433,8 +1562,9 @@ class BatchService:
             if command.step_run_id != live.id:
                 continue
             reached_device = command.delivery_state in {"maybe_sent", "delivered"}
-            settled = command.state in {"cancelled", "not_executed"}
-            if command.state in {"accepted", "running"} or (reached_device and not settled):
+            # 被续跑 / 重试接续的旧指令不再代表设备上的动作，由接续它的新指令说了算
+            settled = command.state in {"cancelled", "not_executed", "superseded"}
+            if command.state in {"accepted", "running", "held"} or (reached_device and not settled):
                 raise StateConflict(
                     "设备已收到这一步的指令，不能跳过：等设备给出结论或保持后走恢复", code="command_delivered",
                 )
@@ -1513,8 +1643,11 @@ class BatchService:
         steps = self.steps_of(batch)
         scope = {index} | dag.descendants(steps, index)
         blockers = self._blind_blockers(batch)
-        in_flight = [c for c in self.commands.for_batch(batch.id) if c.state in {"accepted", "running"}]
-        blockers += [{"key": "command", "label": f"指令 {c.id[:8]} 仍在设备上执行"} for c in in_flight]
+        in_flight = [c for c in self.commands.for_batch(batch.id) if c.state in {"accepted", "running", "held"}]
+        blockers += [
+            {"key": "command", "label": f"指令 {c.id[:8]} 仍在设备上{'保持' if c.state == 'held' else '执行'}"}
+            for c in in_flight
+        ]
         if blockers:
             raise StateConflict("存在没有结论的设备指令，不能重做", {"blocked": blockers}, code="manual_check_required")
         self.gate.require_open(self._station_ids(batch, from_step=index))
@@ -1664,13 +1797,13 @@ class BatchService:
             else:
                 command.state = "done"
                 command.error = verdict
+                if command.type == "hold":
+                    # 现场确认设备停在保持状态：被保持的动作记为已保持，续跑时由续跑指令接续
+                    execution.confirm_hold(batch, command)
                 if command.type == "abort":
-                    # 设备离线时终止确认不了：现场确认已安全停机，由核查人签名结束批次
+                    # 设备离线时终止确认不了：现场确认这台设备已安全停机。只结束这台设备上的动作；
+                    # 别的设备各自确认后批次才终止
                     execution._confirm_abort(batch, command, record)
-                    for other in self.commands.for_batch(batch.id):
-                        if other.id != command.id and other.state in {"unknown", "manual"}:
-                            other.state = "cancelled"
-                            other.error = f"随终止人工确认结束：{verdict}"
             execution._release(record, command)
         elif conclusion == "not_executed":
             ledger.state = "not_executed"
@@ -1691,6 +1824,8 @@ class BatchService:
             command.state = "partial"
             command.error = verdict
             execution._release(record, command)
+            # 动作做了一半：需要清洗的设备同样转为待清洗
+            execution._soil(batch, command)
             if run is not None and run.state == "unknown":
                 run.state = "failed"
                 run.ended_at = now()
@@ -1773,18 +1908,22 @@ class BatchService:
                 return {**self.summary_out(batch), "pending_material_return": pending}
             batch.state = "aborting"
             run = self.runs.current(batch.id)
-            # 在动作的可能是转运（承运工位）或并行分支上的设备步骤：终止发给它所在的工位
-            target = next((c for c in acting_now if c.type == "transfer"), None) or acting_now[0]
-            command = self.issue_command(
-                batch, "abort", target.step_index, step_run_id=target.step_run_id or (run.id if run else ""),
-                station_id=target.station_id, capability=target.capability,
-            )
+            # 可能在动作的每一条（转运、并行分支上的设备步骤、结果未知的动作）各发一条终止，
+            # 发给它所在的工位、指明要停的动作；批次等全部设备各自确认停止后才转为已终止
+            commands = [
+                self.issue_command(
+                    batch, "abort", target.step_index, step_run_id=target.step_run_id or (run.id if run else ""),
+                    station_id=target.station_id, capability=target.capability, target_command_id=target.id,
+                )
+                for target in acting_now
+            ]
             self.audit.record(
                 user, "终止批次", batch.id, sign=True, meaning=signature.meaning, before=before,
-                after="终止中", signature_id=signature.id, command_id=command.id,
+                after="终止中", signature_id=signature.id, command_id=commands[0].id,
                 object_version=batch.row_version,
                 detail=(
-                    f"{reason or '人工终止'}；未完成样品待隔离处置，工位清理后释放；"
+                    f"{reason or '人工终止'}；向 {'、'.join(sorted({c.station_id for c in acting_now}))} "
+                    f"下发 {len(commands)} 条终止，逐台确认停止后结束批次；未完成样品待隔离处置，工位清理后释放；"
                     f"取消 {cancelled} 个待办"
                     + (f"；{len(pending)} 项已领用物料待归还或处置" if pending else "")
                 ),
@@ -1813,26 +1952,48 @@ class BatchService:
         }
 
     def due_windows(self) -> list[dict]:
+        """硬时限倒计时：前驱都已结束、自己还没开工的带硬时限步骤，从最晚结束的前驱起算。
+
+        按依赖图算，不按「当前步骤 + 1」：并行时当前步骤可能是一个还开着的静置，真正在倒计时的是别的分支。
+        起算点与投递前的硬时限核对一致：设备前驱看检查点，其余看步骤实例的结束时刻。
+        """
         rows = []
         for batch in self.batches.by_state("running", "paused", "fault"):
             steps = self.steps_of(batch)
-            index = batch.current_step + 1
-            if index >= len(steps):
-                continue
-            hard = steps[index].get("hard") or {}
-            if "maxGapMin" not in hard:
-                continue
-            checkpoint = self.checkpoints.latest_for_step(batch.id, batch.current_step)
-            anchor = checkpoint.created_at if checkpoint else (batch.held_at or batch.created_at)
-            deadline = anchor + timedelta(minutes=float(hard["maxGapMin"]))
-            rows.append(
-                {
-                    "batch_id": batch.id,
-                    "step_index": index,
-                    "step_name": steps[index].get("name"),
-                    "max_gap_min": hard["maxGapMin"],
-                    "deadline": deadline.isoformat(timespec="minutes"),
-                    "remaining_min": round((deadline - now()).total_seconds() / 60),
-                }
-            )
+            before = dag.predecessors(steps)
+            latest = {}
+            for run in self.runs.for_batch(batch.id):
+                if run.state not in {"superseded", "cancelled"}:
+                    latest[run.step_id] = run
+            for index, step in enumerate(steps):
+                hard = step.get("hard") or {}
+                if "maxGapMin" not in hard or not before[index]:
+                    continue
+                run = latest.get(step_id_of(step, index))
+                if run is not None and run.state not in {"pending", "ready"}:
+                    continue  # 已经开工或已有结论
+                anchors = []
+                for parent in before[index]:
+                    checkpoint = self.checkpoints.latest_for_step(batch.id, parent)
+                    parent_run = latest.get(step_id_of(steps[parent], parent))
+                    if checkpoint is not None:
+                        anchors.append(checkpoint.created_at)
+                    elif parent_run is not None and parent_run.state == "completed" and parent_run.ended_at:
+                        anchors.append(parent_run.ended_at)
+                    else:
+                        anchors = []
+                        break  # 还有前驱没结束：倒计时还没开始
+                if not anchors:
+                    continue
+                deadline = max(anchors) + timedelta(minutes=float(hard["maxGapMin"]))
+                rows.append(
+                    {
+                        "batch_id": batch.id,
+                        "step_index": index,
+                        "step_name": step.get("name"),
+                        "max_gap_min": hard["maxGapMin"],
+                        "deadline": deadline.isoformat(timespec="minutes"),
+                        "remaining_min": round((deadline - now()).total_seconds() / 60),
+                    }
+                )
         return rows

@@ -32,6 +32,8 @@ class Batch(Base):
     failure_reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     held_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 排程时的计划开始：不占工位的起点步骤与纯人工流程据此推算完成时间
+    planned_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
