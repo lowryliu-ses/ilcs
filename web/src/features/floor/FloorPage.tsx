@@ -172,7 +172,7 @@ function StationCard({ station }: { station: FloorStation }) {
           ))}
         </div>
       ) : null}
-      {control && station.clean ? (
+      {control && station.clean && !station.carrier ? (
         <div className="row-end">
           <button
             className="btn sm"

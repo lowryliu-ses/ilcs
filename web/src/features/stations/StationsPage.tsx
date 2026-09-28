@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
-import { clock, time } from '../../shared/format';
+import { day, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
@@ -301,7 +301,7 @@ function AssetCalibration({ asset }: { asset: StationAsset | null }) {
   return (
     <>
       <Pill state={asset.calibration_valid ? 'valid' : 'expired'} label={asset.calibration_valid ? '有效' : '缺失或过期'} />
-      {asset.calibration_due ? <div className="tiny muted">至 {clock(asset.calibration_due)}</div> : null}
+      {asset.calibration_due ? <div className="tiny muted">至 {day(asset.calibration_due)}</div> : null}
     </>
   );
 }

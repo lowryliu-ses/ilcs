@@ -661,6 +661,8 @@ class TransferService:
                 "id": station.id, "name": station.name, "island": station.island, "status": station.status,
                 "retired": station.retired, "channels": station.channels or 1,
                 "capabilities": sorted((station.limits or {}).keys()),
+                # 只做转运的承运工位（AGV）：不在现场做工艺动作，不涉及清洗
+                "carrier": bool(station.limits) and set(station.limits) <= {TRANSFER_CAPABILITY},
                 "mine": own,
                 "clean": station.clean,
                 # 待清洗是哪个批次用过：别的组织的批次号不外露

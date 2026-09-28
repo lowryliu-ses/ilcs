@@ -1952,6 +1952,8 @@ export type FloorStation = {
   retired: boolean;
   channels: number;
   capabilities: string[];
+  /** 只做转运的承运工位（AGV），不涉及清洗 */
+  carrier: boolean;
   /** 本组织的工位：清洗确认、重连只对它可用 */
   mine: boolean;
   clean: boolean;

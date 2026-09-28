@@ -21,6 +21,23 @@ export function clock(iso?: string | null): string {
   });
 }
 
+/** 带年份的日期：校准到期这类一年以上的期限只写月日会看成「昨天就到期了」 */
+export function day(iso?: string | null): string {
+  if (!iso) return '—';
+  return dateOf(iso).toLocaleDateString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', timeZone: displayTimezone.get(),
+  });
+}
+
+/** 带年份的日期时间 */
+export function stamp(iso?: string | null): string {
+  if (!iso) return '—';
+  return dateOf(iso).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    timeZone: displayTimezone.get(),
+  });
+}
+
 export function time(iso?: string | null): string {
   if (!iso) return '—';
   return dateOf(iso).toLocaleTimeString('zh-CN', {

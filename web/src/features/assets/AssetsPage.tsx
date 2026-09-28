@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { api, pageQuery } from '../../shared/api';
-import { clock } from '../../shared/format';
+import { clock, day, stamp } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
@@ -111,7 +111,7 @@ export function AssetsPage() {
                         <>
                           <Pill state={row.calibration_valid ? 'valid' : 'expired'} label={row.calibration_valid ? '有效' : '缺失或过期'} />
                           {row.calibration_due ? (
-                            <div className="tiny muted">至 {clock(row.calibration_due)}</div>
+                            <div className="tiny muted">至 {day(row.calibration_due)}</div>
                           ) : null}
                         </>
                       ) : (
@@ -312,8 +312,8 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
                         <Pill state={row.result === 'pass' ? 'valid' : 'invalid'} label={row.result === 'pass' ? '合格' : '不合格'} />
                         {row.valid_now ? <div className="tiny">当前有效</div> : <div className="tiny muted">当前无效</div>}
                       </td>
-                      <td className="small">{clock(row.effective_from)}</td>
-                      <td className="small">{row.expires_at ? clock(row.expires_at) : '未设'}</td>
+                      <td className="small">{stamp(row.effective_from)}</td>
+                      <td className="small">{row.expires_at ? stamp(row.expires_at) : '未设'}</td>
                       <td className="small">
                         {row.certificate_file_id ? (
                           <button

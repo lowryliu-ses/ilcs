@@ -149,8 +149,9 @@ def test_floor_carries_what_the_operator_acts_on(operator, reset_runtime):
         return next(row for row in operator.get("/api/floor").json()["stations"] if row["id"] == station_id)
 
     row = card("ST-05")
-    assert row["mine"] is True and row["clean"] is True and row["row_version"] > 0
+    assert row["mine"] is True and row["clean"] is True and row["row_version"] > 0 and row["carrier"] is False
     assert row["adapter"]["status"] in {"online", "degraded", "stale", "offline", "disabled"}
+    assert card("AGV-01")["carrier"] is True, "只做转运的工位不涉及清洗"
 
     marked = operator.patch(
         "/api/stations/ST-05/readiness", {"clean": False, "status": "idle", "row_version": row["row_version"]},
