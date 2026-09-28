@@ -12,7 +12,9 @@ import { Blocked, Empty, Field, Modal, Panel, Pill, useToast } from '../../share
 /* 现场监控：中控室大屏看的就是这一页。
 
    一眼要能回答三件事：哪台设备在干什么（或为什么不能干）、每块板在哪、有什么在路上。
-   数据由服务端变更推送驱动刷新；推送断开时退回 10 s 轮询，顶栏的「实时 / 轮询」标明当前模式。 */
+   数据由服务端变更推送驱动刷新；推送断开时退回 10 s 轮询，顶栏的「实时 / 轮询」标明当前模式。
+   现场操作也在这里做（要 batch.control，且只对本组织的工位）：确认已清洗、结果未知的指令转人工核查、
+   失联或心跳超时的适配器重连。工位能接什么活、怎么连设备是静态配置，在「工位配置」。 */
 
 const COMMAND_LABEL: Record<string, string> = {
   dispatch: '动作', resume: '续跑', retry: '重试', hold: '保持', abort: '终止', transfer: '转运',
@@ -27,6 +29,7 @@ function stationHealth(station: FloorStation): { tone: 'ok' | 'warn' | 'bad' | '
   if (!adapter) return { tone: 'off', label: '无适配器' };
   if (!adapter.enabled) return { tone: 'off', label: '适配器停用' };
   if (!adapter.connected) return { tone: 'bad', label: '失联' };
+  if (adapter.status === 'stale') return { tone: 'bad', label: '心跳超时' };
   if (adapter.interlock) return { tone: 'bad', label: '安全联锁' };
   if (station.status === 'fault') return { tone: 'bad', label: '故障' };
   if (!adapter.accepts_commands) return { tone: 'warn', label: '拒收动作' };
@@ -62,9 +65,35 @@ function Slot({ slot }: { slot: FloorSlot }) {
 }
 
 function StationCard({ station }: { station: FloorStation }) {
+  const { can } = useSession();
+  const toast = useToast();
   const health = stationHealth(station);
   const active = station.commands.filter((c) => c.state !== 'sent');
   const queued = station.commands.filter((c) => c.state === 'sent').length;
+  // 现场操作只对本组织、在用的工位开放；别的组织的设备只看不动
+  const control = can('batch.control') && station.mine && !station.retired;
+  const adapter = station.adapter;
+
+  const readiness = useMutation(
+    (clean: boolean) =>
+      api.patch(`/stations/${station.id}/readiness`, {
+        clean, status: station.status, row_version: station.row_version,
+      }),
+    {
+      invalidates: ['floor', 'stations', 'dashboard', 'schedule', 'alarms', 'audit'],
+      onSuccess: () => toast.push(`${station.id} 就绪状态已更新`),
+    },
+  );
+  const toManual = useMutation((commandId: string) => api.post(`/commands/${commandId}/manual-review`), {
+    invalidates: ['floor', 'batches', 'dashboard', 'audit'],
+    onSuccess: () => toast.push('已转人工核查：到现场确认设备实态，再在批次详情里签名下核查结论'),
+  });
+  const reconnect = useMutation(() => api.post(`/stations/${station.id}/adapter/reconnect`), {
+    invalidates: ['floor', 'stations', 'gate', 'dashboard', 'audit'],
+    onSuccess: () => toast.push(`${station.id} 适配器已重连并对账最近检查点`),
+  });
+  const fail = (error: Error) => toast.push(error.message);
+
   return (
     <div className={`station-card ${health.tone}`}>
       <div className="station-head">
@@ -77,6 +106,28 @@ function StationCard({ station }: { station: FloorStation }) {
         </div>
         <span className={`health ${health.tone}`}>{health.label}</span>
       </div>
+      {!station.clean ? (
+        <div className="station-alert">
+          <span className="small warn-text">
+            待清洗{station.dirty_batch_id ? `（${station.dirty_batch_id} 用后）` : ''}：确认前别的批次的动作不投递
+          </span>
+          {control ? (
+            <button className="btn sm primary" disabled={readiness.pending} onClick={() => readiness.run(true).catch(fail)}>
+              确认已清洗
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {control && adapter?.enabled && adapter.status !== 'online' ? (
+        <div className="station-alert">
+          <span className="small bad-text">
+            适配器{adapter.status === 'degraded' ? '心跳降级' : adapter.status === 'stale' ? '心跳超时' : '失联'}
+          </span>
+          <button className="btn sm" disabled={reconnect.pending} onClick={() => reconnect.run().catch(fail)}>
+            重连
+          </button>
+        </div>
+      ) : null}
       <div className="station-work">
         {active.length ? (
           active.map((command) => (
@@ -90,6 +141,23 @@ function StationCard({ station }: { station: FloorStation }) {
                 </>
               ) : null}
               <span className="tiny muted"> · {clock(command.since)} 起</span>
+              {command.state === 'unknown' && control && command.mine ? (
+                <div>
+                  <button
+                    className="btn sm"
+                    disabled={toManual.pending}
+                    title="结果未知不自动重试：转人工核查，由现场确认设备实态后在批次详情里签名下结论"
+                    onClick={() => toManual.run(command.id).catch(fail)}
+                  >
+                    转人工核查
+                  </button>
+                </div>
+              ) : null}
+              {command.state === 'manual' && command.mine && command.batch_id ? (
+                <div className="tiny muted">
+                  人工核查中：到<Link to={`/batches/${command.batch_id}`}>批次详情</Link>签名下核查结论
+                </div>
+              ) : null}
             </div>
           ))
         ) : (
@@ -102,6 +170,18 @@ function StationCard({ station }: { station: FloorStation }) {
           {station.nests.map((slot) => (
             <Slot key={slot.id} slot={slot} />
           ))}
+        </div>
+      ) : null}
+      {control && station.clean ? (
+        <div className="row-end">
+          <button
+            className="btn sm"
+            disabled={readiness.pending}
+            title="现场发现污染或残留时手工标记；确认已清洗之前别的批次的动作不投递"
+            onClick={() => readiness.run(false).catch(fail)}
+          >
+            标记待清洗
+          </button>
         </div>
       ) : null}
     </div>

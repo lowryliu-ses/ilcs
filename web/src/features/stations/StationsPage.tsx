@@ -1,39 +1,39 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
-import { time } from '../../shared/format';
+import { clock, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, CommandRow, Recovery, StationRow } from '../../shared/types';
-import { ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+import type { AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, StationAsset, StationRow } from '../../shared/types';
+import { Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+
+/* 工位配置：系统里的执行位置能接什么活（能力极限）、同时接几份（通道）、怎么连设备（适配器）。
+
+   以静态配置为主。实物属性——型号、序列号、校准、资产状态与总容量——归「仪器设备」，这里只读显示关联资产的结论；
+   清洗确认、结果未知指令转人工核查、适配器重连是现场操作，在「现场监控」做；能力本身的定义在「能力字典」。 */
+
+const CHANNELS_HINT =
+  '同一时刻能同时跑几个批次的设备步骤。一个批次的一个设备步骤占 1 个，与批次里有几个样本无关：' +
+  '设备若一颗电芯占一个物理通道，一批 8 颗的 8 通道柜只能同时跑 1 批，这里就填 1。不能超过所属资产的容量';
+
+const ADAPTER_STATUS: Record<string, [string, string]> = {
+  online: ['running', '在线'], degraded: ['paused', '降级'], stale: ['fault', '心跳超时'],
+  offline: ['fault', '失联'], disabled: ['retired', '已停用'],
+};
+
+const ASSET_STATE: Record<string, string> = { active: '正常', maintenance: '维护中', retired: '已退役' };
 
 export function StationsPage() {
   const { can } = useSession();
   const toast = useToast();
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'), 15000);
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
-  const commands = useQuery<CommandRow[]>('commands', () => api.get<CommandRow[]>('/commands?limit=30'), 10000);
   const [editing, setEditing] = useState<StationRow | null>(null);
-  const [registering, setRegistering] = useState(false);
   const [addingStation, setAddingStation] = useState(false);
   const [editingStation, setEditingStation] = useState<StationRow | null>(null);
   const [editingAdapter, setEditingAdapter] = useState<StationRow | null>(null);
-  const [editingCapability, setEditingCapability] = useState<CapabilityRow | null>(null);
-  const [deletingCapability, setDeletingCapability] = useState<CapabilityRow | null>(null);
-
-  const readiness = useMutation(
-    (payload: { id: string; clean: boolean; status: string; row_version: number }) =>
-      api.patch(`/stations/${payload.id}/readiness`, {
-        clean: payload.clean, status: payload.status, row_version: payload.row_version,
-      }),
-    { invalidates: ['stations', 'dashboard', 'schedule'], onSuccess: () => toast.push('工位就绪状态已更新') },
-  );
-
-  const reconnect = useMutation((stationId: string) => api.post(`/stations/${stationId}/adapter/reconnect`), {
-    invalidates: ['stations', 'dashboard', 'gate', 'audit'],
-    onSuccess: () => toast.push('适配器已重连并对账最近检查点'),
-  });
 
   const retireStation = useMutation(
     (payload: { id: string; retired: boolean }) =>
@@ -49,27 +49,22 @@ export function StationsPage() {
     },
   );
 
-  const retireCapability = useMutation(
-    (payload: { id: string; retired: boolean }) =>
-      api.post(`/capabilities/${payload.id}/retire`, { retired: payload.retired }),
+  // 「以资产型号为准」：清掉工位上早先登记、与资产不一致的型号（设备方法本来就按资产型号匹配）
+  const adoptAssetModel = useMutation(
+    (station: StationRow) =>
+      api.patch<{ broken_recipes: string[] }>(`/stations/${station.id}`, { model: '', row_version: station.row_version }),
     {
-      invalidates: ['capabilities', 'recipes', 'audit'],
-      onSuccess: () => toast.push('能力状态已更新；已有流程与批次快照不受影响'),
+      invalidates: ['stations', 'recipes', 'audit'],
+      onSuccess: (result) =>
+        toast.push(
+          result.broken_recipes.length
+            ? `已清除工位上的旧型号；${result.broken_recipes.join('、')} 重校验不再通过`
+            : '已清除工位上的旧型号，以资产登记的型号为准',
+        ),
     },
   );
 
-  const removeCapability = useMutation((capabilityId: string) => api.remove(`/capabilities/${capabilityId}`), {
-    invalidates: ['capabilities', 'stations', 'audit'],
-    onSuccess: () => {
-      toast.push('能力已删除');
-      setDeletingCapability(null);
-    },
-  });
-
-  const toManual = useMutation((commandId: string) => api.post(`/commands/${commandId}/manual-review`), {
-    invalidates: ['commands', 'batches', 'dashboard', 'audit'],
-    onSuccess: () => toast.push('已转人工核查：现场确认设备实态与检查点一致后再续跑'),
-  });
+  const capabilityName = (id: string) => capabilities.data?.find((row) => row.id === id)?.name ?? id.replace('cap.', '');
 
   return (
     <div className="page">
@@ -77,18 +72,15 @@ export function StationsPage() {
         <div>
           <h1>工位配置</h1>
           <div className="small muted">
-            能力极限是流程校验与排程匹配的唯一数据源，修改需要电子签名并触发流程重校验
+            能力极限是流程校验与排程匹配的唯一数据源，修改需要电子签名并触发流程重校验。型号、校准、资产状态从关联的
+            <Link to="/assets">仪器设备</Link>带出；清洗确认、指令核查、重连在<Link to="/floor">现场监控</Link>；能力定义在
+            <Link to="/capabilities">能力字典</Link>。
           </div>
         </div>
         <div className="row">
           {can('station.edit') ? (
-            <button className="btn" onClick={() => setAddingStation(true)}>
+            <button className="btn primary" onClick={() => setAddingStation(true)}>
               登记新工位
-            </button>
-          ) : null}
-          {can('station.edit') ? (
-            <button className="btn primary" onClick={() => setRegistering(true)}>
-              登记新能力
             </button>
           ) : null}
         </div>
@@ -100,9 +92,10 @@ export function StationsPage() {
             <tr>
               <th>工位</th>
               <th>状态</th>
-              <th className="num">样品位</th>
-              <th className="num" title="同一时刻能同时承接的批次数">通道</th>
-              <th>校准到期</th>
+              <th>关联资产</th>
+              <th title="设备方法按这个型号匹配工位">型号</th>
+              <th>校准（按资产）</th>
+              <th className="num" title="同一时刻能同时承接几个批次的设备步骤">通道</th>
               <th>实现能力</th>
               <th />
             </tr>
@@ -113,7 +106,7 @@ export function StationsPage() {
                 <td>
                   <b className="mono">{station.id}</b>
                   <div className="tiny muted">
-                    {station.name} · {station.model} · 岛 {station.island}
+                    {station.name} · 岛 {station.island}
                   </div>
                 </td>
                 <td>
@@ -122,31 +115,57 @@ export function StationsPage() {
                   ) : (
                     <Pill state={station.status} label={stationLabel(station.status)} />
                   )}
-                  <div className="tiny muted">{station.clean ? '已清洗' : '未清洗'}</div>
+                  <div className={`tiny ${station.clean ? 'muted' : 'warn-text'}`}>
+                    {station.clean ? '已清洗' : `待清洗${station.dirty_batch_id ? `（${station.dirty_batch_id} 用后）` : ''}`}
+                  </div>
                 </td>
-                <td className="num">{station.positions}</td>
+                <td className="small">
+                  {station.asset ? (
+                    <>
+                      <Link to="/assets" className="mono">{station.asset.asset_no}</Link>
+                      <div className="tiny muted">{station.asset.name}</div>
+                      {station.asset.state !== 'active' ? (
+                        <div className="tiny warn-text">资产{ASSET_STATE[station.asset.state] ?? station.asset.state}</div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span className="muted" title="设备步骤要落在关联了资产的工位上，开跑检查才能核对校准与容量">未关联</span>
+                  )}
+                </td>
+                <td className="small">
+                  <span className="mono">{station.model || '—'}</span>
+                  {station.model_source === 'asset' && !station.model ? (
+                    <div className="tiny warn-text">资产未登记型号</div>
+                  ) : null}
+                  {station.model_conflict ? (
+                    <div className="tiny warn-text" title="设备方法按资产登记的型号匹配工位；若工位上的才对，请到「仪器设备」改资产型号">
+                      工位原登记 <span className="mono">{station.model_conflict}</span>，与资产不一致
+                      {can('station.edit') && station.model ? (
+                        <div>
+                          <button
+                            className="btn sm"
+                            disabled={adoptAssetModel.pending}
+                            onClick={() => adoptAssetModel.run(station).catch((error) => toast.push(error.message))}
+                          >
+                            以资产型号为准
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </td>
+                <td className="small">
+                  <AssetCalibration asset={station.asset} />
+                </td>
                 <td className="num">{station.channels ?? 1}</td>
-                <td className="small mono">{station.cal_due}</td>
                 <td className="small">
                   {Object.keys(station.limits).map((capability) => (
-                    <span key={capability} className="tag mono">
-                      {capability.replace('cap.', '')}
+                    <span key={capability} className="tag" title={capability}>
+                      {capabilityName(capability)}
                     </span>
                   ))}
                 </td>
                 <td className="row-end">
-                  {can('batch.control') ? (
-                    <button
-                      className="btn sm"
-                      onClick={() =>
-                        readiness
-                          .run({ id: station.id, clean: !station.clean, status: station.status, row_version: station.row_version })
-                          .catch((error) => toast.push(error.message))
-                      }
-                    >
-                      {station.clean ? '标记未清洗' : '确认已清洗'}
-                    </button>
-                  ) : null}
                   {can('station.edit') ? (
                     <button className="btn sm" onClick={() => setEditingStation(station)}>
                       编辑台账
@@ -176,6 +195,10 @@ export function StationsPage() {
             ))}
           </tbody>
         </table>
+        <div className="panel-body small muted">
+          通道按「一个批次的一个设备步骤占 1 个」计，与批次里有几个样本无关：设备若一颗电芯占一个物理通道，
+          一批 8 颗的 8 通道柜只能同时跑 1 批，这里就填 1。工位通道数不能超过所属资产容量；资产容量由映射到它的所有工位共用。
+        </div>
       </Panel>
 
       <Panel title="设备适配器" flush>
@@ -197,6 +220,7 @@ export function StationsPage() {
               .filter((station) => station.adapter)
               .map((station) => {
                 const adapter = station.adapter!;
+                const [pill, label] = ADAPTER_STATUS[adapter.status] ?? ['fault', adapter.status];
                 return (
                   <tr key={station.id}>
                     <td className="mono">{station.id}</td>
@@ -216,10 +240,7 @@ export function StationsPage() {
                       ) : null}
                     </td>
                     <td>
-                      <Pill
-                        state={adapter.status === 'online' ? 'running' : adapter.status === 'degraded' ? 'paused' : adapter.status === 'disabled' ? 'retired' : 'fault'}
-                        label={{ online: '在线', degraded: '降级', offline: '失联', disabled: '已停用' }[adapter.status] ?? adapter.status}
-                      />
+                      <Pill state={pill} label={label} />
                       {adapter.site_interlock ? <div className="tiny bad-text">公共保护联锁</div> : null}
                       {!adapter.accepts_commands ? <div className="tiny warn-text">拒绝动作指令</div> : null}
                       {adapter.unsupported_note ? (
@@ -238,15 +259,6 @@ export function StationsPage() {
                           配置
                         </button>
                       ) : null}
-                      {can('batch.control') && adapter.enabled && adapter.status !== 'online' ? (
-                        <button
-                          className="btn sm"
-                          disabled={reconnect.pending}
-                          onClick={() => reconnect.run(station.id).catch((error) => toast.push(error.message))}
-                        >
-                          重连
-                        </button>
-                      ) : null}
                     </td>
                   </tr>
                 );
@@ -255,140 +267,13 @@ export function StationsPage() {
         </table>
         <div className="panel-body small muted">
           “模拟器”只验证系统流程，不代表对应协议已经接入真实设备。心跳超过 5 s 标记降级，超过 5 min
-          全站执行门锁定。重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
+          判为心跳超时、挡住用到这台设备的批次。配置里可以测试连接、读取设备方法目录；失联后的重连在「现场监控」该工位卡片上做——
+          重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
         </div>
-      </Panel>
-
-      <Panel title="指令对账" flush>
-        {commands.data?.length ? (
-          <table>
-            <thead>
-              <tr>
-                <th>指令</th>
-                <th>批次</th>
-                <th>工位</th>
-                <th>类型</th>
-                <th>状态</th>
-                <th>更新</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {commands.data.map((command) => (
-                <tr key={command.id}>
-                  <td className="mono small">{command.id.slice(0, 8)}</td>
-                  <td className="mono small">{command.batch_id}</td>
-                  <td className="mono">{command.station_id}</td>
-                  <td className="small">
-                    第 {command.step_index + 1} 步 {command.type}
-                    {command.error ? <div className="tiny bad-text">{command.error}</div> : null}
-                  </td>
-                  <td>
-                    <Pill state={command.state} label={commandLabel(command.state)} />
-                  </td>
-                  <td className="small mono">{time(command.updated_at ?? command.created_at)}</td>
-                  <td className="row-end">
-                    {command.state === 'unknown' && can('batch.control') ? (
-                      <button
-                        className="btn sm"
-                        disabled={toManual.pending}
-                        onClick={() => toManual.run(command.id).catch((error) => toast.push(error.message))}
-                      >
-                        转人工核查
-                      </button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <Empty>还没有指令记录</Empty>
-        )}
-        <div className="panel-body small muted">
-          指令七态：已发送 → 设备已接受 → 执行中 → 已完成 / 结果未知。结果未知不自动重试，进入人工核查。
-        </div>
-      </Panel>
-
-      <Panel title="能力字典与恢复规则" flush>
-        <table>
-          <thead>
-            <tr>
-              <th>能力</th>
-              <th>参数</th>
-              <th>保持</th>
-              <th>重试</th>
-              <th>恢复前核实</th>
-              <th>实现工位</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {(capabilities.data ?? []).map((capability) => (
-              <tr key={capability.id} className={capability.retired ? 'retired-row' : undefined}>
-                <td>
-                  {capability.name}
-                  {capability.retired ? <Pill state="retired" label="已停用" /> : null}
-                  <div className="tiny muted mono">{capability.id}</div>
-                </td>
-                <td className="small">{Object.values(capability.params).join(' · ') || '无参数'}</td>
-                <td className="small">
-                  {capability.recovery.pausable ? `≤ ${capability.recovery.maxHoldMin} min` : '不可保持'}
-                  {capability.recovery.hold ? <div className="tiny muted">{capability.recovery.hold}</div> : null}
-                </td>
-                <td className="small">
-                  {capability.recovery.retryable ? '可重试' : '不可重试'}
-                  {capability.recovery.cleanAfter ? <div className="tiny warn-text">用后需清洗确认</div> : null}
-                  {capability.recovery.sideEffect ? (
-                    <div className="tiny muted">{capability.recovery.sideEffect}</div>
-                  ) : null}
-                </td>
-                <td className="small muted">{capability.recovery.verify?.join('、') || '无'}</td>
-                <td className="small mono">
-                  {capability.stations.join('、') || '无'}
-                  {capability.recipes.length ? (
-                    <div className="tiny muted">{capability.recipes.length} 个流程在用</div>
-                  ) : null}
-                </td>
-                <td className="row-end">
-                  {can('station.edit') ? (
-                    <>
-                      <button className="btn sm" onClick={() => setEditingCapability(capability)}>
-                        编辑
-                      </button>
-                      <button
-                        className="btn sm"
-                        title={capability.retired ? '恢复可选' : '新流程步骤不能再选它，已有流程不受影响'}
-                        onClick={() =>
-                          retireCapability
-                            .run({ id: capability.id, retired: !capability.retired })
-                            .catch((error) => toast.push(error.message))
-                        }
-                      >
-                        {capability.retired ? '启用' : '停用'}
-                      </button>
-                      <button
-                        className="btn sm danger"
-                        disabled={capability.delete_blockers.length > 0}
-                        title={capability.delete_blockers.join('；') || undefined}
-                        onClick={() => setDeletingCapability(capability)}
-                      >
-                        删除
-                      </button>
-                    </>
-                  ) : null}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </Panel>
 
       {editing ? (
         <LimitsEditor station={editing} capabilities={capabilities.data ?? []} onClose={() => setEditing(null)} />
-      ) : null}
-      {registering ? (
-        <CapabilityForm stations={stations.data ?? []} onClose={() => setRegistering(false)} />
       ) : null}
       {addingStation ? (
         <StationForm capabilities={capabilities.data ?? []} onClose={() => setAddingStation(false)} />
@@ -399,26 +284,25 @@ export function StationsPage() {
       {editingAdapter ? (
         <AdapterEditor station={editingAdapter} onClose={() => setEditingAdapter(null)} />
       ) : null}
-      {editingCapability ? (
-        <CapabilityEditForm capability={editingCapability} onClose={() => setEditingCapability(null)} />
-      ) : null}
-      {deletingCapability ? (
-        <ConfirmDialog
-          title={`删除能力 · ${deletingCapability.name}`}
-          danger
-          confirmLabel="删除"
-          pending={removeCapability.pending}
-          error={removeCapability.error?.message}
-          onClose={() => setDeletingCapability(null)}
-          onConfirm={() => removeCapability.run(deletingCapability.id).catch(() => undefined)}
-        >
-          <div className="note warn">
-            <span className="mono">{deletingCapability.id}</span> 没有工位实现、也没有流程引用，可以从字典里移除。
-            有引用的能力请改用「停用」。
-          </div>
-        </ConfirmDialog>
-      ) : null}
     </div>
+  );
+}
+
+/** 校准只登记在资产上：这里显示资产按校准记录算出的结论，不在工位上另存一份到期日。 */
+function AssetCalibration({ asset }: { asset: StationAsset | null }) {
+  if (!asset) return <span className="muted">—</span>;
+  if (!asset.calibration_applicable) {
+    return (
+      <span className="tag" title={asset.calibration_exempt_reason}>
+        不适用校准
+      </span>
+    );
+  }
+  return (
+    <>
+      <Pill state={asset.calibration_valid ? 'valid' : 'expired'} label={asset.calibration_valid ? '有效' : '缺失或过期'} />
+      {asset.calibration_due ? <div className="tiny muted">至 {clock(asset.calibration_due)}</div> : null}
+    </>
   );
 }
 
@@ -762,7 +646,7 @@ function LimitsEditor({
     >
       <div className="note warn">
         工位未定义的参数视为不能承接该步骤。保存后服务端重校验所有引用这些能力的流程，
-        已发布但不再通过的版本进入「需修订」，不能再创建批次。
+        已发布但不再通过的版本进入「需修订」，不能再创建批次。能力本身有哪些参数在「能力字典」里定义。
       </div>
 
       {Object.entries(limits).map(([capabilityId, params]) => {
@@ -844,237 +728,11 @@ function LimitsEditor({
   );
 }
 
-/* 登记新能力：参数定义 + 恢复规则 + 实现工位。恢复规则写在能力上而不是流程上，
-   因为「能不能保持、能不能重试」是设备物理属性，流程无权覆盖。 */
-function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose: () => void }) {
-  const toast = useToast();
-  const { sign } = useSignature();
-  const [id, setId] = useState('cap.');
-  const [name, setName] = useState('');
-  const [params, setParams] = useState<{ key: string; label: string }[]>([{ key: '', label: '' }]);
-  const [recovery, setRecovery] = useState<Recovery>({
-    pausable: true, maxHoldMin: 30, hold: '', retryable: false, sideEffect: '', verify: [],
-  });
-  const [verifyText, setVerifyText] = useState('');
-  const [picked, setPicked] = useState<string[]>([]);
-  const [error, setError] = useState('');
-
-  const create = useMutation((payload: Record<string, unknown>) => api.post('/capabilities', payload), {
-    invalidates: ['capabilities', 'stations', 'recipes', 'audit'],
-    onSuccess: () => {
-      toast.push('能力已登记；实现工位的参数极限先给默认区间，请随后按实际标定修改');
-      onClose();
-    },
-  });
-
-  const validParams = params.filter((row) => row.key.trim());
-  const idOk = /^cap\.[a-z0-9_]+$/.test(id);
-  const ready = idOk && name.trim().length > 0;
-
-  const submit = async () => {
-    if (!ready) {
-      setError('标识需形如 cap.xxx（小写字母、数字、下划线），名称不能为空');
-      return;
-    }
-    setError('');
-    const signatureId = await sign('登记新能力', `${id} ${name}`, ['能力模型变更批准']);
-    if (!signatureId) return;
-    await create
-      .run({
-        id: id.trim(),
-        name: name.trim(),
-        params: Object.fromEntries(validParams.map((row) => [row.key.trim(), row.label.trim() || row.key.trim()])),
-        recovery: {
-          ...recovery,
-          verify: verifyText.split(/[、,，\s]+/).map((item) => item.trim()).filter(Boolean),
-        },
-        stations: picked,
-        signature_id: signatureId,
-      })
-      .catch((caught) => setError(caught.message));
-  };
-
-  return (
-    <Modal
-      title="登记新能力"
-      wide
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>
-            取消
-          </button>
-          <button className="btn primary" disabled={create.pending} onClick={submit}>
-            签名并登记
-          </button>
-        </>
-      }
-    >
-      <div className="note">
-        能力是流程步骤的绑定对象。参数定义决定流程里能填哪些字段，恢复规则由能力继承到每一个引用它的步骤。
-      </div>
-
-      <div className="grid cols-2">
-        <Field label="标识" hint="形如 cap.dose_solid，登记后不可更改">
-          <input
-            className={`mono${idOk ? '' : ' bad'}`}
-            value={id}
-            onChange={(event) => setId(event.target.value)}
-          />
-        </Field>
-        <Field label="名称">
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：超声分散" />
-        </Field>
-      </div>
-
-      <div>
-        <div className="small muted" style={{ marginBottom: 6 }}>
-          参数定义（键用于流程与指令，标签用于界面显示，建议带单位）
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>键</th>
-              <th>标签</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {params.map((row, index) => (
-              <tr key={index}>
-                <td>
-                  <input
-                    className="mono"
-                    value={row.key}
-                    aria-label={`参数 ${index + 1} 键`}
-                    placeholder="power"
-                    onChange={(event) =>
-                      setParams((current) =>
-                        current.map((item, order) => (order === index ? { ...item, key: event.target.value } : item)),
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    value={row.label}
-                    aria-label={`参数 ${index + 1} 标签`}
-                    placeholder="超声功率 W"
-                    onChange={(event) =>
-                      setParams((current) =>
-                        current.map((item, order) => (order === index ? { ...item, label: event.target.value } : item)),
-                      )
-                    }
-                  />
-                </td>
-                <td className="row-end">
-                  <button
-                    className="btn sm"
-                    aria-label={`删除参数 ${index + 1}`}
-                    onClick={() => setParams((current) => current.filter((_, order) => order !== index))}
-                  >
-                    删
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <button
-          className="btn sm"
-          style={{ marginTop: 8 }}
-          onClick={() => setParams((current) => [...current, { key: '', label: '' }])}
-        >
-          添加参数
-        </button>
-      </div>
-
-      <div className="grid cols-2">
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={!!recovery.pausable}
-            onChange={(event) => setRecovery((current) => ({ ...current, pausable: event.target.checked }))}
-          />
-          可保持（异常时能停在中间态）
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={!!recovery.retryable}
-            onChange={(event) => setRecovery((current) => ({ ...current, retryable: event.target.checked }))}
-          />
-          可重试（重做本步不产生不可逆副作用）
-        </label>
-        <label className="check" title="做完后工位转为待清洗；在工位页确认已清洗之前，别的批次的动作不投递">
-          <input
-            type="checkbox"
-            checked={!!recovery.cleanAfter}
-            onChange={(event) => setRecovery((current) => ({ ...current, cleanAfter: event.target.checked }))}
-          />
-          用后需清洗确认（确认前不给别的批次用）
-        </label>
-      </div>
-
-      <div className="grid cols-2">
-        <Field label="最长保持时长 min">
-          <NumberInput
-            value={recovery.maxHoldMin ?? ''}
-            disabled={!recovery.pausable}
-            ariaLabel="最长保持时长"
-            onChange={(next) => setRecovery((current) => ({ ...current, maxHoldMin: next === '' ? 0 : next }))}
-          />
-        </Field>
-        <Field label="保持状态描述">
-          <input
-            value={recovery.hold ?? ''}
-            disabled={!recovery.pausable}
-            placeholder="例如：换能器停振，冷却水继续循环"
-            onChange={(event) => setRecovery((current) => ({ ...current, hold: event.target.value }))}
-          />
-        </Field>
-      </div>
-
-      <Field label="重试副作用说明" hint="不可重试时这句话会出现在恢复评估里，解释为什么只能终止">
-        <input
-          value={recovery.sideEffect ?? ''}
-          onChange={(event) => setRecovery((current) => ({ ...current, sideEffect: event.target.value }))}
-        />
-      </Field>
-
-      <Field label="恢复前核实项" hint="用顿号或逗号分隔">
-        <input value={verifyText} onChange={(event) => setVerifyText(event.target.value)} placeholder="累计超声时间、浆料温度" />
-      </Field>
-
-      <Field label="实现工位" hint="勾选后按参数默认区间 [0, 100] 写入，请随后按实际标定修改">
-        <div className="row">
-          {stations.map((station) => (
-            <label key={station.id} className="check">
-              <input
-                type="checkbox"
-                checked={picked.includes(station.id)}
-                onChange={(event) =>
-                  setPicked((current) =>
-                    event.target.checked ? [...current, station.id] : current.filter((item) => item !== station.id),
-                  )
-                }
-              />
-              <span className="mono">{station.id}</span>
-            </label>
-          ))}
-        </div>
-      </Field>
-
-      {error ? <div className="note bad">{error}</div> : null}
-    </Modal>
-  );
-}
-
 /* 登记新工位。能力极限一并写入并立刻重校验受影响的流程，所以要签名。 */
 function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[]; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
-  const [form, setForm] = useState({ id: 'ST-', name: '', island: 1, model: '', cal_due: '', positions: 1, channels: 1 });
+  const [form, setForm] = useState({ id: 'ST-', name: '', island: 1, model: '', channels: 1 });
   const [protocol, setProtocol] = useState('');
   const [adapterVersion, setAdapterVersion] = useState('');
   const [adapterKind, setAdapterKind] = useState<'simulation' | 'real'>('simulation');
@@ -1170,6 +828,7 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
     >
       <div className="note">
         工位是排程匹配的落点。勾选的能力先按 [0, 100] 写入极限占位，登记后请到「编辑极限」按实际标定改。
+        有资产档案的设备，型号、序列号、校准在「仪器设备」登记，登记完到资产详情里关联本工位。
         <div><button type="button" className="btn small" onClick={applyHttpGatewayTemplate}>使用 HTTPS JSON 真实设备模板</button></div>
       </div>
       <div className="grid cols-2">
@@ -1180,22 +839,16 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
           <input value={form.name} placeholder="例如：超声分散站" onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
       </div>
-      <div className="grid cols-3">
+      <div className="grid cols-2">
         <Field label="功能岛">
           <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
-        <Field label="样品位">
-          <NumberInput value={form.positions} ariaLabel="样品位" invalid={!(form.positions >= 1)} onChange={(v) => setForm({ ...form, positions: Number(v) || 1 })} />
-        </Field>
-        <Field label="并行通道数" hint="同一时刻能同时承接几个批次，如 8 通道充放电柜填 8">
+        <Field label="并行通道数" hint={CHANNELS_HINT}>
           <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
-        </Field>
-        <Field label="校准到期">
-          <input value={form.cal_due} placeholder="2027-01-01" onChange={(e) => setForm({ ...form, cal_due: e.target.value })} />
         </Field>
       </div>
       <div className="grid cols-2">
-        <Field label="型号">
+        <Field label="型号" hint="只给没有资产档案的工位填（如 AGV、机械臂）；关联资产后以资产登记的型号为准">
           <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
         </Field>
         <Field label="适配器协议" hint="留空表示暂不登记适配器；登记后等首次心跳才算在线">
@@ -1284,22 +937,37 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
   );
 }
 
-/* 台账信息不影响排程判据，所以不要签名；能力极限走另一条要签名的路。 */
+/* 台账信息不影响排程判据，所以不要签名；能力极限走另一条要签名的路。
+   关联了资产的工位不在这里改型号：型号以资产登记为准，设备方法按它匹配。 */
 function StationLedgerForm({ station, onClose }: { station: StationRow; onClose: () => void }) {
   const toast = useToast();
+  const linked = Boolean(station.asset);
   const [form, setForm] = useState({
-    name: station.name, model: station.model, island: station.island,
-    positions: station.positions, channels: station.channels ?? 1, cal_due: station.cal_due,
+    name: station.name, model: station.model, island: station.island, channels: station.channels ?? 1,
   });
   const [error, setError] = useState('');
 
-  const save = useMutation((payload: Record<string, unknown>) => api.patch(`/stations/${station.id}`, payload), {
-    invalidates: ['stations', 'dashboard', 'schedule', 'audit'],
-    onSuccess: () => {
-      toast.push('工位台账已更新');
-      onClose();
+  const save = useMutation(
+    (payload: Record<string, unknown>) => api.patch<{ broken_recipes: string[] }>(`/stations/${station.id}`, payload),
+    {
+      invalidates: ['stations', 'recipes', 'dashboard', 'schedule', 'audit'],
+      onSuccess: (result) => {
+        toast.push(
+          result.broken_recipes?.length
+            ? `工位台账已更新；${result.broken_recipes.join('、')} 重校验不再通过`
+            : '工位台账已更新',
+        );
+        onClose();
+      },
     },
-  });
+  );
+
+  const submit = () => {
+    const { model, ...rest } = form;
+    save
+      .run({ ...rest, ...(linked ? {} : { model }), row_version: station.row_version })
+      .catch((caught) => setError(caught.message));
+  };
 
   return (
     <Modal
@@ -1308,173 +976,35 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
       footer={
         <>
           <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn primary" disabled={save.pending} onClick={() => save.run({ ...form, row_version: station.row_version }).catch((c) => setError(c.message))}>
+          <button className="btn primary" disabled={save.pending} onClick={submit}>
             保存
           </button>
         </>
       }
     >
       <div className="note">
-        这里只改台账信息。能力极限是排程与流程校验的判据，改动要签名并触发重校验，请用「编辑极限」。
+        这里只改台账信息。能力极限是排程与流程校验的判据，改动要签名并触发重校验，请用「编辑极限」；
+        校准、资产状态与总容量在「仪器设备」维护。
       </div>
       <Field label="名称">
         <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
       </Field>
       <div className="grid cols-2">
-        <Field label="型号">
-          <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
-        </Field>
+        {linked ? (
+          <Field label="型号" hint={`以资产 ${station.asset!.asset_no} 登记的为准，设备方法按它匹配；要改请到「仪器设备」`}>
+            <input value={station.model || '（资产未登记型号）'} readOnly />
+          </Field>
+        ) : (
+          <Field label="型号" hint="没有资产档案的工位（如 AGV、机械臂）才在这里填">
+            <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+          </Field>
+        )}
         <Field label="功能岛">
           <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
       </div>
-      <div className="grid cols-2">
-        <Field label="样品位">
-          <NumberInput value={form.positions} ariaLabel="样品位" invalid={!(form.positions >= 1)} onChange={(v) => setForm({ ...form, positions: Number(v) || 1 })} />
-        </Field>
-        <Field label="并行通道数" hint="同一时刻能同时承接几个批次，如 8 通道充放电柜填 8">
-          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
-        </Field>
-        <Field label="校准到期">
-          <input value={form.cal_due} onChange={(e) => setForm({ ...form, cal_due: e.target.value })} />
-        </Field>
-      </div>
-      {error ? <div className="note bad">{error}</div> : null}
-    </Modal>
-  );
-}
-
-/* 改能力定义。增删参数会改变所有引用流程的校验结果，所以签名并当场报告影响面。 */
-function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow; onClose: () => void }) {
-  const toast = useToast();
-  const { sign } = useSignature();
-  const [name, setName] = useState(capability.name);
-  const [params, setParams] = useState<{ key: string; label: string }[]>(
-    () => Object.entries(capability.params ?? {}).map(([key, label]) => ({ key, label })),
-  );
-  const [recovery, setRecovery] = useState<Recovery>({ ...capability.recovery });
-  const [verifyText, setVerifyText] = useState((capability.recovery.verify ?? []).join('、'));
-  const [error, setError] = useState('');
-
-  const save = useMutation(
-    (payload: Record<string, unknown>) => api.patch<{ broken_recipes: string[] }>(`/capabilities/${capability.id}`, payload),
-    {
-      invalidates: ['capabilities', 'stations', 'recipes', 'audit'],
-      onSuccess: (result) => {
-        toast.push(
-          result.broken_recipes.length
-            ? `已保存；${result.broken_recipes.join('、')} 重校验不再通过`
-            : '已保存并重新校验全部引用流程',
-        );
-        onClose();
-      },
-    },
-  );
-
-  const removed = Object.keys(capability.params ?? {}).filter((key) => !params.some((p) => p.key.trim() === key));
-
-  const submit = async () => {
-    const signatureId = await sign('修改能力定义', `${capability.id} ${name}`, ['能力模型变更批准']);
-    if (!signatureId) return;
-    await save
-      .run({
-        name,
-        params: Object.fromEntries(params.filter((p) => p.key.trim()).map((p) => [p.key.trim(), p.label.trim() || p.key.trim()])),
-        recovery: { ...recovery, verify: verifyText.split(/[、,，\s]+/).map((x) => x.trim()).filter(Boolean) },
-        signature_id: signatureId,
-      })
-      .catch((caught) => setError(caught.message));
-  };
-
-  return (
-    <Modal
-      title={`编辑能力 · ${capability.id}`}
-      wide
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn primary" disabled={save.pending} onClick={submit}>签名并保存</button>
-        </>
-      }
-    >
-      {capability.recipes.length ? (
-        <div className="note warn">
-          {capability.recipes.length} 个流程的步骤在用它（{capability.recipes.slice(0, 5).join('、')}）。
-          改参数定义会立刻重算它们的校验结果。
-        </div>
-      ) : null}
-      {removed.length ? (
-        <div className="note bad">
-          将移除参数 <span className="mono">{removed.join('、')}</span>：引用它的流程步骤会变成「参数不属于该能力」，
-          各工位极限里的对应条目也会一并清掉。
-        </div>
-      ) : null}
-
-      <Field label="名称">
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </Field>
-
-      <div>
-        <div className="small muted" style={{ marginBottom: 6 }}>参数定义</div>
-        <table>
-          <thead><tr><th>键</th><th>标签</th><th /></tr></thead>
-          <tbody>
-            {params.map((row, index) => (
-              <tr key={index}>
-                <td>
-                  <input className="mono" value={row.key} aria-label={`参数 ${index + 1} 键`}
-                    onChange={(e) => setParams((c) => c.map((x, i) => (i === index ? { ...x, key: e.target.value } : x)))} />
-                </td>
-                <td>
-                  <input value={row.label} aria-label={`参数 ${index + 1} 标签`}
-                    onChange={(e) => setParams((c) => c.map((x, i) => (i === index ? { ...x, label: e.target.value } : x)))} />
-                </td>
-                <td className="row-end">
-                  <button className="btn sm" aria-label={`删除参数 ${index + 1}`}
-                    onClick={() => setParams((c) => c.filter((_, i) => i !== index))}>删</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <button className="btn sm" style={{ marginTop: 8 }} onClick={() => setParams((c) => [...c, { key: '', label: '' }])}>
-          添加参数
-        </button>
-      </div>
-
-      <div className="grid cols-2">
-        <label className="check">
-          <input type="checkbox" checked={!!recovery.pausable}
-            onChange={(e) => setRecovery((c) => ({ ...c, pausable: e.target.checked }))} />
-          可保持
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={!!recovery.retryable}
-            onChange={(e) => setRecovery((c) => ({ ...c, retryable: e.target.checked }))} />
-          可重试
-        </label>
-        <label className="check" title="做完后工位转为待清洗；确认已清洗之前别的批次的动作不投递">
-          <input type="checkbox" checked={!!recovery.cleanAfter}
-            onChange={(e) => setRecovery((c) => ({ ...c, cleanAfter: e.target.checked }))} />
-          用后需清洗确认
-        </label>
-      </div>
-      <div className="grid cols-2">
-        <Field label="最长保持时长 min">
-          <NumberInput value={recovery.maxHoldMin ?? ''} disabled={!recovery.pausable} ariaLabel="最长保持时长"
-            onChange={(v) => setRecovery((c) => ({ ...c, maxHoldMin: v === '' ? 0 : v }))} />
-        </Field>
-        <Field label="保持状态描述">
-          <input value={recovery.hold ?? ''} disabled={!recovery.pausable}
-            onChange={(e) => setRecovery((c) => ({ ...c, hold: e.target.value }))} />
-        </Field>
-      </div>
-      <Field label="重试副作用说明">
-        <input value={recovery.sideEffect ?? ''} onChange={(e) => setRecovery((c) => ({ ...c, sideEffect: e.target.value }))} />
-      </Field>
-      <Field label="恢复前核实项" hint="用顿号或逗号分隔">
-        <input value={verifyText} onChange={(e) => setVerifyText(e.target.value)} />
+      <Field label="并行通道数" hint={CHANNELS_HINT}>
+        <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
       </Field>
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
@@ -1483,15 +1013,6 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
 
 function stationLabel(status: string): string {
   return { idle: '空闲', running: '运行', fault: '故障', offline: '离线' }[status] ?? status;
-}
-
-function commandLabel(state: string): string {
-  return (
-    {
-      sent: '已发送', accepted: '设备已接受', running: '执行中', done: '已完成',
-      unknown: '结果未知', manual: '人工核查中', rejected: '设备拒绝',
-    }[state] ?? state
-  );
 }
 
 /** 驱动自报的设备身份与方法目录。空目录不据此筛工位；「*」表示接受任意设备端程序。 */

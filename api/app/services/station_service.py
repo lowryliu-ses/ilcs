@@ -6,6 +6,7 @@ from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.errors import DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain.access import service_may_use_station
+from ..domain.gate import adapter_status
 from ..domain.lifecycle import capability_delete_blockers, station_retire_blockers
 from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
@@ -15,7 +16,10 @@ from ..adapters.registry import adapter_for, catalog_of, describe, reset_cache
 from ..repositories.batches import AllocationRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.recipes import RecipeRepository
-from ..repositories.resources import AdapterRepository, CapabilityRepository, IslandRepository, StationRepository
+from ..repositories.resources import (
+    AdapterRepository, AssetRepository, CapabilityRepository, IslandRepository, StationRepository,
+    adopt_asset_model, station_model,
+)
 from .audit_service import AuditService
 from .gate_service import GateService
 from .identity_service import IdentityService
@@ -39,47 +43,56 @@ class StationService:
     # ---------- 读 ----------
 
     def list_stations(self) -> list[dict]:
+        """工位台账。实物属性（型号、校准、资产状态）从关联资产带出、只读，不在工位上另存一份。"""
+        from .asset_service import AssetService
+
         adapters = {a.station_id: a for a in self.adapters.list()}
         gate_state = self.gate.status()
-        degraded = " ".join(gate_state["degraded"])
+        stations = self.stations.list()
+        assets = self.stations.assets_by_id(stations)
+        asset_service = AssetService(self.db, self.ctx)
+        briefs: dict[str, dict] = {}
         rows = []
-        for station in self.stations.list():
+        for station in stations:
             adapter = adapters.get(station.id)
+            asset = assets.get(station.asset_id)
+            if asset is not None and asset.id not in briefs:
+                briefs[asset.id] = asset_brief(asset_service.asset_out(asset))
+            model = station_model(station, asset)
             rows.append(
                 {
                     "id": station.id,
                     "island": station.island,
                     "name": station.name,
-                    "model": station.model,
+                    "model": model,
+                    # 型号从哪来：asset 资产登记（关联了资产）/ station 工位自己登记（没关联资产）
+                    "model_source": "asset" if asset is not None else "station",
+                    # 工位上早先登记、与资产不一致的型号。设备方法已按资产型号匹配，界面提示人核对
+                    "model_conflict": (
+                        station.model if asset is not None and station.model and station.model != model else ""
+                    ),
                     "status": station.status,
-                    "cal_due": station.cal_due,
-                    "positions": station.positions,
                     "channels": station.channels or 1,
                     "clean": station.clean,
+                    "dirty_batch_id": station.dirty_batch_id,
                     "limits": station.limits,
                     "retired": station.retired,
                     "asset_id": station.asset_id,
+                    "asset": briefs.get(asset.id) if asset is not None else None,
                     "row_version": station.row_version,
                     "retire_blockers": station_retire_blockers(
                         station.status, self._open_allocation_count(station.id)
                     ),
-                    "adapter": self._adapter_out(adapter, degraded) if adapter else None,
+                    "adapter": self._adapter_out(adapter, gate_state) if adapter else None,
                 }
             )
         return rows
 
     def _adapter_out(
-        self, adapter: Adapter, degraded_text: str, *, include_config: bool = False,
+        self, adapter: Adapter, gate_state: dict, *, include_config: bool = False,
     ) -> dict:
         age = (now() - adapter.last_heartbeat).total_seconds()
-        if not adapter.enabled:
-            status = "disabled"
-        elif not adapter.connected:
-            status = "offline"
-        elif adapter.station_id in degraded_text:
-            status = "degraded"
-        else:
-            status = "online"
+        status = adapter_status(gate_state, adapter.station_id, adapter.enabled, adapter.connected)
         return {
             "protocol": adapter.protocol,
             "driver": adapter.driver,
@@ -124,8 +137,7 @@ class StationService:
         adapter = self.adapters.get(station_id)
         if not adapter:
             raise NotFound("适配器未登记")
-        degraded = " ".join(self.gate.status()["degraded"])
-        return self._adapter_out(adapter, degraded, include_config=True)
+        return self._adapter_out(adapter, self.gate.status(), include_config=True)
 
     @staticmethod
     def _reject_inline_secrets(value, path: str = "config") -> None:
@@ -357,7 +369,7 @@ class StationService:
             detail=f"{adapter.protocol} 健康检查成功：{health}；批次续跑仍需恢复评估",
         )
         self.db.commit()
-        return {"station": station_id, "adapter": self._adapter_out(adapter, " ".join(self.gate.status()["degraded"]))}
+        return {"station": station_id, "adapter": self._adapter_out(adapter, self.gate.status())}
 
     # ---------- 工位增改停 ----------
 
@@ -373,10 +385,18 @@ class StationService:
         station = Station(
             id=payload["id"], org_id=self.ctx.org_id, asset_id=payload.get("asset_id", ""),
             island=payload.get("island", 0), name=payload["name"],
-            model=payload.get("model", ""), status="idle", cal_due=payload.get("cal_due", ""),
-            positions=payload.get("positions", 1), channels=max(1, int(payload.get("channels") or 1)),
+            model=payload.get("model", ""), status="idle",
+            channels=max(1, int(payload.get("channels") or 1)),
             clean=True, limits=payload.get("limits") or {},
         )
+        model_note = ""
+        if station.asset_id:
+            # 关联了资产就以资产型号为准，工位上不另存一份会分叉的型号
+            asset = AssetRepository(self.db, self.ctx).get(station.asset_id)
+            had_model = bool(asset.model)
+            model_note, _ = adopt_asset_model(station, asset)
+            if not had_model and asset.model:
+                AssetRepository.bump(asset)
         self.stations.add(station)
         if payload.get("protocol"):
             self._reject_inline_secrets(payload.get("adapter_config") or {})
@@ -400,6 +420,7 @@ class StationService:
             user, "登记新工位", station.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
             before="—", after="空闲",
             detail=f"{station.name}；{len(station.limits or {})} 项能力极限"
+                   + (f"；{model_note}" if model_note else "")
                    + (f"；重校验影响 {len(broken)} 个流程" if broken else ""),
         )
         self.db.commit()
@@ -454,7 +475,7 @@ class StationService:
             detail="；".join(diff) or "无字段变化（仅递增配置版本）",
         )
         self.db.commit()
-        return self._adapter_out(adapter, " ".join(self.gate.status()["degraded"]))
+        return self._adapter_out(adapter, self.gate.status())
 
     @staticmethod
     def _adapter_diff(adapter: Adapter, changes: dict) -> list[str]:
@@ -527,8 +548,11 @@ class StationService:
         adapter.described_at = now()
         station = self.stations.get(station_id)
         warning = ""
-        if station and reported["reported_model"] and station.model and reported["reported_model"] != station.model:
-            warning = f"设备自报型号 {reported['reported_model']} 与台账型号 {station.model} 不一致"
+        asset = AssetRepository(self.db, self.ctx).get(station.asset_id) if station and station.asset_id else None
+        registered = station_model(station, asset) if station else ""
+        if reported["reported_model"] and registered and reported["reported_model"] != registered:
+            source = f"资产 {asset.asset_no} 登记的型号" if asset is not None else "工位登记的型号"
+            warning = f"设备自报型号 {reported['reported_model']} 与{source} {registered} 不一致"
         self.audit.record(
             user, "读取设备方法目录", station_id, before=before,
             after=f"{len(reported['methods'])} 个方法 · 固件 {reported['firmware'] or '—'}",
@@ -539,37 +563,75 @@ class StationService:
         return {"station_id": station_id, **catalog_of(adapter), "warning": warning}
 
     def update_station(self, station_id: str, changes: dict, user: User) -> dict:
-        """改台账信息（名称、型号、岛、样品位、校准到期）。能力极限走单独的签名接口。"""
+        """改台账信息（名称、岛、通道；没关联资产时的型号）。能力极限走单独的签名接口。
+
+        校准、型号这类实物属性归资产档案：关联了资产的工位不另存型号，`model` 只接受空值或与资产
+        登记一致的值，都按「清掉工位上的旧登记」处理；要改型号请改资产。
+        """
         station = self._require_station(station_id)
         self.stations.check_version(station, changes.pop("row_version", None), "工位")
-        allowed = {"name", "model", "island", "positions", "channels", "cal_due", "asset_id"}
+        allowed = {"name", "model", "island", "channels", "asset_id"}
         rejected = [k for k in changes if k not in allowed]
         if rejected:
             raise DomainError(f"这些字段不能在这里修改：{'、'.join(rejected)}；能力极限请用极限编辑并签名")
+        asset_id = changes.get("asset_id", station.asset_id)
+        asset = AssetRepository(self.db, self.ctx).get(asset_id) if asset_id else None
+        if asset_id and asset is None:
+            raise NotFound("资产不存在")
+        if "model" in changes and asset is not None:
+            if (changes["model"] or "") not in {"", asset.model or ""}:
+                raise StateConflict(
+                    f"工位 {station.id} 关联了资产 {asset.asset_no}，型号以资产登记的 {asset.model or '（未登记）'} 为准："
+                    "要改型号请到「仪器设备」修改资产",
+                    code="model_owned_by_asset",
+                )
+            # 「以资产型号为准」：清掉工位上早先登记的型号，同一件事只留资产上一份
+            changes["model"] = ""
         if "channels" in changes or "asset_id" in changes:
             self._require_channels_fit(
-                station.id, int(changes.get("channels", station.channels) or 1),
-                changes.get("asset_id", station.asset_id),
+                station.id, int(changes.get("channels", station.channels) or 1), asset_id,
             )
+        previous = (
+            AssetRepository(self.db, self.ctx).get(station.asset_id)
+            if "asset_id" in changes and station.asset_id and station.asset_id != asset_id else None
+        )
         before = {k: getattr(station, k) for k in changes}
         for key, value in changes.items():
             setattr(station, key, value)
+        model_note = ""
+        if "asset_id" in changes and "model" not in changes:
+            if asset is not None and before["asset_id"] != asset_id:
+                # 从这里关联资产与在资产详情里关联同一口径：型号归资产
+                had_model = bool(asset.model)
+                model_note, _ = adopt_asset_model(station, asset)
+                if not had_model and asset.model:
+                    AssetRepository.bump(asset)
+            elif asset is None and previous is not None and not station.model:
+                # 取消关联：工位不能因此没了型号，把资产登记的抄回工位
+                station.model = previous.model or ""
         self.stations.bump(station)
+        # 型号与关联资产决定设备方法能不能落到这台工位：变了就重校验引用它能力的流程
+        broken = (
+            self.revalidate_recipes(set(station.limits or {}))
+            if {"model", "asset_id"} & set(changes) else []
+        )
         self.audit.record(
             user, "编辑工位台账", station_id,
-            detail="；".join(f"{k}: {before[k]} → {v}" for k, v in changes.items()),
+            detail="；".join(f"{k}: {before[k]} → {v}" for k, v in changes.items())
+            + (f"；{model_note}" if model_note else "")
+            + (f"；重校验后 {len(broken)} 个流程不再通过" if broken else ""),
         )
         self.db.commit()
-        return {"id": station_id}
+        return {"id": station_id, "broken_recipes": broken}
 
     def _require_channels_fit(self, station_id: str, channels: int, asset_id: str) -> None:
         """工位通道数不能超过所属资产容量：资产同一时刻最多承接 capacity 份作业，排程与执行都按它计。"""
-        from ..repositories.resources import AssetRepository
-
         if not asset_id:
             return
         asset = AssetRepository(self.db, self.ctx).get(asset_id)
-        if asset is not None and channels > max(1, asset.capacity):
+        if asset is None:
+            raise NotFound("资产不存在")
+        if channels > max(1, asset.capacity):
             raise StateConflict(
                 f"工位 {station_id} 有 {channels} 个并行通道，超过资产 {asset.asset_no} 的容量 {asset.capacity}："
                 f"资产同一时刻最多承接 {asset.capacity} 份作业，请先调大资产容量或减少通道数",
@@ -720,7 +782,7 @@ class StationService:
         if not adapter.enabled:
             # 停用的适配器不能靠一条心跳重新上线：必须由人启用并通过健康检查
             raise StateConflict(
-                "适配器已停用，心跳不被接受；请在工位页启用并完成健康检查", code="adapter_disabled",
+                "适配器已停用，心跳不被接受；请在「工位配置」启用并完成健康检查", code="adapter_disabled",
             )
         adapter.connected = connected
         adapter.site_interlock = site_interlock
@@ -863,3 +925,14 @@ class StationService:
             "event_id": payload["event_id"], "accepted": accepted,
             "duplicates": len(rows) - accepted, "batch_id": batch_id,
         }
+
+
+def asset_brief(row: dict) -> dict:
+    """工位台账上显示的资产摘要：校准、状态、容量都只读，改动去「仪器设备」。"""
+    return {
+        key: row.get(key)
+        for key in (
+            "id", "asset_no", "name", "model", "state", "capacity", "calibration_applicable",
+            "calibration_exempt_reason", "calibration_valid", "calibration_due", "unavailable_reasons",
+        )
+    }

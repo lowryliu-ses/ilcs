@@ -123,6 +123,8 @@ export type StepRow = {
   cap: string;
   cap_name: string;
   params: Record<string, number>;
+  /** 按哪版设备方法执行（冻结在批次快照里） */
+  method?: { id: string; code: string; version: number; name: string; program: string } | null;
   dur: number;
   hard: { from?: string; maxGapMin?: number } | null;
   form: FormField[];
@@ -629,20 +631,40 @@ export type PlanDetail = PlanSummary & {
   audit: AuditRow[];
 };
 
+/** 工位台账上显示的关联资产摘要。校准、状态、容量都只读，改动去「仪器设备」 */
+export type StationAsset = {
+  id: string;
+  asset_no: string;
+  name: string;
+  model: string;
+  state: string;
+  capacity: number;
+  calibration_applicable: boolean;
+  calibration_exempt_reason: string;
+  calibration_valid: boolean;
+  calibration_due: string | null;
+  unavailable_reasons: string[];
+};
+
 export type StationRow = {
   id: string;
   island: number;
   name: string;
+  /** 有效型号：关联了资产取资产登记的型号，设备方法按它匹配工位 */
   model: string;
+  model_source: 'asset' | 'station';
+  /** 工位上早先登记、与资产不一致的型号；设备方法已按资产型号匹配，需要人核对 */
+  model_conflict: string;
   status: string;
-  cal_due: string;
-  positions: number;
-  /** 并行通道数：同一时刻能同时承接几个批次（如充放电柜通道）；样品位是单个批次的容量 */
+  /** 并行通道数：同一时刻能同时承接几个批次的设备步骤；一个批次的一个设备步骤占 1 个，与样本数无关 */
   channels: number;
   clean: boolean;
+  dirty_batch_id: string;
   limits: Record<string, Record<string, [number, number]>>;
   retired: boolean;
   retire_blockers: string[];
+  asset_id: string;
+  asset: StationAsset | null;
   adapter: AdapterRow | null;
   /** 乐观并发版本：台账、极限、就绪状态的修改都带上它 */
   row_version: number;
@@ -1914,6 +1936,9 @@ export type FloorCommand = {
   type: string;
   state: string;
   batch_id: string;
+  /** 本组织的指令才能在这里转人工核查 */
+  mine: boolean;
+  error: string;
   step_index: number;
   motion: boolean;
   since: string;
@@ -1927,12 +1952,19 @@ export type FloorStation = {
   retired: boolean;
   channels: number;
   capabilities: string[];
+  /** 本组织的工位：清洗确认、重连只对它可用 */
+  mine: boolean;
+  clean: boolean;
+  dirty_batch_id: string;
+  row_version: number;
   adapter: {
     connected: boolean;
     enabled: boolean;
     interlock: boolean;
     accepts_commands: boolean;
     kind: string;
+    /** 与执行门同一口径：online / degraded / stale 心跳超时 / offline 失联 / disabled */
+    status: string;
     heartbeat_age_sec: number | null;
     current_command_id: string;
   } | null;

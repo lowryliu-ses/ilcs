@@ -173,7 +173,7 @@ def test_multi_channel_station_runs_windows_in_parallel():
     """8 通道充放电柜：同一时刻最多 8 个时间窗，第 9 个等最早结束的那个。"""
     from app.domain.scheduling import earliest_free
 
-    cycler = StationSpec(id="CYC", channels=2, positions=32, limits={"cap.test": {}})
+    cycler = StationSpec(id="CYC", channels=2, limits={"cap.test": {}})
     long = timedelta(hours=10)
     context = SchedulingContext(
         stations=[cycler],

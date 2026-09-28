@@ -5767,11 +5767,6 @@
             "title": "Asset Id",
             "type": "string"
           },
-          "cal_due": {
-            "default": "",
-            "title": "Cal Due",
-            "type": "string"
-          },
           "channels": {
             "default": 1,
             "maximum": 512.0,
@@ -5815,12 +5810,6 @@
           "name": {
             "title": "Name",
             "type": "string"
-          },
-          "positions": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Positions",
-            "type": "integer"
           },
           "protocol": {
             "default": "",
@@ -5887,17 +5876,6 @@
             ],
             "title": "Asset Id"
           },
-          "cal_due": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cal Due"
-          },
           "channels": {
             "anyOf": [
               {
@@ -5943,18 +5921,6 @@
               }
             ],
             "title": "Name"
-          },
-          "positions": {
-            "anyOf": [
-              {
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Positions"
           },
           "row_version": {
             "anyOf": [

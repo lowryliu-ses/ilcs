@@ -24,6 +24,7 @@ from ..repositories.materials import LotRepository, ReservationRepository
 from ..repositories.metrics import MetricRepository, ResultValueRepository
 from ..repositories.recipes import ExperimentTaskRepository, PlanRepository
 from ..repositories.reports import ReportRepository, ReportVersionRepository
+from ..repositories.resources import station_model
 from ..repositories.samples import PhysicalSampleRepository
 from ..repositories.workflow import StepRunRepository
 from .audit_service import AuditService
@@ -510,7 +511,7 @@ class ReportService:
             rows.append({
                 "station_id": station_id,
                 "name": station.name if station is not None else station_id,
-                "model": (station.model if station is not None else "") or (asset.model if asset else ""),
+                "model": station_model(station, asset) if station is not None else (asset.model if asset else ""),
                 "asset_no": asset.asset_no if asset else "",
                 "vendor": (asset.vendor if asset else "") or (adapter.vendor if adapter else ""),
                 "serial": asset.serial if asset else "",

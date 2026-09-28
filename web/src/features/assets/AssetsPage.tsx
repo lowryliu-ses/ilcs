@@ -48,7 +48,8 @@ export function AssetsPage() {
       <div className="page-head">
         <h1>仪器设备</h1>
         <span className="small muted">
-          容量按资产算：一台资产映射多个工位时共享同一份容量与校准许可，不因工位 ID 不同就重复占用。
+          实物档案只在这里登记一份：型号、序列号、校准与总容量归资产，工位配置页只读显示。一台资产映射多个工位时共享同一份容量、
+          校准许可与型号，不因工位 ID 不同就重复占用。
         </span>
       </div>
 
@@ -227,11 +228,16 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
   const [linking, setLinking] = useState('');
 
   const link = useMutation(
-    () => api.post(`/assets/${assetId}/stations`, { station_id: linking }),
+    () => api.post<{ warning: string; broken_recipes: string[] }>(`/assets/${assetId}/stations`, { station_id: linking }),
     {
-      invalidates: ['assets', 'stations'],
-      onSuccess: () => {
-        toast.push('工位已关联，容量与校准许可随资产共享');
+      invalidates: ['assets', 'stations', 'recipes', 'audit'],
+      onSuccess: (result) => {
+        toast.push(
+          [
+            result.warning || '工位已关联：容量、校准许可与型号随资产共享',
+            result.broken_recipes?.length ? `${result.broken_recipes.join('、')} 重校验不再通过` : '',
+          ].filter(Boolean).join('；'),
+        );
         setLinking('');
       },
     },
@@ -363,7 +369,7 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
                   {asset.station_ids.map((id) => (
                     <tr key={id}>
                       <td className="mono">{id}</td>
-                      <td className="small muted">共享该资产的容量与校准许可</td>
+                      <td className="small muted">共享该资产的容量、校准许可与型号</td>
                     </tr>
                   ))}
                 </tbody>
@@ -621,11 +627,15 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
   });
 
   const save = useMutation(
-    () => api.patch(`/assets/${asset.id}`, { ...form, row_version: asset.row_version }),
+    () => api.patch<{ broken_recipes: string[] }>(`/assets/${asset.id}`, { ...form, row_version: asset.row_version }),
     {
-      invalidates: ['assets', 'stations', 'schedule', 'dashboard', 'audit'],
-      onSuccess: () => {
-        toast.push('资产已更新');
+      invalidates: ['assets', 'stations', 'recipes', 'schedule', 'dashboard', 'audit'],
+      onSuccess: (result) => {
+        toast.push(
+          result.broken_recipes?.length
+            ? `资产已更新；型号变了，${result.broken_recipes.join('、')} 重校验不再通过，已标记需修订`
+            : '资产已更新',
+        );
         onClose();
       },
     },
@@ -657,7 +667,7 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
         <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
       </Field>
       <div className="grid cols-2">
-        <Field label="型号">
+        <Field label="型号" hint="设备方法按这个型号匹配关联的工位；改了会重校验引用它的流程">
           <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
         </Field>
         <Field label="序列号">
@@ -666,7 +676,7 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
         <Field label="厂商">
           <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
         </Field>
-        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件会显示在工位页，二者不一致要核对">
+        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件显示在「工位配置」的适配器里，二者不一致要核对">
           <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>
@@ -789,7 +799,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
       </Field>
       <div className="grid cols-2">
-        <Field label="型号">
+        <Field label="型号" hint="设备方法按这个型号匹配关联的工位">
           <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
         </Field>
         <Field label="序列号">
@@ -798,7 +808,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         <Field label="厂商">
           <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
         </Field>
-        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件会显示在工位页，二者不一致要核对">
+        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件显示在「工位配置」的适配器里，二者不一致要核对">
           <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>

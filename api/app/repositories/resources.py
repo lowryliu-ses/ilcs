@@ -13,11 +13,51 @@ from ..models import (
 from .base import Repository, ScopedRepository
 
 
+def station_model(station: Station, asset: Asset | None) -> str:
+    """工位的有效型号：关联了资产以资产登记的为准，没关联资产的工位（AGV、机械臂）才用工位自己的。
+
+    设备方法的适用型号、驱动自报型号的核对、报告里的仪器清单都按这一个口径，不各读各的。
+    """
+    if asset is not None:
+        return asset.model or ""
+    return station.model or ""
+
+
+def adopt_asset_model(station: Station, asset: Asset) -> tuple[str, str]:
+    """工位关联到资产时型号归谁：资产没登记就用工位的补上；两边一致就清掉工位上的；不一致留着待人核对。
+
+    返回（审计说明, 给人看的不一致提醒）。资产型号被补上时调用方负责给资产递增行版本。
+    """
+    if not station.model:
+        return "", ""
+    if not asset.model:
+        asset.model, station.model = station.model, ""
+        return f"资产未登记型号，按工位登记的 {asset.model} 补上", ""
+    if station.model == asset.model:
+        station.model = ""
+        return "", ""
+    warning = (
+        f"工位 {station.id} 登记的型号 {station.model} 与资产 {asset.asset_no} 登记的 {asset.model} 不一致："
+        f"设备方法今后按资产型号 {asset.model} 匹配，请核对"
+    )
+    return warning, warning
+
+
 class StationRepository(ScopedRepository[Station]):
     model = Station
 
     def list(self) -> list[Station]:
         return list(self.query().order_by(Station.island, Station.id).all())
+
+    def assets_by_id(self, stations: list[Station]) -> dict[str, Asset]:
+        """这些工位关联的资产（同组织），供取有效型号用。"""
+        ids = {s.asset_id for s in stations if s.asset_id}
+        if not ids:
+            return {}
+        rows = self.db.query(Asset).filter(Asset.id.in_(ids))
+        if self.ctx is not None:
+            rows = rows.filter(Asset.org_id == self.ctx.org_id)
+        return {row.id: row for row in rows.all()}
 
     def specs(self) -> list[StationSpec]:
         stations = self.list()
@@ -25,11 +65,12 @@ class StationRepository(ScopedRepository[Station]):
             row.station_id: row
             for row in self.db.query(Adapter).filter(Adapter.station_id.in_([s.id for s in stations])).all()
         } if stations else {}
+        assets = self.assets_by_id(stations)
         return [
             StationSpec(
-                id=s.id, status=s.status, clean=s.clean, cal_due=s.cal_due,
-                positions=s.positions, channels=s.channels or 1, limits=s.limits or {}, retired=s.retired,
-                asset_id=s.asset_id or "", model=s.model or "",
+                id=s.id, status=s.status, clean=s.clean,
+                channels=s.channels or 1, limits=s.limits or {}, retired=s.retired,
+                asset_id=s.asset_id or "", model=station_model(s, assets.get(s.asset_id)),
                 programs=tuple(
                     str(row.get("program")) for row in (getattr(adapters.get(s.id), "methods", None) or [])
                     if isinstance(row, dict) and row.get("program")

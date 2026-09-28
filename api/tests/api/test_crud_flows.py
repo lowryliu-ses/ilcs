@@ -106,19 +106,24 @@ def test_retired_capability_blocks_new_recipe_steps(client, admin, researcher, r
 
 def test_station_create_edit_and_retire(client, admin, reset_runtime):
     created = admin.post("/api/stations", {
-        "id": "ST-99", "name": "测试超声站", "island": 1, "model": "SONIC-1", "positions": 4,
-        "cal_due": "2027-01-01", "limits": {"cap.degas": {"vacuum": [10, 500]}},
+        "id": "ST-99", "name": "测试超声站", "island": 1, "model": "SONIC-1",
+        "limits": {"cap.degas": {"vacuum": [10, 500]}},
         "signature_id": admin.sign("工程变更批准", target="ST-99"),
     })
     assert created.status_code == 201, created.text
 
-    assert admin.patch("/api/stations/ST-99", {"name": "超声分散站", "positions": 6}).status_code == 200
+    assert admin.patch("/api/stations/ST-99", {"name": "超声分散站", "channels": 2}).status_code == 200
     row = next(s for s in admin.get("/api/stations").json() if s["id"] == "ST-99")
-    assert row["name"] == "超声分散站" and row["positions"] == 6
+    assert row["name"] == "超声分散站" and row["channels"] == 2
+    # 没关联资产的工位型号用工位自己登记的
+    assert row["model"] == "SONIC-1" and row["model_source"] == "station" and row["asset"] is None
     assert row["retired"] is False and row["retire_blockers"] == []
 
     # 能力极限要签名，不能从台账接口偷偷改：未声明的字段在 schema 层就被拒
     assert admin.patch("/api/stations/ST-99", {"limits": {}}).status_code == 422
+    # 校准归资产、样品位不参与任何判断：台账接口不再接受这两项
+    assert admin.patch("/api/stations/ST-99", {"cal_due": "2099-01-01"}).status_code == 422
+    assert admin.patch("/api/stations/ST-99", {"positions": 6}).status_code == 422
 
     retired = admin.post("/api/stations/ST-99/retire", {"retired": True})
     assert retired.status_code == 200

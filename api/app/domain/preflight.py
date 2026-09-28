@@ -49,7 +49,8 @@ class PreflightContext:
     sop_ack_blockers: list[str] | None = None
     # 任务上游：None 表示任务没有声明依赖（不适用）；空列表表示依赖都已满足
     dependency_blockers: list[str] | None = None
-    # 首工位之外的其余工位：[{id, status, cal_due, interlock, alarm}]。故障、离线、校准过期、联锁、活动报警都挡下发
+    # 首工位之外的其余工位：[{id, status, interlock, alarm}]。故障、离线、联锁、活动报警都挡下发。
+    # 校准不在这里查：第 4 项已按每个设备步骤的执行区间查过所用资产的校准记录（校准只在资产上登记一份）
     other_stations: list[dict] = field(default_factory=list)
     # 环境要求：None 表示没有步骤声明要求（不适用）
     environment_blockers: list[str] | None = None
@@ -174,18 +175,15 @@ def evaluate(context: PreflightContext) -> list[Check]:
         detail = "首个节点不占工位" if state == NOT_APPLICABLE else "未分配首工位"
         checks.append(Check("station", "首工位执行许可", state, detail))
     else:
-        today = (context.now or datetime.utcnow()).date().isoformat()
         station_ok = (
             station.get("clean") is True
             and station.get("status") != "fault"
             and station.get("status") != "offline"
             and not context.station_alarm_active
-            and (station.get("cal_due") in {"", "-"} or str(station.get("cal_due")) >= today)
             and not station.get("interlock")
         )
         detail = (
             f"{station['id']}：{'已清洗' if station.get('clean') else '未清洗'}、"
-            f"校准至 {station.get('cal_due') or '—'}、"
             f"{'离线' if station.get('status') == 'offline' else ('故障' if station.get('status') == 'fault' else '状态正常')}、"
             f"{'安全联锁触发' if station.get('interlock') else '联锁未触发'}、"
             f"{'存在活动报警' if context.station_alarm_active else '无活动报警'}"
@@ -196,14 +194,11 @@ def evaluate(context: PreflightContext) -> list[Check]:
     if not context.other_stations:
         checks.append(Check("stations", "后续工位执行许可", NOT_APPLICABLE, "没有首工位之外的工位"))
     else:
-        today = (context.now or datetime.utcnow()).date().isoformat()
         failing = []
         for row in context.other_stations:
             reasons = []
             if row.get("status") in {"fault", "offline"}:
                 reasons.append("离线" if row.get("status") == "offline" else "故障")
-            if row.get("cal_due") not in {"", "-", None} and str(row.get("cal_due")) < today:
-                reasons.append(f"校准已于 {row.get('cal_due')} 到期")
             if row.get("interlock"):
                 reasons.append("安全联锁触发")
             if row.get("alarm"):
@@ -212,8 +207,8 @@ def evaluate(context: PreflightContext) -> list[Check]:
                 failing.append(f"{row['id']}：{'、'.join(reasons)}")
         checks.append(Check(
             "stations", "后续工位执行许可", _state(not failing),
-            "；".join(failing) or f"{len(context.other_stations)} 个后续工位在线、校准有效、无联锁与活动报警"
-            "（清洗状态到步骤开工前再核对）",
+            "；".join(failing) or f"{len(context.other_stations)} 个后续工位在线、无联锁与活动报警"
+            "（校准见「设备校准与占用许可」；清洗状态到步骤开工前再核对）",
         ))
 
     # ---------- 5c 环境条件 ----------

@@ -336,7 +336,7 @@ class ExecutionService:
             self.alarms.raise_alarm(
                 severity=3, source_type="batch", source_id=batch.id,
                 message=f"{role}{station.id} {who}待清洗确认；{batch.id} 第 {command.step_index + 1} 步排队等待",
-                response="完成清洗后在工位页确认就绪（已清洗），排队的动作随即投递",
+                response="完成清洗后在「现场监控」该工位卡片上点「确认已清洗」，排队的动作随即投递",
                 owner="操作员", origin="system", condition_key=f"station:{station.id}:awaiting_clean",
             )
             waiting = True

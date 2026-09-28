@@ -89,6 +89,13 @@ class ResourceBooking(Base):
 
 
 class Station(Base):
+    """工位：系统里的执行位置。
+
+    实物身份（型号、序列号、固件）、校准与总容量归资产档案；工位只管能接什么活（能力极限）、
+    同时接几份（通道）、怎么连设备（适配器）。校准到期与样品位不在这里存（迁移 0036 删列）：
+    前者是资产校准的副本、会和资产各说各话，后者从来不参与任何判断。
+    """
+
     __tablename__ = "stations"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     org_id: Mapped[str] = mapped_column(String, default="", index=True)
@@ -96,10 +103,9 @@ class Station(Base):
     asset_id: Mapped[str] = mapped_column(String, default="")
     island: Mapped[int] = mapped_column(Integer, default=0)
     name: Mapped[str] = mapped_column(String)
+    # 只对没关联资产的工位（AGV、机械臂一类）有意义；关联了资产就以资产登记的型号为准（`station_model`）
     model: Mapped[str] = mapped_column(String, default="")
     status: Mapped[str] = mapped_column(String, default="idle")
-    cal_due: Mapped[str] = mapped_column(String, default="")
-    positions: Mapped[int] = mapped_column(Integer, default=1)
     # 并行通道数（如 8 通道充放电柜）。排程按它允许同一工位的时间窗重叠
     channels: Mapped[int] = mapped_column(Integer, default=1)
     clean: Mapped[bool] = mapped_column(Boolean, default=True)

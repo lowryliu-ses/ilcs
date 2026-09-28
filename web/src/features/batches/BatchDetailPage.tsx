@@ -220,6 +220,11 @@ export function BatchDetailPage() {
                   <span className={`kind ${step.kind}`}>{step.kind_label}</span>{' '}
                   {step.kind === 'device' ? step.cap_name : null}
                   <div className="tiny muted mono">{stepContent(step)}</div>
+                  {step.method ? (
+                    <div className="tiny muted" title="设备方法内容已冻结进批次快照，指令带着设备端程序下发">
+                      方法 {step.method.code} v{step.method.version} · 程序 <span className="mono">{step.method.program || '—'}</span>
+                    </div>
+                  ) : null}
                 </td>
                 <td className="mono">
                   {step.needs_station ? step.station_id ?? '—' : <span className="muted">不占工位</span>}

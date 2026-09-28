@@ -48,6 +48,22 @@ def evaluate(adapters: list[AdapterHealth], now: datetime, stale_sec: int, degra
     }
 
 
+def adapter_status(state: dict, station_id: str, enabled: bool, connected: bool) -> str:
+    """适配器在界面上的状态，和执行门用同一份判断：停用 / 失联 / 心跳超时 / 降级 / 在线。
+
+    「降级」按工位标识精确匹配：`degraded` 里每条原因以「<工位> 」开头，按子串找会让 ST-01 命中 ST-01-A。
+    """
+    if not enabled:
+        return "disabled"
+    if not connected:
+        return "offline"
+    if station_id in (state.get("blocked_stations") or {}):
+        return "stale"
+    if any(row.startswith(f"{station_id} ") for row in state.get("degraded") or []):
+        return "degraded"
+    return "online"
+
+
 def station_reasons(state: dict, station_ids) -> list[str]:
     """这些工位上挡住动作的原因：全站原因加上各工位自己的原因。"""
     blocked = state.get("blocked_stations") or {}

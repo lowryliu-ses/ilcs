@@ -10,15 +10,14 @@ class StationSpec:
     id: str
     status: str = "idle"
     clean: bool = True
-    cal_due: str = ""
-    positions: int = 1
-    # 并行通道数：同一时刻能同时承接几个批次；样品位是单个批次的容量，二者不是一回事
+    # 并行通道数：同一时刻能同时承接几个批次的设备步骤。一个批次的一个设备步骤占 1 个，
+    # 与批次里有几个样本无关
     channels: int = 1
     limits: dict[str, dict[str, list[float]]] = field(default_factory=dict)
     retired: bool = False
     # 一台资产可映射多个工位；容量约束按资产算，不按工位 ID 算
     asset_id: str = ""
-    # 型号与驱动自报的设备端程序目录：步骤引用设备方法时据此筛工位（空目录不筛）
+    # 型号（关联了资产取资产登记的型号）与驱动自报的设备端程序目录：步骤引用设备方法时据此筛工位（空目录不筛）
     model: str = ""
     programs: tuple[str, ...] = ()
 

@@ -602,9 +602,12 @@ class TransferService:
     def floor(self) -> dict:
         """现场总览：每个工位的实时状态、在途指令、放置位上的板；板库槽位；在途转运。
 
-        载具条码只对本组织可见；别的组织的板只显示「已占用」。
+        载具条码只对本组织可见；别的组织的板只显示「已占用」。现场操作（确认已清洗、结果未知转人工核查、
+        适配器重连）在这一页做，所以带上清洗状态、行版本与适配器状态；别的组织的工位只看不动（`mine`）。
         """
+        from ..domain.gate import adapter_status
         from ..repositories.execution import MOTION
+        from .gate_service import GateService
 
         mine = {row.id: row for row in self.labware.query().all()}
         where = {
@@ -645,6 +648,7 @@ class TransferService:
                 ),
             }
 
+        gate_state = GateService(self.db).status()
         stations = []
         for station in self.db.query(Station).order_by(Station.island, Station.id).all():
             record = adapters.get(station.id)
@@ -652,19 +656,28 @@ class TransferService:
                 round((moment - record.last_heartbeat).total_seconds()) if record and record.last_heartbeat else None
             )
             commands = by_station.get(station.id, [])
+            own = station.org_id == self.ctx.org_id
             stations.append({
                 "id": station.id, "name": station.name, "island": station.island, "status": station.status,
                 "retired": station.retired, "channels": station.channels or 1,
                 "capabilities": sorted((station.limits or {}).keys()),
+                "mine": own,
+                "clean": station.clean,
+                # 待清洗是哪个批次用过：别的组织的批次号不外露
+                "dirty_batch_id": station.dirty_batch_id if own else "",
+                "row_version": station.row_version if own else 0,
                 "adapter": (
                     {"connected": record.connected, "enabled": record.enabled, "interlock": record.site_interlock,
                      "accepts_commands": record.accepts_commands, "kind": record.kind,
+                     "status": adapter_status(gate_state, station.id, record.enabled, record.connected),
                      "heartbeat_age_sec": heartbeat_age, "current_command_id": record.current_command_id}
                     if record else None
                 ),
                 "commands": [
                     {"id": c.id, "type": c.type, "state": c.state,
                      "batch_id": c.batch_id if c.org_id == self.ctx.org_id else "",
+                     "mine": c.org_id == self.ctx.org_id,
+                     "error": c.error if c.org_id == self.ctx.org_id else "",
                      "step_index": c.step_index, "motion": c.type in MOTION,
                      "since": (c.started_at or c.created_at).isoformat(timespec="seconds")}
                     for c in sorted(commands, key=lambda c: c.created_at)

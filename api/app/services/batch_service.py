@@ -318,6 +318,8 @@ class BatchService:
                     "cap": step.get("cap"),
                     "cap_name": capability_names.get(step.get("cap", ""), step.get("cap")),
                     "params": step.get("params"),
+                    # 按哪版设备方法执行（冻结在批次快照里）：编号、版本、设备端程序
+                    "method": command_method(step) or None,
                     "dur": step.get("dur"),
                     "hard": step.get("hard"),
                     "form": step.get("form") or [],
@@ -1030,7 +1032,6 @@ class BatchService:
             first_station=(
                 {
                     "id": station.id, "clean": station.clean, "status": station.status,
-                    "cal_due": station.cal_due,
                     "interlock": bool(adapter and adapter.site_interlock),
                 }
                 if station else None
@@ -1082,7 +1083,7 @@ class BatchService:
                 continue
             adapter = self.db.get(Adapter, station_id)
             rows.append({
-                "id": station.id, "status": station.status, "cal_due": station.cal_due,
+                "id": station.id, "status": station.status,
                 "interlock": bool(adapter and adapter.site_interlock),
                 "alarm": bool(self.alarms.active_on_station(station.id)),
             })

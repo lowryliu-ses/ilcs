@@ -97,7 +97,7 @@ export function defaultParams(stations: StationRow[] | undefined, capability: Ca
 }
 
 /** 步骤引用设备方法时，工位还要满足：型号在适用清单里、驱动自报过的程序目录包含该程序（没报过目录不筛）。
-    与服务端 `domain/methods.station_allows` 同一判据。 */
+    与服务端 `domain/methods.station_allows` 同一判据；`station.model` 是服务端给出的有效型号（关联了资产取资产登记的）。 */
 export function methodBlocksStation(station: StationRow, step: RecipeStep): string[] {
   const method = step.method;
   if (!method?.id) return [];

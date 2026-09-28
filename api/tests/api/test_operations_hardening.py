@@ -429,9 +429,11 @@ def test_disabled_adapter_rejects_heartbeat(device, reset_runtime):
 def test_station_edits_are_optimistically_locked(admin, reset_runtime):
     station = next(s for s in admin.get("/api/stations").json() if s["id"] == "ST-02")
     version = station["row_version"]
-    assert admin.patch("/api/stations/ST-02", {"model": "M-1", "row_version": version}).status_code == 200
-    stale = admin.patch("/api/stations/ST-02", {"model": "M-2", "row_version": version})
+    # ST-02 关联了资产，型号以资产为准、不在台账改；拿名称测乐观并发
+    assert admin.patch("/api/stations/ST-02", {"name": "中试匀浆罐 甲", "row_version": version}).status_code == 200
+    stale = admin.patch("/api/stations/ST-02", {"name": "中试匀浆罐 乙", "row_version": version})
     assert stale.status_code == 409
+    admin.patch("/api/stations/ST-02", {"name": station["name"]})
 
 
 def test_station_id_taken_by_another_org_is_a_conflict(admin, reset_runtime, db):

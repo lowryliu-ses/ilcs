@@ -68,37 +68,39 @@ SLURRY_LIMITS = {
     "cap.degas": {"vacuum": [5, 900]},
 }
 
+# 关联了资产的工位（ST-*）不另存型号：型号、序列号、校准都登记在下面的 ASSETS 上。
+# AGV 没有资产档案，型号留在工位上
 STATIONS = [
-    dict(id="ST-01-A", island=1, name="高通量匀浆站 A", model="EXP-SLURRY-24", status="idle",
-         cal_due="2026-12-02", positions=24, clean=True, limits=SLURRY_LIMITS),
-    dict(id="ST-01-B", island=1, name="高通量匀浆站 B", model="EXP-SLURRY-24", status="idle",
-         cal_due="2026-12-02", positions=24, clean=True, limits=SLURRY_LIMITS),
-    dict(id="ST-02", island=2, name="中试匀浆罐", model="PILOT-MIX-8", status="idle",
-         cal_due="2026-10-30", positions=8, clean=True, limits={
+    dict(id="ST-01-A", island=1, name="高通量匀浆站 A", status="idle",
+         clean=True, limits=SLURRY_LIMITS),
+    dict(id="ST-01-B", island=1, name="高通量匀浆站 B", status="idle",
+         clean=True, limits=SLURRY_LIMITS),
+    dict(id="ST-02", island=2, name="中试匀浆罐", status="idle",
+         clean=True, limits={
              "cap.dose_solid": {"mass": [1, 2000]},
              "cap.dose_liquid": {"volume": [10, 5000], "rate": [1, 100]},
              "cap.mix": {"temp": [15, 60], "rpm": [0, 1200]},
              "cap.degas": {"vacuum": [50, 900]}}),
-    dict(id="ST-03", island=3, name="涂布烘干线", model="COATER-150", status="idle",
-         cal_due="2027-01-15", positions=1, clean=True,
+    dict(id="ST-03", island=3, name="涂布烘干线", status="idle",
+         clean=True,
          limits={"cap.coat": {"thickness": [20, 400], "temp": [40, 150]}}),
-    dict(id="ST-04", island=4, name="辊压冲切机", model="CALENDER-P2", status="idle",
-         cal_due="2026-11-20", positions=1, clean=True,
+    dict(id="ST-04", island=4, name="辊压冲切机", status="idle",
+         clean=True,
          limits={"cap.calender": {"gap": [10, 200], "diameter": [8, 20]}}),
-    dict(id="ST-05", island=4, name="真空干燥与称重站", model="VAC-WEIGH-12", status="idle",
-         cal_due="2026-12-29", positions=12, clean=True, limits={
+    dict(id="ST-05", island=4, name="真空干燥与称重站", status="idle",
+         clean=True, limits={
              "cap.vacuum_dry": {"temp": [40, 160], "vacuum": [0.1, 100]},
              "cap.weigh": {"mass": [0.00001, 200]}}),
-    dict(id="ST-06", island=5, name="手套箱组装线", model="GB-ASSY-8", status="idle",
-         cal_due="2027-03-17", positions=8, clean=True,
+    dict(id="ST-06", island=5, name="手套箱组装线", status="idle",
+         clean=True,
          limits={"cap.assemble": {"electrolyte": [10, 200]}}),
-    dict(id="ST-07", island=6, name="充放电测试柜", model="CYCLER-32", status="idle", channels=8,
-         cal_due="2027-02-10", positions=32, clean=True,
+    dict(id="ST-07", island=6, name="充放电测试柜", status="idle", channels=8,
+         clean=True,
          limits={"cap.test": {"rate": [0.01, 10], "vmax": [2.0, 5.0]}}),
     dict(id="AGV-01", island=0, name="AGV-01", model="MiR-250", status="idle",
-         cal_due="-", positions=1, clean=True, limits={"cap.transfer": {}}),
+         clean=True, limits={"cap.transfer": {}}),
     dict(id="AGV-02", island=0, name="AGV-02", model="MiR-250", status="idle",
-         cal_due="-", positions=1, clean=True, limits={"cap.transfer": {}}),
+         clean=True, limits={"cap.transfer": {}}),
 ]
 
 ADAPTERS = [
@@ -323,14 +325,14 @@ ASSETS = [
          location="岛 #2", stations=["ST-02"], capacity=1, cal_days=40),
     dict(asset_no="AS-0004", name="涂布烘干线", model="COATER-150", serial="CT-150-001",
          location="岛 #3", stations=["ST-03"], capacity=1, cal_days=365),
-    dict(asset_no="AS-0005", name="辊压冲切机", model="CAL-200", serial="CL-200-001",
+    dict(asset_no="AS-0005", name="辊压冲切机", model="CALENDER-P2", serial="CL-200-001",
          location="岛 #4", stations=["ST-04"], capacity=1, cal_days=365),
-    dict(asset_no="AS-0006", name="真空干燥箱", model="VAC-80", serial="VC-80-001",
+    dict(asset_no="AS-0006", name="真空干燥箱", model="VAC-WEIGH-12", serial="VC-80-001",
          location="岛 #4", stations=["ST-05"], capacity=1, cal_days=365),
-    dict(asset_no="AS-0007", name="手套箱组装台", model="GB-ASM", serial="GB-001",
+    dict(asset_no="AS-0007", name="手套箱组装台", model="GB-ASSY-8", serial="GB-001",
          location="岛 #5", stations=["ST-06"], capacity=1, cal_days=365),
     # 8 通道充放电柜：资产容量与工位通道数一致，同一时刻最多 8 份作业
-    dict(asset_no="AS-0008", name="电性能测试柜", model="EC-TESTER", serial="EC-TESTER-0001",
+    dict(asset_no="AS-0008", name="电性能测试柜", model="CYCLER-32", serial="EC-TESTER-0001",
          location="岛 #6", stations=["ST-07"], capacity=8, cal_days=365),
     # 手工工作台：没有适配器，也明确不适用校准
     dict(asset_no="AS-0009", name="称量工作台", model="BENCH-W", serial="", location="备料间",

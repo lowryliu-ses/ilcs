@@ -86,8 +86,14 @@ def _migrate(scratch_database: str, revision: str) -> None:
 
 
 def _copy_into(engine, source_rows, transform=lambda table_name, values: values) -> None:
-    """把主测试库里的行按旧结构复制进一次性库；外键指向的行递归一并复制。"""
+    """把主测试库里的行按旧结构复制进一次性库；外键指向的行递归一并复制。
+
+    旧结构里可能有后来删掉的列（如 0036 删的 stations.cal_due）：从主库取外键指向的行时只取主库还有的列，
+    缺的非空列由 `transform` 按旧结构补上。
+    """
     from sqlalchemy import MetaData, and_, select
+
+    from app.models import Base
 
     old = MetaData()
     old.reflect(bind=engine, only=sorted({name for name, _ in source_rows}))
@@ -102,9 +108,13 @@ def _copy_into(engine, source_rows, transform=lambda table_name, values: values)
                 if any(values.get(element.parent.name) is None for element in elements):
                     continue
                 parent = elements[0].column.table
+                if (parent.name, tuple(values[element.parent.name] for element in elements)) in copied:
+                    continue
+                current = Base.metadata.tables.get(parent.name)
+                columns = [column for column in parent.columns if current is None or column.name in current.c]
                 predicate = and_(*(element.column == values[element.parent.name] for element in elements))
-                referenced = source_session.execute(select(parent).where(predicate)).mappings().one()
-                copy_row(parent, dict(referenced))
+                referenced = source_session.execute(select(*columns).where(predicate)).mappings().one()
+                copy_row(parent, transform(parent.name, dict(referenced)))
             connection.execute(table.insert().values({k: v for k, v in values.items() if k in table.c}))
             copied.add(identity)
 
@@ -495,6 +505,9 @@ def test_upgrade_backfills_legacy_unknown_outcomes(operator, scratch_database):
             return {**values, "state": "fault"}
         if table_name == "commands":
             return {**values, "state": "unknown"}
+        if table_name == "stations":
+            # 0036 之前工位上还有这两列（非空、无缺省）：按旧结构补上占位值
+            return {**values, "cal_due": "", "positions": 1}
         return values
 
     _migrate(scratch_database, "0031_automation_extensions")

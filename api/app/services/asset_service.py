@@ -20,7 +20,7 @@ from ..repositories.files import FileRepository
 from ..repositories.batches import AllocationRepository, BatchRepository
 from ..repositories.people import PersonRepository
 from ..repositories.resources import (
-    AssetRepository, BookingRepository, CalibrationRepository, StationRepository,
+    AssetRepository, BookingRepository, CalibrationRepository, StationRepository, adopt_asset_model,
 )
 from .audit_service import AuditService
 
@@ -283,12 +283,31 @@ class AssetService:
         for key, value in changes.items():
             setattr(asset, key, value)
         self.assets.bump(asset)
+        # 型号以资产为准：设备方法按它匹配映射到这台资产的工位，改了就重校验这些工位能力上的流程。
+        # 工位上早先登记、与旧型号或新型号一致的副本随手清掉：同一件事只留资产上一份，
+        # 只有和两者都对不上的旧登记才留着让人核对
+        broken: list[str] = []
+        if "model" in changes and before["model"] != changes["model"]:
+            linked = self.stations.for_asset(asset.id)
+            for station in linked:
+                if station.model and station.model in {before["model"], changes["model"]}:
+                    station.model = ""
+            broken = self._revalidate_for_stations(linked)
         self.audit.record(
             user, "编辑资产", asset.id, object_version=asset.row_version,
-            detail="；".join(f"{k}: {before[k]} → {v}" for k, v in changes.items()),
+            detail="；".join(f"{k}: {before[k]} → {v}" for k, v in changes.items())
+            + (f"；重校验后 {len(broken)} 个流程不再通过" if broken else ""),
         )
         self.db.commit()
-        return self.asset_out(asset)
+        return {**self.asset_out(asset), "broken_recipes": broken}
+
+    def _revalidate_for_stations(self, stations) -> list[str]:
+        from .station_service import StationService
+
+        capabilities = {capability for station in stations for capability in (station.limits or {})}
+        if not capabilities:
+            return []
+        return StationService(self.db, self.ctx).revalidate_recipes(capabilities)
 
     def link_station(self, asset_id: str, station_id: str, user: User) -> dict:
         asset = self.assets.get(asset_id)
@@ -305,12 +324,22 @@ class AssetService:
             )
         before = station.asset_id
         station.asset_id = asset.id
+        # 型号改由资产决定，工位上不再另存一份（迁移 0036 同一口径）
+        had_model = bool(asset.model)
+        note, warning = adopt_asset_model(station, asset)
+        if not had_model and asset.model:
+            self.assets.bump(asset)
+        notes = [note] if note else []
+        # 型号改由资产决定，设备方法能不能落到这台工位可能随之变化
+        broken = self._revalidate_for_stations([station])
+        if broken:
+            notes.append(f"重校验后 {len(broken)} 个流程不再通过")
         self.audit.record(
             user, "关联工位到资产", asset.id, before=before or "—", after=station.id,
-            detail=f"工位 {station.id} 共享资产 {asset.asset_no} 的容量与校准许可",
+            detail="；".join([f"工位 {station.id} 共享资产 {asset.asset_no} 的容量、校准许可与型号", *notes]),
         )
         self.db.commit()
-        return self.asset_out(asset, detail=True)
+        return {**self.asset_out(asset, detail=True), "warning": warning, "broken_recipes": broken}
 
     def add_calibration(self, asset_id: str, payload: dict, user: User) -> dict:
         asset = self.assets.get(asset_id)
@@ -347,10 +376,6 @@ class AssetService:
         if certificate is not None:
             certificate.ref_type = "calibration"
             certificate.ref_id = record.id
-        # 工位上的 cal_due 是展示字段，跟着有效校准走
-        if result == "pass" and expires_at:
-            for station in self.stations.for_asset(asset.id):
-                station.cal_due = expires_at.date().isoformat()
         self.audit.record(
             user, "登记校准记录", asset.id, before="—", after=result,
             detail=(

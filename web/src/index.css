@@ -86,6 +86,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 }
 .status { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
 .status b { font-family: var(--mono); color: var(--ink); }
+.status .status-link { color: inherit; text-decoration: none; }
+.status .status-link:hover { text-decoration: underline; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .dot.ok { background: var(--ok); }
 .dot.bad { background: var(--sev-1); }
@@ -387,6 +389,7 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .health.bad { color: var(--sev-1); background: color-mix(in srgb, var(--sev-1) 12%, transparent); }
 .health.off { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
 .station-work { display: grid; gap: 4px; min-height: 22px; }
+.station-alert { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); gap: 6px; }
 .slots.wide { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 .slot { border: 1px dashed var(--border); border-radius: 6px; padding: 4px 6px; display: grid; gap: 1px; font-size: 11px; min-height: 44px; }

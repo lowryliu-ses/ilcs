@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
-import { NavLink, Route, Routes } from 'react-router-dom';
+import { Link, NavLink, Route, Routes } from 'react-router-dom';
 
 import { AlarmsPage } from '../features/alarms/AlarmsPage';
 import { AssetsPage } from '../features/assets/AssetsPage';
 import { AuditPage } from '../features/audit/AuditPage';
+import { CapabilitiesPage } from '../features/capabilities/CapabilitiesPage';
 import { BatchDetailPage } from '../features/batches/BatchDetailPage';
 import { BatchesPage } from '../features/batches/BatchesPage';
 import { DashboardPage } from '../features/dashboard/DashboardPage';
@@ -48,10 +49,10 @@ const NAV: [string, NavItem[]][] = [
     { path: '/tasks', label: '任务中心' },
   ]],
   ['实验设计', [
-    { path: '/plans', label: '实验方案' },
-    { path: '/recipes', label: '实验流程' },
-    { path: '/methods', label: '设备方法' },
     { path: '/sops', label: 'SOP 规程' },
+    { path: '/methods', label: '设备方法' },
+    { path: '/recipes', label: '实验流程' },
+    { path: '/plans', label: '实验方案' },
   ]],
   ['执行与监控', [
     { path: '/samples', label: '样本管理' },
@@ -62,14 +63,15 @@ const NAV: [string, NavItem[]][] = [
     { path: '/exceptions', label: '异常处理' },
   ]],
   ['数据与报告', [
+    { path: '/metrics', label: '指标与规则' },
     { path: '/data-review', label: '数据审核' },
     { path: '/results', label: '结果分析' },
     { path: '/reports', label: '报告管理' },
-    { path: '/metrics', label: '指标与规则' },
   ]],
   ['资源管理', [
     { path: '/assets', label: '仪器设备' },
     { path: '/stations', label: '工位配置' },
+    { path: '/capabilities', label: '能力字典' },
     { path: '/materials', label: '试剂耗材' },
     { path: '/people', label: '人员与资质' },
     { path: '/environment', label: '环境监测' },
@@ -153,9 +155,9 @@ export function App() {
           <span>
             工位在线 <b>{counts?.stations_online ?? 0}/{counts?.stations_total ?? 0}</b>
           </span>
-          <span>
+          <Link to="/floor" className="status-link" title="结果未知的指令在现场监控的工位卡片上转人工核查">
             结果未知指令 <b>{counts?.unknown_commands ?? 0}</b>
-          </span>
+          </Link>
           <span className={counts?.open_alarms ? 'alarm-hot' : ''}>
             未确认报警 <b>{counts?.open_alarms ?? 0}</b>
           </span>
@@ -206,6 +208,7 @@ export function App() {
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/stations" element={<StationsPage />} />
+          <Route path="/capabilities" element={<CapabilitiesPage />} />
           <Route path="/materials" element={<MaterialsPage />} />
           <Route path="/people" element={<PeoplePage />} />
           <Route path="/alarms" element={<AlarmsPage />} />

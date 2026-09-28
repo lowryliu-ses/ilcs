@@ -8,7 +8,7 @@ ST-05、AGV、机械臂是系统内置模拟适配器。
     python3 scripts/load-demo-cases.py http://127.0.0.1:8090
 
     案例 A 注液：        真空干燥 → 称重 → 按孔位注液封口（SiLA 2）→ 逐孔注液量质检 → 人工封口检查 → QA 复核
-    案例 B 循环测试：    上柜检查 → 化成 → 静置 → 循环测试（SiLA 2，8 通道）→ 放电容量质检 → QA 复核
+    案例 B 循环测试：    上柜检查 → 化成 → 静置 → 循环测试（SiLA 2，8 通道，引用设备方法）→ 放电容量质检 → QA 复核
     案例 C 串行：        托盘绑定批次，AGV 在 板库 → ST-05 → ST-06 → ST-07 之间自动转运，
                          注液时手套箱机械臂协同上下料；注液与循环测试在一个批次里串起来
 
@@ -33,6 +33,23 @@ RUN = uuid.uuid4().hex[:6]
 
 ELECTROLYTE = {"name": "电解液 LP57", "unit": "mL", "per": 0.001}
 METRIC_IDS: dict[str, str] = {}
+
+# 案例 B 的循环测试按这版设备方法执行：流程只写倍率（方案因子按孔位覆盖），截止电压与圈数取方法缺省；
+# 方法规定设备端程序与应回报的数据，排程只把它落到型号适用、设备报告支持该程序的工位上
+CYCLING_METHOD = {
+    "name": "扣电 50 圈循环测试", "capability_id": "cap.test", "program": "CYC-50",
+    "params": {
+        "rate": {"default": 0.5, "min": 0.1, "max": 2, "unit": "C"},
+        "vmax": {"default": 4.3, "min": 4.2, "max": 4.4, "unit": "V"},
+        "cycles": {"default": 50, "min": 50, "max": 50, "unit": "圈"},
+    },
+    "outputs": [
+        {"key": "cycles_completed", "label": "完成圈数", "unit": "圈", "lo": 50, "required": True},
+        {"key": "discharge_capacity_mAh", "label": "放电容量", "unit": "mAh", "lo": 2.5, "hi": 4.0, "required": True},
+    ],
+    "dur_min": 120,
+    "note": "参考案例 B：倍率可在 0.1–2C 内由流程或方案因子调整，截止电压 4.2–4.4 V，圈数固定 50",
+}
 
 
 class Failed(SystemExit):
@@ -139,7 +156,7 @@ def prepare(admin: Actor, operator: Actor) -> None:
             "signature_id": admin.sign("登记新工位", "ARM-01"),
         })
     if (admin.get("/gate").get("blocked_stations") or {}).get("ARM-01"):
-        # 新登记的适配器是离线的：在「工位配置」点「重连」做一次握手，之后由心跳维持在线
+        # 新登记的适配器是离线的：在「现场监控」该工位卡片上点「重连」做一次握手，之后由心跳维持在线
         admin.post("/stations/ARM-01/adapter/reconnect")
     wait_for("ARM-01 适配器在线", lambda: not (admin.get("/gate").get("blocked_stations") or {}).get("ARM-01"),
              timeout=60)
@@ -175,6 +192,22 @@ def prepare(admin: Actor, operator: Actor) -> None:
             operator.post("/labware", {"barcode": barcode, "type_id": "LT-TRAY-8", "location_id": slot,
                                        "note": "案例 C 用 8 位扣电托盘"})
     ok("托盘", "TRAY-C01 → 板库 S01（案例导入用）、TRAY-C02 → 板库 S02（留给你自己操作）")
+
+
+def release_cycling_method(engineer: Actor, qa: Actor) -> str:
+    """自动化工程师起草、QA 发布「扣电 50 圈循环测试」。适用型号取 ST-07 关联资产登记的型号。"""
+    for row in engineer.get("/device-methods?state=released&capability_id=cap.test"):
+        if row["name"] == CYCLING_METHOD["name"]:
+            ok("设备方法", f"{row['code']} v{row['version']} {row['name']}（已发布，沿用）")
+            return row["id"]
+    st07 = next(row for row in engineer.get("/stations") if row["id"] == "ST-07")
+    if not st07.get("model"):
+        raise Failed("ST-07 关联的资产没有登记型号：先到「仪器设备」补上，设备方法按它匹配工位")
+    draft = engineer.post("/device-methods", {**CYCLING_METHOD, "instrument_models": [st07["model"]]})
+    released = qa.post(f"/device-methods/{draft['id']}/release", {"row_version": draft["row_version"]})
+    ok("设备方法已发布", f"{released['code']} v{released['version']} {released['name']}：适用型号 {st07['model']}，"
+                        f"程序 {released['program']}，回报完成圈数与放电容量")
+    return released["id"]
 
 
 # ---------------------------------------------------------------- 通用链路
@@ -384,7 +417,11 @@ def formation_step(step_id: str) -> dict:
             "params": {"rate": 0.1, "vmax": 4.3, "cycles": 1}, "dur": 45, "sop_step": 7}
 
 
-def cycling_step(step_id: str) -> dict:
+def cycling_step(step_id: str, method_id: str = "") -> dict:
+    if method_id:
+        # 引用设备方法：只写要改的倍率，截止电压、圈数、时长取方法缺省，程序与输出规则随方法冻结进批次
+        return {"step_id": step_id, "kind": "device", "name": "循环测试", "cap": "cap.test",
+                "params": {"rate": 0.5}, "method": {"id": method_id}}
     return {"step_id": step_id, "kind": "device", "name": "循环测试", "cap": "cap.test",
             "params": {"rate": 0.5, "vmax": 4.3, "cycles": 50}, "dur": 120}
 
@@ -457,8 +494,8 @@ def case_filling(researcher: Actor, qa: Actor, operator: Actor) -> dict:
     return {"流程": recipe_id, "方案": plan_id, "批次": batch_id, "报告": report_id}
 
 
-def case_cycling(researcher: Actor, qa: Actor, operator: Actor) -> dict:
-    step("B 循环测试：上柜检查 → 化成 → 静置 → 循环测试（ST-07）→ 放电容量质检 → QA 复核 → 数据 → 报告")
+def case_cycling(researcher: Actor, qa: Actor, operator: Actor, method_id: str) -> dict:
+    step("B 循环测试：上柜检查 → 化成 → 静置 → 循环测试（ST-07，按设备方法）→ 放电容量质检 → QA 复核 → 数据 → 报告")
     recipe_id = release_recipe(
         researcher, qa, "案例B 扣电循环测试",
         "已组装扣电上柜：化成一圈、静置后按倍率循环 50 圈；放电容量低于下限返工重测一次，仍不合格转 QA",
@@ -471,7 +508,7 @@ def case_cycling(researcher: Actor, qa: Actor, operator: Actor) -> dict:
              ]},
             formation_step("s02"),
             rest_step("s03", "化成后静置"),
-            cycling_step("s04"),
+            cycling_step("s04", method_id),
             capacity_gate("s05", "s04"),
             review_step("s06", "QA 复核循环数据"),
         ],
@@ -559,6 +596,7 @@ def case_serial(researcher: Actor, qa: Actor, operator: Actor) -> dict:
 
 def main() -> int:
     researcher, qa, operator, admin = Actor("researcher"), Actor("qa"), Actor("operator"), Actor("admin")
+    engineer = Actor("engineer")
     gate = operator.get("/gate")
     blocked = {k: v for k, v in (gate.get("blocked_stations") or {}).items() if k in {"ST-05", "ST-06", "ST-07"}}
     if not gate["open"] or blocked:
@@ -573,9 +611,10 @@ def main() -> int:
             ok("关闭已恢复的切换报警", f"{alarm['id']} {alarm['message']}")
 
     prepare(admin, operator)
+    method_id = release_cycling_method(engineer, qa)
     summary = {
         "案例A 注液": case_filling(researcher, qa, operator),
-        "案例B 循环测试": case_cycling(researcher, qa, operator),
+        "案例B 循环测试": case_cycling(researcher, qa, operator, method_id),
         "案例C 串行": case_serial(researcher, qa, operator),
     }
     print("\n完成：")

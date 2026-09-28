@@ -59,7 +59,8 @@ export function MethodsPage() {
       </div>
       <div className="note">
         流程的设备步骤写「做什么」（能力）；设备方法写「怎么做」：适用哪些型号、调用设备上的哪个程序、参数缺省值与允许范围、
-        这一步应该回报哪些数据。流程引用方法后，只有型号适用、且驱动自报支持该程序的工位才会承接这一步。
+        这一步应该回报哪些数据。流程引用方法后，只有型号适用（按工位关联资产在「仪器设备」登记的型号）、
+        且驱动自报支持该程序的工位才会承接这一步；设备没报过方法目录时不按程序排除。
       </div>
 
       <Panel title="方法目录" flush>
@@ -252,7 +253,7 @@ function MethodDialog({
         <Field label="设备端程序" hint="驱动按它选设备上的程序 / 方法文件；设备自报的方法目录里没有它的工位不会承接">
           <input value={program} readOnly={readOnly} className="mono" onChange={(event) => setProgram(event.target.value)} placeholder="如：VD-120" />
         </Field>
-        <Field label="适用仪器型号" hint="逗号分隔；留空表示实现了该能力的型号都可以">
+        <Field label="适用仪器型号" hint="逗号分隔，按「仪器设备」里登记的型号填；留空表示实现了该能力的型号都可以">
           <input value={models} readOnly={readOnly} onChange={(event) => setModels(event.target.value)} placeholder="如：VAC-WEIGH-12" />
         </Field>
         <Field label="缺省时长（min）" hint="流程步骤没写时长时取这个值">

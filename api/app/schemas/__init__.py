@@ -1089,9 +1089,8 @@ class StationCreateIn(Signed):
     id: str
     name: str
     island: int = 0
+    # 只对不关联资产的工位有意义；关联了资产以资产登记的型号为准
     model: str = ""
-    cal_due: str = ""
-    positions: int = Field(default=1, ge=1)
     channels: int = Field(default=1, ge=1, le=512)
     limits: dict[str, dict[str, list[float]]] = {}
     asset_id: str = ""
@@ -1129,11 +1128,10 @@ class StationPatchIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
+    # 关联了资产的工位只接受空值或与资产登记一致的值（清掉早先不一致的登记），要改型号请改资产
     model: str | None = None
     island: int | None = None
-    positions: int | None = Field(default=None, ge=1)
     channels: int | None = Field(default=None, ge=1, le=512)
-    cal_due: str | None = None
     asset_id: str | None = None
     # 乐观并发：带上读到的版本，别人先改过就 409，不做后写覆盖前写
     row_version: int | None = None

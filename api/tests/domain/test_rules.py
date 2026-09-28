@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from app.domain import matrix, preflight, recovery, statistics
-from app.domain.gate import AdapterHealth, evaluate as evaluate_gate
+from app.domain.gate import AdapterHealth, adapter_status, evaluate as evaluate_gate
 
 NOW = datetime(2026, 9, 20, 10, 0)
 
@@ -18,7 +18,7 @@ def preflight_context(**overrides) -> preflight.PreflightContext:
         reservations=[{"lot_id": "LOT-NMP-2601", "qty": 0.6, "unit": "L", "release": "已放行"}],
         bom_items=[{"material": "NMP", "qty": 0.6, "unit": "L"}], material_steps=6,
         bom_satisfied=True, expired_lots=[],
-        first_station={"id": "ST-01-A", "clean": True, "status": "idle", "cal_due": "2026-12-02"},
+        first_station={"id": "ST-01-A", "clean": True, "status": "idle"},
         station_alarm_active=False, gate_reasons=[], planned_start=NOW + timedelta(minutes=5), now=NOW,
         has_control_permission=True, role_name="操作员", manual_review_done=True,
         qualification_required=True, qualification_blockers=[],
@@ -219,3 +219,37 @@ def test_probed_device_is_not_degraded_within_its_probe_period():
     state = evaluate_gate(adapters, NOW, stale_sec=300, degraded_sec=5)
 
     assert state["degraded"] == ["ST-04 心跳间隔 8 s 超过 5 s 阈值", "ST-07 心跳间隔 20 s 超过 15 s 阈值"]
+
+
+def test_station_checks_leave_calibration_to_the_resource_check():
+    """校准只在资产上登记一份：工位两项检查不再各查一份到期日，校准由「设备校准与占用许可」按执行区间查。"""
+    checks = {
+        c.key: c for c in preflight.evaluate(preflight_context(
+            other_stations=[{"id": "ST-03", "status": "idle", "interlock": False, "alarm": False}],
+        ))
+    }
+
+    assert checks["station"].ok and "校准" not in checks["station"].detail
+    assert checks["stations"].ok and "校准见「设备校准与占用许可」" in checks["stations"].detail
+
+    failing = preflight.evaluate(preflight_context(resource_checks=[
+        {"step_index": 0, "step_id": "s01", "step_name": "匀浆", "applicable": True,
+         "ok": False, "reasons": ["AS-0001 高通量匀浆站 A 最近一次校准结果不合格"]},
+    ]))
+    assert [c.key for c in preflight.blocked(failing)] == ["resource"]
+
+
+def test_adapter_status_follows_the_gate_and_matches_station_ids_exactly():
+    adapters = [
+        AdapterHealth("ST-01-A", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(seconds=8)),
+        AdapterHealth("ST-01", connected=True, site_interlock=False, last_heartbeat=NOW),
+        AdapterHealth("ST-03", connected=True, site_interlock=False, last_heartbeat=NOW - timedelta(minutes=7)),
+    ]
+    state = evaluate_gate(adapters, NOW, stale_sec=300, degraded_sec=5)
+
+    assert adapter_status(state, "ST-01-A", enabled=True, connected=True) == "degraded"
+    assert adapter_status(state, "ST-01", enabled=True, connected=True) == "online", "ST-01 不能被 ST-01-A 的降级带上"
+    assert adapter_status(state, "ST-03", enabled=True, connected=True) == "stale"
+    assert adapter_status(state, "ST-03", enabled=True, connected=False) == "offline"
+    assert adapter_status(state, "ST-03", enabled=False, connected=True) == "disabled"
+

@@ -10,9 +10,9 @@
 - 资产档案 ← 工位行（名称、型号、所在功能岛都照抄），并把工位指向它。
 
 **刻意不做的事：**
-不建校准记录。工位上的 cal_due 只说到期日，没说哪天校准的、证书编号是什么；
-而系统明确要求「合格校准必须附证书文件」（`certificate_required`）。绕开这条去写一条
-无证书的合格记录，等于用脚本伪造一份计量背书——那正是这套系统要防的事。
+不建校准记录。老库工位上的校准到期日只说到期日（迁移 0036 起工位不再存它），没说哪天校准的、
+证书编号是什么；而系统明确要求「合格校准必须附证书文件」（`certificate_required`）。绕开这条去写
+一条无证书的合格记录，等于用脚本伪造一份计量背书——那正是这套系统要防的事。
 同理不建资质记录：谁有哪项资质、什么时候到期，老库里从来没有这个信息。
 
 所以跑完之后批次仍然下发不了。变化只是开跑检查从「无法校验」变成「缺哪一项」，
@@ -87,8 +87,6 @@ def collect(db, org_id: str) -> dict:
                 "model": station.model,
                 "location": islands.get(station.island, ""),
                 "station_id": station.id,
-                "positions": station.positions,
-                "cal_due": station.cal_due,
             }
         )
     return {"people": people, "assets": assets}
@@ -105,9 +103,8 @@ def describe(plan: dict) -> None:
             f"  {row['location'] or '位置未记录'}  ← 工位 {row['station_id']}"
         )
     print(
-        "\n口径：一个工位建一台资产，容量 1。工位上的「位数」是托盘孔位数，"
-        "从来没有参与过并发判断，所以这样建出来的排程约束与原先逐工位时间窗完全一致，"
-        "不会放松也不会收紧。"
+        "\n口径：一个工位建一台资产，容量 1。并发只按工位通道数与资产容量计，"
+        "所以这样建出来的排程约束与原先逐工位时间窗完全一致，不会放松也不会收紧。"
     )
     print(
         "现实里若有一台设备同时承接多个工位（两个工位共用一台），需要把这两份资产合并并"
@@ -153,8 +150,7 @@ def apply(db, org_id: str, plan: dict) -> dict:
             None, "补录资产档案", asset.id, after=f"{row['asset_no']} {row['name']}",
             detail=(
                 f"由工位 {station.id} 派生（名称 / 型号 / 位置照抄）；容量 1；"
-                f"工位原 cal_due {row['cal_due'] or '未记录'} 保留为展示字段，"
-                "未据此生成校准记录"
+                "未生成校准记录，需按证书登记"
             ),
         )
 

@@ -48,6 +48,9 @@ def main() -> int:
         step = next((r for r in batch["step_runs"] if r["step_index"] == checkpoint["step_index"]), {})
         print(f"\n第 {checkpoint['step_index'] + 1} 步 {step.get('step_name', '')} @ {payload['station_id']}"
               f"（来源 {payload['origin']}）")
+        method = next((r.get("method") for r in batch.get("steps") or [] if r["index"] == checkpoint["step_index"]), None)
+        if method:
+            print(f"  设备方法：{method['code']} v{method['version']} {method['name']}（设备端程序 {method.get('program') or '—'}）")
         fixed = {k: v for k, v in params.items() if k != "wells"}
         if fixed:
             print("  设定：" + "  ".join(f"{k}={v}" for k, v in fixed.items()))

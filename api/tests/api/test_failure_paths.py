@@ -324,7 +324,7 @@ def test_command_without_adapter_is_surfaced_not_silently_queued(operator, runni
             db.add(
                 Station(
                     id=station_id, org_id="ORG-001", name="无适配器测试工位",
-                    status="idle", positions=1, clean=True, limits={},
+                    status="idle", clean=True, limits={},
                 )
             )
             db.flush()
