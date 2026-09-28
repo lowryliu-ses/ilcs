@@ -5,6 +5,7 @@ import { api } from '../../shared/api';
 import { clock, dateOf, minutes } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
+import { BATCH_STATE_LABEL } from '../../shared/types';
 import type { DueWindow, Gate, OptimizePreview, QueueRow, ScheduleBoard, ScheduleProposalRow } from '../../shared/types';
 import { Empty, GateBanner, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
@@ -65,7 +66,7 @@ function ScheduledBatches({
                 </Link>
               </td>
               <td>
-                <Pill state={row.state} />
+                <Pill state={row.state} label={BATCH_STATE_LABEL[row.state] ?? row.state} />
               </td>
               <td className="small mono">{[...row.stations].join('、')}</td>
               <td className="small mono">

@@ -6,7 +6,7 @@ import { clock, num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import { DEPENDENCY_GATE_LABEL, SPLIT_MODE_HINT } from '../../shared/types';
+import { DEPENDENCY_GATE_LABEL, PLAN_TYPE_LABEL, SPLIT_MODE_HINT } from '../../shared/types';
 import type {
   AnalysisView, DependencyGate, Paged, PersonRow, PlanRow, SplitMode, SplitPreview, StepRunRow, TaskDetail, TaskProgress,
   TaskRow,
@@ -230,7 +230,7 @@ export function TasksPage() {
                     <td className="small">
                       {row.plan_id}
                       <div className="tiny muted">
-                        v{row.plan_version} · {row.plan_type}
+                        v{row.plan_version} · {PLAN_TYPE_LABEL[row.plan_type] ?? row.plan_type}
                       </div>
                     </td>
                     <td className="small">
@@ -582,6 +582,12 @@ function AssignDialog({ task, onClose }: { task: TaskDetail; onClose: () => void
       <div className="note">
         分配时按预计执行时间校验资质。资质到期、被撤销或账号停用的人员会被服务端拒绝，
         并给出具体缺哪一项。
+        {task.children.length ? (
+          <>
+            {' '}这是拆分过的父任务：还没分配的子任务一并分配给同一个人，执行人接父任务时子任务一并接单；
+            批次已开跑的子任务不跟着换人。
+          </>
+        ) : null}
       </div>
       <Field label="执行人">
         <select value={assignee} onChange={(event) => setAssignee(event.target.value)}>
@@ -778,8 +784,7 @@ function TaskResults({ taskId }: { taskId: string }) {
                 </table>
                 {block.batch_effect ? (
                   <div className={`tiny ${block.batch_effect.significant ? 'warn-text' : 'muted'}`}>
-                    批次差异：F({block.batch_effect.df1}, {block.batch_effect.df2}) = {num(block.batch_effect.f, 2)}，
-                    p = {block.batch_effect.p === null ? '—' : block.batch_effect.p.toPrecision(3)}；{block.batch_effect.note}
+                    批次差异：F({block.batch_effect.df1}, {block.batch_effect.df2}) = {num(block.batch_effect.f, 2)}；{block.batch_effect.note}
                   </div>
                 ) : null}
               </div>

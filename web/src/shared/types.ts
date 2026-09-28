@@ -41,6 +41,16 @@ export type Check = {
 
 export type NextAction = { who: string; what: string; why: string };
 
+/** 批次状态的中文名，与服务端 BatchService.STATE_LABEL 一致。 */
+export const BATCH_STATE_LABEL: Record<string, string> = {
+  planned: '计划', scheduled: '已排程', running: '运行中', paused: '已保持',
+  fault: '故障', aborting: '终止中', aborted: '已终止', done: '已完成',
+};
+
+export const PLAN_TYPE_LABEL: Record<string, string> = {
+  matrix: '矩阵实验', single_condition: '单条件样本实验', commissioned_test: '委托检测',
+};
+
 export type BatchSummary = {
   id: string;
   state: string;
@@ -52,6 +62,10 @@ export type BatchSummary = {
   plan_version: number;
   /** 绑定的实验任务。批次与任务一一对应，不留第二条数据链。 */
   task_id: string;
+  /** 一个方案分多批执行时：父任务、本批是父任务的哪一份、是不是补测 */
+  task_parent_id?: string;
+  task_portion_label?: string;
+  task_purpose?: string;
   priority: number;
   operator: string;
   note: string;
@@ -2003,6 +2017,7 @@ export type AnalysisView = {
     task_id: string;
     title: string;
     state: string;
+    state_label?: string;
     purpose: string;
     portion_label: string;
     samples: number;

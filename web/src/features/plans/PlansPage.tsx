@@ -241,7 +241,7 @@ export function PlansPage() {
             </select>
           </Field>
           {form.plan_type === 'single_condition' ? (
-            <Field label="样本数" hint="也可以在详情页改成显式样本清单">
+            <Field label="样本数" hint="可以超过流程每批样品位：建任务时按每批容量拆成几批；也可以在详情页改成显式样本清单">
               <input
                 type="number"
                 min={1}
@@ -252,7 +252,7 @@ export function PlansPage() {
             </Field>
           ) : null}
           </>)}
-          <Field label="实验流程" hint="样品位数由流程决定，样本数不能超过它">
+          <Field label="实验流程" hint="每批样品位由流程决定：一批最多放这么多样本，超过就分批执行">
             <select value={form.recipe_id} onChange={(event) => setForm({ ...form, recipe_id: event.target.value })}>
               {(recipes.data ?? []).map((recipe) => (
                 <option key={recipe.id} value={recipe.id}>

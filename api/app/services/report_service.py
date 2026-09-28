@@ -43,6 +43,10 @@ STATE_LABEL = {
 ASSIGNMENT_STATE_LABEL = {
     "pending": "待执行", "running": "执行中", "done": "已完成", "failed": "失败",
 }
+BATCH_STATE_LABEL = {
+    "planned": "计划", "scheduled": "已排程", "running": "运行中", "paused": "已保持",
+    "fault": "故障", "aborting": "终止中", "aborted": "已终止", "done": "已完成",
+}
 STEP_STATE_LABEL = {
     "pending": "待执行", "ready": "待办", "running": "执行中", "waiting": "等待中",
     "completed": "已完成", "failed": "失败", "unknown": "结果未知", "cancelled": "已取消",
@@ -225,6 +229,7 @@ class ReportService:
                 "batches": [
                     {
                         "batch_id": item.id, "task_id": leaf.id, "title": leaf.title, "state": item.state,
+                        "state_label": BATCH_STATE_LABEL.get(item.state, item.state),
                         "purpose": leaf.purpose or "",
                         "portion_label": tasks.part_label(
                             leaf.portion or {}, len(self.assignments.for_batch(item.id)), plan_type == "matrix",

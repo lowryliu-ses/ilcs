@@ -199,7 +199,9 @@ class TaskService:
             for bucket in ("valid", "failed", "running", "pending"):
                 add(bucket, leaf[bucket])
             if task.purpose == "retest":
-                add("retest", leaf["planned"])
+                # 没下发就取消的补测不再算「补测中」：它补不了短缺
+                if not leaf["descoped"]:
+                    add("retest", leaf["planned"])
             else:
                 add("descoped", leaf["descoped"])
                 if not leaf["descoped"]:
@@ -1079,6 +1081,7 @@ class TaskService:
             )
             self.tasks.add(child)
             self.db.flush()
+            self._follow_parent(child, task, user)
             created.append(child)
         edges = task_rules.split_dependencies([row.id for row in created], planned["mode"])
         for child in created:
@@ -1238,7 +1241,11 @@ class TaskService:
                 count = wanted_count or progress["shortfall"]
                 if count <= 0:
                     raise StateConflict("没有需要补测的样本", code="no_shortfall")
-                base = progress["target"] + progress["retest"]
+                # 补测的序号接在计划与已有补测（含取消了的）之后，编号不重复
+                base = max(
+                    [progress["target"], *(int((row.portion or {}).get("offset") or 0) + int((row.portion or {}).get("count") or 0)
+                                           for row in previous)],
+                )
                 sizes = task_rules.split_sizes(count, plate)
                 specs = [
                     {"sample_ids": [], "portion": {"count": size, "offset": base + start}, "size": size}
@@ -1259,6 +1266,7 @@ class TaskService:
             )
             self.tasks.add(child)
             self.db.flush()
+            self._follow_parent(child, task, user)
             created.append((child, spec))
         task.updated_at = now()
         self.tasks.bump(task)
@@ -1406,22 +1414,82 @@ class TaskService:
                 action="reassign" if reassign else "assign", reason=reason, actor_id=user.id,
             )
         )
-        if task.batch_id:
-            # 已排程的批次：人工步骤的预占跟着换到新执行人
-            from ..models import Batch
-            from .staffing_service import StaffingService
-
-            batch = self.db.get(Batch, task.batch_id)
-            if batch is not None and batch.state in {"scheduled", "running", "held"}:
-                self.db.flush()
-                StaffingService(self.db, self.ctx).book_batch(batch)
+        self._rebook_people(task)
+        followers = self._assign_followers(task, previous, assignee_id, user)
         self.audit.record(
             user, "转派实验任务" if reassign else "分配实验任务", task.id,
             before=self._name(previous) or "待分配", after=assignee.display_name,
-            detail=reason or "首次分配", object_version=task.row_version,
+            detail=(reason or "首次分配") + (f"；子任务 {'、'.join(followers)} 一并分配" if followers else ""),
+            object_version=task.row_version,
         )
         self.db.commit()
         return self.out(task)
+
+    def _rebook_people(self, task: ExperimentTask) -> None:
+        """已排程的批次：人工步骤的预占跟着换到新执行人。"""
+        if not task.batch_id:
+            return
+        from ..models import Batch
+        from .staffing_service import StaffingService
+
+        batch = self.db.get(Batch, task.batch_id)
+        if batch is not None and batch.state in {"scheduled", "running", "held"}:
+            self.db.flush()
+            StaffingService(self.db, self.ctx).book_batch(batch)
+
+    def _followers(self, task: ExperimentTask, previous: str) -> list[ExperimentTask]:
+        """跟着父任务走的后代：还没分配的，或原来就是父任务那位执行人的；批次已开跑的不跟着换人。"""
+        found = []
+        for child_id in sorted(self._descendant_ids(task.id)):
+            child = self.tasks.get(child_id)
+            if child is None or child.state == "cancelled" or child.plan_id != task.plan_id:
+                continue
+            if child.assignee_user_id and child.assignee_user_id != previous:
+                continue
+            batch = self.batches.get(child.batch_id) if child.batch_id else None
+            if batch is not None and batch.state not in {"planned", "scheduled"}:
+                continue
+            found.append(child)
+        return found
+
+    def _assign_followers(self, task: ExperimentTask, previous: str, assignee_id: str, user: User) -> list[str]:
+        """分配父任务时，还没分配（或跟着父任务原执行人）的子任务一并分配给同一个人，各自等接单。"""
+        moved = []
+        for child in self._followers(task, previous):
+            if child.assignee_user_id == assignee_id and child.accepted_at is not None:
+                continue
+            before = child.assignee_user_id
+            child.assignee_user_id = assignee_id
+            child.accepted_at = None
+            child.state = "pending_accept"
+            child.updated_at = now()
+            self.tasks.bump(child)
+            self.assignments.add(TaskAssignment(
+                task_id=child.id, from_user_id=before, to_user_id=assignee_id,
+                action="reassign" if before else "assign", reason=f"随父任务 {task.id} 分配", actor_id=user.id,
+            ))
+            self._rebook_people(child)
+            moved.append(child.id)
+        return moved
+
+    def _follow_parent(self, child: ExperimentTask, parent: ExperimentTask, user: User) -> None:
+        """拆分、补测出来的子任务沿用父任务的执行人；父任务已接单，子任务也算已接单（同一个人接的是整件事）。"""
+        if not parent.assignee_user_id:
+            return
+        child.assignee_user_id = parent.assignee_user_id
+        self.assignments.add(TaskAssignment(
+            task_id=child.id, from_user_id="", to_user_id=parent.assignee_user_id, action="assign",
+            reason=f"沿用父任务 {parent.id} 的执行人", actor_id=user.id,
+        ))
+        if parent.accepted_at is not None:
+            child.accepted_at = now()
+            child.state = "accepted"
+            self.assignments.add(TaskAssignment(
+                task_id=child.id, from_user_id="", to_user_id=parent.assignee_user_id, action="accept",
+                reason=f"父任务 {parent.id} 已接单", actor_id=user.id,
+            ))
+        else:
+            child.state = "pending_accept"
 
     def _require_sop_ack_in_flight(self, task, user_id: str, action: str) -> None:
         """批次已经开跑时换执行人：新执行人要确认过批次采用的 SOP（按固化版本）。
@@ -1463,8 +1531,22 @@ class TaskService:
                 actor_id=user.id,
             )
         )
+        # 接父任务就是接整件事：分配给同一个人、还没接单的子任务一并接单
+        followers = [
+            child for child in self._followers(task, user.id)
+            if child.assignee_user_id == user.id and child.accepted_at is None
+        ]
+        for child in followers:
+            child.accepted_at = now()
+            child.state = "accepted"
+            self.tasks.bump(child)
+            self.assignments.add(TaskAssignment(
+                task_id=child.id, from_user_id="", to_user_id=user.id, action="accept",
+                reason=f"随父任务 {task.id} 接单", actor_id=user.id,
+            ))
         self.audit.record(
             user, "接单", task.id, before="待接单", after="已接单",
+            detail=f"子任务 {'、'.join(child.id for child in followers)} 一并接单" if followers else "",
             object_version=task.row_version,
         )
         self.db.commit()

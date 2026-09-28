@@ -217,6 +217,7 @@ class BatchService:
             "plan_id": batch.plan_id,
             "plan_version": batch.plan_version,
             "task_id": batch.task_id,
+            **self._task_place(batch, len(samples)),
             "priority": batch.priority,
             "operator": batch.operator,
             "note": batch.note,
@@ -234,6 +235,20 @@ class BatchService:
             "next_action": self.next_action(batch),
             "row_version": batch.row_version,
             "delete_blockers": batch_delete_blockers(batch.state, bool(self.commands.for_batch(batch.id))),
+        }
+
+    def _task_place(self, batch: Batch, samples: int) -> dict:
+        """批次在一个方案分多批执行里是第几份：父任务、本份份额、是不是补测。"""
+        task = self.tasks.get(batch.task_id) if batch.task_id else None
+        if task is None or not task.parent_id:
+            return {"task_parent_id": "", "task_portion_label": "", "task_purpose": ""}
+        from .task_service import TaskService
+
+        matrix_plan = (batch.plan_snapshot or {}).get("plan_type") == "matrix"
+        return {
+            "task_parent_id": task.parent_id,
+            "task_portion_label": TaskService.part_label(task.portion or {}, samples, matrix_plan) if task.portion else "",
+            "task_purpose": task.purpose or "",
         }
 
     def _current_station_id(self, batch: Batch) -> str | None:
@@ -271,6 +286,21 @@ class BatchService:
                 "why": f"第 {run.step_index + 1} 步「{(run.step_snapshot or {}).get('name', '')}」",
             }
         if batch.state == "done":
+            # 运行结束之后看任务走到哪了：复核、出报告，还是已经完成（拆分出来的子任务由父任务的合并报告覆盖）
+            task = self.tasks.get(batch.task_id) if batch.task_id else None
+            if task is not None:
+                from .task_service import TaskService
+
+                state = TaskService(self.db, self.ctx).derive_state(task)
+                if state == "done":
+                    return {"who": "—", "what": "无待办", "why": "任务已完成"}
+                if state == "data_review":
+                    return {"who": "研究员 / QA", "what": "数据复核", "why": "运行结束，检测结果还没复核完"}
+                if state == "reporting":
+                    if task.parent_id:
+                        return {"who": "研究员", "what": "出报告",
+                                "why": f"运行结束；在父任务 {task.parent_id} 上出合并报告，或单独出这一批的报告"}
+                    return {"who": "研究员", "what": "出报告", "why": "运行结束，数据已复核"}
             return {"who": "研究员", "what": "数据复核与报告", "why": "运行结束，任务尚未完成"}
         return {"who": "—", "what": "无待办", "why": STATE_LABEL.get(batch.state, batch.state)}
 

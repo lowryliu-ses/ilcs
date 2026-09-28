@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# 把演示环境重置成「种子主数据 + 三个跑完的参考案例」（见 docs/操作案例.md）。
+# 把演示环境重置成「种子主数据 + 四个跑完的参考案例」（见 docs/操作案例.md）。
 #
 # 做法与 reset-demo.sh 相同（备份 → 空库 → 迁移 → 播种），之后：
 # - 删掉种子里的全部演示流程、方案与报警：案例只保留主数据，流程与方案由案例自己建；
 # - 按 simulators/pilot-devices.json 把全部示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
 #   串口命令、MT-SICS、HTTPS 网关、车队 REST），等执行器探测在线；机械臂 ARM-01 由导入脚本登记时接好；
-# - 用 load-demo-cases.py 走和界面相同的 HTTP 接口把三个案例真实跑一遍：
+# - 用 load-demo-cases.py 走和界面相同的 HTTP 接口把四个案例真实跑一遍：
 #     案例 A 注液（ST-05 → ST-06），案例 B 循环测试（ST-07），
-#     案例 C 注液 → 循环测试串行（托盘由 AGV 在工位间转运，注液时手套箱机械臂协同上下料）。
+#     案例 C 注液 → 循环测试串行（托盘由 AGV 在工位间转运，注液时手套箱机械臂协同上下料），
+#     案例 D 分批（20 个扣电按每批 8 位拆成 3 个子任务、3 个批次，父任务出一份合并报告）。
 #   签名用演示账号口令逐次签署，与在界面上签的一样。
 #
 # 用法（部署机上）：  ILCS_BASE_URL=http://10.10.106.51:8090 bash /opt/ilcs/scripts/reset-demo-cases.sh
@@ -99,7 +100,7 @@ else:
     raise SystemExit(f"外部模拟设备未全部上线：{sorted(blocked)} {gate['reasons']}")
 PY
 
-echo "==> 导入三个参考案例（约 8 分钟：设备按模拟时长真实执行）"
+echo "==> 导入四个参考案例（约 12 分钟：设备按模拟时长真实执行）"
 # 只走 HTTP：宿主机的 python3 打 nginx 端口即可
 python3 "$ROOT/scripts/load-demo-cases.py" "$BASE_URL" --pilot-devices="$ROOT/simulators/pilot-devices.json"
 

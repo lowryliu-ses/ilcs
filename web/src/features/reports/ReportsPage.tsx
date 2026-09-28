@@ -6,6 +6,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CommentsPanel } from '../../shared/comments';
+import { BATCH_STATE_LABEL } from '../../shared/types';
 import type { BatchSummary, Paged, ReportContent, ReportTemplate, ReportVersionRow, TaskRow } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, Pager, Panel, Pill, useToast,
@@ -510,7 +511,7 @@ function BatchesSection({ section }: { section: NonNullable<ReportContent['batch
               <td className="mono small">{row.task_id}</td>
               <td className="small">{row.purpose === 'retest' ? '补测 ' : ''}{row.portion_label || '—'}</td>
               <td className="num">{row.samples}</td>
-              <td><Pill state={row.state} /></td>
+              <td><Pill state={row.state} label={row.state_label ?? BATCH_STATE_LABEL[row.state] ?? row.state} /></td>
             </tr>
           ))}
         </tbody>
@@ -555,8 +556,7 @@ function BatchesSection({ section }: { section: NonNullable<ReportContent['batch
             </table>
             {block.batch_effect ? (
               <div className={`tiny ${block.batch_effect.significant ? 'warn-text' : 'muted'}`}>
-                批次差异：F({block.batch_effect.df1}, {block.batch_effect.df2}) = {block.batch_effect.f || '—'}，
-                p = {block.batch_effect.p || '—'}；{block.batch_effect.note}
+                批次差异：F({block.batch_effect.df1}, {block.batch_effect.df2}) = {block.batch_effect.f || '—'}；{block.batch_effect.note}
               </div>
             ) : null}
           </div>

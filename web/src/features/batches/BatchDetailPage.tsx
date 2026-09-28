@@ -93,6 +93,13 @@ export function BatchDetailPage() {
               <>
                 {' '}
                 · 任务 <span className="mono">{data.task_id}</span>
+                {data.task_parent_id ? (
+                  <>
+                    （父任务 <span className="mono">{data.task_parent_id}</span>
+                    {data.task_purpose === 'retest' ? ' · 补测' : ''}
+                    {data.task_portion_label ? ` · ${data.task_portion_label}` : ''}）
+                  </>
+                ) : null}
               </>
             ) : null}
             {data.sop_snapshot?.code ? (

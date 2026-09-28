@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把三个参考案例（docs/操作案例.md）真实跑一遍导进演示库。
+"""把四个参考案例（docs/操作案例.md）真实跑一遍导进演示库。
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署（`POST /signatures`），
 与在界面上签的一样。批次由执行器真实投递到外部模拟设备（reset-demo-cases.sh 已按
@@ -13,6 +13,8 @@ ST-07 走 HTTPS 网关（厂家 SDK 接口服务），AGV 走车队 REST 接口�
     案例 B 循环测试：    上柜检查 → 化成 → 静置 → 循环测试（8 通道，引用设备方法）→ 放电容量质检 → QA 复核
     案例 C 串行：        托盘绑定批次，AGV 在 板库 → ST-05 → ST-06 → ST-07 之间自动转运，
                          注液时手套箱机械臂协同上下料；注液与循环测试在一个批次里串起来
+    案例 D 分批：        20 个扣电用案例 B 的流程（每批 8 位）：建任务时自动拆成 3 个子任务（7/7/6），
+                         一次建 3 个批次、多批次优化一起排程，逐批执行；父任务汇总进度，出一份合并报告
 
 每个案例都走完：流程发布 → 方案审批 → 任务 → 批次 → 排程 → 开跑检查 → 签名下发 → 执行 →
 检测录入 → 数据复核 → 报告发布。
@@ -308,36 +310,52 @@ def launch(researcher: Actor, operator: Actor, plan_id: str, note: str, tray: st
 
 def drive(operator: Actor, qa: Actor, batch_id: str, manual_values: dict, timeout: float = 600) -> dict:
     """推到批次结束：人工节点按表单填，审核节点由 QA 批准；设备、等待、关卡由系统自己走。"""
+    return drive_many(operator, qa, [batch_id], manual_values, timeout)[0]
+
+
+def drive_many(operator: Actor, qa: Actor, batch_ids: list[str], manual_values: dict, timeout: float = 600) -> list[dict]:
+    """几个批次一起推：哪个批次走到人工或审核节点就先处理哪个，全部结束才返回（按传入顺序）。"""
     handled: set[str] = set()
+    finished: dict[str, dict] = {}
 
     def advance():
-        detail = operator.get(f"/batches/{batch_id}")
-        if detail["state"] in {"fault", "aborted", "paused"}:
-            raise Failed(f"批次 {batch_id} 进入 {detail['state']}：{detail.get('failure_reason')}")
-        if detail["state"] == "done":
-            return detail
-        for run in detail["step_runs"]:
-            if run["id"] in handled or run["state"] not in {"ready", "running"}:
+        for batch_id in batch_ids:
+            if batch_id in finished:
                 continue
-            if run["kind"] == "manual":
-                values = {field["key"]: manual_values[field["key"]] for field in run["form"]}
-                body = {"form_data": values, "checks": {"samples": True, "materials": bool(detail["reservations"])},
-                        "note": "案例导入", "row_version": run["row_version"]}
-                if run["requires_signature"]:
-                    body["signature_id"] = operator.sign("人工步骤记录确认", run["id"], run["row_version"])
-                operator.post(f"/step-runs/{run['id']}/submit", body)
-                handled.add(run["id"])
-                ok(f"人工节点「{run['step_name']}」已提交")
-            elif run["kind"] == "review":
-                qa.post(f"/step-runs/{run['id']}/review", {
-                    "conclusion": "approved", "row_version": run["row_version"],
-                    "signature_id": qa.sign("流程审核通过", run["id"], run["row_version"]),
-                })
-                handled.add(run["id"])
-                ok(f"审核节点「{run['step_name']}」QA 已批准")
-        return None
+            detail = operator.get(f"/batches/{batch_id}")
+            if detail["state"] in {"fault", "aborted", "paused"}:
+                raise Failed(f"批次 {batch_id} 进入 {detail['state']}：{detail.get('failure_reason')}")
+            if detail["state"] == "done":
+                finished[batch_id] = detail
+                continue
+            for run in detail["step_runs"]:
+                if run["id"] in handled or run["state"] not in {"ready", "running"}:
+                    continue
+                label = f"{batch_id} " if len(batch_ids) > 1 else ""
+                if run["kind"] == "manual":
+                    values = {field["key"]: manual_values[field["key"]] for field in run["form"]}
+                    body = {"form_data": values, "checks": {"samples": True, "materials": bool(detail["reservations"])},
+                            "note": "案例导入", "row_version": run["row_version"]}
+                    if run["requires_signature"]:
+                        body["signature_id"] = operator.sign("人工步骤记录确认", run["id"], run["row_version"])
+                    operator.post(f"/step-runs/{run['id']}/submit", body)
+                    handled.add(run["id"])
+                    ok(f"{label}人工节点「{run['step_name']}」已提交")
+                elif run["kind"] == "review":
+                    qa.post(f"/step-runs/{run['id']}/review", {
+                        "conclusion": "approved", "row_version": run["row_version"],
+                        "signature_id": qa.sign("流程审核通过", run["id"], run["row_version"]),
+                    })
+                    handled.add(run["id"])
+                    ok(f"{label}审核节点「{run['step_name']}」QA 已批准")
+        return len(finished) == len(batch_ids)
 
-    detail = wait_for(f"批次 {batch_id} 完成", advance, timeout=timeout)
+    wait_for(f"批次 {'、'.join(batch_ids)} 完成", advance, timeout=timeout)
+    return [report_batch(finished[batch_id]) for batch_id in batch_ids]
+
+
+def report_batch(detail: dict) -> dict:
+    batch_id = detail["id"]
     for checkpoint in sorted(detail["checkpoints"], key=lambda c: c["step_index"]):
         payload = checkpoint["payload"]
         delivered = payload.get("delivered") or {}
@@ -401,8 +419,10 @@ def record_results(researcher: Actor, qa: Actor, detail: dict, metrics_for, inva
     return len(values)
 
 
-def publish_report(researcher: Actor, qa: Actor, batch_id: str, conclusion: str) -> str:
-    report = researcher.post("/reports", {"batch_id": batch_id, "conclusion": conclusion})
+def publish_report(researcher: Actor, qa: Actor, batch_id: str, conclusion: str, task_id: str = "") -> str:
+    """发布报告。给了 task_id（已拆分的父任务）就出一份多批合并报告。"""
+    body = {"task_id": task_id} if task_id else {"batch_id": batch_id}
+    report = researcher.post("/reports", {**body, "conclusion": conclusion})
     researcher.post(f"/reports/{report['id']}/submit")
     fresh = qa.get(f"/reports/{report['id']}")
     approved = qa.post(f"/reports/{report['id']}/approve", {
@@ -468,7 +488,7 @@ def review_step(step_id: str, name: str) -> dict:
     return {"step_id": step_id, "kind": "review", "name": name, "review_role": "qa", "sop_step": 8}
 
 
-# ---------------------------------------------------------------- 三个案例
+# ---------------------------------------------------------------- 四个案例
 
 
 def case_filling(researcher: Actor, qa: Actor, operator: Actor) -> dict:
@@ -620,6 +640,73 @@ def case_serial(researcher: Actor, qa: Actor, operator: Actor, method_id: str) -
     return {"流程": recipe_id, "方案": plan_id, "批次": batch_id, "报告": report_id}
 
 
+def case_split(researcher: Actor, qa: Actor, operator: Actor, recipe_id: str) -> dict:
+    step("D 分批：20 个扣电、流程每批 8 位 → 建任务时拆成 3 个子任务 → 3 个批次一起排程 → 合并统计与一份报告")
+    plan_id = approve_plan(researcher, qa, {
+        "name": "案例D 20 个扣电循环测试", "recipe_id": recipe_id, "plan_type": "single_condition",
+        "goal": "同一配方 20 个扣电 0.5C 循环 50 圈；流程每批 8 个，分 3 批执行，合并统计容量保持率并检查批次差异",
+        "sample_count": 20,
+        "required_metrics": [METRIC_IDS["discharge_capacity"], METRIC_IDS["retention"]],
+    })
+    capacity = next(row for row in researcher.get(f"/plans/{plan_id}")["checks"] if row["key"] == "capacity")
+    ok("方案校验 · 容量", capacity["detail"])
+    preview = researcher.post("/experiment-tasks/split-preview", {"plan_id": plan_id})
+    ok("拆分预览", preview["detail"] + "：" + "、".join(row["label"] for row in preview["parts"]))
+    parent = researcher.post("/experiment-tasks", {
+        "plan_id": plan_id, "priority": 2, "title": "案例D 20 个扣电循环测试", "split": {"mode": "parallel"},
+    })
+    ok("建任务时自动拆分", f"{parent['id']} → " + "、".join(
+        f"{row['id']}（{row['portion_label']}）" for row in parent["children"]))
+    # 分配、接单父任务就是分配、接单整件事：3 个子任务一并分配给操作员、一并接单
+    researcher.post(f"/experiment-tasks/{parent['id']}/assign", {"assignee_user_id": operator.id})
+    operator.post(f"/experiment-tasks/{parent['id']}/accept")
+    made = operator.post(f"/experiment-tasks/{parent['id']}/batches", {"note": "案例D 分批"})
+    batch_ids = [row["id"] for row in made["batches"]]
+    ok("为 3 个子任务建批次", "、".join(f"{row['id']}（{row['sample_count']} 个样本）" for row in made["batches"]))
+    # 一起排程：多批次优化给出顺序，写入时间线（ST-07 按批计 8 个通道，三批可以同时上柜）
+    optimized = operator.post("/schedule/optimize", {"batch_ids": batch_ids})
+    operator.post("/schedule/optimize/apply", {"order": optimized["best"]["order"], "start_from": optimized["start_from"]})
+    ok("多批次优化并写入时间线", f"顺序 {'→'.join(optimized['best']['order'])}，跨度 {optimized['best']['span_min']} min")
+    for batch_id in batch_ids:
+        preflight = operator.get(f"/batches/{batch_id}/preflight?manual_review=true")
+        if not preflight["ok"]:
+            raise Failed(f"{batch_id} 开跑检查未通过：" + "；".join(row["detail"] for row in preflight["blocked"]))
+        fresh = operator.get(f"/batches/{batch_id}")
+        operator.post(f"/batches/{batch_id}/dispatch", {
+            "manual_review": True, "reason": "案例D 分批",
+            "signature_id": operator.sign("批准执行", batch_id, fresh["row_version"]),
+        })
+    ok("三批开跑检查通过、逐批签名下发", "、".join(batch_ids))
+    details = drive_many(operator, qa, batch_ids, {"channel_checked": True, "ocv_min": 3.01}, timeout=900)
+
+    def metrics(index, sample):
+        # 同一配方：数值只有小的随机波动（按全局样本序号取），三批之间没有系统差异
+        number = int(sample.get("repeat") or index + 1)
+        return [
+            {"metric_version_id": METRIC_IDS["discharge_capacity"],
+             "value": round(203.2 + 0.1 * ((number * 7) % 5), 1), "unit": "mAh/g"},
+            {"metric_version_id": METRIC_IDS["retention"],
+             "value": round(96.9 + 0.1 * ((number * 3) % 4), 1), "unit": "%"},
+        ]
+
+    for number, detail in enumerate(details):
+        # 第 2 批的第 6 个样本（全局第 13 号）判无效：合并报告的排除说明里列出
+        record_results(researcher, qa, detail, metrics, invalid="5" if number == 1 else "")
+    view = researcher.get(f"/experiment-tasks/{parent['id']}/results")
+    for block in view["metrics"]:
+        effect = block.get("batch_effect") or {}
+        ok(f"合并统计 · {block['metric_name']}",
+           f"纳入 {block['summary']['included']}、排除 {block['summary']['excluded']}；"
+           f"按批 {'/'.join(str(row['n_included']) for row in block.get('by_batch') or [])}；{effect.get('note', '')}")
+    report_id = publish_report(
+        researcher, qa, "", "20 个扣电分 3 批（7/7/6）完成 0.5C 循环 50 圈，容量保持率约 97%；三批之间没有显著差异，"
+        "1 个样本因封口漏液判无效，已在排除说明中列出。", task_id=parent["id"],
+    )
+    progress = researcher.get(f"/experiment-tasks/{parent['id']}")
+    ok("父任务", f"{progress['state_label']}；计划 {progress['progress']['target']}，有效 {progress['progress']['valid']}")
+    return {"方案": plan_id, "任务": parent["id"], "批次": "、".join(batch_ids), "报告": report_id}
+
+
 def main() -> int:
     researcher, qa, operator, admin = Actor("researcher"), Actor("qa"), Actor("operator"), Actor("admin")
     engineer = Actor("engineer")
@@ -638,13 +725,23 @@ def main() -> int:
 
     prepare(admin, operator)
     method_id = release_cycling_method(engineer, qa)
+    if "--only=D" in sys.argv[1:]:
+        # 只补导入案例 D：库里已有三个参考案例，沿用案例 B 已发布的流程
+        recipe = next((row for row in researcher.get("/recipes")
+                       if row["name"] == "案例B 扣电循环测试" and row["state"] == "released"), None)
+        if recipe is None:
+            raise Failed("没找到已发布的「案例B 扣电循环测试」：先导入三个参考案例")
+        ids = case_split(researcher, qa, operator, recipe["id"])
+        print("\n完成：\n  案例D 分批：" + " · ".join(f"{key} {value}" for key, value in ids.items()))
+        return 0
     summary = {
         "案例A 注液": case_filling(researcher, qa, operator),
         "案例B 循环测试": case_cycling(researcher, qa, operator, method_id),
         "案例C 串行": case_serial(researcher, qa, operator, method_id),
     }
+    summary["案例D 分批"] = case_split(researcher, qa, operator, summary["案例B 循环测试"]["流程"])
     # 参考案例应当干净地跑完：案例批次上不该留下报警（消耗被拒、偏差、数据越界都说明案例数据有问题）
-    batches = {ids["批次"] for ids in summary.values()}
+    batches = {batch_id for ids in summary.values() for batch_id in ids["批次"].split("、")}
     raised = [row for row in operator.get("/alarms") if row.get("source_id") in batches]
     for alarm in raised:
         print(f"  ! 报警 {alarm['id']} {alarm['source_id']}：{alarm['message']}")

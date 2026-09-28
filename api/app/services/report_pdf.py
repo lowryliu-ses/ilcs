@@ -229,7 +229,8 @@ def _batches(page: "Page", content: dict) -> None:
         ["批次", "子任务", "份额", "样本数", "状态", "流程版本"],
         [[row.get("batch_id", ""), row.get("task_id", ""),
           ("补测 " if row.get("purpose") == "retest" else "") + (row.get("portion_label") or ""),
-          str(row.get("samples", "")), row.get("state", ""), row.get("recipe_version", "")] for row in rows],
+          str(row.get("samples", "")), row.get("state_label") or row.get("state", ""), row.get("recipe_version", "")]
+         for row in rows],
         [20, 16, 24, 10, 12, 18],
     )
     progress = section.get("progress") or {}
@@ -258,8 +259,7 @@ def _batches(page: "Page", content: dict) -> None:
         effect = block.get("batch_effect")
         if effect:
             page.text(
-                f"批次差异：F({effect.get('df1')}, {effect.get('df2')}) = {effect.get('f') or '—'}，p = {effect.get('p') or '—'}；"
-                f"{effect.get('note', '')}",
+                f"批次差异：F({effect.get('df1')}, {effect.get('df2')}) = {effect.get('f') or '—'}；{effect.get('note', '')}",
                 size=8.5, indent=4 * mm,
             )
 

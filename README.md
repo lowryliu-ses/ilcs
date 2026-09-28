@@ -209,7 +209,7 @@ executor/    设备执行器 + 工作流推进器；接真实设备实现 adapte
 simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，同一套设备行为与故障注入，见 simulators/README.md
 connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
-scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为三个操作案例）
+scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
 contracts/   OpenAPI 快照；设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
 docs/        需求文档与迁移报告
 ```
@@ -339,7 +339,7 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [connectors/result_files/README.md](connectors/result_files/README.md)）。
 
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
-（注液、循环测试、AGV / 机械臂串行，外加故障演练）见 [操作案例](docs/操作案例.md)；`scripts/reset-demo-cases.sh` 可把演示库重置为三个案例跑完的结果。
+（注液、循环测试、AGV / 机械臂串行、20 个扣电分 3 批，外加故障演练）见 [操作案例](docs/操作案例.md)；`scripts/reset-demo-cases.sh` 可把演示库重置为四个案例跑完的结果。
 
 ### PostgreSQL 与附件备份恢复演练
 

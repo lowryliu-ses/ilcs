@@ -159,7 +159,9 @@ def test_a_shortfall_must_be_retested_or_signed_off(researcher, qa, operator, re
     assert after["state"] == "running" and after["progress"]["shortfall"] == 0 and after["progress"]["target"] == 20
 
     assert researcher.post(f"/api/experiment-tasks/{extra[0]['id']}/cancel", {"reason": "改为签名放弃"}).status_code == 200
-    assert researcher.get(f"/api/experiment-tasks/{parent['id']}").json()["state"] == "shortfall"
+    reopened = researcher.get(f"/api/experiment-tasks/{parent['id']}").json()
+    assert reopened["state"] == "shortfall"
+    assert reopened["progress"]["retest"] == 0, "没下发就取消的补测补不了短缺，不再算「补测中」"
 
     unsigned = researcher.post(f"/api/experiment-tasks/{parent['id']}/accept-shortfall", {"reason": "样品用完"})
     assert unsigned.status_code == 400
@@ -314,3 +316,35 @@ def test_per_sample_channels_keep_full_batches_apart(admin, operator, researcher
         with _session() as db:
             db.get(Station, "ST-07").channel_unit = "batch"
             db.commit()
+
+
+def test_assigning_and_accepting_the_parent_carries_the_children(researcher, operator, qa, reset_runtime):
+    """分配父任务就是分配整件事：还没分配的子任务一并分配给同一个人；执行人接父任务，子任务一并接单。
+    之后补测出来的子任务沿用父任务的执行人。"""
+    plan_id = _plan(researcher, qa, sample_count=20)
+    parent = _create_task(researcher, plan_id)
+    assigned = researcher.post(f"/api/experiment-tasks/{parent['id']}/assign", {
+        "assignee_user_id": operator.user["id"], "row_version": parent["row_version"],
+    })
+    assert assigned.status_code == 200, assigned.text
+    children = [researcher.get(f"/api/experiment-tasks/{row['id']}").json() for row in parent["children"]]
+    assert all(row["assignee_user_id"] == operator.user["id"] and row["state"] == "pending_accept" for row in children)
+
+    accepted = operator.post(f"/api/experiment-tasks/{parent['id']}/accept")
+    assert accepted.status_code == 200, accepted.text
+    assert all(row["state"] == "accepted" for row in accepted.json()["children"]), "接父任务就是接整件事"
+
+    from app.models import Batch
+
+    made = operator.post(f"/api/experiment-tasks/{parent['id']}/batches", {}).json()["batches"]
+    with _session() as db:
+        for batch in made:
+            db.get(Batch, batch["id"]).state = "aborted"
+        db.commit()
+    retest = researcher.post(f"/api/experiment-tasks/{parent['id']}/retest", {}).json()
+    extras = [row for row in retest["children"] if row["purpose"] == "retest"]
+    assert [row["portion"]["offset"] for row in extras] == [20, 27, 34], "20 个都要补：分 3 个补测子任务，接着第 21 号编"
+    extra = extras[0]
+    detail = researcher.get(f"/api/experiment-tasks/{extra['id']}").json()
+    assert detail["assignee_user_id"] == operator.user["id"] and detail["state"] == "accepted", \
+        "补测子任务沿用父任务的执行人"
