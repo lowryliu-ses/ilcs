@@ -84,20 +84,77 @@ class PlanService:
         if plan.plan_type == MATRIX:
             return len(self.conditions(plan)) * max(1, plan.repeats)
         if plan.plan_type == SINGLE:
-            return plan.sample_count or len(plan.sample_ids or [])
+            return len(plan.sample_ids or []) or plan.sample_count or 0
         return len(plan.sample_ids or [])
 
+    def batch_plan(self, plan, plate: int | None = None) -> dict:
+        """方案按流程每批样品位要分几批、每批几个样本（矩阵还有每批几次重复）。
+
+        `plan` 可以是方案本身，也可以是任务锁定的批准版本内容。「每批最多几个」是流程的属性，
+        「一共多少」是方案的需求，这里只做除法：超过一批的方案照样能审批，建任务时按这份结果拆成子任务，
+        每个子任务一个批次。矩阵方案每批都包含全部条件（完整区组），条件数超过每批样品位时给出原因。
+        """
+        from ..domain import tasks as task_rules
+
+        if plate is None:
+            recipe = self.recipes.get(plan.recipe_id)
+            plate = int(recipe.plate or 0) if recipe else 0
+        total = self.sample_total(plan)
+        out = {
+            "total": total, "capacity": plate, "batches": 0, "sizes": [], "repeats": None,
+            "conditions": None, "split": False, "detail": "", "error": "",
+        }
+        if total <= 0:
+            out["detail"] = "还没有样本"
+            return out
+        if plate <= 0:
+            out["error"] = "流程没有设置每批样品位"
+            out["detail"] = out["error"]
+            return out
+        if plan.plan_type == MATRIX and int(plan.repeats or 0) < 1:
+            out["error"] = "重复次数至少 1 次"
+            out["detail"] = out["error"]
+            return out
+        try:
+            if plan.plan_type == MATRIX:
+                count = len(self.conditions(plan))
+                blocks = task_rules.matrix_blocks(count, max(1, plan.repeats), plate)
+                out |= {"repeats": blocks, "sizes": [block * count for block in blocks], "conditions": count}
+            else:
+                out["sizes"] = task_rules.split_sizes(total, plate)
+        except ValueError as error:
+            out["error"] = str(error)
+            out["detail"] = f"{total} 个样本；{error}"
+            return out
+        out["batches"] = len(out["sizes"])
+        out["split"] = out["batches"] > 1
+        sizes = "/".join(str(size) for size in out["sizes"])
+        if not out["split"]:
+            out["detail"] = f"{total} 个样本；流程每批 {plate} 位，一批完成"
+        elif plan.plan_type == MATRIX:
+            out["detail"] = (
+                f"{out['conditions']} 个条件 × {plan.repeats} 次重复 = {total} 个样本；流程每批 {plate} 位 → "
+                f"分 {out['batches']} 批（{sizes}），每批都包含全部条件，重复次数 "
+                f"{'/'.join(str(block) for block in out['repeats'])}"
+            )
+        else:
+            out["detail"] = f"{total} 个样本；流程每批 {plate} 位 → 分 {out['batches']} 批（{sizes}）"
+        return out
+
     def layout(self, plan: Plan) -> list[dict]:
+        """孔位布局预览。分多批执行时预览第 1 批：每批都是全部条件 × 本批的重复次数。"""
         if plan.plan_type != MATRIX:
             return []
         recipe = self.recipes.require(plan.recipe_id, "流程不存在")
+        batches = self.batch_plan(plan, recipe.plate)
+        repeats = batches["repeats"][0] if batches["split"] and batches["repeats"] else plan.repeats
         return [
             {
                 "well": a.well, "group": a.group, "repeat": a.repeat, "levels": a.levels,
                 "label": a.label, "is_control": a.is_control,
             }
             for a in matrix.layout(
-                plan.factors or [], plan.control, plan.repeats, recipe.plate, plan.layout, plan.seed,
+                plan.factors or [], plan.control, repeats, recipe.plate, plan.layout, plan.seed,
                 plan.design_points or None,
             )
         ]
@@ -116,7 +173,6 @@ class PlanService:
         factors = plan.factors or []
         points = plan.design_points or []
         conditions = matrix.conditions(factors, plan.control, points or None)
-        total = len(conditions) * max(plan.repeats, 0) if factors else 0
         control_detail, control_ok = "未设对照（允许）", True
         if plan.control and plan.control.get("cond"):
             wanted = plan.control["cond"]
@@ -135,11 +191,7 @@ class PlanService:
                 ),
             },
             self._design_space_check(plan),
-            {
-                "key": "capacity", "label": "条件 × 重复 不超过流程样品位",
-                "detail": f"{len(conditions)} × {plan.repeats} = {total}；流程每批 {plate} 位",
-                "ok": 0 < total <= plate,
-            },
+            self._capacity_check(plan, plate, "每批包含全部条件、不超过流程样品位"),
             {
                 "key": "repeats", "label": "重复次数可评估组内重复性",
                 "detail": f"{plan.repeats} 次重复" if plan.repeats >= 2
@@ -224,11 +276,7 @@ class PlanService:
                 ) + (f"；不存在的样本：{'、'.join(missing)}" if missing else ""),
                 "ok": total > 0 and not missing,
             },
-            {
-                "key": "capacity", "label": "样本数不超过流程样品位",
-                "detail": f"{total}；流程每批 {plate} 位",
-                "ok": 0 < total <= plate,
-            },
+            self._capacity_check(plan, plate, "每批样本数不超过流程样品位"),
             {
                 "key": "factors", "label": "单条件方案不要求因子矩阵",
                 "detail": "已按单条件校验，不强制两个因子水平",
@@ -260,8 +308,17 @@ class PlanService:
                 "detail": "不生成新样本，也不要求 BOM",
                 "ok": True,
             },
+            self._capacity_check(plan, recipe.plate if recipe else 0, "每批样本数不超过流程样品位"),
             self._metrics_check(plan),
         ]
+
+    def _capacity_check(self, plan: Plan, plate: int, label: str) -> dict:
+        """容量是每一批的约束，不是方案的：总数超过一批就分批执行，每批不超过流程样品位。"""
+        batches = self.batch_plan(plan, plate)
+        return {
+            "key": "capacity", "label": label, "detail": batches["detail"],
+            "ok": batches["total"] > 0 and not batches["error"],
+        }
 
     def _metrics_check(self, plan: Plan) -> dict:
         required = plan.required_metrics or []
@@ -287,7 +344,15 @@ class PlanService:
         if plan.plan_type == COMMISSIONED:
             return []
         recipe = self.recipes.require(plan.recipe_id, "流程不存在")
-        demands = [{"factor": "流程 BOM", **item} for item in (recipe.bom or [])]
+        # BOM 是每批的需求：分几批执行就要几份
+        batches = max(1, self.batch_plan(plan, recipe.plate)["batches"])
+        demands = [
+            {
+                **item, "factor": "流程 BOM" if batches == 1 else f"流程 BOM × {batches} 批",
+                "qty": float(dec(item.get("qty") or 0) * batches) if batches > 1 else item.get("qty"),
+            }
+            for item in (recipe.bom or [])
+        ]
         if plan.plan_type == MATRIX:
             demands += matrix.material_demand(plan.factors or [], plan.repeats, plan.design_points or None)
         rows = []
@@ -394,6 +459,7 @@ class PlanService:
                 "round_no": plan.round_no,
                 "conditions": conditions,
                 "layout_preview": self.layout(plan),
+                "batch_plan": self.batch_plan(plan),
                 "checks": checks,
                 "lockable": all(c["ok"] for c in checks),
                 "materials": self.material_preview(plan),

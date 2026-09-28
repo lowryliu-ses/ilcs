@@ -101,6 +101,7 @@ class ReportService:
                         levels=tuple(assignment.levels or []) if assignment else (),
                         repeat=assignment.repeat if assignment else 1,
                         method_version=task.method_version,
+                        batch_id=batch_id,
                     )
                 )
         return rows
@@ -112,7 +113,40 @@ class ReportService:
         batch = self.batches.get(batch_id)
         if not batch:
             raise NotFound("批次不存在")
-        rows = self.observations(batch_id)
+        return self._view([batch], metric_ids, official)
+
+    def task_batches(self, task_id: str) -> tuple:
+        """父任务（一个方案分多批执行）下已经建了批次的叶子：[(子任务, 批次)]，按份额顺序。"""
+        from .task_service import TaskService
+
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise NotFound("实验任务不存在")
+        if not self.tasks.children(task.id):
+            raise StateConflict("任务没有拆分：按批次看结果", code="task_not_split")
+        leaves = [
+            (leaf, batch) for leaf, batch in TaskService(self.db, self.ctx).leaf_batches([task.id])
+            if batch is not None
+        ]
+        leaves.sort(key=lambda pair: (pair[0].purpose == "retest", int((pair[0].portion or {}).get("offset") or 0),
+                                      pair[1].created_at))
+        return task, leaves
+
+    def task_analysis_view(
+        self, task_id: str, metric_ids: list[str] | None = None, official: bool = True,
+    ) -> dict:
+        """父任务的合并结果：各叶子批次的观测合在一起，给出合并统计、分批明细与批次差异。"""
+        task, leaves = self.task_batches(task_id)
+        if not leaves:
+            raise StateConflict("子任务还没有批次", code="no_batches")
+        return self._view([batch for _, batch in leaves], metric_ids, official, task=task, leaves=leaves)
+
+    def _view(self, batches: list, metric_ids: list[str] | None, official: bool, *, task=None, leaves=None) -> dict:
+        batch = batches[0]
+        multi = task is not None
+        # 合并时终止的批次只列在分批明细里：它的样本按失败计，数据不进合并统计
+        pooled = [item for item in batches if not (multi and item.state == "aborted")] or batches
+        rows = [row for item in pooled for row in self.observations(item.id)]
         plan = self.plans.get(batch.plan_id)
         plan_type = plan.plan_type if plan else "matrix"
         factors = (batch.plan_snapshot or {}).get("factors") or []
@@ -133,6 +167,21 @@ class ReportService:
                 official=official,
             )
             groups = statistics.dataset_groups(dataset)
+            extra: dict = {}
+            if multi:
+                # 合并前先看可比性：各批回传的单位或检测方法版本不一致就不合并
+                units = sorted({row.unit for row in dataset.included if row.unit})
+                methods = sorted({row.method_version for row in dataset.included if row.method_version})
+                comparable, reason = True, ""
+                if len(units) > 1:
+                    comparable, reason = False, f"各批单位不一致：{'、'.join(units)}"
+                elif len(methods) > 1:
+                    comparable, reason = False, f"各批检测方法版本不一致：{'、'.join(methods)}"
+                extra = {
+                    "comparable": comparable, "comparable_reason": reason,
+                    "by_batch": statistics.batch_breakdown(dataset),
+                    "batch_effect": statistics.batch_effect(dataset) if comparable else None,
+                }
             blocks.append(
                 {
                     "metric_id": metric_id,
@@ -141,6 +190,7 @@ class ReportService:
                     "groups": groups,
                     "effects": statistics.dataset_effects(dataset, factors, plan_type),
                     "summary": statistics.dataset_summary(dataset, groups, repeats),
+                    **extra,
                     "excluded": [
                         {
                             "assignment_id": row.assignment_id,
@@ -165,14 +215,38 @@ class ReportService:
             for metric_id in chosen
             if metric_id in definitions and definitions[metric_id].value_type != "number"
         ]
+        scope = {}
+        if multi:
+            from .task_service import TaskService
+
+            tasks = TaskService(self.db, self.ctx)
+            scope = {
+                "task_id": task.id, "task_title": task.title, "batch_ids": [item.id for item in pooled],
+                "batches": [
+                    {
+                        "batch_id": item.id, "task_id": leaf.id, "title": leaf.title, "state": item.state,
+                        "purpose": leaf.purpose or "",
+                        "portion_label": tasks.part_label(
+                            leaf.portion or {}, len(self.assignments.for_batch(item.id)), plan_type == "matrix",
+                        ) if leaf.portion else "",
+                        "samples": len(self.assignments.for_batch(item.id)),
+                        "recipe_version": item.recipe_snapshot.get("version", ""),
+                    }
+                    for leaf, item in leaves
+                ],
+                "progress": tasks.progress(task),
+            }
         return {
-            "batch_id": batch.id,
+            **scope,
+            "batch_id": "" if multi else batch.id,
             "plan_id": batch.plan_id,
             "plan_name": (batch.plan_snapshot or {}).get("name"),
             "plan_type": plan_type,
             "recipe_id": batch.recipe_id,
             "recipe_name": batch.recipe_snapshot.get("name"),
-            "state": batch.state,
+            "state": batch.state if not multi else (
+                "done" if all(item.state in {"done", "aborted"} for item in batches) else "running"
+            ),
             "official": official,
             "scope_label": "正式范围（审核通过且质量有效）" if official else "探索性范围（含未审核、可疑、无效）",
             "available_metrics": [
@@ -338,96 +412,9 @@ class ReportService:
             raise NotFound("批次不存在")
         view = self.analysis_view(batch_id, official=True)
         task = self.tasks.by_batch(batch_id)
-        plan = self.plans.get(batch.plan_id)
-        assignments = self.assignments.for_batch(batch_id)
+        parts = self._batch_parts(batch)
+        results, exclusions, stats = self._result_sections(view)
         sop = batch.sop_snapshot or {}
-
-        samples = []
-        for assignment in assignments:
-            physical = self.physical.get(assignment.physical_sample_id)
-            samples.append(
-                {
-                    "id": assignment.id,
-                    "barcode": physical.barcode if physical else "",
-                    "source": physical.source if physical else "",
-                    "sample_type": physical.sample_type if physical else "",
-                    "location": (
-                        physical.current_location or physical.location_note
-                        if physical else ""
-                    ),
-                    "state": ASSIGNMENT_STATE_LABEL.get(assignment.state, assignment.state),
-                }
-            )
-
-        materials = []
-        for reservation in self.reservations.for_batch(batch_id):
-            lot = self.lots.get(reservation.lot_id)
-            state = self.inventory.state_of(reservation)
-            materials.append(
-                {
-                    "lot_id": reservation.lot_id,
-                    "material": lot.material if lot else "",
-                    "qty": f"{state.authorized:f}",
-                    "consumed": f"{state.consumed:f}",
-                    "loss": f"{state.loss:f}",
-                    "unit": reservation.unit,
-                }
-            )
-
-        runs = self.runs.for_batch(batch_id)
-        execution = [
-            {
-                "step_index": run.step_index,
-                "kind_label": KIND_NAMES.get(run.kind, run.kind),
-                "step_name": (run.step_snapshot or {}).get("name", ""),
-                "state_label": STEP_STATE_LABEL.get(run.state, run.state),
-                "note": run.reason or "",
-            }
-            for run in runs
-        ]
-        exceptions = [run.reason for run in runs if run.state in {"failed", "unknown"} and run.reason]
-        if batch.failure_reason:
-            exceptions.append(batch.failure_reason)
-
-        results = []
-        exclusions = []
-        stats = []
-        for block in view["metrics"]:
-            rows = []
-            for group in block["groups"]:
-                for observation in group["observations"]:
-                    rows.append(
-                        {
-                            "assignment_id": observation["assignment_id"],
-                            "condition_label": group["label"],
-                            "round_no": observation["round_no"],
-                            "result_version": observation["result_version"],
-                            "value": observation["value"],
-                            "quality_label": "有效",
-                            "review_label": "已通过",
-                        }
-                    )
-            results.append(
-                {"metric_name": block["metric_name"], "unit": block["unit"], "rows": rows}
-            )
-            exclusions.extend(block["excluded"])
-            stats.append(
-                {
-                    "metric_name": block["metric_name"],
-                    "included": block["summary"]["included"],
-                    "excluded": block["summary"]["excluded"],
-                    "mean": self._num(block["summary"]["mean"]),
-                    "sd": self._num(block["summary"]["sd"]),
-                    "cv_pct": self._num(block["summary"]["cv_pct"]),
-                    "groups": block["groups"],
-                    "effects": block["effects"] if view["show_factor_effects"] else [],
-                }
-            )
-
-        instruments = self._instruments(batch, runs)
-        raw_files, data_flags = self._raw_files_and_flags(batch_id, runs)
-        operation_log = self._operation_log(batch, runs)
-
         owner = self.users.get(task.owner_user_id) if task and task.owner_user_id else None
         assignee = self.users.get(task.assignee_user_id) if task and task.assignee_user_id else None
         reviewer = self.users.get(task.reviewer_user_id) if task and task.reviewer_user_id else None
@@ -448,20 +435,20 @@ class ReportService:
                 "sop_checksum": sop.get("file_checksum", ""),
                 "risk": batch.recipe_snapshot.get("risk", ""),
             },
-            "samples": samples,
+            "samples": parts["samples"],
             "resources": {
                 "owner": owner.display_name if owner else "",
                 "assignee": assignee.display_name if assignee else batch.operator,
                 "reviewer": reviewer.display_name if reviewer else "",
-                "stations": sorted({run.station_id for run in runs if run.station_id}),
-                "materials": materials,
+                "stations": parts["stations"],
+                "materials": parts["materials"],
             },
-            "execution": execution,
-            "exceptions": exceptions,
-            "instruments": instruments,
-            "operation_log": operation_log,
-            "raw_files": raw_files,
-            "data_flags": data_flags,
+            "execution": parts["execution"],
+            "exceptions": parts["exceptions"],
+            "instruments": parts["instruments"],
+            "operation_log": parts["operation_log"],
+            "raw_files": parts["raw_files"],
+            "data_flags": parts["data_flags"],
             "results": results,
             "exclusions": exclusions,
             "statistics": stats,
@@ -469,6 +456,268 @@ class ReportService:
             "plan_type": view["plan_type"],
             "batch_id": batch_id,
             "template": report_templates.template(template_key),
+        }
+
+    def build_task_content(self, task_id: str, conclusion: str = "", template_key: str | None = None) -> dict:
+        """父任务（一个方案分多批执行）的一份合并报告：合并统计、分批明细与批次差异、短缺与放弃记录。
+
+        各章节按批次汇总（执行、异常、操作记录前面标批次号），结果与统计用全部批次的正式观测一起算。
+        """
+        from .task_service import TaskService
+
+        task, leaves = self.task_batches(task_id)
+        if not leaves:
+            raise StateConflict("子任务还没有批次，无法出报告", code="no_batches")
+        batches = [batch for _, batch in leaves]
+        view = self.task_analysis_view(task_id, official=True)
+        results, exclusions, stats = self._result_sections(view)
+        first = batches[0]
+        plan = self.plans.get(task.plan_id)
+        merged: dict[str, list] = {key: [] for key in (
+            "samples", "materials", "execution", "exceptions", "operation_log", "raw_files", "data_flags",
+        )}
+        instruments: dict[str, dict] = {}
+        stations: set[str] = set()
+        for batch in batches:
+            parts = self._batch_parts(batch, label=batch.id)
+            for key in merged:
+                merged[key].extend(parts[key])
+            stations.update(parts["stations"])
+            for row in parts["instruments"]:
+                current = instruments.setdefault(row["station_id"], {**row, "steps": [], "methods": []})
+                current["steps"] = current["steps"] + row["steps"]
+                current["methods"] = sorted(set(current["methods"]) | set(row["methods"]))
+        recipes = sorted({f"{batch.recipe_id} v{batch.recipe_snapshot.get('version', '')}" for batch in batches})
+        sops = sorted({
+            f"{(batch.sop_snapshot or {}).get('code', '')} {(batch.sop_snapshot or {}).get('version', '')}".strip()
+            for batch in batches if batch.sop_snapshot
+        })
+        owner = self.users.get(task.owner_user_id) if task.owner_user_id else None
+        reviewer = self.users.get(task.reviewer_user_id) if task.reviewer_user_id else None
+        assignees = []
+        for leaf, _ in leaves:
+            person = self.users.get(leaf.assignee_user_id) if leaf.assignee_user_id else None
+            if person is not None and person.display_name not in assignees:
+                assignees.append(person.display_name)
+        progress = TaskService(self.db, self.ctx).progress(task)
+        return {
+            "title": f"{(first.plan_snapshot or {}).get('name') or task.plan_id} 实验报告（{len(batches)} 批合并）",
+            "header": {"generated_at": now().isoformat(timespec="minutes")},
+            "plan_section": {
+                "plan": task.plan_id,
+                "plan_version": "、".join(sorted({str(batch.plan_version) for batch in batches})),
+                "task": task.id,
+                "goal": (first.plan_snapshot or {}).get("goal", "") or (plan.goal if plan else ""),
+            },
+            "method_section": {
+                "recipe": "、".join(sorted({batch.recipe_id for batch in batches})),
+                "recipe_version": "、".join(recipes),
+                "sop": "、".join(sops),
+                "sop_version": "",
+                "sop_checksum": "、".join(sorted({
+                    (batch.sop_snapshot or {}).get("file_checksum", "") for batch in batches if batch.sop_snapshot
+                } - {""})),
+                "risk": first.recipe_snapshot.get("risk", ""),
+            },
+            "samples": merged["samples"],
+            "resources": {
+                "owner": owner.display_name if owner else "",
+                "assignee": "、".join(assignees) or first.operator,
+                "reviewer": reviewer.display_name if reviewer else "",
+                "stations": sorted(stations),
+                "materials": merged["materials"],
+            },
+            "execution": merged["execution"],
+            "exceptions": merged["exceptions"],
+            "instruments": [instruments[key] for key in sorted(instruments)],
+            "operation_log": sorted(merged["operation_log"], key=lambda row: row["time"])[-OPERATION_LOG_LIMIT:],
+            "raw_files": merged["raw_files"],
+            "data_flags": merged["data_flags"],
+            "results": results,
+            "exclusions": exclusions,
+            "statistics": stats,
+            "batches": {
+                "rows": view.get("batches") or [],
+                "progress": {key: progress[key] for key in (
+                    "target", "valid", "failed", "running", "pending", "descoped", "retest", "accepted", "shortfall",
+                )},
+                "decisions": list(task.shortfall_decisions or []),
+                "metrics": [
+                    {
+                        "metric_name": block["metric_name"], "unit": block["unit"],
+                        "comparable": block.get("comparable", True),
+                        "comparable_reason": block.get("comparable_reason", ""),
+                        "by_batch": [
+                            {**row, "mean": self._num(row["mean"]), "sd": self._num(row["sd"]),
+                             "cv_pct": self._num(row["cv_pct"])}
+                            for row in block.get("by_batch") or []
+                        ],
+                        "batch_effect": self._effect_out(block.get("batch_effect")),
+                    }
+                    for block in view["metrics"]
+                ],
+            },
+            "conclusion": conclusion,
+            "plan_type": view["plan_type"],
+            "task_id": task.id,
+            "batch_id": "",
+            # 报告引用的批次：终止的批次只在「分批情况」里列出，不进结果、不参与发布前校验与固化
+            "batch_ids": view.get("batch_ids") or [batch.id for batch in batches],
+            "template": report_templates.template(template_key),
+        }
+
+    def _effect_out(self, effect: dict | None) -> dict | None:
+        if not effect:
+            return None
+        p_value = effect.get("p")
+        return {**effect, "f": self._num(effect.get("f")), "p": "" if p_value is None else f"{p_value:.3g}"}
+
+    @staticmethod
+    def content_batch_ids(content: dict) -> list[str]:
+        """报告引用的批次：多批合并报告是 batch_ids，单批报告是 batch_id。"""
+        return list(content.get("batch_ids") or ([content["batch_id"]] if content.get("batch_id") else []))
+
+    def _rebuild(self, content: dict, conclusion: str, template_key: str | None) -> dict:
+        """按报告原来的范围重新取数：多批合并报告按父任务，单批报告按批次。"""
+        if content.get("batch_ids") and content.get("task_id"):
+            return self.build_task_content(content["task_id"], conclusion, template_key)
+        return self.build_content(content.get("batch_id", ""), conclusion, template_key)
+
+    def _require_task_reportable(self, task_id: str) -> None:
+        """父任务出合并报告前：批次都跑完了、短缺已处置、各批可以合并。"""
+        from .task_service import TaskService
+
+        task, leaves = self.task_batches(task_id)
+        tasks = TaskService(self.db, self.ctx)
+        blocked: list[str] = []
+        running = [batch.id for _, batch in leaves if batch.state not in {"done", "aborted"}]
+        if running:
+            blocked.append(f"批次 {'、'.join(running)} 还没运行结束")
+        waiting = [
+            leaf.id for leaf, batch in tasks.leaf_batches([task.id]) if batch is None and leaf.state != "cancelled"
+        ]
+        if waiting:
+            blocked.append(f"子任务 {'、'.join(waiting)} 还没有批次")
+        progress = tasks.progress(task)
+        if progress["shortfall"] > 0:
+            blocked.append(f"计划 {progress['target']} 个样本，还短缺 {progress['shortfall']} 个：先补测或签名放弃")
+        if not [batch for _, batch in leaves if batch.state == "done"]:
+            blocked.append("没有运行结束的批次")
+        if not blocked:
+            view = self.task_analysis_view(task_id, official=True)
+            blocked += [
+                f"{block['metric_name']}：{block['comparable_reason']}，不能合并出一份报告；请分批出报告"
+                for block in view["metrics"] if not block.get("comparable", True)
+            ]
+        if blocked:
+            raise StateConflict(
+                "父任务还不能出合并报告", {"blocked": [{"key": "task", "label": text} for text in blocked]},
+                code="task_not_reportable",
+            )
+
+    def _result_sections(self, view: dict) -> tuple[list, list, list]:
+        """结果表、排除说明与统计三节：单批与多批合并同一套。"""
+        results, exclusions, stats = [], [], []
+        for block in view["metrics"]:
+            rows = []
+            for group in block["groups"]:
+                for observation in group["observations"]:
+                    rows.append(
+                        {
+                            "assignment_id": observation["assignment_id"],
+                            "condition_label": group["label"],
+                            "round_no": observation["round_no"],
+                            "result_version": observation["result_version"],
+                            "value": observation["value"],
+                            "quality_label": "有效",
+                            "review_label": "已通过",
+                        }
+                    )
+            results.append({"metric_name": block["metric_name"], "unit": block["unit"], "rows": rows})
+            exclusions.extend(block["excluded"])
+            stats.append(
+                {
+                    "metric_name": block["metric_name"],
+                    "included": block["summary"]["included"],
+                    "excluded": block["summary"]["excluded"],
+                    "mean": self._num(block["summary"]["mean"]),
+                    "sd": self._num(block["summary"]["sd"]),
+                    "cv_pct": self._num(block["summary"]["cv_pct"]),
+                    "groups": block["groups"],
+                    "effects": block["effects"] if view["show_factor_effects"] else [],
+                }
+            )
+        return results, exclusions, stats
+
+    def _batch_parts(self, batch, label: str = "") -> dict:
+        """一个批次的样本、物料、执行、异常、仪器、原始文件、数据标记与操作记录。
+
+        `label` 给了（多批合并报告）就在执行、异常、操作记录、物料与标记前面标上批次号，读的人分得清是哪一批。
+        """
+        tag = f"{label} · " if label else ""
+        samples = []
+        for assignment in self.assignments.for_batch(batch.id):
+            physical = self.physical.get(assignment.physical_sample_id)
+            samples.append(
+                {
+                    "id": assignment.id,
+                    "barcode": physical.barcode if physical else "",
+                    "source": physical.source if physical else "",
+                    "sample_type": physical.sample_type if physical else "",
+                    "location": (
+                        physical.current_location or physical.location_note
+                        if physical else ""
+                    ),
+                    "state": ASSIGNMENT_STATE_LABEL.get(assignment.state, assignment.state),
+                    **({"batch_id": batch.id} if label else {}),
+                }
+            )
+
+        materials = []
+        for reservation in self.reservations.for_batch(batch.id):
+            lot = self.lots.get(reservation.lot_id)
+            state = self.inventory.state_of(reservation)
+            materials.append(
+                {
+                    "lot_id": reservation.lot_id,
+                    "material": (lot.material if lot else "") + (f"（{label}）" if label else ""),
+                    "qty": f"{state.authorized:f}",
+                    "consumed": f"{state.consumed:f}",
+                    "loss": f"{state.loss:f}",
+                    "unit": reservation.unit,
+                }
+            )
+
+        runs = self.runs.for_batch(batch.id)
+        execution = [
+            {
+                "step_index": run.step_index,
+                "kind_label": KIND_NAMES.get(run.kind, run.kind),
+                "step_name": tag + (run.step_snapshot or {}).get("name", ""),
+                "state_label": STEP_STATE_LABEL.get(run.state, run.state),
+                "note": run.reason or "",
+            }
+            for run in runs
+        ]
+        exceptions = [f"{tag}{run.reason}" for run in runs if run.state in {"failed", "unknown"} and run.reason]
+        if batch.failure_reason:
+            exceptions.append(f"{tag}{batch.failure_reason}")
+        instruments = self._instruments(batch, runs)
+        if label:
+            for row in instruments:
+                row["steps"] = [f"{label} {name}" for name in row["steps"]]
+        raw_files, data_flags = self._raw_files_and_flags(batch.id, runs)
+        if label:
+            for flag in data_flags:
+                flag["target"] = f"{label} {flag['target']}"
+        operation_log = self._operation_log(batch, runs)
+        if label:
+            for row in operation_log:
+                row["action"] = f"{label} {row['action']}"
+        return {
+            "samples": samples, "materials": materials, "execution": execution, "exceptions": exceptions,
+            "instruments": instruments, "raw_files": raw_files, "data_flags": data_flags,
+            "operation_log": operation_log, "stations": sorted({run.station_id for run in runs if run.station_id}),
         }
 
     # ---------- 报告补充章节 ----------
@@ -589,13 +838,25 @@ class ReportService:
         batch_id = payload.get("batch_id") or ""
         task_id = payload.get("task_id") or ""
         task = self.tasks.get(task_id) if task_id else None
+        if task_id and task is None:
+            raise NotFound("实验任务不存在")
+        template = report_templates.template(payload.get("template"))
+        if task is not None and not batch_id and self.tasks.children(task.id):
+            # 一个方案分多批执行：在父任务上出一份合并报告，子任务不必各出一份
+            self._require_task_reportable(task.id)
+            content = self.build_task_content(task.id, payload.get("conclusion", ""), template["key"])
+            report = Report(
+                org_id=self.ctx.org_id, code=self.reports.next_code(),
+                title=payload.get("title") or content["title"], task_id=task.id,
+                plan_id=payload.get("plan_id", "") or task.plan_id, batch_id="", created_by=user.id,
+            )
+            return self._save_draft(report, content, template, user, f"父任务 {task.id}（{len(content['batch_ids'])} 批）")
         if task is not None and not batch_id:
             batch_id = task.batch_id
         if not batch_id:
-            raise ValidationFailed("报告必须绑定一个执行批次")
+            raise ValidationFailed("报告必须绑定一个执行批次，或一个已拆分的父任务")
         if task is None:
             task = self.tasks.by_batch(batch_id)
-        template = report_templates.template(payload.get("template"))
         content = self.build_content(batch_id, payload.get("conclusion", ""), template["key"])
         report = Report(
             org_id=self.ctx.org_id, code=self.reports.next_code(),
@@ -604,6 +865,9 @@ class ReportService:
             (self.batches.get(batch_id).plan_id if self.batches.get(batch_id) else ""),
             batch_id=batch_id, created_by=user.id,
         )
+        return self._save_draft(report, content, template, user, f"批次 {batch_id}")
+
+    def _save_draft(self, report: Report, content: dict, template: dict, user: User, scope: str) -> dict:
         self.reports.add(report)
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=report.id, version=1, state="draft",
@@ -613,7 +877,7 @@ class ReportService:
         self.versions.add(version)
         self.audit.record(
             user, "生成报告草稿", version.id, before="—", after="草稿",
-            detail=f"{report.code}；批次 {batch_id}；模板 {template['name']} {version.template_version}",
+            detail=f"{report.code}；{scope}；模板 {template['name']} {version.template_version}",
             object_version=version.row_version,
         )
         self.db.commit()
@@ -634,8 +898,8 @@ class ReportService:
         if "conclusion" in payload:
             content["conclusion"] = payload["conclusion"]
         if payload.get("refresh"):
-            refreshed = self.build_content(
-                content.get("batch_id", ""), content.get("conclusion", ""),
+            refreshed = self._rebuild(
+                content, content.get("conclusion", ""),
                 payload.get("template") or (content.get("template") or {}).get("key"),
             )
             content = refreshed
@@ -725,17 +989,19 @@ class ReportService:
     def publish_blockers(self, version: ReportVersion) -> list[str]:
         """发布前必须校验引用结果全部审核通过。"""
         content = version.content or {}
-        batch_id = content.get("batch_id") or ""
-        if not batch_id:
+        batch_ids = self.content_batch_ids(content)
+        if not batch_ids:
             return ["报告没有绑定批次，无法校验结果审核状态"]
         blockers: list[str] = []
-        for row in self.observations(batch_id):
-            if row.superseded:
-                continue
-            if row.review_state == "pending":
-                blockers.append(
-                    f"任务 {row.analysis_task_id} 的指标 {row.metric_id} v{row.result_version} 待复核"
-                )
+        for batch_id in batch_ids:
+            for row in self.observations(batch_id):
+                if row.superseded:
+                    continue
+                if row.review_state == "pending":
+                    blockers.append(
+                        f"任务 {row.analysis_task_id} 的指标 {row.metric_id} v{row.result_version} 待复核"
+                        + (f"（批次 {batch_id}）" if len(batch_ids) > 1 else "")
+                    )
         return sorted(set(blockers))[:10]
 
     def publish(self, version_id: str, payload: dict, user: User) -> dict:
@@ -757,9 +1023,9 @@ class ReportService:
         )
         report = self.reports.get(version.report_id)
         content = dict(version.content or {})
-        batch_id = content.get("batch_id", "")
         result_versions = [
             f"{row.analysis_task_id}:{row.metric_id}:v{row.result_version}"
+            for batch_id in self.content_batch_ids(content)
             for row in self.observations(batch_id)
             if not row.superseded
         ]
@@ -837,8 +1103,8 @@ class ReportService:
             raise NotFound("报告版本不存在")
         if published.state != "published":
             raise StateConflict("只有已发布的报告才需要通过新版本替代")
-        content = self.build_content(
-            (published.content or {}).get("batch_id", ""),
+        content = self._rebuild(
+            published.content or {},
             (published.content or {}).get("conclusion", ""),
             ((published.content or {}).get("template") or {}).get("key"),
         )

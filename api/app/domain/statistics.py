@@ -81,6 +81,8 @@ class Observation:
     levels: tuple = ()
     repeat: int = 1
     method_version: str = ""
+    # 来自哪个批次：一个方案分多批执行时合并统计，批次是一个要保留的维度
+    batch_id: str = ""
 
 
 def exclusion_reason(row: Observation, official: bool = True) -> str | None:
@@ -283,6 +285,127 @@ def dataset_summary(dataset: Dataset, groups: list[dict], plan_repeats: int | No
         "single_repeat": bool(plan_repeats is not None and plan_repeats < 2),
         "best_group": best["group"] if best else None,
         "best_mean": best["mean"] if best else None,
+    }
+
+
+# ---------- 跨批合并：分批明细与批次差异 ----------
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """不完全 Beta 函数的连分式（Lentz 算法）。"""
+    tiny, eps = 1e-300, 3e-14
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def regularized_beta(a: float, b: float, x: float) -> float:
+    """正则化不完全 Beta 函数 I_x(a, b)。"""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1 - x))
+    if x < (a + 1) / (a + b + 2):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1 - x) / b
+
+
+def f_survival(f: float, df1: int, df2: int) -> float:
+    """F 分布的上尾概率 P(F > f)。"""
+    if f <= 0 or df1 <= 0 or df2 <= 0:
+        return 1.0
+    return regularized_beta(df2 / 2, df1 / 2, df2 / (df2 + df1 * f))
+
+
+def batch_breakdown(dataset: Dataset) -> list[dict]:
+    """按批次汇总纳入正式统计的数值：每批 n、均值、SD、CV。批次按首次出现的顺序。"""
+    order: list[str] = []
+    values: dict[str, list[float]] = {}
+    excluded: dict[str, int] = {}
+    for row in dataset.included:
+        if row.value is None:
+            continue
+        if row.batch_id not in values:
+            order.append(row.batch_id)
+            values[row.batch_id] = []
+        values[row.batch_id].append(row.value)
+    for row, _ in dataset.excluded:
+        excluded[row.batch_id] = excluded.get(row.batch_id, 0) + 1
+        if row.batch_id not in values:
+            order.append(row.batch_id)
+            values[row.batch_id] = []
+    return [
+        {
+            "batch_id": batch_id, "n_included": len(values[batch_id]), "n_excluded": excluded.get(batch_id, 0),
+            "mean": mean(values[batch_id]), "sd": stddev(values[batch_id]), "cv_pct": cv_percent(values[batch_id]),
+        }
+        for batch_id in order
+    ]
+
+
+def batch_effect(dataset: Dataset, alpha: float = 0.05) -> dict | None:
+    """批次之间有没有系统差异：单因素方差分析，矩阵方案先按条件组校正。
+
+    每个数值先减去它所在条件组（全部批次合在一起）的均值，再比较各批次的均值——矩阵方案每批都包含
+    全部条件，这样看到的是批次本身的差异，不是各批条件搭配不同。残差自由度扣掉条件组数：
+    N − 批次数 − (条件组数 − 1)。样本缺失使各批条件不再严格成比例时结果是近似的，照样标出来。
+    少于两个批次、或自由度不够时返回 None。
+    """
+    rows = [row for row in dataset.included if row.value is not None]
+    batches = sorted({row.batch_id for row in rows})
+    groups = sorted({row.condition_group or "C00" for row in rows})
+    if len(batches) < 2:
+        return None
+    group_mean = {
+        group: mean([row.value for row in rows if (row.condition_group or "C00") == group]) or 0.0 for group in groups
+    }
+    centered: dict[str, list[float]] = {batch: [] for batch in batches}
+    for row in rows:
+        centered[row.batch_id].append(row.value - group_mean[row.condition_group or "C00"])
+    total = len(rows)
+    df1 = len(batches) - 1
+    df2 = total - len(batches) - (len(groups) - 1)
+    if df2 < 1:
+        return None
+    grand = mean([value for values in centered.values() for value in values]) or 0.0
+    between = sum(len(values) * ((mean(values) or 0.0) - grand) ** 2 for values in centered.values())
+    within = sum(sum((value - (mean(values) or 0.0)) ** 2 for value in values) for values in centered.values())
+    if within <= 0:
+        return {
+            "method": "anova_centered" if len(groups) > 1 else "anova",
+            "f": None, "df1": df1, "df2": df2, "p": None, "significant": between > 0,
+            "note": "批内没有波动，无法做方差检验" + ("；各批均值不同" if between > 0 else ""),
+        }
+    f_value = (between / df1) / (within / df2)
+    p_value = f_survival(f_value, df1, df2)
+    return {
+        "method": "anova_centered" if len(groups) > 1 else "anova",
+        "f": f_value, "df1": df1, "df2": df2, "p": p_value, "alpha": alpha,
+        "significant": p_value < alpha,
+        "note": (
+            ("各条件组先减去组均值后比较批次；" if len(groups) > 1 else "")
+            + (f"批次之间差异显著（p = {p_value:.3g} < {alpha}）：合并统计前先确认原因（电解液批号、上柜时间、设备通道）"
+               if p_value < alpha else f"没有发现批次之间的显著差异（p = {p_value:.3g}）")
+        ),
     }
 
 

@@ -172,6 +172,8 @@ def render(content: dict) -> bytes:
     )
 
     sections = (content.get("template") or {}).get("sections") or LEGACY_SECTIONS
+    # 「分批情况」只有多批合并报告才有内容；单批报告跳过它，章节编号照常连续
+    sections = [key for key in sections if key != "batches" or content.get("batches")]
     for number, key in enumerate(sections, start=1):
         renderer = RENDERERS.get(key)
         if renderer is None:
@@ -218,6 +220,48 @@ def _samples(page: "Page", content: dict) -> None:
           s.get("location", ""), s.get("state", "")] for s in samples],
         [22, 20, 22, 14, 14, 12],
     )
+
+
+def _batches(page: "Page", content: dict) -> None:
+    section = content.get("batches") or {}
+    rows = section.get("rows") or []
+    page.table(
+        ["批次", "子任务", "份额", "样本数", "状态", "流程版本"],
+        [[row.get("batch_id", ""), row.get("task_id", ""),
+          ("补测 " if row.get("purpose") == "retest" else "") + (row.get("portion_label") or ""),
+          str(row.get("samples", "")), row.get("state", ""), row.get("recipe_version", "")] for row in rows],
+        [20, 16, 24, 10, 12, 18],
+    )
+    progress = section.get("progress") or {}
+    page.text(
+        f"计划 {progress.get('target', 0)} 个样本：有效完成 {progress.get('valid', 0)}，失败 {progress.get('failed', 0)}，"
+        f"补测 {progress.get('retest', 0)}，签名放弃 {progress.get('accepted', 0)}，短缺 {progress.get('shortfall', 0)}",
+        size=8.5,
+    )
+    for decision in section.get("decisions") or []:
+        page.text(
+            f"{BULLET} {decision.get('at', '')[:16].replace('T', ' ')} {decision.get('user', '')} 签名放弃 "
+            f"{decision.get('count', 0)} 个：{decision.get('reason', '')}",
+            size=8.5, indent=4 * mm,
+        )
+    for block in section.get("metrics") or []:
+        page.text(f"{block.get('metric_name', '')}（{block.get('unit', '')}）按批", size=9.5)
+        if not block.get("comparable", True):
+            page.text(f"{block.get('comparable_reason', '')}：不合并统计", size=8.5, indent=4 * mm)
+        page.table(
+            ["批次", "纳入", "排除", "均值", "SD", "CV %"],
+            [[row.get("batch_id", ""), str(row.get("n_included", 0)), str(row.get("n_excluded", 0)),
+              row.get("mean") or "—", row.get("sd") or "—", row.get("cv_pct") or "—"]
+             for row in block.get("by_batch") or []],
+            [26, 12, 12, 18, 16, 16],
+        )
+        effect = block.get("batch_effect")
+        if effect:
+            page.text(
+                f"批次差异：F({effect.get('df1')}, {effect.get('df2')}) = {effect.get('f') or '—'}，p = {effect.get('p') or '—'}；"
+                f"{effect.get('note', '')}",
+                size=8.5, indent=4 * mm,
+            )
 
 
 def _resources(page: "Page", content: dict) -> None:
@@ -371,7 +415,8 @@ def _approval(page: "Page", content: dict) -> None:
 
 
 RENDERERS = {
-    "plan": _plan, "method": _method, "samples": _samples, "resources": _resources, "instruments": _instruments,
+    "plan": _plan, "method": _method, "samples": _samples, "batches": _batches, "resources": _resources,
+    "instruments": _instruments,
     "execution": _execution, "operation_log": _operation_log, "results": _results, "exclusions": _exclusions,
     "data_flags": _data_flags, "raw_files": _raw_files, "statistics": _statistics, "conclusion": _conclusion,
     "approval": _approval,

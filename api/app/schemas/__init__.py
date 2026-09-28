@@ -502,6 +502,18 @@ class DecisionIn(BaseModel):
 
 # ---------- 实验任务 ----------
 
+class TaskSplitIn(BaseModel):
+    """怎么分批。每批最多几个样本（chunk_size，按它装满）或分几份（parts，均分）；都不填按最少批数均分
+    （20 个、每批最多 8 个 → 7、7、6）。replicate：每份按方案整体执行一次（整体重复），不填时一批放得下的
+    矩阵方案给了份数就按整体重复（兼容旧用法），其余按份额拆分。mode：parallel 并行（排程按设备决定先后）/
+    pilot 首批验证后放行其余 / sequential 逐批顺序。"""
+
+    chunk_size: int | None = Field(default=None, ge=1, le=96)
+    parts: int | None = Field(default=None, ge=2, le=50)
+    replicate: bool | None = None
+    mode: Literal["parallel", "pilot", "sequential"] | None = None
+
+
 class TaskCreateIn(BaseModel):
     plan_id: str
     title: str = ""
@@ -516,14 +528,46 @@ class TaskCreateIn(BaseModel):
     depends_on: list[str] = []
     # 上游怎样才算满足：运行结束 / 数据复核通过 / 报告发布放行
     dependency_gate: Literal["run_completed", "data_validated", "released"] = "run_completed"
+    # 方案超过流程每批样品位时按它拆成子任务；不传按最少批数均分、并行
+    split: TaskSplitIn | None = None
 
 
-class TaskDecomposeIn(BaseModel):
-    """拆分任务：按样本每份 chunk_size 个（缺省按方法样品位），或拆成 parts 份；sequential 时后一份依赖前一份。"""
+class TaskDecomposeIn(TaskSplitIn):
+    """拆分任务。sequential 是旧参数，等同 mode=sequential。"""
 
-    chunk_size: int | None = Field(default=None, ge=1, le=96)
-    parts: int | None = Field(default=None, ge=2, le=50)
     sequential: bool = False
+
+
+class TaskSplitPreviewIn(TaskSplitIn):
+    """拆分预览：按方案（建任务前）或按任务（拆分前）算出每一份，不写库。"""
+
+    plan_id: str = ""
+    task_id: str = ""
+    sample_ids: list[str] = []
+
+
+class TaskRetestIn(BaseModel):
+    """补测：在父任务下新建一个补测子任务。不填按当前短缺：按数量拆的补同样多个，
+    有样本清单的补没有有效完成的那些样本，矩阵补失败样本所在的条件组。"""
+
+    sample_count: int | None = Field(default=None, ge=1, le=96)
+    sample_ids: list[str] = []
+    note: str = ""
+
+
+class TaskBatchesIn(BaseModel):
+    """为父任务下还没建批次的子任务各建一个批次。priority 不填沿用各子任务的优先级。"""
+
+    priority: int | None = Field(default=None, ge=1, le=5)
+    note: str = ""
+
+
+class ShortfallAcceptIn(BaseModel):
+    """按现有结果结束、不再补测：写明原因并签名。count 不填按当前短缺。"""
+
+    count: int | None = Field(default=None, ge=1)
+    reason: str
+    signature_id: str | None = None
 
 
 class TaskDependenciesIn(BaseModel):
@@ -1099,6 +1143,8 @@ class StationCreateIn(Signed):
     # 只对不关联资产的工位有意义；关联了资产以资产登记的型号为准
     model: str = ""
     channels: int = Field(default=1, ge=1, le=512)
+    # 通道怎么计：batch 一个批次的一个设备步骤占 1 个；sample 批次里每个样本各占 1 个（一颗电芯一个通道）
+    channel_unit: Literal["batch", "sample"] = "batch"
     limits: dict[str, dict[str, list[float]]] = {}
     asset_id: str = ""
     protocol: str = ""
@@ -1139,6 +1185,7 @@ class StationPatchIn(BaseModel):
     model: str | None = None
     island: int | None = None
     channels: int | None = Field(default=None, ge=1, le=512)
+    channel_unit: Literal["batch", "sample"] | None = None
     asset_id: str | None = None
     # 乐观并发：带上读到的版本，别人先改过就 409，不做后写覆盖前写
     row_version: int | None = None

@@ -37,6 +37,11 @@ from .gate_service import GateService
 TRANSPORT_CAPABILITY = "cap.transfer"
 
 
+
+def units_of(command: Command, station_id: str) -> int:
+    """一条动作在这台工位上占几份通道：主工位按指令记下的份数（按样本计通道的工位是样本数），协同工位 1 份。"""
+    return max(1, int(command.units or 1)) if station_id == command.station_id else 1
+
 class ExecutionService:
     """一个 ExecutionService 实例服务一个组织上下文。
 
@@ -167,7 +172,8 @@ class ExecutionService:
         维护 / 校准预约占满整台资产。续跑 / 重试接续的是它自己针对的那个被保持的动作，不另占一份。
 
         资产按份数计，与排程同一个口径：一条动作在这台资产上占几个工位（主工位 + 协同工位）就算几份，
-        新动作自己要的份数一并算进去——只看「还剩不剩一份」会放行一条要两份的协同动作。
+        新动作自己要的份数一并算进去——只看「还剩不剩一份」会放行一条要两份的协同动作。按样本计通道的
+        工位上，一条动作在主工位上占下发时记下的样本数那么多份（`commands.units`）。
         """
         from ..core.db import serialize
 
@@ -183,17 +189,18 @@ class ExecutionService:
         for key in sorted({station.asset_id or station.id for station in stations}):
             serialize(self.db, f"occupancy:{key}")
         exempt = {command.id, command.target_command_id}
-        if any(self._channels_full(station, exempt) for station in stations):
+        if any(self._channels_full(station, exempt, units_of(command, station.id)) for station in stations):
             return True
         demand: dict[str, int] = {}
         for station in stations:
             if station.asset_id:
-                demand[station.asset_id] = demand.get(station.asset_id, 0) + 1
+                demand[station.asset_id] = demand.get(station.asset_id, 0) + units_of(command, station.id)
         return any(self._asset_full(asset_id, units, exempt) for asset_id, units in demand.items())
 
-    def _channels_full(self, station: Station, exempt: set[str]) -> bool:
+    def _channels_full(self, station: Station, exempt: set[str], demand: int = 1) -> bool:
         on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
-        return len(on_station) >= max(1, int(station.channels or 1))
+        load = sum(units_of(c, station.id) for c in on_station)
+        return load + demand > max(1, int(station.channels or 1))
 
     def _asset_full(self, asset_id: str, demand: int, exempt: set[str]) -> bool:
         """资产此刻压着的份数加上新动作要的份数，是否超过容量。"""
@@ -203,8 +210,9 @@ class ExecutionService:
         capacity = max(1, int(asset.capacity or 1)) if asset is not None else 1
         mapped = {row[0] for row in self.db.query(Station.id).filter(Station.asset_id == asset_id).all()}
         load = sum(
-            len(mapped & {c.station_id, *(c.assist_station_ids or [])})
+            units_of(c, station_id)
             for c in self.commands.occupying(sorted(mapped)) if c.id not in exempt
+            for station_id in mapped & {c.station_id, *(c.assist_station_ids or [])}
         )
         return load + self._booked_now(asset_id, capacity) + demand > capacity
 

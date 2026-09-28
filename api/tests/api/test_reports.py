@@ -485,7 +485,8 @@ def test_report_templates_add_instruments_operation_log_and_raw_files(admin, ope
     assert created.status_code == 201, created.text
     report = created.json()
     content = report["content"]
-    assert content["template"]["key"] == "audit" and report["template_version"] == "audit-1.0"
+    # 1.1：加了「分批情况」一节（只在多批合并报告里渲染）
+    assert content["template"]["key"] == "audit" and report["template_version"] == "audit-1.1"
     assert "operation_log" in content["template"]["sections"] and "results" not in content["template"]["sections"]
     stations = {row["station_id"] for row in content["instruments"]}
     assert stations and all(row["calibration"] for row in content["instruments"])
@@ -497,5 +498,5 @@ def test_report_templates_add_instruments_operation_log_and_raw_files(admin, ope
     switched = admin.patch(f"/api/reports/{report['id']}", {"template": "summary", "row_version": report["row_version"]})
     assert switched.status_code == 200, switched.text
     assert switched.json()["content"]["template"]["key"] == "summary"
-    assert switched.json()["template_version"] == "summary-1.0"
+    assert switched.json()["template_version"] == "summary-1.1"
     assert render(switched.json()["content"]).startswith(b"%PDF")

@@ -308,7 +308,7 @@ class ExceptionService:
 
     def _reroute(self, batch: Batch, command: Command) -> tuple[bool, str]:
         """改派：在具备同样能力、参数范围覆盖、此刻可用的其他工位里取最早能开工的一台，重排这一步的时间窗后重新下发。"""
-        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free
+        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free, units_on
         from ..repositories.resources import StationRepository
         from .schedule_service import ScheduleService, lock_schedule
 
@@ -328,9 +328,15 @@ class ExceptionService:
         mine = self.db.query(Allocation).filter(Allocation.batch_id == batch.id).all()
         for row in mine:
             if row.step_index != index:
-                context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
+                context.busy.setdefault(row.station_id, []).append(
+                    Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
+                )
+        samples = schedule.samples_of(batch)
+        specs = {spec.id: spec for spec in context.stations}
         try:
-            candidates = [sid for sid in candidate_station_ids(context, step, index) if sid != command.station_id]
+            candidates = [
+                sid for sid in candidate_station_ids(context, step, index, samples) if sid != command.station_id
+            ]
         except SchedulingError as error:
             return False, f"没有可改派的工位：{error.message}"
         if not candidates:
@@ -338,7 +344,9 @@ class ExceptionService:
         current = next((row for row in mine if row.step_index == index and row.kind == "work"), None)
         ready = max(now(), current.starts_at if current else now())
         duration = timedelta(minutes=float(step.get("dur") or 0))
-        begin, station_id = min((earliest_free(context, sid, ready, duration), sid) for sid in candidates)
+        begin, station_id = min(
+            (earliest_free(context, sid, ready, duration, units_on(specs.get(sid), samples)), sid) for sid in candidates
+        )
         station = StationRepository(self.db, self.ctx).get(station_id)
         try:
             # 保存点：改派后的时间窗若与别的批次重叠，撤销这次时间窗改动，批次保持原样留在故障
@@ -349,7 +357,7 @@ class ExceptionService:
                 self.db.add(Allocation(
                     batch_id=batch.id, step_index=index, station_id=station_id,
                     asset_id=station.asset_id if station is not None else "", starts_at=begin,
-                    ends_at=begin + duration, kind="work",
+                    ends_at=begin + duration, kind="work", units=units_on(specs.get(station_id), samples),
                 ))
                 self.db.flush()
                 schedule._refuse_overlaps(batch.id)
@@ -434,7 +442,7 @@ class ExceptionService:
 
     def reroute_future_windows(self, station_id: str) -> tuple[list[str], list[str]]:
         """把这台工位上还没开始、步骤也还没开出的时间窗改派到等价工位（时间不变优先，否则最早可用）。"""
-        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free
+        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free, units_on
         from ..repositories.resources import StationRepository
         from .schedule_service import ScheduleService, lock_schedule
 
@@ -464,17 +472,27 @@ class ExceptionService:
             context = schedule.context({batch.id})
             for row in self.db.query(Allocation).filter(Allocation.batch_id == batch.id).all():
                 if row.id != allocation.id:
-                    context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
+                    context.busy.setdefault(row.station_id, []).append(
+                        Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
+                    )
+            samples = schedule.samples_of(batch)
+            specs = {spec.id: spec for spec in context.stations}
             try:
-                candidates = [sid for sid in candidate_station_ids(context, step, index) if sid != station_id]
+                candidates = [
+                    sid for sid in candidate_station_ids(context, step, index, samples) if sid != station_id
+                ]
             except SchedulingError:
                 candidates = []
             if not candidates:
                 stuck.append(f"{label} 没有等价工位")
                 continue
             duration = allocation.ends_at - allocation.starts_at
-            begin, target = min((earliest_free(context, sid, allocation.starts_at, duration), sid) for sid in candidates)
+            begin, target = min(
+                (earliest_free(context, sid, allocation.starts_at, duration, units_on(specs.get(sid), samples)), sid)
+                for sid in candidates
+            )
             before = f"{allocation.starts_at:%H:%M}"
+            allocation.units = units_on(specs.get(target), samples)
             allocation.station_id = target
             station = StationRepository(self.db, self.ctx).get(target)
             allocation.asset_id = station.asset_id if station is not None else ""

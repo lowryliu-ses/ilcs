@@ -366,6 +366,19 @@ export function PlanDetailPage() {
         </Panel>
       </div>
 
+      {data.batch_plan && (data.batch_plan.split || data.batch_plan.error) ? (
+        <Panel title="分批执行">
+          <div className={`small ${data.batch_plan.error ? 'bad-text' : ''}`}>{data.batch_plan.detail}</div>
+          {data.batch_plan.split ? (
+            <div className="tiny muted">
+              容量是每一批的约束：方案照常审批，建立实验任务时按这个分法拆成 {data.batch_plan.batches} 个子任务，
+              每个子任务一个批次；父任务按样本汇总进度，出一份合并报告。
+              {data.is_matrix ? '矩阵方案按重复分批，每批都包含全部条件，批内再随机排布。' : ''}
+            </div>
+          ) : null}
+        </Panel>
+      ) : null}
+
       {data.is_matrix ? (
       <Panel title={`条件矩阵（${data.conditions.length} 组，${data.sample_count} 样品）`} flush>
         <table>
@@ -373,7 +386,7 @@ export function PlanDetailPage() {
             <tr>
               <th>条件组</th>
               <th>水平组合</th>
-              <th>孔位</th>
+              <th>{data.batch_plan?.split ? `孔位（第 1 批，共 ${data.batch_plan.batches} 批）` : '孔位'}</th>
             </tr>
           </thead>
           <tbody>
@@ -398,7 +411,7 @@ export function PlanDetailPage() {
       ) : null}
 
       {data.materials.length ? (
-      <Panel title="物料需求预览（每批）" flush>
+      <Panel title={data.batch_plan?.split ? `物料需求预览（${data.batch_plan.batches} 批合计）` : '物料需求预览（每批）'} flush>
         <table>
           <thead>
             <tr>

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import { api } from '../../shared/api';
 import { clock, dateOf, minutes } from '../../shared/format';
@@ -105,7 +105,9 @@ export function SchedulePage() {
   const queue = useQuery<QueueRow[]>('schedule:queue', () => api.get<QueueRow[]>('/schedule/queue'), 10000);
   const gate = useQuery<Gate>('gate', () => api.get<Gate>('/gate'), 15000);
   const due = useQuery<DueWindow[]>('schedule:due', () => api.get<DueWindow[]>('/schedule/due-windows'), 15000);
-  const [selected, setSelected] = useState<string[]>([]);
+  // 从任务页「为全部子任务建批次」跳过来时带着这些批次：直接勾选好，一起做多批次优化
+  const [params] = useSearchParams();
+  const [selected, setSelected] = useState<string[]>(() => (params.get('select') ?? '').split(',').filter(Boolean));
   const [preview, setPreview] = useState<OptimizePreview | null>(null);
   const [mode, setMode] = useState<OptimizePreview['mode']>('optimize');
   const proposals = useQuery<ScheduleProposalRow[]>(
@@ -251,6 +253,11 @@ export function SchedulePage() {
               <div className="lane-head">
                 <b className="mono">{lane.id}</b>
                 <span className="tiny muted">{lane.name}</span>
+                {lane.channel_unit === 'sample' ? (
+                  <span className="tag" title="批次里每个样本各占 1 个通道">{lane.channels} 通道 · 按样本</span>
+                ) : (lane.channels ?? 1) > 1 ? (
+                  <span className="tag" title="一个批次的一个设备步骤占 1 个通道">{lane.channels} 通道</span>
+                ) : null}
                 {lane.held ? <span className="tag warn">保持中，释放时间未知</span> : null}
               </div>
               <div className="lane-track">
@@ -261,12 +268,13 @@ export function SchedulePage() {
                       key={`${item.batch_id}-${item.step_index}-${index}`}
                       className={`chip ${item.kind}${item.uncertain ? ' uncertain' : ''}${item.forecast ? ' forecast' : ''}`}
                       style={{ left: `${laneOffset(item.starts_at)}%`, width: `${width}%` }}
-                      title={`${item.batch_id}｜第 ${item.step_index + 1} 步 ${item.step_name ?? ''}${item.kind === 'assist' ? '（协同资源）' : ''}｜${clock(item.starts_at)} → ${clock(item.ends_at)}${item.uncertain ? '｜其后安排仅为预测' : ''}${item.forecast ? `｜预测：${item.forecast_reason}` : ''}`}
+                      title={`${item.batch_id}｜第 ${item.step_index + 1} 步 ${item.step_name ?? ''}${item.kind === 'assist' ? '（协同资源）' : ''}${(item.units ?? 1) > 1 ? `｜占 ${item.units} 个通道` : ''}｜${clock(item.starts_at)} → ${clock(item.ends_at)}${item.uncertain ? '｜其后安排仅为预测' : ''}${item.forecast ? `｜预测：${item.forecast_reason}` : ''}`}
                     >
                       {/* 窄条写不下文字，留给悬浮提示，避免半个字符的噪声 */}
                       {width >= 4 ? (
                         <span>
                           {item.kind === 'clean' ? '清洗' : item.kind === 'transfer' ? '转运' : item.kind === 'assist' ? `协同 #${item.batch_id.split('-').pop()}` : `#${item.batch_id.split('-').pop()}`}
+                          {(item.units ?? 1) > 1 && item.kind === 'work' ? ` ×${item.units}` : ''}
                         </span>
                       ) : null}
                       {item.hard?.maxGapMin && width >= 6 ? <em className="hard">硬</em> : null}

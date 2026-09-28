@@ -6,7 +6,7 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CommentsPanel } from '../../shared/comments';
-import type { BatchSummary, Paged, ReportContent, ReportTemplate, ReportVersionRow } from '../../shared/types';
+import type { BatchSummary, Paged, ReportContent, ReportTemplate, ReportVersionRow, TaskRow } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -93,7 +93,9 @@ export function ReportsPage() {
                     v{row.version}
                     {row.supersedes_id ? <div className="tiny muted">替代上一版本</div> : null}
                   </td>
-                  <td className="mono small">{row.batch_id}</td>
+                  <td className="mono small">
+                    {row.batch_id || (row.task_id ? <>{row.task_id}<div className="tiny muted">父任务合并</div></> : '—')}
+                  </td>
                   <td>
                     <Pill state={row.state} label={row.state_label} />
                   </td>
@@ -332,6 +334,8 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 )}
               </Panel>
 
+              {content.batches ? <BatchesSection section={content.batches} /> : null}
+
               <Panel title="统计（正式范围）" flush>
                 {content.statistics.length ? (
                   <table>
@@ -484,17 +488,104 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
   );
 }
 
+/** 多批合并报告的「分批情况」：各批样本数与状态、按样本的进度、放弃记录、按批统计与批次差异。 */
+function BatchesSection({ section }: { section: NonNullable<ReportContent['batches']> }) {
+  const progress = section.progress;
+  return (
+    <Panel title="分批情况" flush>
+      <table>
+        <thead>
+          <tr>
+            <th>批次</th>
+            <th>子任务</th>
+            <th>份额</th>
+            <th className="num">样本数</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {section.rows.map((row) => (
+            <tr key={row.batch_id}>
+              <td className="mono small">{row.batch_id}</td>
+              <td className="mono small">{row.task_id}</td>
+              <td className="small">{row.purpose === 'retest' ? '补测 ' : ''}{row.portion_label || '—'}</td>
+              <td className="num">{row.samples}</td>
+              <td><Pill state={row.state} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="panel-body stack">
+        <div className="small">
+          计划 {progress.target} 个样本：有效完成 {progress.valid}，失败 {progress.failed}，补测 {progress.retest}，
+          签名放弃 {progress.accepted}，短缺 {progress.shortfall}
+        </div>
+        {section.decisions.map((row, index) => (
+          <div key={index} className="tiny muted">
+            {clock(row.at)} {row.user} 签名放弃 {row.count} 个：{row.reason}
+          </div>
+        ))}
+        {section.metrics.map((block) => (
+          <div key={block.metric_name} className="stack">
+            <div className="small"><b>{block.metric_name}</b>（{block.unit}）按批</div>
+            {!block.comparable ? <div className="note warn">{block.comparable_reason}：不合并统计</div> : null}
+            <table>
+              <thead>
+                <tr>
+                  <th>批次</th>
+                  <th className="num">纳入</th>
+                  <th className="num">排除</th>
+                  <th className="num">均值</th>
+                  <th className="num">SD</th>
+                  <th className="num">CV%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {block.by_batch.map((row) => (
+                  <tr key={row.batch_id}>
+                    <td className="mono small">{row.batch_id}</td>
+                    <td className="num">{row.n_included}</td>
+                    <td className="num">{row.n_excluded}</td>
+                    <td className="num">{row.mean || '—'}</td>
+                    <td className="num">{row.sd || '—'}</td>
+                    <td className="num">{row.cv_pct || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {block.batch_effect ? (
+              <div className={`tiny ${block.batch_effect.significant ? 'warn-text' : 'muted'}`}>
+                批次差异：F({block.batch_effect.df1}, {block.batch_effect.df2}) = {block.batch_effect.f || '—'}，
+                p = {block.batch_effect.p || '—'}；{block.batch_effect.note}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast();
   const batches = useQuery<BatchSummary[]>('batches', () => api.get<BatchSummary[]>('/batches'));
+  const parents = useQuery<Paged<TaskRow>>('tasks:all', () => api.get<Paged<TaskRow>>('/experiment-tasks?page_size=200'));
+  // 一个方案分多批执行时在父任务上出一份合并报告；否则按单个批次出
+  const [scope, setScope] = useState<'batch' | 'task'>('batch');
   const [batchId, setBatchId] = useState('');
+  const [taskId, setTaskId] = useState('');
   const [conclusion, setConclusion] = useState('');
   const [template, setTemplate] = useState('standard');
   const templates = useQuery<ReportTemplate[]>('reports:templates', () => api.get<ReportTemplate[]>('/reports/templates'));
   const chosen = templates.data?.find((row) => row.key === template);
 
   const create = useMutation(
-    () => api.post('/reports', { batch_id: batchId, conclusion, template }, true),
+    () =>
+      api.post(
+        '/reports',
+        scope === 'task' ? { task_id: taskId, conclusion, template } : { batch_id: batchId, conclusion, template },
+        true,
+      ),
     {
       invalidates: ['reports', 'tasks'],
       onSuccess: () => {
@@ -505,6 +596,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
   );
 
   const done = (batches.data ?? []).filter((row) => row.state === 'done');
+  const splitTasks = (parents.data?.items ?? []).filter((row) => row.children.length && row.state !== 'cancelled');
 
   return (
     <Modal
@@ -515,7 +607,11 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
           <button className="btn" onClick={onClose}>
             取消
           </button>
-          <button className="btn primary" disabled={!batchId || create.pending} onClick={() => create.run().catch(() => undefined)}>
+          <button
+            className="btn primary"
+            disabled={(scope === 'task' ? !taskId : !batchId) || create.pending}
+            onClick={() => create.run().catch(() => undefined)}
+          >
             生成草稿
           </button>
         </>
@@ -534,20 +630,48 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </select>
       </Field>
       {chosen ? <div className="tiny muted">章节：{chosen.sections.map((row) => row.title).join(' → ')}</div> : null}
-      <Field label="执行批次">
-        <select value={batchId} onChange={(event) => setBatchId(event.target.value)}>
-          <option value="">选择已完成的批次</option>
-          {done.map((row) => (
-            <option key={row.id} value={row.id}>
-              {row.id} · {row.recipe_name}
-            </option>
-          ))}
-        </select>
-      </Field>
+      <div className="row">
+        <label className="check">
+          <input type="radio" name="report-scope" checked={scope === 'batch'} onChange={() => setScope('batch')} />
+          单个批次
+        </label>
+        <label className="check" title="一个方案分多批执行：合并统计、分批明细与批次差异，一份报告覆盖全部批次">
+          <input type="radio" name="report-scope" checked={scope === 'task'} onChange={() => setScope('task')} />
+          已拆分的父任务（合并报告）
+        </label>
+      </div>
+      {scope === 'task' ? (
+        <Field label="父任务" hint="批次都跑完、短缺已补测或签名放弃、各批可比时才能出合并报告">
+          <select value={taskId} onChange={(event) => setTaskId(event.target.value)}>
+            <option value="">选择父任务</option>
+            {splitTasks.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.id} · {row.title}（{row.children.length} 个子任务，{row.state_label}）
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : (
+        <Field label="执行批次">
+          <select value={batchId} onChange={(event) => setBatchId(event.target.value)}>
+            <option value="">选择已完成的批次</option>
+            {done.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.id} · {row.recipe_name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
       <Field label="结论草稿">
         <textarea rows={3} value={conclusion} onChange={(event) => setConclusion(event.target.value)} />
       </Field>
-      {create.error ? <div className="note bad">{create.error.message}</div> : null}
+      {create.error ? (
+        <div className="note bad">
+          {create.error.message}
+          <Blocked reasons={create.error.blocked.map((row) => row.label)} />
+        </div>
+      ) : null}
     </Modal>
   );
 }

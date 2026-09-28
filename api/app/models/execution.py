@@ -51,6 +51,9 @@ class Command(Base):
     target_command_id: Mapped[str] = mapped_column(String, default="")
     # 协同资源：这一步执行期间一并占用的其他工位（机械臂、放置位、配套设备），随本指令一起取得、一起释放
     assist_station_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 这条动作在主工位上占几份通道：按样本计通道的工位是下发时批次在用的样本数，其余为 1。
+    # 协同工位各占 1 份
+    units: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class ExecutorHeartbeat(Base):

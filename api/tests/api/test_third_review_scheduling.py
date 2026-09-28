@@ -27,8 +27,10 @@ def pending(package: str):
     return pytest.mark.xfail(strict=True, reason=f"{package} 待修")
 
 
-def _alloc(batch_id, index, station, start, end, kind="work"):
-    return N(batch_id=batch_id, step_index=index, station_id=station, kind=kind, starts_at=M(start), ends_at=M(end))
+def _alloc(batch_id, index, station, start, end, kind="work", units=1):
+    # units：这段时间窗占几份通道（按样本计通道的工位是批次的样本数），与 Allocation 模型一致
+    return N(batch_id=batch_id, step_index=index, station_id=station, kind=kind, starts_at=M(start), ends_at=M(end),
+             units=units)
 
 
 def _device(step_id, cap, dur, after):

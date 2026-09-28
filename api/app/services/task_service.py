@@ -28,12 +28,14 @@ from .people_service import PeopleService
 
 STATES = (
     "unassigned", "pending_accept", "accepted", "running", "data_review", "reporting",
-    "done", "cancelled",
+    "done", "cancelled", "shortfall",
 )
 STATE_LABEL = {
     "unassigned": "待分配", "pending_accept": "待接单", "accepted": "已接单",
     "running": "执行中", "data_review": "待数据复核", "reporting": "待报告",
     "done": "完成", "cancelled": "已取消",
+    # 父任务：子任务都跑完了，但计划的样本有短缺（批次终止、样本不合格），要补测或签名放弃
+    "shortfall": "待补测",
 }
 ACTION_LABEL = {"assign": "分配", "reassign": "转派", "accept": "接单", "cancel": "取消"}
 
@@ -56,16 +58,32 @@ class TaskService:
         self.users = UserRepository(db)
         self.people = PeopleService(db, ctx)
         self.audit = AuditService(db, ctx)
+        # 一次输出（out）之内的派生结果缓存：父任务的状态、进度要按样本逐个批次数，列表里会被问好几遍。
+        # 只在 out 期间有效——写操作之间不缓存，免得拿到改动之前的数
+        self._memo: dict | None = None
 
     # ---------- 状态派生 ----------
 
     def derive_state(self, task: ExperimentTask, _depth: int = 0) -> str:
         """只有「待分配 / 待接单 / 已接单 / 已取消」是任务自己的状态，其余从对象派生。父任务由子任务汇总。"""
+        if self._memo is not None and ("state", task.id) in self._memo:
+            return self._memo[("state", task.id)]
+        state = self._derive_state(task, _depth)
+        if self._memo is not None:
+            self._memo[("state", task.id)] = state
+        return state
+
+    def _derive_state(self, task: ExperimentTask, _depth: int = 0) -> str:
         if task.state == "cancelled":
             return "cancelled"
         children = self.tasks.children(task.id) if _depth < 8 else []
         if children:
-            return task_rules.aggregate([self.derive_state(child, _depth + 1) for child in children])
+            state = task_rules.aggregate([self.derive_state(child, _depth + 1) for child in children])
+            # 子任务都跑完了不等于这件事做完了：批次终止、样本不合格留下的短缺要补测或签名放弃，
+            # 否则父任务不能结束，也不能作为下游的「运行结束」依据
+            if state in task_rules.RUN_FINISHED and self.progress(task, _depth)["shortfall"] > 0:
+                return "shortfall"
+            return state
         batch = self.batches.get(task.batch_id) if task.batch_id else None
         if batch is None:
             if not task.assignee_user_id:
@@ -80,12 +98,148 @@ class TaskService:
         review = self._data_review(batch)
         if review["tasks"] and not self._review_complete(review):
             return "data_review"
-        report = self.reports.query().filter_by(task_id=task.id).first()
-        if report is not None:
-            published = self.report_versions.published(report.id)
-            if published is not None:
-                return "done"
+        if self._report_covers(task, batch.id):
+            return "done"
         return "reporting"
+
+    def _report_covers(self, task: ExperimentTask, batch_id: str) -> bool:
+        """这个叶子任务的结果有没有进一份已发布的报告：它自己的报告，或纳入了它批次的祖先任务报告。
+
+        一个方案分多批执行时报告通常出在父任务上（合并统计、分批明细），子任务不必各出一份；
+        父任务报告发布之后才补做的批次不在那份报告里，照样要等新版报告。
+        """
+        for owner in [task, *self.ancestors(task)]:
+            report = self.reports.query().filter_by(task_id=owner.id).first()
+            if report is None:
+                continue
+            published = self.report_versions.published(report.id)
+            if published is None:
+                continue
+            content = published.content or {}
+            covered = content.get("batch_ids") or [content.get("batch_id")]
+            if owner is task or batch_id in covered:
+                return True
+        return False
+
+    # ---------- 按样本算的进度 ----------
+
+    def _groups_planned(self, task: ExperimentTask, content) -> dict[str, int]:
+        """叶子任务按条件组计划做几个：补测给的条件组、矩阵每组若干次重复，非矩阵只有一组 C01。"""
+        portion = task.portion or {}
+        if portion.get("groups"):
+            return {str(group): int(count or 0) for group, count in portion["groups"].items()}
+        if content.plan_type == "matrix":
+            from ..domain import matrix
+
+            each = int(portion.get("repeats") or content.repeats or 1)
+            return {
+                condition.group: each
+                for condition in matrix.conditions(content.factors or [], content.control, content.design_points or None)
+            }
+        return {"C01": self.planned_count(task, content)}
+
+    def _top_level_samples(self, batch) -> tuple[list, set[str]]:
+        """批次里建批次时生成的那些样本（拆分出来的子样本并回母样），以及其中算失败的。
+
+        母样被拆分后看子样本：子样本全部不合格才算这个母样失败。
+        """
+        rows = self.samples.for_batch(batch.id)
+        split = [row.id for row in rows if row.state == "split"]
+        top = [row for row in rows if not any(row.id.startswith(parent + "-") for parent in split)]
+        failed: set[str] = set()
+        for row in top:
+            if row.state == "failed":
+                failed.add(row.id)
+            elif row.state == "split":
+                descendants = [other for other in rows if other.id.startswith(row.id + "-") and other.state != "split"]
+                if not descendants or all(other.state == "failed" for other in descendants):
+                    failed.add(row.id)
+        return top, failed
+
+    def _leaf_tally(self, task: ExperimentTask) -> dict[str, dict[str, int]]:
+        plan = self.plans.get(task.plan_id)
+        tally: dict[str, dict[str, int]] = {
+            key: {} for key in ("planned", "valid", "failed", "running", "pending", "descoped")
+        }
+        if plan is None:
+            return tally
+        content = self._content_of(task, plan)
+        tally["planned"] = self._groups_planned(task, content)
+        batch = self.batches.get(task.batch_id) if task.batch_id else None
+        if batch is None or batch.state in {"planned", "scheduled"}:
+            # 还没下发：取消了就是不做了（写了原因），否则待做
+            tally["descoped" if task.state == "cancelled" else "pending"] = dict(tally["planned"])
+            return tally
+        top, failed = self._top_level_samples(batch)
+        for row in top:
+            if batch.state == "aborted" or row.id in failed:
+                bucket = "failed"
+            elif batch.state == "done":
+                bucket = "valid"
+            else:
+                bucket = "running"
+            group = row.condition_group or "C01"
+            tally[bucket][group] = tally[bucket].get(group, 0) + 1
+        return tally
+
+    def _tally(self, task: ExperimentTask, _depth: int = 0) -> tuple[dict[str, dict[str, int]], int]:
+        """（按条件组的计数, 已签名放弃的个数）。补测子任务的计划量不计入 target，另记在 retest。"""
+        tally: dict[str, dict[str, int]] = {
+            key: {} for key in ("target", "valid", "failed", "running", "pending", "descoped", "retest")
+        }
+
+        def add(bucket: str, groups: dict[str, int]) -> None:
+            for group, count in groups.items():
+                tally[bucket][group] = tally[bucket].get(group, 0) + int(count or 0)
+
+        accepted = sum(int(row.get("count") or 0) for row in task.shortfall_decisions or [])
+        children = self.tasks.children(task.id) if _depth < 8 else []
+        if not children:
+            leaf = self._leaf_tally(task)
+            for bucket in ("valid", "failed", "running", "pending"):
+                add(bucket, leaf[bucket])
+            if task.purpose == "retest":
+                add("retest", leaf["planned"])
+            else:
+                add("descoped", leaf["descoped"])
+                if not leaf["descoped"]:
+                    add("target", leaf["planned"])
+            return tally, accepted
+        for child in children:
+            sub, sub_accepted = self._tally(child, _depth + 1)
+            accepted += sub_accepted
+            for bucket, groups in sub.items():
+                add(bucket, groups)
+        return tally, accepted
+
+    def progress(self, task: ExperimentTask, _depth: int = 0) -> dict:
+        """按样本算的进度：计划、有效完成、失败、进行中、待开始、补测中、已签名放弃，以及短缺。
+
+        短缺按条件组算：一个条件缺的样本不能拿另一个条件多做的补上。补测子任务、签名放弃都会让短缺变少；
+        没下发就取消的子任务是不做了（记为「取消」），不算短缺。
+        """
+        if self._memo is not None and ("progress", task.id) in self._memo:
+            return self._memo[("progress", task.id)]
+        tally, accepted = self._tally(task, _depth)
+        groups = sorted(set().union(*(set(values) for values in tally.values())))
+        per_group = {
+            group: {
+                "target": tally["target"].get(group, 0), "valid": tally["valid"].get(group, 0),
+                "open": tally["running"].get(group, 0) + tally["pending"].get(group, 0),
+                "failed": tally["failed"].get(group, 0),
+            }
+            for group in groups
+        }
+        missing = sum(max(0, row["target"] - row["valid"] - row["open"]) for row in per_group.values())
+        totals = {bucket: sum(values.values()) for bucket, values in tally.items()}
+        result = {
+            **totals, "accepted": accepted,
+            "shortfall": task_rules.shortfall(missing, 0, 0, accepted),
+            "groups": per_group,
+        }
+        if self._memo is not None:
+            self._memo[("progress", task.id)] = result
+        return result
 
     def _data_review(self, batch) -> dict[str, list]:
         """批次的数据阶段：有效检测任务，以及缺指标、待复核、被退回、判为无效的结果与没有检测任务的样本。
@@ -175,12 +329,28 @@ class TaskService:
     # ---------- 读 ----------
 
     def out(self, task: ExperimentTask, detail: bool = False) -> dict:
+        outer = self._memo is None
+        if outer:
+            self._memo = {}
+        try:
+            return self._out(task, detail)
+        finally:
+            if outer:
+                self._memo = None
+
+    def _out(self, task: ExperimentTask, detail: bool = False) -> dict:
         plan = self.plans.get(task.plan_id)
         owner = self.users.get(task.owner_user_id) if task.owner_user_id else None
         assignee = self.users.get(task.assignee_user_id) if task.assignee_user_id else None
         reviewer = self.users.get(task.reviewer_user_id) if task.reviewer_user_id else None
         state = self.derive_state(task)
         batch = self.batches.get(task.batch_id) if task.batch_id else None
+        children = self.tasks.children(task.id)
+        matrix_plan = bool(plan and plan.plan_type == "matrix")
+        if children:
+            planned = self.progress(task)["target"]
+        else:
+            planned = self.planned_count(task) if plan else 0
         payload = {
             "id": task.id,
             "title": task.title or (plan.name if plan else task.id),
@@ -211,12 +381,18 @@ class TaskService:
             "dependency_gate": task.dependency_gate or task_rules.DEFAULT_GATE,
             "dependency_gate_label": task_rules.gate_label(task.dependency_gate),
             "latest_plan_version": (latest.version if (latest := self.plan_versions.latest_approved(task.plan_id)) else None),
-            "children": [
-                {"id": child.id, "title": child.title, "batch_id": child.batch_id,
-                 "state": (child_state := self.derive_state(child)),
-                 "state_label": STATE_LABEL.get(child_state, child_state)}
-                for child in self.tasks.children(task.id)
-            ],
+            "children": [self._child_out(child, matrix_plan) for child in children],
+            # 一个方案分多批执行：这一份负责什么、父任务怎么拆的、是不是补测
+            "portion": task.portion or {},
+            "portion_label": (
+                self.part_label(task.portion or {}, planned, matrix_plan) if task.parent_id and task.portion else ""
+            ),
+            "planned_count": planned,
+            "split_mode": task.split_mode or "",
+            "split_mode_label": task_rules.SPLIT_MODES.get(task.split_mode or "", ""),
+            "purpose": task.purpose or "",
+            "progress": self.progress(task) if children or detail else None,
+            "shortfall_decisions": list(task.shortfall_decisions or []),
             "blocked_by": self.dependency_blockers(task),
             "state": state,
             "state_label": STATE_LABEL.get(state, state),
@@ -255,6 +431,8 @@ class TaskService:
             ]
             report = self.reports.query().filter_by(task_id=task.id).first()
             payload["report_id"] = report.id if report else ""
+            if children:
+                payload["sample_map"] = self.sample_map(task, matrix_plan)
             payload["audit"] = [
                 {
                     "time": e.time.isoformat(timespec="seconds"), "user": e.user,
@@ -263,6 +441,55 @@ class TaskService:
                 for e in self.audit.for_target(task.id)
             ]
         return payload
+
+    def _child_out(self, child: ExperimentTask, matrix_plan: bool) -> dict:
+        state = self.derive_state(child)
+        grandchildren = self.tasks.children(child.id)
+        planned = self.progress(child)["target"] if grandchildren else self.planned_count(child)
+        batch = self.batches.get(child.batch_id) if child.batch_id else None
+        counts = self.progress(child)
+        return {
+            "id": child.id, "title": child.title, "batch_id": child.batch_id,
+            "batch_state": batch.state if batch else "",
+            "state": state, "state_label": STATE_LABEL.get(state, state),
+            "purpose": child.purpose or "", "planned_count": planned if child.purpose != "retest" else counts["retest"],
+            "portion": child.portion or {},
+            "portion_label": self.part_label(child.portion or {}, planned, matrix_plan) if child.portion else "",
+            "depends_on": list(child.depends_on or []),
+            "dependency_gate_label": task_rules.gate_label(child.dependency_gate),
+            "valid": counts["valid"], "failed": counts["failed"], "running": counts["running"],
+            "pending": counts["pending"],
+        }
+
+    def sample_map(self, task: ExperimentTask, matrix_plan: bool) -> list[dict]:
+        """样本 → 子任务 → 批次 → 孔位对照。建了批次的列实际样本，没建的列计划的样本清单或份额。"""
+        rows = []
+        for child in self.tasks.children(task.id):
+            batch = self.batches.get(child.batch_id) if child.batch_id else None
+            planned = self.planned_count(child) if not self.tasks.children(child.id) else self.progress(child)["target"]
+            if batch is not None:
+                top, failed = self._top_level_samples(batch)
+                samples = [
+                    {
+                        "id": row.id, "physical_sample_id": row.physical_sample_id, "well": row.well,
+                        "condition_group": row.condition_group, "repeat": row.repeat,
+                        "state": "failed" if (row.id in failed or batch.state == "aborted") else row.state,
+                    }
+                    for row in top
+                ]
+            else:
+                samples = [
+                    {"id": "", "physical_sample_id": sample_id, "well": "", "condition_group": "", "repeat": 0,
+                     "state": "planned"}
+                    for sample_id in child.sample_ids or []
+                ]
+            rows.append({
+                "task_id": child.id, "title": child.title, "purpose": child.purpose or "",
+                "label": self.part_label(child.portion or {}, planned, matrix_plan) if child.portion else "",
+                "planned_count": planned, "batch_id": child.batch_id, "batch_state": batch.state if batch else "",
+                "samples": samples,
+            })
+        return rows
 
     def _name(self, user_id: str) -> str:
         user = self.users.get(user_id) if user_id else None
@@ -512,6 +739,8 @@ class TaskService:
         if version.id == task.plan_version_id:
             raise StateConflict(f"任务已经是最新批准版本 v{version.version}", code="task_version_current")
         family = [task, *(row for row in (self.tasks.get(ref) for ref in sorted(self._descendant_ids(task.id))) if row)]
+        plan = self.plans.get(task.plan_id)
+        old_content = self._content_of(task, plan) if plan is not None else None
         moved, kept, skipped = [], [], []
         for row in family:
             if row.state == "cancelled":
@@ -528,9 +757,12 @@ class TaskService:
             row.updated_at = now()
             self.tasks.bump(row)
             moved.append({"task_id": row.id, "from": before, "to": version.version})
+        reportioned = self._reportion(task, plan, old_content, version) if plan is not None and old_content else []
         self.audit.record(
             user, "迁移任务方案版本", task.id, before=f"v{moved[0]['from']}" if moved else "—", after=f"v{version.version}",
             detail=f"{reason}；迁移 {len(moved)} 个任务" + (
+                f"；按新版本重新分配份额：{'、'.join(reportioned)}" if reportioned else ""
+            ) + (
                 f"；{len(kept)} 个已建批次的子任务保持原版本（{'、'.join(row['task_id'] for row in kept)}）" if kept else ""
             ) + (
                 f"；{len(skipped)} 个别的方案的子任务不迁移（{'、'.join(row['task_id'] for row in skipped)}）"
@@ -540,6 +772,80 @@ class TaskService:
         )
         self.db.commit()
         return {**self.out(task, detail=True), "migrated": moved, "kept": kept, "skipped": skipped}
+
+    def _reportion(self, task: ExperimentTask, plan, old_content, version) -> list[str]:
+        """父任务整单迁移到新批准版本：还没建批次的子任务按新版本重新分配份额。
+
+        按数量拆的：新版本总数减去已建批次的子任务占掉的，均分给还没建批次的；矩阵按重复拆的同理（条件变了
+        不行——已建批次的子任务按旧条件在做，混在一起没法合并统计）；整体重复的每份按新版本整体执行。
+        分不下（剩下的比子任务还少、或某份超过流程每批样品位）就拒绝，请取消后按新版本重新建任务。
+        """
+        from ..domain import matrix
+        from .batch_service import BatchService
+
+        shares = [
+            child for child in self.tasks.children(task.id)
+            if child.purpose != "retest" and child.state != "cancelled" and child.plan_id == task.plan_id
+            and ((child.portion or {}).get("count") or (child.portion or {}).get("repeats"))
+        ]
+        if not shares:
+            return []
+        content = BatchService._pinned_plan(plan, version)
+        recipe = self._recipe_of(content)
+        plate = int(recipe.plate or 0) if recipe else 0
+        matrix_plan = content.plan_type == "matrix"
+        key = "repeats" if matrix_plan else "count"
+        movable = [child for child in shares if not child.batch_id]
+        fixed = [child for child in shares if child.batch_id]
+        if not movable:
+            return []
+
+        def refuse(message: str) -> None:
+            raise StateConflict(
+                f"{message}：请取消这个父任务，按新版本重新建任务", code="task_split_mismatch",
+            )
+
+        conditions = self.condition_count(content)
+        if matrix_plan:
+            before = [tuple(row.levels) for row in matrix.conditions(
+                old_content.factors or [], old_content.control, old_content.design_points or None)]
+            after = [tuple(row.levels) for row in matrix.conditions(
+                content.factors or [], content.control, content.design_points or None)]
+            if fixed and before != after:
+                refuse("新版本的条件与原版本不同，已建批次的子任务按原条件在做")
+            unit_total, per_part = max(1, int(content.repeats or 1)), max(1, plate // max(1, conditions))
+        else:
+            unit_total, per_part = int(content.sample_count or 0), plate
+            if unit_total <= 0:
+                refuse("新版本没有样本数")
+        if any((child.portion or {}).get("replica") for child in shares):
+            if unit_total > per_part:
+                refuse(f"新版本一份就超过流程每批样品位 {plate}，不能整体重复")
+            for child in movable:
+                replica = int((child.portion or {}).get("replica") or 1)
+                child.portion = {**(child.portion or {}), key: unit_total, "offset": (replica - 1) * unit_total}
+                self.tasks.bump(child)
+            return [f"{child.id} 整体执行 {unit_total}" for child in movable]
+        used = sum(int((child.portion or {}).get(key) or 0) for child in fixed)
+        remaining = unit_total - used
+        if remaining < len(movable):
+            refuse(
+                f"新版本共 {unit_total}{'次重复' if matrix_plan else '个样本'}，已建批次的子任务占了 {used}，"
+                f"剩下的不够分给 {len(movable)} 个子任务"
+            )
+        sizes = task_rules.balanced(remaining, len(movable))
+        if max(sizes) > per_part:
+            refuse(f"剩下的 {remaining} 分给 {len(movable)} 个子任务后超过流程每批样品位 {plate}")
+        start = max(
+            (int((child.portion or {}).get("offset") or 0) + int((child.portion or {}).get(key) or 0) for child in fixed),
+            default=0,
+        )
+        notes = []
+        for child, size, offset in zip(movable, sizes, task_rules.offsets(sizes)):
+            child.portion = {**(child.portion or {}), key: size, "offset": start + offset}
+            self.tasks.bump(child)
+            notes.append(f"{child.id} {size}{'次重复' if matrix_plan else '个'}")
+        return notes
 
     def _locked_content(self, task: ExperimentTask, plan):
         """任务锁定的方案版本内容，与建批次同一个解析口径。早先没记版本的任务按方案本身。"""
@@ -555,11 +861,253 @@ class TaskService:
 
         return BatchService._pinned_plan(plan, version)
 
-    def decompose(self, task_id: str, payload: dict, user: User) -> dict:
-        """把任务拆成子任务：按样本分份（每份不超过 chunk_size，默认按方法的样品位），或拆成 N 份。
+    # ---------- 一个方案分多批执行 ----------
 
-        子任务继承方案、优先级、期望完成时间、负责人与复核人；`sequential` 时后一份依赖前一份
-        （同一台设备要按顺序做的场景），否则并行。父任务不绑定批次，状态由子任务汇总。
+    def _content_of(self, task: ExperimentTask, plan):
+        """任务锁定版本的方案内容。只读场合（进度、展示）版本失效时退回方案本身；写操作走 `_locked_content`。"""
+        try:
+            return self._locked_content(task, plan)
+        except StateConflict:
+            return plan
+
+    def _recipe_of(self, content):
+        from ..repositories.recipes import RecipeRepository
+
+        return RecipeRepository(self.db, self.ctx).get(content.recipe_id)
+
+    @staticmethod
+    def condition_count(content) -> int:
+        if content.plan_type != "matrix":
+            return 1
+        from ..domain import matrix
+
+        return len(matrix.conditions(content.factors or [], content.control, content.design_points or None))
+
+    def planned_count(self, task: ExperimentTask, content=None) -> int:
+        """叶子任务计划做几个样本：样本清单、本份份额，或方案整体。"""
+        if task.sample_ids:
+            return len(task.sample_ids)
+        plan = self.plans.get(task.plan_id)
+        if plan is None:
+            return 0
+        content = content if content is not None else self._content_of(task, plan)
+        counted = task_rules.portion_count(task.portion, self.condition_count(content))
+        if counted is not None:
+            return counted
+        from .plan_service import PlanService
+
+        return PlanService(self.db, self.ctx).sample_total(content)
+
+    def split_parts(self, content, payload: dict, samples: list[str]) -> dict:
+        """按请求算出每一份，不写库。拆分预览、建任务时自动拆分与手动拆分共用这一套。
+
+        有样本清单：按清单顺序切，每份一个子任务、带自己的样本。按数量的方案：每份记样本数与全局序号偏移，
+        建批次时按它生成样本。矩阵方案：按重复拆，每份都包含全部条件（完整区组）。整体重复（replicate）：
+        每份按方案整体执行一次。任何一份都不能超过流程每批样品位。
+        """
+        recipe = self._recipe_of(content)
+        plate = int(recipe.plate or 0) if recipe else 0
+        chunk = int(payload.get("chunk_size") or 0) or None
+        parts = int(payload.get("parts") or 0) or None
+        mode = payload.get("mode") or ("sequential" if payload.get("sequential") else task_rules.DEFAULT_SPLIT_MODE)
+        if mode not in {"parallel", "pilot", "sequential"}:
+            raise ValidationFailed("拆分方式只能是 parallel（并行）、pilot（首批验证后放行）、sequential（逐批顺序）")
+        matrix_plan = content.plan_type == "matrix"
+        conditions = self.condition_count(content)
+        replicate = payload.get("replicate")
+        try:
+            if samples:
+                if replicate:
+                    raise ValueError("有样本清单时不能整体重复：同一个样本不能同时放进几个批次")
+                replicate = False
+                sizes = task_rules.split_sizes(len(samples), plate, per_batch=chunk, parts=parts)
+                rows = [
+                    {"sample_ids": samples[start:start + size], "portion": {"offset": start}, "size": size}
+                    for size, start in zip(sizes, task_rules.offsets(sizes))
+                ]
+            else:
+                if matrix_plan:
+                    repeats = max(1, int(content.repeats or 1))
+                    total = conditions * repeats
+                else:
+                    repeats, total = 1, int(content.sample_count or 0)
+                    if total <= 0:
+                        raise ValueError("方案没有样本清单也没有样本数，无法拆分")
+                if replicate is None:
+                    # 兼容旧用法：一批放得下的矩阵方案给了份数，就是把整个矩阵重复做几次
+                    replicate = matrix_plan and bool(parts) and not chunk and total <= plate
+                if replicate:
+                    if not parts:
+                        raise ValueError("整体重复执行要指定份数（至少 2 份）")
+                    if total > plate:
+                        raise ValueError(
+                            f"方案 {total} 个样本超过流程每批样品位 {plate}，一批放不下，不能整体重复；请按份额分批"
+                        )
+                    key, unit = ("repeats", repeats) if matrix_plan else ("count", total)
+                    rows = [
+                        {"sample_ids": [], "portion": {key: unit, "offset": index * unit, "replica": index + 1},
+                         "size": total}
+                        for index in range(parts)
+                    ]
+                elif matrix_plan:
+                    blocks = task_rules.matrix_blocks(conditions, repeats, plate, per_batch=chunk, parts=parts)
+                    rows = [
+                        {"sample_ids": [], "portion": {"repeats": block, "offset": start}, "size": block * conditions}
+                        for block, start in zip(blocks, task_rules.offsets(blocks))
+                    ]
+                else:
+                    sizes = task_rules.split_sizes(total, plate, per_batch=chunk, parts=parts)
+                    rows = [
+                        {"sample_ids": [], "portion": {"count": size, "offset": start}, "size": size}
+                        for size, start in zip(sizes, task_rules.offsets(sizes))
+                    ]
+        except ValueError as error:
+            raise ValidationFailed(str(error), code="split_invalid") from error
+        return {
+            "parts": rows, "mode": mode, "mode_label": task_rules.SPLIT_MODES[mode], "replicate": bool(replicate),
+            "capacity": plate, "total": sum(row["size"] for row in rows),
+            "conditions": conditions if matrix_plan else None, "plan_type": content.plan_type,
+        }
+
+    @staticmethod
+    def part_label(portion: dict, size: int, matrix_plan: bool) -> str:
+        """给人看的份额：第 8–14 号 / 第 5–7 次重复 / 第 2 次整体重复 / 补测。"""
+        portion = portion or {}
+        offset = int(portion.get("offset") or 0)
+        if portion.get("groups"):
+            return "补测 " + "、".join(f"{group}×{count}" for group, count in portion["groups"].items())
+        if portion.get("replica"):
+            return f"第 {portion['replica']} 次整体执行"
+        if matrix_plan and portion.get("repeats"):
+            first, last = offset + 1, offset + int(portion["repeats"])
+            return f"第 {first} 次重复" if first == last else f"第 {first}–{last} 次重复"
+        if size <= 0:
+            return "—"
+        first, last = offset + 1, offset + size
+        return f"第 {first} 号" if first == last else f"第 {first}–{last} 号"
+
+    def split_preview(self, payload: dict) -> dict:
+        """拆分预览：建任务前按方案的批准版本算，拆分前按任务锁定的版本算。不写库。"""
+        if payload.get("task_id"):
+            task = self.tasks.get(payload["task_id"])
+            if task is None:
+                raise NotFound("实验任务不存在")
+            plan = self.plans.get(task.plan_id)
+            if plan is None:
+                raise NotFound("实验方案不存在")
+            content = self._locked_content(task, plan)
+            samples = list(task.sample_ids or []) or (
+                list(content.sample_ids or []) if content.plan_type != "matrix" else []
+            )
+        else:
+            plan = self.plans.get(payload.get("plan_id") or "")
+            if plan is None:
+                raise NotFound("实验方案不存在")
+            version = self.plan_versions.latest_approved(plan.id)
+            if version is None:
+                raise StateConflict("方案还没有批准版本", code="plan_not_approved")
+            from .batch_service import BatchService
+
+            content = BatchService._pinned_plan(plan, version)
+            samples = list(payload.get("sample_ids") or []) or (
+                list(content.sample_ids or []) if content.plan_type != "matrix" else []
+            )
+        return self._preview_out(content, samples, payload)
+
+    def _preview_out(self, content, samples: list[str], payload: dict) -> dict:
+        from .plan_service import PlanService
+
+        recipe = self._recipe_of(content)
+        plate = int(recipe.plate or 0) if recipe else 0
+        total = len(samples) or PlanService(self.db, self.ctx).sample_total(content)
+        needed = total > plate
+        wanted = bool(payload.get("chunk_size") or payload.get("parts") or payload.get("replicate"))
+        out = {
+            "total": total, "capacity": plate, "needs_split": needed, "plan_type": content.plan_type,
+            "modes": [{"key": key, "label": label} for key, label in task_rules.SPLIT_MODES.items() if key != "replicate"],
+            "parts": [], "mode": payload.get("mode") or task_rules.DEFAULT_SPLIT_MODE, "error": "",
+        }
+        if not needed and not wanted:
+            out["detail"] = f"{total} 个样本；流程每批 {plate} 位，一批完成，不需要拆分"
+            return out
+        try:
+            planned = self.split_parts(content, payload, samples)
+        except ValidationFailed as error:
+            out["error"] = error.message
+            out["detail"] = error.message
+            return out
+        matrix_plan = content.plan_type == "matrix"
+        out |= {
+            "mode": planned["mode"], "mode_label": planned["mode_label"], "replicate": planned["replicate"],
+            "conditions": planned["conditions"], "total_planned": planned["total"],
+            "parts": [
+                {
+                    "index": number, "size": row["size"], "portion": row["portion"], "sample_ids": row["sample_ids"],
+                    "label": self.part_label(row["portion"], row["size"], matrix_plan),
+                }
+                for number, row in enumerate(planned["parts"], start=1)
+            ],
+        }
+        sizes = "/".join(str(row["size"]) for row in planned["parts"])
+        out["detail"] = (
+            f"整体执行 {len(planned['parts'])} 次，每次 {planned['parts'][0]['size']} 个样本"
+            if planned["replicate"] else
+            f"{total} 个样本；流程每批 {plate} 位 → 分 {len(planned['parts'])} 批（{sizes}）"
+            + ("，每批都包含全部条件" if matrix_plan else "")
+        )
+        return out
+
+    def _split(self, task: ExperimentTask, content, samples: list[str], payload: dict, user: User) -> list[ExperimentTask]:
+        """按拆分计划建子任务（不提交）。依赖按拆分方式：并行没有、首批验证其余等首批数据复核通过、逐批顺序。"""
+        planned = self.split_parts(content, payload, samples)
+        rows = planned["parts"]
+        if len(rows) < 2:
+            raise ValidationFailed(
+                f"按这个分法只有 1 份（{rows[0]['size'] if rows else 0} 个样本），不需要拆分", code="split_invalid",
+            )
+        if len(rows) > 50:
+            raise ValidationFailed("一次最多拆成 50 个子任务", code="split_invalid")
+        created: list[ExperimentTask] = []
+        for number, row in enumerate(rows, start=1):
+            child = ExperimentTask(
+                id=self.tasks.next_id(), org_id=self.ctx.org_id, plan_id=task.plan_id,
+                plan_version=task.plan_version, plan_version_id=task.plan_version_id,
+                title=f"{task.title} · {number}/{len(rows)}", owner_user_id=task.owner_user_id,
+                reviewer_user_id=task.reviewer_user_id, sample_ids=row["sample_ids"], portion=row["portion"],
+                due_at=task.due_at, priority=task.priority, note=f"由 {task.id} 拆分", created_by=user.id,
+                state="unassigned", parent_id=task.id,
+            )
+            self.tasks.add(child)
+            self.db.flush()
+            created.append(child)
+        edges = task_rules.split_dependencies([row.id for row in created], planned["mode"])
+        for child in created:
+            upstream, gate = edges[child.id]
+            child.depends_on, child.dependency_gate = upstream, gate
+        task.split_mode = planned["mode"]
+        task.updated_at = now()
+        self.tasks.bump(task)
+        matrix_plan = content.plan_type == "matrix"
+        self.audit.record(
+            user, "拆分实验任务", task.id, after=f"{len(created)} 个子任务",
+            detail=(
+                ("整体执行 " + str(len(created)) + " 次" if planned["replicate"] else
+                 f"{planned['total']} 个样本按流程每批 {planned['capacity']} 位分 {len(created)} 批（"
+                 + "/".join(str(row["size"]) for row in rows) + "）")
+                + f"；{task_rules.SPLIT_MODES[planned['mode']]}；子任务 "
+                + "、".join(f"{child.id}（{self.part_label(row['portion'], row['size'], matrix_plan)}）"
+                           for child, row in zip(created, rows))
+            ),
+            object_version=task.row_version,
+        )
+        return created
+
+    def decompose(self, task_id: str, payload: dict, user: User) -> dict:
+        """把任务拆成子任务，每个子任务一个批次。父任务不绑定批次，状态由子任务汇总。
+
+        分法见 `split_parts`：缺省按最少批数均分（20 个、每批最多 8 个 → 7、7、6），也可以指定每批最多几个
+        （装满）或分几份（均分）。拆分方式缺省并行——同一台设备一次只能跑一批是资源约束，排程按通道数
+        自己会错开；首批验证与逐批顺序才加依赖。子任务继承方案、优先级、期望完成时间、负责人与复核人。
         """
         task = self.tasks.get(task_id)
         if not task:
@@ -580,50 +1128,184 @@ class TaskService:
         samples = list(task.sample_ids or []) or (
             list(content.sample_ids or []) if content.plan_type != "matrix" else []
         )
-        parts = payload.get("parts")
-        size = payload.get("chunk_size")
-        if samples:
-            if not size:
-                if parts:
-                    size = -(-len(samples) // int(parts))
-                else:
-                    from ..repositories.recipes import RecipeRepository
+        self._split(task, content, samples, payload, user)
+        self.db.commit()
+        return self.out(task, detail=True)
 
-                    recipe = RecipeRepository(self.db, self.ctx).get(content.recipe_id)
-                    size = max(1, int(recipe.plate or 1)) if recipe else len(samples)
-            groups = task_rules.chunks(samples, int(size))
-        else:
-            count = int(parts or 0)
-            if count < 2:
-                raise ValidationFailed("没有样本清单时必须指定拆成几份（parts ≥ 2），每份按方案整体执行一次")
-            groups = [[] for _ in range(count)]
-        if len(groups) < 2:
-            raise ValidationFailed(f"按每份 {size} 个样本只能分成 {len(groups)} 份，不需要拆分")
-        if len(groups) > 50:
-            raise ValidationFailed("一次最多拆成 50 个子任务")
-        sequential = bool(payload.get("sequential"))
-        created: list[ExperimentTask] = []
-        for number, group in enumerate(groups, start=1):
+    # ---------- 短缺的处置：补测或签名放弃 ----------
+
+    def _require_split_parent(self, task_id: str) -> ExperimentTask:
+        task = self.tasks.get(task_id)
+        if not task:
+            raise NotFound("实验任务不存在")
+        if task.state == "cancelled":
+            raise StateConflict("已取消的任务不能再补测或结束", code="task_cancelled")
+        if not self.tasks.children(task.id):
+            raise StateConflict(
+                "只有拆分过的父任务才按样本汇总短缺；单个任务的不合格样本在数据复核里处理", code="task_not_split",
+            )
+        return task
+
+    def _retest_samples(self, task: ExperimentTask) -> list[str]:
+        """有样本清单的拆分：没有有效完成、也不在做或待做的那些物理样本（按出现顺序）。"""
+        failed, settled = [], set()
+        for leaf, batch in self.leaf_batches([task.id]):
+            if batch is None or batch.state in {"planned", "scheduled"}:
+                if leaf.state != "cancelled":
+                    settled.update(leaf.sample_ids or [])
+                continue
+            top, bad = self._top_level_samples(batch)
+            for row in top:
+                if batch.state == "aborted" or row.id in bad:
+                    failed.append(row.physical_sample_id)
+                else:
+                    settled.add(row.physical_sample_id)
+        return [sample_id for sample_id in dict.fromkeys(failed) if sample_id and sample_id not in settled]
+
+    def retest(self, task_id: str, payload: dict, user: User) -> dict:
+        """补测：在父任务下新建补测子任务，补的是现有短缺。补测子任务照常建批次、排程、执行。
+
+        有样本清单的补没有有效完成的那些样本（也可以指定）；按数量拆的补同样多个（也可以指定个数）；
+        矩阵补缺样本的条件组，每组缺几个补几个——一个条件缺的样本不能拿别的条件补。超过流程每批样品位的
+        分成几个补测子任务。已签名放弃的个数从补测量里扣掉。
+        """
+        task = self._require_split_parent(task_id)
+        plan = self.plans.get(task.plan_id)
+        if plan is None:
+            raise NotFound("实验方案不存在")
+        content = self._locked_content(task, plan)
+        recipe = self._recipe_of(content)
+        plate = int(recipe.plate or 0) if recipe else 0
+        progress = self.progress(task)
+        wanted_ids = [sid.strip() for sid in payload.get("sample_ids") or [] if sid and sid.strip()]
+        wanted_count = int(payload.get("sample_count") or 0)
+        if progress["shortfall"] <= 0 and not wanted_ids and not wanted_count:
+            raise StateConflict(
+                "没有短缺：计划的样本都已有效完成、正在做或已签名放弃", code="no_shortfall",
+            )
+        listed = any(child.sample_ids for child in self.tasks.children(task.id) if child.purpose != "retest")
+        previous = [
+            child for child in self.tasks.children(task.id) if child.purpose == "retest"
+        ]
+        specs: list[dict] = []
+        try:
+            if listed:
+                from ..repositories.samples import PhysicalSampleRepository
+
+                wanted = wanted_ids or self._retest_samples(task)[: progress["shortfall"]]
+                if not wanted:
+                    raise StateConflict("找不到需要补测的样本：请指定样本", code="no_shortfall")
+                physical = PhysicalSampleRepository(self.db, self.ctx)
+                unknown = [sample_id for sample_id in wanted if physical.get(sample_id) is None]
+                if unknown:
+                    raise NotFound(f"样本 {'、'.join(unknown)} 不存在或不在本组织")
+                sizes = task_rules.split_sizes(len(wanted), plate)
+                specs = [
+                    {"sample_ids": wanted[start:start + size], "portion": {"offset": start}, "size": size}
+                    for size, start in zip(sizes, task_rules.offsets(sizes))
+                ]
+            elif content.plan_type == "matrix":
+                if wanted_count or wanted_ids:
+                    raise ValueError("矩阵方案按缺样本的条件组补测，不能只给个数或样本清单")
+                needed = {
+                    group: max(0, row["target"] - row["valid"] - row["open"])
+                    for group, row in progress["groups"].items()
+                }
+                # 已签名放弃的个数从缺得最多的条件组里扣（确定性的：同样多时按组号倒序）
+                for _ in range(progress["accepted"]):
+                    candidates = [group for group, count in needed.items() if count > 0]
+                    if not candidates:
+                        break
+                    biggest = max(candidates, key=lambda group: (needed[group], group))
+                    needed[biggest] -= 1
+                needed = {group: count for group, count in sorted(needed.items()) if count > 0}
+                if not needed:
+                    raise StateConflict("没有需要补测的条件组", code="no_shortfall")
+                repeats = max(1, int(content.repeats or 1))
+                offset = repeats + sum(max((row.portion or {}).get("groups", {}).values(), default=0) for row in previous)
+                chunk: dict[str, int] = {}
+                for group, count in needed.items():
+                    for _ in range(count):
+                        if sum(chunk.values()) >= plate:
+                            specs.append({"sample_ids": [], "portion": {"groups": chunk, "offset": offset},
+                                          "size": sum(chunk.values())})
+                            chunk = {}
+                        chunk[group] = chunk.get(group, 0) + 1
+                if chunk:
+                    specs.append({"sample_ids": [], "portion": {"groups": chunk, "offset": offset},
+                                  "size": sum(chunk.values())})
+            else:
+                count = wanted_count or progress["shortfall"]
+                if count <= 0:
+                    raise StateConflict("没有需要补测的样本", code="no_shortfall")
+                base = progress["target"] + progress["retest"]
+                sizes = task_rules.split_sizes(count, plate)
+                specs = [
+                    {"sample_ids": [], "portion": {"count": size, "offset": base + start}, "size": size}
+                    for size, start in zip(sizes, task_rules.offsets(sizes))
+                ]
+        except ValueError as error:
+            raise ValidationFailed(str(error), code="split_invalid") from error
+        note = (payload.get("note") or "").strip()
+        created = []
+        for number, spec in enumerate(specs, start=len(previous) + 1):
             child = ExperimentTask(
                 id=self.tasks.next_id(), org_id=self.ctx.org_id, plan_id=task.plan_id,
                 plan_version=task.plan_version, plan_version_id=task.plan_version_id,
-                title=f"{task.title} · {number}/{len(groups)}", owner_user_id=task.owner_user_id,
-                reviewer_user_id=task.reviewer_user_id, sample_ids=group, due_at=task.due_at,
-                priority=task.priority, note=f"由 {task.id} 拆分", created_by=user.id, state="unassigned",
-                parent_id=task.id, depends_on=[created[-1].id] if sequential and created else [],
+                title=f"{task.title} · 补测 {number}", owner_user_id=task.owner_user_id,
+                reviewer_user_id=task.reviewer_user_id, sample_ids=spec["sample_ids"], portion=spec["portion"],
+                due_at=task.due_at, priority=task.priority, created_by=user.id, state="unassigned",
+                parent_id=task.id, purpose="retest", note=note or f"补 {task.id} 的短缺",
             )
             self.tasks.add(child)
             self.db.flush()
-            created.append(child)
+            created.append((child, spec))
+        task.updated_at = now()
+        self.tasks.bump(task)
+        matrix_plan = content.plan_type == "matrix"
+        self.audit.record(
+            user, "新建补测子任务", task.id, before=f"短缺 {progress['shortfall']}",
+            after=f"补测 {sum(spec['size'] for _, spec in created)} 个",
+            detail="；".join(
+                f"{child.id}（{self.part_label(spec['portion'], spec['size'], matrix_plan)}）" for child, spec in created
+            ) + (f"；{note}" if note else ""),
+            object_version=task.row_version,
+        )
+        self.db.commit()
+        return self.out(task, detail=True)
+
+    def accept_shortfall(self, task_id: str, payload: dict, user: User) -> dict:
+        """按现有结果结束、不再补测：写明原因、电子签名，记在父任务上。之后再出现新的短缺还要再处置。"""
+        task = self._require_split_parent(task_id)
+        reason = (payload.get("reason") or "").strip()
+        if not reason:
+            raise ValidationFailed("放弃补测必须写明原因")
+        progress = self.progress(task)
+        if progress["shortfall"] <= 0:
+            raise StateConflict("没有短缺，不需要放弃补测", code="no_shortfall")
+        count = int(payload.get("count") or progress["shortfall"])
+        if count > progress["shortfall"]:
+            raise ValidationFailed(f"当前短缺 {progress['shortfall']} 个，放弃的个数不能超过它")
+        from .identity_service import IdentityService
+
+        signature = IdentityService(self.db, self.ctx).consume_signature(
+            payload.get("signature_id"), user, "放弃补测，按现有结果结束", object_ref=task.id,
+            object_version=task.row_version,
+        )
+        decisions = list(task.shortfall_decisions or [])
+        decisions.append({
+            "count": count, "reason": reason, "user_id": user.id, "user": user.display_name,
+            "at": now().isoformat(timespec="seconds"), "signature_id": signature.id,
+            "valid": progress["valid"], "target": progress["target"],
+        })
+        task.shortfall_decisions = decisions
         task.updated_at = now()
         self.tasks.bump(task)
         self.audit.record(
-            user, "拆分实验任务", task.id, after=f"{len(created)} 个子任务",
-            detail=(
-                f"{'按样本每份 ' + str(size) + ' 个' if samples else '整体执行 ' + str(len(groups)) + ' 次'}；"
-                f"{'顺序依赖' if sequential else '并行'}；子任务 {'、'.join(row.id for row in created)}"
-            ),
-            object_version=task.row_version,
+            user, "放弃补测", task.id, before=f"短缺 {progress['shortfall']}",
+            after=f"放弃 {count} 个，按现有结果结束" if count == progress["shortfall"] else f"放弃 {count} 个",
+            detail=f"计划 {progress['target']}，有效完成 {progress['valid']}；{reason}", sign=True,
+            meaning=signature.meaning, signature_id=signature.id, object_version=task.row_version,
         )
         self.db.commit()
         return self.out(task, detail=True)
@@ -667,11 +1349,26 @@ class TaskService:
             raise ValidationFailed(f"放行条件只能是 {'、'.join(task_rules.GATES)}")
         task.dependency_gate = gate
         self.tasks.add(task)
+        self.db.flush()
+        from .batch_service import BatchService
+        from .plan_service import PlanService
+
+        content = BatchService._pinned_plan(plan, version)
+        samples = list(task.sample_ids or []) or (
+            list(content.sample_ids or []) if content.plan_type != "matrix" else []
+        )
+        total = len(samples) or PlanService(self.db, self.ctx).sample_total(content)
+        recipe = self._recipe_of(content)
+        plate = int(recipe.plate or 0) if recipe else 0
         self.audit.record(
             user, "建立实验任务", task.id, before="—", after="待分配",
-            detail=f"方案 {plan.id} v{version.version}；{len(task.sample_ids)} 个样本",
+            detail=f"方案 {plan.id} v{version.version}；{total} 个样本",
             object_version=task.row_version,
         )
+        split = payload.get("split")
+        if split is not None or total > plate:
+            # 超过流程每批样品位：建任务时就拆成子任务，每个子任务一个批次；不传分法按最少批数均分、并行
+            self._split(task, content, samples, split or {}, user)
         self.db.commit()
         return self.out(task)
 

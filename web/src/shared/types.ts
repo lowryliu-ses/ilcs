@@ -285,11 +285,20 @@ export type Preflight = {
   }[];
 };
 
+export type ChannelUnit = 'batch' | 'sample';
+
+export const CHANNEL_UNIT_LABEL: Record<ChannelUnit, string> = {
+  batch: '按批次（一个设备步骤占 1 个通道）',
+  sample: '按样本（每个样本占 1 个通道）',
+};
+
 export type Allocation = {
   step_index: number;
   station_id: string;
   /** assist：协同资源，与主设备同起同止一并占用 */
   kind: 'work' | 'transfer' | 'clean' | 'assist';
+  /** 占几份通道：按样本计通道的工位是批次的样本数，其余 1 */
+  units?: number;
   starts_at: string;
   ends_at: string;
   /** 预测窗口（分支未定的下游、冻结期之后）；false 为承诺窗口 */
@@ -604,6 +613,18 @@ export type PlanDetail = PlanSummary & {
   round_no: number;
   checks: Check[];
   lockable: boolean;
+  /** 按流程每批样品位分几批、每批几个样本（矩阵还有每批几次重复）；超过一批的方案建任务时自动拆分 */
+  batch_plan?: {
+    total: number;
+    capacity: number;
+    batches: number;
+    sizes: number[];
+    repeats: number[] | null;
+    conditions: number | null;
+    split: boolean;
+    detail: string;
+    error: string;
+  };
   materials: {
     source: string;
     material: string;
@@ -656,8 +677,10 @@ export type StationRow = {
   /** 工位上早先登记、与资产不一致的型号；设备方法已按资产型号匹配，需要人核对 */
   model_conflict: string;
   status: string;
-  /** 并行通道数：同一时刻能同时承接几个批次的设备步骤；一个批次的一个设备步骤占 1 个，与样本数无关 */
+  /** 并行通道数。按批计：同一时刻能同时承接几个批次的设备步骤，一个批次的一个设备步骤占 1 个；
+   *  按样本计：批次里每个样本各占 1 个（一颗电芯占一个物理通道的充放电柜） */
   channels: number;
+  channel_unit: ChannelUnit;
   clean: boolean;
   dirty_batch_id: string;
   limits: Record<string, Record<string, [number, number]>>;
@@ -947,6 +970,8 @@ export type ScheduleBoard = {
     name: string;
     island: number;
     status: string;
+    channels?: number;
+    channel_unit?: ChannelUnit;
     held: boolean;
     items: {
       batch_id: string;
@@ -954,6 +979,7 @@ export type ScheduleBoard = {
       step_index: number;
       step_name: string;
       kind: string;
+      units?: number;
       hard: { maxGapMin?: number } | null;
       starts_at: string;
       ends_at: string;
@@ -1359,9 +1385,129 @@ export type TaskRow = {
   dependency_gate_label: string;
   /** 方案当前的最新批准版本；高于 plan_version 时可以显式迁移 */
   latest_plan_version: number | null;
-  children: { id: string; title: string; batch_id: string; state: string; state_label: string }[];
+  children: TaskChild[];
   /** 还没满足的上游 */
   blocked_by: { task_id: string; label: string }[];
+  /** 子任务在父任务里负责的那一份：按数量拆的 count、矩阵按重复拆的 repeats、补测的 groups、全局序号偏移 offset、
+   *  整体重复的第几次 replica。空对象表示按样本清单或方案整体执行 */
+  portion: TaskPortion;
+  portion_label: string;
+  /** 计划样本数：叶子任务是本份，父任务是全部子任务的计划合计（不含补测） */
+  planned_count: number;
+  /** 父任务怎么拆的：parallel 并行 / pilot 首批验证后放行其余 / sequential 逐批顺序 */
+  split_mode: '' | SplitMode;
+  split_mode_label: string;
+  /** retest：补测子任务 */
+  purpose: '' | 'retest';
+  /** 按样本算的进度；父任务总是有，叶子任务只在详情里有 */
+  progress: TaskProgress | null;
+  /** 「按现有结果结束、不再补测」的签名记录 */
+  shortfall_decisions: ShortfallDecision[];
+};
+
+export type SplitMode = 'parallel' | 'pilot' | 'sequential';
+
+export const SPLIT_MODE_HINT: Record<SplitMode, string> = {
+  parallel: '各批独立排程：同一台设备一次跑一批由排程按通道数错开，能流水线的就流水线',
+  pilot: '先做第一批，数据复核通过后其余几批才能开跑；首批不合格就不浪费后面的样本',
+  sequential: '每批等上一批整个流程跑完才开工，不能流水线；只在工艺上确实有先后时用',
+};
+
+export type TaskPortion = {
+  count?: number;
+  repeats?: number;
+  groups?: Record<string, number>;
+  offset?: number;
+  replica?: number;
+};
+
+export type TaskChild = {
+  id: string;
+  title: string;
+  batch_id: string;
+  batch_state: string;
+  state: string;
+  state_label: string;
+  purpose: '' | 'retest';
+  planned_count: number;
+  portion: TaskPortion;
+  portion_label: string;
+  depends_on: string[];
+  dependency_gate_label: string;
+  valid: number;
+  failed: number;
+  running: number;
+  pending: number;
+};
+
+/** 按样本算的进度。短缺按条件组算：一个条件缺的样本不能拿另一个条件多做的补上 */
+export type TaskProgress = {
+  /** 计划（不含补测、不含没下发就取消的子任务） */
+  target: number;
+  valid: number;
+  failed: number;
+  running: number;
+  pending: number;
+  /** 没下发就取消的子任务：不做了，不算短缺 */
+  descoped: number;
+  /** 补测子任务的计划量 */
+  retest: number;
+  /** 已签名放弃的个数 */
+  accepted: number;
+  shortfall: number;
+  groups: Record<string, { target: number; valid: number; open: number; failed: number }>;
+};
+
+export type ShortfallDecision = {
+  count: number;
+  reason: string;
+  user_id: string;
+  user: string;
+  at: string;
+  signature_id: string;
+  valid: number;
+  target: number;
+};
+
+export type SampleMapRow = {
+  task_id: string;
+  title: string;
+  purpose: '' | 'retest';
+  label: string;
+  planned_count: number;
+  batch_id: string;
+  batch_state: string;
+  samples: {
+    id: string;
+    physical_sample_id: string;
+    well: string;
+    condition_group: string;
+    repeat: number;
+    state: string;
+  }[];
+};
+
+export type SplitPart = {
+  index: number;
+  size: number;
+  portion: TaskPortion;
+  sample_ids: string[];
+  label: string;
+};
+
+export type SplitPreview = {
+  total: number;
+  capacity: number;
+  needs_split: boolean;
+  plan_type: string;
+  modes: { key: SplitMode; label: string }[];
+  mode: SplitMode;
+  mode_label?: string;
+  replicate?: boolean;
+  conditions?: number | null;
+  parts: SplitPart[];
+  detail: string;
+  error: string;
 };
 
 export type DependencyGate = 'run_completed' | 'data_validated' | 'released';
@@ -1395,6 +1541,8 @@ export type TaskDetail = TaskRow & {
   analysis_tasks: { id: string; state: string; round_no: number }[];
   report_id: string;
   audit: AuditRow[];
+  /** 父任务：样本 → 子任务 → 批次 → 孔位 */
+  sample_map?: SampleMapRow[];
 };
 
 /* ---------- 步骤运行 ---------- */
@@ -1711,6 +1859,22 @@ export type ReportContent = {
   statistics: Record<string, unknown>[];
   conclusion: string;
   batch_id: string;
+  /** 父任务的多批合并报告：引用的全部批次、父任务，以及「分批情况」一节 */
+  batch_ids?: string[];
+  task_id?: string;
+  batches?: {
+    rows: NonNullable<AnalysisView['batches']>;
+    progress: Omit<TaskProgress, 'groups'>;
+    decisions: ShortfallDecision[];
+    metrics: {
+      metric_name: string;
+      unit: string;
+      comparable: boolean;
+      comparable_reason: string;
+      by_batch: { batch_id: string; n_included: number; n_excluded: number; mean: string; sd: string; cv_pct: string }[];
+      batch_effect: (Omit<BatchEffect, 'f' | 'p'> & { f: string; p: string }) | null;
+    }[];
+  };
   /** 以下章节在报告模板 2.0 起提供；老报告没有 */
   instruments?: ReportInstrument[];
   operation_log?: { time: string; user: string; action: string; before: string; after: string; detail: string; signed: boolean; meaning: string }[];
@@ -1801,9 +1965,50 @@ export type MetricBlock = {
     best_mean: number | null;
   };
   excluded: DatasetGroup['excluded'];
+  /** 以下只在父任务的合并视图里有：各批单位、方法版本是否一致，分批明细与批次差异 */
+  comparable?: boolean;
+  comparable_reason?: string;
+  by_batch?: BatchStat[];
+  batch_effect?: BatchEffect | null;
+};
+
+export type BatchStat = {
+  batch_id: string;
+  n_included: number;
+  n_excluded: number;
+  mean: number | null;
+  sd: number | null;
+  cv_pct: number | null;
+};
+
+/** 批次之间有没有系统差异：单因素方差分析，矩阵方案先按条件组校正 */
+export type BatchEffect = {
+  method: 'anova' | 'anova_centered';
+  f: number | null;
+  df1: number;
+  df2: number;
+  p: number | null;
+  alpha?: number;
+  significant: boolean;
+  note: string;
 };
 
 export type AnalysisView = {
+  /** 父任务的合并视图：任务、各批次与按样本的进度；单批视图没有这些 */
+  task_id?: string;
+  task_title?: string;
+  batch_ids?: string[];
+  batches?: {
+    batch_id: string;
+    task_id: string;
+    title: string;
+    state: string;
+    purpose: string;
+    portion_label: string;
+    samples: number;
+    recipe_version: string;
+  }[];
+  progress?: TaskProgress;
   batch_id: string;
   plan_id: string;
   plan_name: string;

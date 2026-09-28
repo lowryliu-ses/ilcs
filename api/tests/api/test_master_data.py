@@ -65,12 +65,17 @@ def test_limit_change_marks_released_recipe_as_needing_revision(client, admin, r
     assert admin.get("/api/recipes/R-201").json()["valid"]
 
 
-def test_plan_lock_rejects_matrix_larger_than_plate(client, researcher, reset_runtime):
+def test_plan_lock_rejects_matrix_whose_conditions_do_not_fit_one_batch(client, researcher, reset_runtime):
+    """容量是每一批的约束：超过一批的矩阵照样能锁定（按重复分批，每批都包含全部条件）；
+    条件数超过流程每批样品位时一批放不下全部条件，跨批会让批次与因子混杂，不能锁定。"""
     created = researcher.post(
         "/api/plans",
         {
             "name": "超容量矩阵", "recipe_id": "R-205", "repeats": 4,
-            "factors": [{"name": "FEC 含量", "unit": "%", "levels": [0, 2, 5, 10]}],
+            "factors": [
+                {"name": "FEC 含量", "unit": "%", "levels": [0, 2, 5, 10]},
+                {"name": "注液量", "unit": " μL", "levels": [50, 60, 70]},
+            ],
             "required_metrics": ["METRIC-discharge_capacity-v1"],
         },
     )
@@ -78,10 +83,13 @@ def test_plan_lock_rejects_matrix_larger_than_plate(client, researcher, reset_ru
 
     rejected = researcher.post(f"/api/plans/{plan_id}/lock")
     assert rejected.status_code == 409
-    assert any(c["key"] == "capacity" for c in rejected.json()["detail"]["checks"])
+    capacity = next(c for c in rejected.json()["detail"]["checks"] if c["key"] == "capacity")
+    assert "每批放不下全部条件" in capacity["detail"]
 
-    researcher.patch(f"/api/plans/{plan_id}", {"repeats": 2})
+    researcher.patch(f"/api/plans/{plan_id}", {"factors": [{"name": "FEC 含量", "unit": "%", "levels": [0, 2, 5, 10]}]})
     assert researcher.post(f"/api/plans/{plan_id}/lock").status_code == 200
+    capacity = next(c for c in researcher.get(f"/api/plans/{plan_id}").json()["checks"] if c["key"] == "capacity")
+    assert "分 2 批" in capacity["detail"], "4 个条件 × 4 次重复 = 16 个样本，每批 8 位：两批，每批每个条件 2 次"
 
 
 def test_locked_plan_is_immutable_and_lot_release_needs_signature(client, researcher, operator, qa, reset_runtime):

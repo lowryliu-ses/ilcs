@@ -5149,6 +5149,43 @@
         "title": "ShelveIn",
         "type": "object"
       },
+      "ShortfallAcceptIn": {
+        "description": "按现有结果结束、不再补测：写明原因并签名。count 不填按当前短缺。",
+        "properties": {
+          "count": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Id"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ShortfallAcceptIn",
+        "type": "object"
+      },
       "SignatureIn": {
         "properties": {
           "action": {
@@ -5786,6 +5823,15 @@
             "title": "Asset Id",
             "type": "string"
           },
+          "channel_unit": {
+            "default": "batch",
+            "enum": [
+              "batch",
+              "sample"
+            ],
+            "title": "Channel Unit",
+            "type": "string"
+          },
           "channels": {
             "default": 1,
             "maximum": 512.0,
@@ -5894,6 +5940,21 @@
               }
             ],
             "title": "Asset Id"
+          },
+          "channel_unit": {
+            "anyOf": [
+              {
+                "enum": [
+                  "batch",
+                  "sample"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel Unit"
           },
           "channels": {
             "anyOf": [
@@ -6070,6 +6131,31 @@
         "title": "TaskAssignIn",
         "type": "object"
       },
+      "TaskBatchesIn": {
+        "description": "为父任务下还没建批次的子任务各建一个批次。priority 不填沿用各子任务的优先级。",
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "maximum": 5.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          }
+        },
+        "title": "TaskBatchesIn",
+        "type": "object"
+      },
       "TaskCreateIn": {
         "properties": {
           "dependency_gate": {
@@ -6141,6 +6227,16 @@
             "title": "Sample Ids",
             "type": "array"
           },
+          "split": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskSplitIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "default": "",
             "title": "Title",
@@ -6154,7 +6250,7 @@
         "type": "object"
       },
       "TaskDecomposeIn": {
-        "description": "拆分任务：按样本每份 chunk_size 个（缺省按方法样品位），或拆成 parts 份；sequential 时后一份依赖前一份。",
+        "description": "拆分任务。sequential 是旧参数，等同 mode=sequential。",
         "properties": {
           "chunk_size": {
             "anyOf": [
@@ -6169,6 +6265,22 @@
             ],
             "title": "Chunk Size"
           },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parallel",
+                  "pilot",
+                  "sequential"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
           "parts": {
             "anyOf": [
               {
@@ -6181,6 +6293,17 @@
               }
             ],
             "title": "Parts"
+          },
+          "replicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replicate"
           },
           "sequential": {
             "default": false,
@@ -6233,6 +6356,177 @@
           "reason"
         ],
         "title": "TaskMigrateIn",
+        "type": "object"
+      },
+      "TaskRetestIn": {
+        "description": "补测：在父任务下新建一个补测子任务。不填按当前短缺：按数量拆的补同样多个，\n有样本清单的补没有有效完成的那些样本，矩阵补失败样本所在的条件组。",
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "sample_count": {
+            "anyOf": [
+              {
+                "maximum": 96.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Count"
+          },
+          "sample_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Sample Ids",
+            "type": "array"
+          }
+        },
+        "title": "TaskRetestIn",
+        "type": "object"
+      },
+      "TaskSplitIn": {
+        "description": "怎么分批。每批最多几个样本（chunk_size，按它装满）或分几份（parts，均分）；都不填按最少批数均分\n（20 个、每批最多 8 个 → 7、7、6）。replicate：每份按方案整体执行一次（整体重复），不填时一批放得下的\n矩阵方案给了份数就按整体重复（兼容旧用法），其余按份额拆分。mode：parallel 并行（排程按设备决定先后）/\npilot 首批验证后放行其余 / sequential 逐批顺序。",
+        "properties": {
+          "chunk_size": {
+            "anyOf": [
+              {
+                "maximum": 96.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parallel",
+                  "pilot",
+                  "sequential"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "parts": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 2.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parts"
+          },
+          "replicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replicate"
+          }
+        },
+        "title": "TaskSplitIn",
+        "type": "object"
+      },
+      "TaskSplitPreviewIn": {
+        "description": "拆分预览：按方案（建任务前）或按任务（拆分前）算出每一份，不写库。",
+        "properties": {
+          "chunk_size": {
+            "anyOf": [
+              {
+                "maximum": 96.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Size"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parallel",
+                  "pilot",
+                  "sequential"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "parts": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 2.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parts"
+          },
+          "plan_id": {
+            "default": "",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "replicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replicate"
+          },
+          "sample_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Sample Ids",
+            "type": "array"
+          },
+          "task_id": {
+            "default": "",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "title": "TaskSplitPreviewIn",
         "type": "object"
       },
       "TelemetryIn": {
@@ -12747,6 +13041,69 @@
         ]
       }
     },
+    "/api/experiment-tasks/split-preview": {
+      "post": {
+        "description": "拆分预览（不写库）：按方案的批准版本（建任务前）或任务锁定的版本（拆分前）算出每一份。\n\n总数超过流程每批样品位时 needs_split 为真，建任务时会按这个分法自动拆成子任务。",
+        "operationId": "split_preview_api_experiment_tasks_split_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskSplitPreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Split Preview",
+        "tags": [
+          "task"
+        ]
+      }
+    },
     "/api/experiment-tasks/{task_id}": {
       "get": {
         "operationId": "get_task_api_experiment_tasks__task_id__get",
@@ -12869,6 +13226,78 @@
         ]
       }
     },
+    "/api/experiment-tasks/{task_id}/accept-shortfall": {
+      "post": {
+        "description": "按现有结果结束、不再补测：写明原因并电子签名。",
+        "operationId": "accept_shortfall_api_experiment_tasks__task_id__accept_shortfall_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShortfallAcceptIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Accept Shortfall",
+        "tags": [
+          "task"
+        ]
+      }
+    },
     "/api/experiment-tasks/{task_id}/assign": {
       "post": {
         "description": "分配或转派。按预计执行时间校验资质；转派必须写原因。",
@@ -12936,6 +13365,94 @@
           }
         ],
         "summary": "Assign Task",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/batches": {
+      "post": {
+        "description": "为父任务下还没建批次的子任务各建一个批次（一个事务：任何一个建不成整体回滚）。",
+        "operationId": "create_child_batches_api_experiment_tasks__task_id__batches_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskBatchesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Child Batches",
         "tags": [
           "task"
         ]
@@ -13239,6 +13756,176 @@
           }
         ],
         "summary": "Migrate Task Version",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/results": {
+      "get": {
+        "description": "父任务的合并结果：各子任务批次的观测合在一起，给出合并统计、分批明细与批次差异。",
+        "operationId": "task_results_api_experiment_tasks__task_id__results_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "official",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Official",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric_ids",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Metric Ids",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Task Results",
+        "tags": [
+          "task"
+        ]
+      }
+    },
+    "/api/experiment-tasks/{task_id}/retest": {
+      "post": {
+        "description": "补测：在父任务下新建补测子任务，补现有的样本短缺。",
+        "operationId": "retest_task_api_experiment_tasks__task_id__retest_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskRetestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retest Task",
         "tags": [
           "task"
         ]

@@ -1,5 +1,8 @@
 """报告模板。模板决定报告包含哪些章节、按什么顺序；取数逻辑只有一套（`ReportService.build_content`），
 所以换模板不会让同一个批次在两份报告里出现两种数。模板带版本，发布时写进固化快照。
+
+「分批情况」只在一个方案分多批执行、在父任务上出合并报告时有内容（各批样本数与状态、按批统计与批次差异、
+短缺与放弃记录）；单批报告渲染时跳过这一节，章节编号照常连续。
 """
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ SECTION_TITLES = {
     "plan": "方案与目的",
     "method": "流程与 SOP 版本",
     "samples": "样本及来源",
+    "batches": "分批情况",
     "resources": "人员与物料",
     "instruments": "仪器与设备方法",
     "execution": "执行与异常",
@@ -22,20 +26,20 @@ SECTION_TITLES = {
 
 TEMPLATES: dict[str, dict] = {
     "standard": {
-        "name": "完整实验报告", "version": "2.0",
-        "description": "方案、流程、样本、人员物料、仪器、执行、结果、排除、数据标记、原始文件、统计与结论",
-        "sections": ["plan", "method", "samples", "resources", "instruments", "execution", "results",
+        "name": "完整实验报告", "version": "2.1",
+        "description": "方案、流程、样本、分批情况、人员物料、仪器、执行、结果、排除、数据标记、原始文件、统计与结论",
+        "sections": ["plan", "method", "samples", "batches", "resources", "instruments", "execution", "results",
                      "exclusions", "data_flags", "raw_files", "statistics", "conclusion", "approval"],
     },
     "summary": {
-        "name": "结果摘要", "version": "1.0",
-        "description": "给项目方看的短报告：方案、流程版本、结果表、统计与结论",
-        "sections": ["plan", "method", "results", "statistics", "conclusion", "approval"],
+        "name": "结果摘要", "version": "1.1",
+        "description": "给项目方看的短报告：方案、流程版本、分批情况、结果表、统计与结论",
+        "sections": ["plan", "method", "batches", "results", "statistics", "conclusion", "approval"],
     },
     "audit": {
-        "name": "质量审计报告", "version": "1.0",
-        "description": "给 QA / 审计：流程与 SOP 版本、仪器与校准、执行与异常、完整操作记录、数据标记与原始文件",
-        "sections": ["method", "samples", "instruments", "execution", "operation_log", "exclusions",
+        "name": "质量审计报告", "version": "1.1",
+        "description": "给 QA / 审计：流程与 SOP 版本、仪器与校准、分批情况、执行与异常、完整操作记录、数据标记与原始文件",
+        "sections": ["method", "samples", "batches", "instruments", "execution", "operation_log", "exclusions",
                      "data_flags", "raw_files", "conclusion", "approval"],
     },
 }

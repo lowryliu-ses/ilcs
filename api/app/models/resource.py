@@ -108,6 +108,9 @@ class Station(Base):
     status: Mapped[str] = mapped_column(String, default="idle")
     # 并行通道数（如 8 通道充放电柜）。排程按它允许同一工位的时间窗重叠
     channels: Mapped[int] = mapped_column(Integer, default=1)
+    # 通道怎么计：batch 一个批次的一个设备步骤占 1 个；sample 批次里每个样本各占 1 个
+    # （一颗电芯占一个物理通道的充放电柜）。排程、写入守门、投递与资产容量都按同一口径数份数
+    channel_unit: Mapped[str] = mapped_column(String, default="batch")
     clean: Mapped[bool] = mapped_column(Boolean, default=True)
     # 待清洗时是哪个批次用过它：同一批次的后续步骤可以接着用，别的批次要等清洗确认
     dirty_batch_id: Mapped[str] = mapped_column(String, default="")

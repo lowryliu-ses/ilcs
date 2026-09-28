@@ -10,9 +10,11 @@ class StationSpec:
     id: str
     status: str = "idle"
     clean: bool = True
-    # 并行通道数：同一时刻能同时承接几个批次的设备步骤。一个批次的一个设备步骤占 1 个，
-    # 与批次里有几个样本无关
+    # 并行通道数。按批计（缺省）：同一时刻能同时承接几个批次的设备步骤，一个批次的一个设备步骤占 1 个，
+    # 与批次里有几个样本无关。按样本计（per_sample，一颗电芯占一个物理通道的充放电柜）：批次里每个样本
+    # 各占 1 个，8 通道的柜子同时只能跑 8 颗——一批 8 颗，或一批 5 颗加一批 3 颗
     channels: int = 1
+    per_sample: bool = False
     limits: dict[str, dict[str, list[float]]] = field(default_factory=dict)
     retired: bool = False
     # 一台资产可映射多个工位；容量约束按资产算，不按工位 ID 算

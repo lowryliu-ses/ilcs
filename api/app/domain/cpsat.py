@@ -6,7 +6,7 @@
 模型（时间单位：分钟，整数）：
 - 每个步骤一个区间；需要工位的步骤在各候选工位上各有一个可选区间，恰好选一个。
 - 工位并行通道：每台工位一个累积约束，容量 = 通道数；已有占用（别的批次、维护、校准）
-  作为固定区间计入。
+  作为固定区间计入。按样本计通道的工位上，一个批次的区间需求是它的样本数，其余为 1。
 - 依赖图：后继开始 ≥ 前驱结束；前后两个设备步骤落在不同工位时再加转运时长。
 - 硬时限：开始 − 最晚前驱结束 ≤ maxGapMin。
 - 任务依赖：上游批次全部结束后，下游批次的步骤才能开始；所选之外的上游给出下游的最早开工时刻。
@@ -43,6 +43,8 @@ class JobSpec:
     batch_id: str
     steps: tuple[StepSpec, ...]
     weight: int = 1
+    # 批次的样本数：在按样本计通道的工位（`solve` 的 per_sample）上，它的每个区间占这么多份
+    samples: int = 1
 
 
 @dataclass
@@ -60,24 +62,27 @@ class Solution:
 def solve(
     jobs: list[JobSpec],
     channels: dict[str, int],
-    busy: dict[str, list[tuple[int, int]]],
+    busy: dict[str, list[tuple[int, ...]]],
     *,
     transfer_min: int = 10,
     time_limit_sec: float = 5.0,
     workers: int = 4,
     precedence: list[tuple[str, str]] | None = None,
     release: dict[str, int] | None = None,
+    per_sample: set[str] | frozenset[str] = frozenset(),
 ) -> Solution:
+    """`busy` 的每一项是 (开始, 结束) 或 (开始, 结束, 份数)。"""
     from ortools.sat.python import cp_model
 
     model = cp_model.CpModel()
     horizon = sum(step.duration + transfer_min for job in jobs for step in job.steps)
-    horizon += max((end for rows in busy.values() for _, end in rows), default=0) + 1
+    horizon += max((row[1] for rows in busy.values() for row in rows), default=0) + 1
     horizon += max((release or {}).values(), default=0)
     starts: dict[tuple[str, int], cp_model.IntVar] = {}
     ends: dict[tuple[str, int], cp_model.IntVar] = {}
     choice: dict[tuple[str, int], dict[str, cp_model.IntVar]] = {}
     per_station: dict[str, list] = {station: [] for station in channels}
+    demands: dict[str, list[int]] = {station: [] for station in channels}
 
     for job in jobs:
         for step in job.steps:
@@ -94,18 +99,25 @@ def solve(
                         start, step.duration, end, literal, f"i_{job.batch_id}_{step.index}_{station}"
                     )
                     per_station.setdefault(station, []).append(interval)
+                    demands.setdefault(station, []).append(
+                        max(1, int(job.samples or 1)) if station in per_sample else 1
+                    )
                     literals[station] = literal
                 model.AddExactlyOne(literals.values())
                 choice[key] = literals
 
     for station, intervals in per_station.items():
-        fixed = [
-            model.NewIntervalVar(begin, end - begin, end, f"busy_{station}_{number}")
-            for number, (begin, end) in enumerate(busy.get(station, [])) if end > begin
-        ]
+        fixed, fixed_demand = [], []
+        for number, row in enumerate(busy.get(station, [])):
+            begin, end = row[0], row[1]
+            if end > begin:
+                fixed.append(model.NewIntervalVar(begin, end - begin, end, f"busy_{station}_{number}"))
+                fixed_demand.append(max(1, int(row[2])) if len(row) > 2 else 1)
         items = intervals + fixed
         if items:
-            model.AddCumulative(items, [1] * len(items), max(1, channels.get(station, 1)))
+            model.AddCumulative(
+                items, demands.get(station, [1] * len(intervals)) + fixed_demand, max(1, channels.get(station, 1)),
+            )
 
     completions = []
     for job in jobs:

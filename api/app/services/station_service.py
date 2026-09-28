@@ -73,6 +73,7 @@ class StationService:
                     ),
                     "status": station.status,
                     "channels": station.channels or 1,
+                    "channel_unit": station.channel_unit or "batch",
                     "clean": station.clean,
                     "dirty_batch_id": station.dirty_batch_id,
                     "limits": station.limits,
@@ -387,6 +388,7 @@ class StationService:
             island=payload.get("island", 0), name=payload["name"],
             model=payload.get("model", ""), status="idle",
             channels=max(1, int(payload.get("channels") or 1)),
+            channel_unit=payload.get("channel_unit") or "batch",
             clean=True, limits=payload.get("limits") or {},
         )
         model_note = ""
@@ -570,7 +572,7 @@ class StationService:
         """
         station = self._require_station(station_id)
         self.stations.check_version(station, changes.pop("row_version", None), "工位")
-        allowed = {"name", "model", "island", "channels", "asset_id"}
+        allowed = {"name", "model", "island", "channels", "channel_unit", "asset_id"}
         rejected = [k for k in changes if k not in allowed]
         if rejected:
             raise DomainError(f"这些字段不能在这里修改：{'、'.join(rejected)}；能力极限请用极限编辑并签名")
@@ -591,6 +593,15 @@ class StationService:
             self._require_channels_fit(
                 station.id, int(changes.get("channels", station.channels) or 1), asset_id,
             )
+        if "channel_unit" in changes:
+            if changes["channel_unit"] not in {"batch", "sample"}:
+                raise DomainError("通道计法只能是 batch（按批次）或 sample（按样本）")
+            if changes["channel_unit"] != (station.channel_unit or "batch") and self._open_allocation_count(station.id):
+                # 已排的时间窗是按原来的计法算的份数：换计法会让它们和新排的对不上
+                raise StateConflict(
+                    f"工位 {station.id} 上还有未结束批次的时间窗，改通道计法前请先让它们结束，或取消排程后按新计法重排",
+                    code="station_has_open_allocations",
+                )
         previous = (
             AssetRepository(self.db, self.ctx).get(station.asset_id)
             if "asset_id" in changes and station.asset_id and station.asset_id != asset_id else None

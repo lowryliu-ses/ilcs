@@ -69,7 +69,8 @@ class StationRepository(ScopedRepository[Station]):
         return [
             StationSpec(
                 id=s.id, status=s.status, clean=s.clean,
-                channels=s.channels or 1, limits=s.limits or {}, retired=s.retired,
+                channels=s.channels or 1, per_sample=(s.channel_unit or "batch") == "sample",
+                limits=s.limits or {}, retired=s.retired,
                 asset_id=s.asset_id or "", model=station_model(s, assets.get(s.asset_id)),
                 programs=tuple(
                     str(row.get("program")) for row in (getattr(adapters.get(s.id), "methods", None) or [])

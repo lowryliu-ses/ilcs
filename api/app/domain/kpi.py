@@ -1,7 +1,8 @@
 """运行指标的统一口径。纯函数：输入区间与记录，输出数字。
 
-- **设备利用率** = 统计窗口内设备实际在执行指令的时长 ÷（窗口时长 × 并行通道数）。「在执行」按指令
-  被设备接受到给出结论的区间算，不按排程时间窗算——排程是计划，利用率要的是实际。计划负荷另算。
+- **设备利用率** = 统计窗口内设备实际在执行指令的时长 × 占的通道份数 ÷（窗口时长 × 并行通道数）。「在执行」按指令
+  被设备接受到给出结论的区间算，不按排程时间窗算——排程是计划，利用率要的是实际。计划负荷另算。按样本计
+  通道的工位上一条动作占它的样本数那么多份。
 - **自动化成功率** = 窗口内完成的批次里，全程没有人工介入的比例。人工介入：人请求保持、恢复评估、
   结果未知指令的现场核查、人工跳过、从指定节点重做，或留下了需要人处理的异常（自动处理成功的不算）。
 - **平均恢复时长（MTTR）** = 窗口内已恢复的异常，从登记到恢复的平均分钟数。
@@ -21,6 +22,8 @@ INTERVENTION_PREFIXES = ("恢复：",)
 class Span:
     start: datetime
     end: datetime
+    # 占几份通道：按样本计通道的工位上一条动作占它的样本数，其余 1 份
+    units: int = 1
 
 
 def clipped_minutes(spans: list[Span], window_start: datetime, window_end: datetime) -> float:
@@ -30,7 +33,7 @@ def clipped_minutes(spans: list[Span], window_start: datetime, window_end: datet
         start = max(span.start, window_start)
         end = min(span.end, window_end)
         if end > start:
-            total += (end - start).total_seconds() / 60
+            total += (end - start).total_seconds() / 60 * max(1, span.units)
     return total
 
 

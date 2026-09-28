@@ -59,17 +59,30 @@ def conditions(factors: list[dict], control: dict | None, points: list | None = 
 
 def layout(
     factors: list[dict], control: dict | None, repeats: int, plate: int, style: str, seed: int,
-    points: list | None = None,
+    points: list | None = None, *, repeat_offset: int = 0, groups: dict[str, int] | None = None,
 ) -> list[WellAssignment]:
-    items = [
-        (condition, repeat + 1)
-        for condition in conditions(factors, control, points)
-        for repeat in range(max(1, repeats))
-    ]
+    """孔位布局。
+
+    跨批执行时每批是一个完整区组（全部条件 × 本批的重复次数）：`repeat_offset` 是本批第一个重复在全局的
+    序号偏移（第 2 批从第 5 次重复起编号，合并统计时重复号不撞车）；随机布局的种子同时加上它，各批的
+    孔位排布互不相同，重放照样一致。`groups` 给了就只排这些条件组、各排几次（补测）。
+    """
+    if groups:
+        items = [
+            (condition, repeat_offset + repeat + 1)
+            for condition in conditions(factors, control, points)
+            for repeat in range(max(0, int(groups.get(condition.group, 0) or 0)))
+        ]
+    else:
+        items = [
+            (condition, repeat_offset + repeat + 1)
+            for condition in conditions(factors, control, points)
+            for repeat in range(max(1, repeats))
+        ]
     wells = well_grid(plate)
     order = list(range(len(wells)))
     if style == "randomized":
-        nxt = seeded(seed)
+        nxt = seeded(seed + repeat_offset)
         for index in range(len(order) - 1, 0, -1):
             swap = int(nxt() * (index + 1))
             order[index], order[swap] = order[swap], order[index]

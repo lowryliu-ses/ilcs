@@ -23,6 +23,8 @@ ASSIST = "assist"
 class Interval:
     start: datetime
     end: datetime
+    # 这段占用在工位（与所属资产）上占几份：按样本计通道的工位是批次的样本数，其余为 1
+    units: int = 1
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,12 @@ class PlannedAllocation:
     starts_at: datetime
     ends_at: datetime
     kind: str = WORK
+    units: int = 1
+
+
+def units_on(spec: StationSpec | None, samples: int) -> int:
+    """一个批次的一段占用在这个工位上占几份通道：按样本计的工位是样本数，其余 1 份。"""
+    return max(1, int(samples or 1)) if spec is not None and spec.per_sample else 1
 
 
 @dataclass
@@ -64,26 +72,36 @@ class SchedulingError(Exception):
         self.step_index = step_index
 
 
-def _channels(context: SchedulingContext, station_id: str) -> int:
-    """工位并行通道数：同一时刻能同时承接几个批次（充放电柜按通道）。默认 1。
+def _spec(context: SchedulingContext, station_id: str) -> StationSpec | None:
+    return next((s for s in context.stations if s.id == station_id), None)
 
-    不是样品位——样品位是一个批次最多放几个样本，和能不能同时跑两个批次无关。
+
+def _channels(context: SchedulingContext, station_id: str) -> int:
+    """工位并行通道数：同一时刻能同时承接几份（按批计是几个批次，按样本计是几个样本）。默认 1。
+
+    不是样品位——样品位是一个批次最多放几个样本；按批计通道时它和能不能同时跑两个批次无关。
     """
-    spec = next((s for s in context.stations if s.id == station_id), None)
+    spec = _spec(context, station_id)
     return max(1, int(spec.channels)) if spec is not None and spec.channels else 1
 
 
-def _station_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
-    """工位上同时进行的时间窗少于并行容量的最早时刻。
+def _station_free(
+    context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta, units: int = 1,
+) -> datetime:
+    """工位上同时压着的份数加上这一段要的份数不超过并行容量的最早时刻。
 
-    重叠数按落在窗口里的区间直接计数，是并发量的上界：宁可多等，也不把通道排超。
+    份数按落在窗口里的区间直接累加，是并发量的上界：宁可多等，也不把通道排超。
     """
     channels = _channels(context, station_id)
+    if units > channels:
+        raise SchedulingError(
+            f"{station_id} 按样本计通道：这一批 {units} 个样本，工位只有 {channels} 个通道，一次放不下", -1,
+        )
     intervals = sorted(context.busy.get(station_id, []), key=lambda i: i.start)
     cursor = not_before
     for _ in range(10_000):
         overlapping = [i for i in intervals if i.start < cursor + duration and i.end > cursor]
-        if len(overlapping) < channels:
+        if sum(i.units for i in overlapping) + units <= channels:
             return cursor
         cursor = min(i.end for i in overlapping)
     raise SchedulingError(f"{station_id} 在可见时间范围内没有空闲通道", -1)
@@ -115,7 +133,7 @@ def _asset_load(context: SchedulingContext, asset_id: str, window: Interval):
     for station_id, mapped in context.station_asset.items():
         if mapped != asset_id:
             continue
-        occupied.extend((interval, 1) for interval in context.busy.get(station_id, []))
+        occupied.extend((interval, interval.units) for interval in context.busy.get(station_id, []))
     ends = [
         interval.end for interval, _ in occupied
         if interval.start < window.end and interval.end > window.start
@@ -123,17 +141,23 @@ def _asset_load(context: SchedulingContext, asset_id: str, window: Interval):
     return peak_load(occupied, window), (min(ends) if ends else None)
 
 
-def earliest_free(context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta) -> datetime:
-    """工位本身空闲，且所属资产在整段时间内还有余量的最早开工时刻。"""
+def earliest_free(
+    context: SchedulingContext, station_id: str, not_before: datetime, duration: timedelta, units: int = 1,
+) -> datetime:
+    """工位本身空闲，且所属资产在整段时间内还有余量的最早开工时刻。`units` 是这一段要占的份数。"""
     cursor = not_before
     asset_id = context.station_asset.get(station_id)
     for _ in range(1000):
-        cursor = _station_free(context, station_id, cursor, duration)
+        cursor = _station_free(context, station_id, cursor, duration, units)
         if not asset_id:
             return cursor
         capacity = max(1, context.asset_capacity.get(asset_id, 1))
+        if units > capacity:
+            raise SchedulingError(
+                f"{station_id} 所属资产容量 {capacity}，这一批要占 {units} 份，一次放不下", -1,
+            )
         load, first_end = _asset_load(context, asset_id, Interval(cursor, cursor + duration))
-        if load + 1 <= capacity or first_end is None:
+        if load + units <= capacity or first_end is None:
             return cursor
         cursor = max(first_end, cursor + timedelta(seconds=1))
     raise SchedulingError(f"{station_id} 所属资产在可见时间范围内没有余量", -1)
@@ -141,14 +165,23 @@ def earliest_free(context: SchedulingContext, station_id: str, not_before: datet
 
 def _occupy(context: SchedulingContext, allocation: PlannedAllocation) -> None:
     context.busy.setdefault(allocation.station_id, []).append(
-        Interval(allocation.starts_at, allocation.ends_at)
+        Interval(allocation.starts_at, allocation.ends_at, allocation.units)
     )
 
 
-def _candidates(context: SchedulingContext, step: dict[str, Any], index: int) -> list[StationSpec]:
+def _candidates(context: SchedulingContext, step: dict[str, Any], index: int, samples: int = 1) -> list[StationSpec]:
     able = [s for s in context.stations if station_fits(s, step)]
     if not able:
         raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」没有可承接工位", index)
+    # 按样本计通道的工位：一批的样本数超过它的通道数就永远排不上，不当作候选
+    narrow = [s for s in able if units_on(s, samples) > max(1, int(s.channels or 1))]
+    able = [s for s in able if s not in narrow]
+    if not able:
+        raise SchedulingError(
+            f"第 {index + 1} 步「{step.get('name')}」无可执行工位："
+            + "；".join(f"{s.id} 按样本计通道，只有 {s.channels} 个，放不下这一批 {samples} 个样本" for s in narrow),
+            index,
+        )
     usable = [
         s for s in able
         if s.healthy and (context.allow_unclean or s.clean)
@@ -192,7 +225,7 @@ def _assist_candidates(
 
 def _with_assists(
     context: SchedulingContext, step: dict[str, Any], index: int, main: StationSpec, begin: datetime,
-    duration: timedelta, main_span: timedelta | None = None,
+    duration: timedelta, main_span: timedelta | None = None, samples: int = 1,
 ) -> tuple[datetime, list[StationSpec]]:
     """主设备与每种协同资源在同一时段都空着的最早时刻，以及选中的协同工位。
 
@@ -208,9 +241,9 @@ def _with_assists(
     for _ in range(500):
         chosen: list[StationSpec] = []
         latest = begin
-        slot = Interval(begin, begin + duration)
-        tentative = [main.id]
-        context.busy.setdefault(main.id, []).append(slot)
+        main_slot = Interval(begin, begin + duration, units_on(main, samples))
+        tentative: list[tuple[str, Interval]] = [(main.id, main_slot)]
+        context.busy.setdefault(main.id, []).append(main_slot)
         try:
             for capability, stations in options.items():
                 free = [s for s in stations if s.id not in {c.id for c in chosen}]
@@ -218,26 +251,31 @@ def _with_assists(
                     raise SchedulingError(
                         f"第 {index + 1} 步「{step.get('name')}」的协同资源 {capability} 没有另一台可用工位", index,
                     )
-                when, station = min(((earliest_free(context, s.id, begin, duration), s) for s in free),
-                                    key=lambda pair: (pair[0], pair[1].id))
+                when, station = min(
+                    ((earliest_free(context, s.id, begin, duration, units_on(s, samples)), s) for s in free),
+                    key=lambda pair: (pair[0], pair[1].id),
+                )
                 chosen.append(station)
                 latest = max(latest, when)
+                slot = Interval(begin, begin + duration, units_on(station, samples))
                 context.busy.setdefault(station.id, []).append(slot)
-                tentative.append(station.id)
+                tentative.append((station.id, slot))
         finally:
-            for station_id in tentative:
+            for station_id, slot in tentative:
                 context.busy[station_id].remove(slot)
         if latest == begin:
             return begin, chosen
-        begin = earliest_free(context, main.id, latest, main_span or duration)
+        begin = earliest_free(context, main.id, latest, main_span or duration, units_on(main, samples))
     raise SchedulingError(
         f"第 {index + 1} 步「{step.get('name')}」主设备与协同资源在可见时间范围内凑不到同一时段", index,
     )
 
 
-def candidate_station_ids(context: SchedulingContext, step: dict[str, Any], index: int) -> list[str]:
-    """这一步当前可以排上去的工位（能力、参数范围、健康、清洗、保持、可用性都过了）。"""
-    return [station.id for station in _candidates(context, step, index)]
+def candidate_station_ids(
+    context: SchedulingContext, step: dict[str, Any], index: int, samples: int = 1,
+) -> list[str]:
+    """这一步当前可以排上去的工位（能力、参数范围、健康、清洗、保持、可用性、按样本计的通道数都过了）。"""
+    return [station.id for station in _candidates(context, step, index, samples)]
 
 
 def plan_steps(
@@ -248,8 +286,11 @@ def plan_steps(
     frozen: Collection[int] = (), known_ends: dict[int, datetime] | None = None,
     known_where: dict[int, str | None] | None = None,
     plate_state: dict[str, tuple[datetime, str]] | None = None,
+    samples: int = 1,
 ) -> list[PlannedAllocation]:
     """按步骤资源需求排程。
+
+    `samples` 是这个批次的样本数：按样本计通道的工位上，一段时间窗占这么多份通道（与资产容量）。
 
     人工、等待、审核节点不占工位（除非显式声明），但它们的时长照样往后推时间线——
     否则下游设备步骤会被排到一个「上一步还没做完」的时刻。
@@ -330,7 +371,7 @@ def plan_steps(
             ends[index] = max(previous_end, not_before) + duration
             where[index] = previous_station
             continue
-        candidates = _candidates(context, step, index)
+        candidates = _candidates(context, step, index, samples)
         # 硬时限从前驱结束起算；独占载具时开工还要等板从上一次设备动作上空出来，并从那台设备搬过来
         gap_from = previous_end
         ready_from = previous_end
@@ -351,6 +392,7 @@ def plan_steps(
                 excluded.append(invalid)
                 continue
             needs_transfer = previous_station is not None and station.id != previous_station
+            station_units = units_on(station, samples)
             ready_at = max(
                 not_before,
                 ready_from + (timedelta(minutes=context.transfer_min) if needs_transfer else timedelta()),
@@ -364,12 +406,12 @@ def plan_steps(
                 probe = [row for row in busy if not (row.start == clean.starts_at and row.end == clean.ends_at)]
                 context.busy[station.id] = probe
                 try:
-                    begin = earliest_free(context, station.id, ready_at, duration + clean_span)
+                    begin = earliest_free(context, station.id, ready_at, duration + clean_span, station_units)
                 finally:
                     context.busy[station.id] = busy
                 takeover = begin < clean.ends_at
             if not takeover:
-                begin = earliest_free(context, station.id, ready_at, duration + clean_span)
+                begin = earliest_free(context, station.id, ready_at, duration + clean_span, station_units)
             expiry = context.calibration_expiry.get((station.id, capability))
             if expiry is not None and begin + duration > expiry:
                 excluded.append(f"{station.id} 的校准 {expiry:%m-%d %H:%M} 到期，覆盖不了最早可开工的时段")
@@ -382,6 +424,7 @@ def plan_steps(
                 f"第 {index + 1} 步「{step.get('name')}」无可执行工位：{'；'.join(excluded)}", index,
             )
         begin, station, needs_transfer, takeover = best
+        station_units = units_on(station, samples)
         if takeover:
             _drop_clean(station.id)
 
@@ -397,11 +440,13 @@ def plan_steps(
             _occupy(context, transfer)
             # 设备工作开始不得早于实际转运完成：不是画面上画一个区间就算（清洗窗口一样要空着）
             if transfer.ends_at > begin:
-                begin = earliest_free(context, station.id, transfer.ends_at, duration + clean_span)
+                begin = earliest_free(context, station.id, transfer.ends_at, duration + clean_span, station_units)
 
         helpers: list[StationSpec] = []
         if assist_capabilities(step):
-            begin, helpers = _with_assists(context, step, index, station, begin, duration, duration + clean_span)
+            begin, helpers = _with_assists(
+                context, step, index, station, begin, duration, duration + clean_span, samples,
+            )
 
         # 硬时限必须在转运把开工时间往后推之后再判：先判后推会放过转运车忙导致的超时
         hard = step.get("hard") or {}
@@ -414,16 +459,18 @@ def plan_steps(
                     index,
                 )
 
-        work = PlannedAllocation(index, station.id, begin, begin + duration, WORK)
+        work = PlannedAllocation(index, station.id, begin, begin + duration, WORK, station_units)
         allocations.append(work)
         _occupy(context, work)
         for helper in helpers:
-            assist = PlannedAllocation(index, helper.id, begin, begin + duration, ASSIST)
+            assist = PlannedAllocation(index, helper.id, begin, begin + duration, ASSIST, units_on(helper, samples))
             allocations.append(assist)
             _occupy(context, assist)
 
         if context.clean_min:
-            clean = PlannedAllocation(index, station.id, work.ends_at, work.ends_at + clean_span, CLEAN)
+            clean = PlannedAllocation(
+                index, station.id, work.ends_at, work.ends_at + clean_span, CLEAN, station_units,
+            )
             allocations.append(clean)
             _occupy(context, clean)
             pending_clean[station.id] = (clean, index)

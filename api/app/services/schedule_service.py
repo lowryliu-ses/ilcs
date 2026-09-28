@@ -97,6 +97,12 @@ class ScheduleService:
             )
         return busy
 
+    def samples_of(self, batch: Batch) -> int:
+        """这个批次在用的样本数：按样本计通道的工位上，它的每段时间窗占这么多份通道。"""
+        from ..repositories.batches import SampleRepository
+
+        return max(1, len(SampleRepository(self.db, self.ctx).active_for_batch(batch.id)))
+
     def carrier_roles(self, batch: Batch) -> set[str]:
         """批次绑定的载具角色：运行时同一块板一次只在一台设备上，排程也按这个排（空集合表示没绑定）。"""
         from .transfer_service import TransferService
@@ -428,7 +434,7 @@ class ScheduleService:
         try:
             planned = plan_steps(
                 steps, begin, self.context({batch.id}, prefer), step_ends=ends,
-                exclusive_carrier=self.carrier_roles(batch),
+                exclusive_carrier=self.carrier_roles(batch), samples=self.samples_of(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
@@ -441,7 +447,7 @@ class ScheduleService:
             Allocation(
                 batch_id=batch.id, step_index=item.step_index, station_id=item.station_id,
                 asset_id=asset_of_station.get(item.station_id, ""),
-                starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind,
+                starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind, units=item.units,
             )
             for item in planned
         ]
@@ -572,10 +578,14 @@ class ScheduleService:
             )
             if planned is not None:
                 existing = existing.filter(Allocation.batch_id != batch_id)
-            occupied = [(Interval(row.starts_at, row.ends_at), 1) for row in existing.all() if row.id not in ignore_ids]
+            occupied = [
+                (Interval(row.starts_at, row.ends_at), max(1, int(row.units or 1)))
+                for row in existing.all() if row.id not in ignore_ids
+            ]
             if planned is not None:
                 occupied += [
-                    (Interval(row.starts_at, row.ends_at), 1) for row in mine if station_asset[row.station_id] == asset_id
+                    (Interval(row.starts_at, row.ends_at), max(1, int(row.units or 1)))
+                    for row in mine if station_asset[row.station_id] == asset_id
                 ]
             for booking in self.db.query(ResourceBooking).filter(
                 ResourceBooking.asset_id == asset_id, ResourceBooking.state.in_(["pending", "confirmed"]),
@@ -601,7 +611,7 @@ class ScheduleService:
         try:
             planned = plan_steps(
                 steps, begin, self.context({batch.id}), step_ends=ends,
-                exclusive_carrier=self.carrier_roles(batch),
+                exclusive_carrier=self.carrier_roles(batch), samples=self.samples_of(batch),
             )
         except SchedulingError as error:
             return {"ok": False, "reason": error.message, "step_index": error.step_index, "path": []}
@@ -628,6 +638,7 @@ class ScheduleService:
             "step_name": (steps[item.step_index] or {}).get("name") if item.step_index < len(steps) else "",
             "station_id": item.station_id,
             "kind": item.kind,
+            "units": item.units,
             "starts_at": item.starts_at.isoformat(timespec="minutes"),
             "ends_at": item.ends_at.isoformat(timespec="minutes"),
         }
@@ -713,11 +724,14 @@ class ScheduleService:
         known_ends, known_where, plate_state = self._known_tail(batch, steps, frozen, protected)
         context = self.context({batch.id})
         for allocation in protected:
-            context.busy.setdefault(allocation.station_id, []).append(Interval(allocation.starts_at, allocation.ends_at))
+            context.busy.setdefault(allocation.station_id, []).append(
+                Interval(allocation.starts_at, allocation.ends_at, max(1, int(allocation.units or 1)))
+            )
         try:
             planned = plan_steps(
                 steps, now(), context, first_index=from_step, frozen=frozen, known_ends=known_ends,
                 known_where=known_where, plate_state=plate_state, exclusive_carrier=self.carrier_roles(batch),
+                samples=self.samples_of(batch),
             )
         except SchedulingError as error:
             self._roll_alarm(batch, f"{reason}后尾段重排不成立：{error.message}")
@@ -730,7 +744,7 @@ class ScheduleService:
                 Allocation(
                     batch_id=batch.id, step_index=item.step_index, station_id=item.station_id,
                     asset_id=asset_of_station.get(item.station_id, ""),
-                    starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind,
+                    starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind, units=item.units,
                 )
                 for item in planned
             ])
@@ -780,6 +794,7 @@ class ScheduleService:
                     "step_name": step.get("name"),
                     "step_kind": step.get("kind", "device"),
                     "kind": allocation.kind,
+                    "units": max(1, int(allocation.units or 1)),
                     "hard": step.get("hard"),
                     "starts_at": allocation.starts_at.isoformat(timespec="minutes"),
                     "ends_at": allocation.ends_at.isoformat(timespec="minutes"),
@@ -793,6 +808,7 @@ class ScheduleService:
             "stations": [
                 {
                     "id": station.id, "name": station.name, "island": station.island, "status": station.status,
+                    "channels": station.channels or 1, "channel_unit": station.channel_unit or "batch",
                     "held": station.id in held, "items": sorted(lanes.get(station.id, []), key=lambda i: i["starts_at"]),
                 }
                 for station in self.stations.list()
@@ -818,7 +834,8 @@ class ScheduleService:
 
         按开始时刻扫描：新区间开始时仍未结束的区间数已达工位通道数，就与这些区间逐一报重叠。
         单通道工位等价于「任意两段重叠即冲突」；多通道工位（充放电柜）允许重叠到通道数，
-        与领域排程 `_station_free` 用同一口径，否则排程算出来的合法结果会在写入前被拒绝。
+        与领域排程 `_station_free` 用同一口径，否则排程算出来的合法结果会在写入前被拒绝。按样本计通道的工位
+        上一段时间窗占它批次的样本数那么多份。
         """
         from ..models import Station
 
@@ -839,7 +856,8 @@ class ScheduleService:
             active: list[tuple[Allocation, str]] = []
             for second, second_org in pairs:
                 active = [pair for pair in active if pair[0].ends_at > second.starts_at]
-                if len(active) >= capacity:
+                # 份数：按样本计通道的工位上一段时间窗占它批次的样本数，其余 1 份
+                if sum(max(1, int(pair[0].units or 1)) for pair in active) + max(1, int(second.units or 1)) > capacity:
                     for first, first_org in active:
                         found.append(
                             {
@@ -899,6 +917,7 @@ class ScheduleService:
                 external_floor[b.id] = floor
 
         exclusive = {b.id: self.carrier_roles(b) for b in batches}
+        samples = {b.id: self.samples_of(b) for b in batches}
 
         def evaluate(order: tuple[str, ...]) -> optimizer.Candidate:
             """候选顺序共享一份工位时间线，先排的批次会占住资源，后排的只能往后挪。
@@ -917,7 +936,7 @@ class ScheduleService:
                 try:
                     plans[batch_id] = plan_steps(
                         steps_by_batch[batch_id], start_at, context, step_ends=ends,
-                        exclusive_carrier=exclusive[batch_id],
+                        exclusive_carrier=exclusive[batch_id], samples=samples[batch_id],
                     )
                 except SchedulingError as error:
                     return optimizer.Candidate(order, False, reason=f"{batch_id}: {error.message}")
@@ -1010,19 +1029,21 @@ class ScheduleService:
                 steps = steps_by_batch[batch.id]
                 before = predecessors(steps)
                 specs = []
+                samples = self.samples_of(batch)
                 for index, step in enumerate(steps):
-                    stations = tuple(candidate_station_ids(context, step, index)) if needs_station(step) else ()
+                    stations = tuple(candidate_station_ids(context, step, index, samples)) if needs_station(step) else ()
                     gap = (step.get("hard") or {}).get("maxGapMin")
                     specs.append(cpsat.StepSpec(
                         index=index, duration=max(0, round(float(step.get("dur") or 0))), stations=stations,
                         preds=tuple(before[index]), max_gap=round(float(gap)) if gap else None,
                     ))
-                jobs.append(cpsat.JobSpec(batch.id, tuple(specs), weight[batch.id]))
+                jobs.append(cpsat.JobSpec(batch.id, tuple(specs), weight[batch.id], samples))
         except SchedulingError as error:
             return {"status": "skipped", "reason": error.message}
         busy = {
             station_id: [
-                (max(0, round((i.start - begin).total_seconds() / 60)), max(0, round((i.end - begin).total_seconds() / 60)))
+                (max(0, round((i.start - begin).total_seconds() / 60)), max(0, round((i.end - begin).total_seconds() / 60)),
+                 i.units)
                 for i in intervals if i.end > begin
             ]
             for station_id, intervals in context.busy.items()
@@ -1030,6 +1051,7 @@ class ScheduleService:
         channels = {spec.id: max(1, int(spec.channels or 1)) for spec in context.stations}
         solution = cpsat.solve(
             jobs, channels, busy, transfer_min=settings.transfer_min,
+            per_sample={spec.id for spec in context.stations if spec.per_sample},
             time_limit_sec=settings.scheduler_cpsat_time_limit_sec,
             precedence=[(before, after) for after, refs in (upstream or {}).items() for before in refs],
             release={
@@ -1115,12 +1137,13 @@ class ScheduleService:
         context = self.context({batch.id})
         for allocation in protected:
             context.busy.setdefault(allocation.station_id, []).append(
-                Interval(allocation.starts_at, allocation.ends_at)
+                Interval(allocation.starts_at, allocation.ends_at, max(1, int(allocation.units or 1)))
             )
         try:
             planned = plan_steps(
                 steps, start_from, context, first_index=from_step, frozen=frozen, known_ends=known_ends,
                 known_where=known_where, plate_state=plate_state, exclusive_carrier=self.carrier_roles(batch),
+                samples=self.samples_of(batch),
             )
         except SchedulingError as error:
             raise StateConflict(error.message, {"step_index": error.step_index}) from error
@@ -1135,7 +1158,7 @@ class ScheduleService:
                     batch_id=batch.id, step_index=item.step_index,
                     station_id=item.station_id,
                     asset_id=asset_of_station.get(item.station_id, ""),
-                    starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind,
+                    starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind, units=item.units,
                 )
             )
         if self._replans_the_start(batch, steps, replan):
@@ -1352,6 +1375,7 @@ class ScheduleService:
             "step_index": allocation.step_index,
             "station_id": allocation.station_id,
             "kind": allocation.kind,
+            "units": max(1, int(allocation.units or 1)),
             "starts_at": allocation.starts_at.isoformat(timespec="minutes"),
             "ends_at": allocation.ends_at.isoformat(timespec="minutes"),
             "transfer": allocation.kind == TRANSFER,

@@ -99,12 +99,16 @@ class DashboardService:
             Command.updated_at >= start,
         ).all():
             finished = command.updated_at if command.state not in {"accepted", "running", "sent"} else moment
-            spans.setdefault(command.station_id, []).append(kpi.Span(command.started_at, finished))
+            spans.setdefault(command.station_id, []).append(
+                kpi.Span(command.started_at, finished, max(1, int(command.units or 1)))
+            )
         planned: dict[str, list[kpi.Span]] = {}
         for allocation in self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id).filter(
             Batch.org_id == org, Allocation.kind == "work", Allocation.ends_at >= start, Allocation.starts_at <= moment,
         ).all():
-            planned.setdefault(allocation.station_id, []).append(kpi.Span(allocation.starts_at, allocation.ends_at))
+            planned.setdefault(allocation.station_id, []).append(
+                kpi.Span(allocation.starts_at, allocation.ends_at, max(1, int(allocation.units or 1)))
+            )
         per_station = [
             {
                 "station_id": station_id, "name": station.name, "channels": station.channels or 1,

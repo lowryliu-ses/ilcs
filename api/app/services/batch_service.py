@@ -534,6 +534,37 @@ class BatchService:
         self, plan_id: str, priority: int, note: str, user: User, task_id: str = "",
     ) -> dict:
         """原子创建：冻结快照 → 预留物料 → 生成运行分配 → 绑定实验任务。任一步失败整体回滚。"""
+        batch = self._create(plan_id, priority, note, user, task_id)
+        self.db.commit()
+        return self.summary_out(batch)
+
+    def create_for_children(self, task_id: str, priority: int | None, note: str, user: User) -> dict:
+        """为父任务下还没建批次的子任务各建一个批次，一个事务：任何一个建不成（物料不足、流程失效）整体回滚。
+
+        建完照常排程；要一起排可以把这几个批次交给多批次优化。
+        """
+        from .task_service import TaskService
+
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise NotFound("实验任务不存在")
+        leaves = [
+            leaf for leaf, batch in TaskService(self.db, self.ctx).leaf_batches([task.id])
+            if batch is None and leaf.state != "cancelled" and leaf.id != task.id
+        ]
+        if not leaves:
+            raise StateConflict("没有需要建批次的子任务：子任务都已建批次或已取消", code="no_pending_children")
+        leaves.sort(key=lambda row: (row.purpose == "retest", int((row.portion or {}).get("offset") or 0), row.id))
+        created = []
+        for leaf in leaves:
+            try:
+                created.append(self._create(leaf.plan_id, priority or leaf.priority, note, user, leaf.id))
+            except (StateConflict, ValidationFailed, NotFound) as error:
+                raise type(error)(f"子任务 {leaf.id}：{error.message}", error.detail, error.code) from error
+        self.db.commit()
+        return {"task_id": task.id, "batches": [self.summary_out(batch) for batch in created]}
+
+    def _create(self, plan_id: str, priority: int, note: str, user: User, task_id: str = "") -> Batch:
         if not self.ctx.has("batch.create"):
             raise PermissionDenied("当前角色不能创建批次")
         plan = self.plans.get(plan_id)
@@ -597,6 +628,17 @@ class BatchService:
             raise NotFound("流程不存在")
         if recipe.state != "released" or recipe.needs_revision:
             raise StateConflict("只能从有效的已发布流程创建批次")
+        # 容量是每一批的约束：一批放不下就先拆成子任务，每个子任务一个批次（先于物料预留判）
+        wanted = self.planned_rows(content, task)
+        plate = int(recipe.plate or 0)
+        if wanted > plate:
+            raise StateConflict(
+                (f"任务 {task.id} 有 {wanted} 个样本，超过流程每批 {plate} 个样品位：请先把任务拆分为子任务，每个子任务一个批次"
+                 if task is not None else
+                 f"方案共 {wanted} 个样本，超过流程每批 {plate} 个样品位：请先建立实验任务，系统会按每批容量拆成子任务"),
+                {"blocked": [{"key": "capacity", "label": f"{wanted} 个样本 > 每批 {plate} 位"}]},
+                code="batch_over_capacity",
+            )
         # 新批次按流程所关联 SOP 的当前生效版本执行；没有生效版本就不建（先于物料预留判）
         sop_version = self.sops.resolve_for_new_batch(recipe.sop_version_id) if recipe.sop_version_id else None
         if sop_version is not None:
@@ -631,7 +673,7 @@ class BatchService:
         bom = batch.recipe_snapshot.get("bom") or []
         if bom:
             self.materials.reserve_for_batch(batch.id, bom, user)
-        rows = self._generate_samples(batch, content, task.sample_ids if task is not None else None)
+        rows = self._generate_samples(batch, content, task)
         if content.plan_type == "matrix":
             from ..domain.matrix import condition_params
 
@@ -650,12 +692,28 @@ class BatchService:
             detail=(
                 f"{recipe.id} v{recipe.version} 快照冻结；方案 {plan.id} v{batch.plan_version}；"
                 f"{len(self.samples.for_batch(batch.id))} 个运行分配；任务 {task.id}"
+                + (f"（{task_service.part_label(task.portion, len(rows), content.plan_type == 'matrix')}）"
+                   if task.portion else "")
                 + (f"；SOP {batch.sop_snapshot.get('code')} {batch.sop_snapshot.get('version')}"
                    if batch.sop_snapshot else "")
             ),
         )
-        self.db.commit()
-        return self.summary_out(batch)
+        self.db.flush()
+        return batch
+
+    @staticmethod
+    def planned_rows(content, task=None) -> int:
+        """这个批次会生成几个运行分配：任务的样本清单或份额，否则按方案整体。建批次前按它核对容量。"""
+        from ..domain.matrix import conditions as matrix_conditions
+
+        portion = (task.portion if task is not None else None) or {}
+        if content.plan_type == "matrix":
+            if portion.get("groups"):
+                return sum(int(count or 0) for count in portion["groups"].values())
+            groups = matrix_conditions(content.factors or [], content.control, content.design_points or None)
+            return len(groups) * max(1, int(portion.get("repeats") or content.repeats or 1))
+        listed = list((task.sample_ids if task is not None else None) or content.sample_ids or [])
+        return len(listed) or int(portion.get("count") or 0) or int(content.sample_count or 0)
 
     def _require_sop_scope(self, version, steps: list[dict], prefix: str) -> None:
         from ..domain.sop_steps import scope_outside
@@ -795,23 +853,27 @@ class BatchService:
             }
         )
 
-    def _generate_samples(self, batch: Batch, plan, task_samples: list[str] | None = None) -> list[dict]:
+    def _generate_samples(self, batch: Batch, plan, task=None) -> list[dict]:
         """生成运行分配。
 
         矩阵方案按孔位布局生成；单条件与委托方案按样本清单或样本数生成——任务自己带了样本清单
-        （例如拆分出来的子任务）就用任务的，否则用方案的。
+        （例如拆分出来的子任务）就用任务的，否则用方案的。拆分出来的子任务带份额（`portion`）：按数量拆的
+        生成本份那么多个，矩阵按重复拆的是全部条件 × 本份的重复次数，补测只排缺样本的条件组；重复号与
+        样本序号按全局偏移编号，合并统计时不撞车。
         每个分配都指向一个物理样本——清单里给了就用它，否则登记一个新的。
         """
         sample_service = SampleService(self.db, self.ctx)
         container_id = container_of(batch.id)
         plan_type = plan.plan_type
         digits = batch.id.replace("B-", "").replace("-", "")
+        portion = (task.portion if task is not None else None) or {}
+        offset = int(portion.get("offset") or 0)
 
         if plan_type == "matrix":
             assignments = well_layout(
-                plan.factors or [], plan.control, plan.repeats,
+                plan.factors or [], plan.control, int(portion.get("repeats") or plan.repeats),
                 batch.recipe_snapshot.get("plate", 0), plan.layout, plan.seed,
-                plan.design_points or None,
+                plan.design_points or None, repeat_offset=offset, groups=portion.get("groups") or None,
             )
             rows = [
                 {
@@ -821,15 +883,15 @@ class BatchService:
                 for a in assignments
             ]
         else:
-            listed = list(task_samples or plan.sample_ids or [])
-            count = len(listed) or plan.sample_count
+            listed = list((task.sample_ids if task is not None else None) or plan.sample_ids or [])
+            count = len(listed) or int(portion.get("count") or 0) or plan.sample_count
             from ..domain.matrix import well_grid
 
             wells = well_grid(max(count, 1))
             rows = [
                 {
                     "well": wells[index] if index < len(wells) else f"P{index + 1}",
-                    "group": "C01", "label": "单一条件", "repeat": index + 1, "levels": [],
+                    "group": "C01", "label": "单一条件", "repeat": offset + index + 1, "levels": [],
                     "is_control": False,
                     "physical_id": listed[index] if index < len(listed) else "",
                 }
@@ -1190,6 +1252,15 @@ class BatchService:
             row.station_id for row in self.allocations.for_batch(batch.id)
             if row.step_index == step_index and row.kind == "assist"
         ] if command_type in DISPATCHING and capability is None else []
+        # 按样本计通道的工位：这条动作占在用样本数那么多份通道（执行器按它数占用）
+        units, per_sample_station = 1, None
+        if command_type in DISPATCHING and capability is None and target_station:
+            from ..models import Station
+
+            station_row = self.db.get(Station, target_station)
+            if station_row is not None and (station_row.channel_unit or "batch") == "sample":
+                per_sample_station = station_row
+                units = max(1, len(self.samples.active_for_batch(batch.id)))
         command = Command(
             org_id=batch.org_id or self.ctx.org_id,
             batch_id=batch.id,
@@ -1206,9 +1277,17 @@ class BatchService:
             not_before=not_before,
             target_command_id=target_command_id,
             assist_station_ids=assist_ids,
+            units=units,
         )
         self.db.add(command)
         self.db.flush()
+        if per_sample_station is not None and units > max(1, int(per_sample_station.channels or 1)):
+            self._refuse_unsent(
+                batch, command,
+                f"工位 {per_sample_station.id} 按样本计通道，只有 {per_sample_station.channels} 个通道，"
+                f"这一批在用 {units} 个样本放不下：请改排到通道够的工位",
+            )
+            return command
         if command_type in DISPATCHING and capability is None and assist_capabilities(step) and not assist_ids:
             self._refuse_unsent(
                 batch, command,

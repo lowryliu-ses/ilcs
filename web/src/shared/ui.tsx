@@ -21,6 +21,8 @@ const STATE_CLASS: Record<string, string> = {
   paused: 'paused', held: 'paused', shelved: 'paused', suspect: 'paused', manual: 'paused',
   waiting: 'paused', maybe_sent: 'paused', leave: 'paused', expiring: 'paused',
   stored: 'paused', maintenance: 'paused',
+  // 父任务：子任务都跑完了但样本有短缺，要补测或签名放弃
+  shortfall: 'paused',
   // 故障、无效、被拒
   fault: 'fault', failed: 'fault', unknown: 'fault', invalid: 'fault', active: 'fault',
   rejected: 'fault', expired: 'fault', revoked: 'fault', unreachable: 'fault',

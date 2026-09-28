@@ -141,7 +141,9 @@ class RescheduleService:
             # 全部步骤都已开出的批次也要压进时间线：context 排除了全部受影响批次，不压回去，
             # 别的批次会被排到它正在运行的时间窗上
             for row in protected:
-                context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
+                context.busy.setdefault(row.station_id, []).append(
+                    Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
+                )
             if not replan:
                 continue
             plans[batch_id] = (steps, replan, protected)
@@ -159,25 +161,32 @@ class RescheduleService:
             begin = max(candidates)
             ends: dict = {}
             exclusive = self.schedule.carrier_roles(batch)
+            samples = self.schedule.samples_of(batch)
             try:
                 if len(replan) == len(steps):
-                    planned = plan_steps(steps, begin, context, step_ends=ends, exclusive_carrier=exclusive)
+                    planned = plan_steps(
+                        steps, begin, context, step_ends=ends, exclusive_carrier=exclusive, samples=samples,
+                    )
                 else:
                     keep = {index for index in range(len(steps)) if index not in replan}
                     known_ends, known_where, plate_state = self.schedule._known_tail(batch, steps, keep, protected)
                     planned = plan_steps(
                         steps, begin, context, first_index=from_step, frozen=keep, known_ends=known_ends,
                         known_where=known_where, plate_state=plate_state, step_ends=ends, exclusive_carrier=exclusive,
+                        samples=samples,
                     )
             except SchedulingError as error:
                 unplanned.append({"batch_id": batch.id, "reason": error.message})
                 # 排不进的批次保留原来的时间窗：后面的批次不能排到它们上面
                 for row in self.allocations.for_batch(batch.id):
                     if row.step_index in replan:
-                        context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
+                        context.busy.setdefault(row.station_id, []).append(
+                            Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
+                        )
                 continue
             rows = [
                 {"step_index": item.step_index, "station_id": item.station_id, "kind": item.kind,
+                 "units": item.units,
                  "starts_at": item.starts_at.isoformat(timespec="seconds"),
                  "ends_at": item.ends_at.isoformat(timespec="seconds")}
                 for item in planned
@@ -358,6 +367,8 @@ class RescheduleService:
                     batch_id=batch_id, step_index=row["step_index"], station_id=row["station_id"],
                     asset_id=asset_of.get(row["station_id"], ""), kind=row["kind"],
                     starts_at=datetime.fromisoformat(row["starts_at"]), ends_at=datetime.fromisoformat(row["ends_at"]),
+                    # 建议生成于本次改动之前的没有份数，按 1 份（与当时的口径一致）
+                    units=max(1, int(row.get("units") or 1)),
                 ))
             if plan.get("planned_start"):
                 batch = self.batches.get(batch_id)

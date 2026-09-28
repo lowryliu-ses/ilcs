@@ -174,7 +174,7 @@ class AllocationRepository(Repository[Allocation]):
         timeline: dict[str, list[Interval]] = {}
         for allocation in query.all():
             timeline.setdefault(allocation.station_id, []).append(
-                Interval(allocation.starts_at, allocation.ends_at)
+                Interval(allocation.starts_at, allocation.ends_at, max(1, int(allocation.units or 1)))
             )
         return timeline
 

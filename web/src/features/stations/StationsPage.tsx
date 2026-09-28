@@ -6,7 +6,10 @@ import { day, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, StationAsset, StationRow } from '../../shared/types';
+import { CHANNEL_UNIT_LABEL } from '../../shared/types';
+import type {
+  AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, ChannelUnit, StationAsset, StationRow,
+} from '../../shared/types';
 import { Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 
 /* 工位配置：系统里的执行位置能接什么活（能力极限）、同时接几份（通道）、怎么连设备（适配器）。
@@ -15,8 +18,21 @@ import { Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/u
    清洗确认、结果未知指令转人工核查、适配器重连是现场操作，在「现场监控」做；能力本身的定义在「能力字典」。 */
 
 const CHANNELS_HINT =
-  '同一时刻能同时跑几个批次的设备步骤。一个批次的一个设备步骤占 1 个，与批次里有几个样本无关：' +
-  '设备若一颗电芯占一个物理通道，一批 8 颗的 8 通道柜只能同时跑 1 批，这里就填 1。不能超过所属资产的容量';
+  '按批次计：同一时刻能同时跑几个批次的设备步骤，一个批次的一个设备步骤占 1 个，与样本数无关。' +
+  '按样本计：填物理通道数，批次里每个样本各占 1 个（8 通道柜同时跑 8 颗：一批 8 颗，或 5 颗加 3 颗）。不能超过所属资产的容量';
+
+const CHANNEL_UNIT_HINT =
+  '一颗电芯占一个物理通道的充放电柜选「按样本」；工位上还有未结束批次的时间窗时不能改';
+
+function ChannelUnitSelect({ value, onChange }: { value: ChannelUnit; onChange: (value: ChannelUnit) => void }) {
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value as ChannelUnit)}>
+      {(Object.keys(CHANNEL_UNIT_LABEL) as ChannelUnit[]).map((key) => (
+        <option key={key} value={key}>{CHANNEL_UNIT_LABEL[key]}</option>
+      ))}
+    </select>
+  );
+}
 
 const ADAPTER_STATUS: Record<string, [string, string]> = {
   online: ['running', '在线'], degraded: ['paused', '降级'], stale: ['fault', '心跳超时'],
@@ -157,7 +173,10 @@ export function StationsPage() {
                 <td className="small">
                   <AssetCalibration asset={station.asset} />
                 </td>
-                <td className="num">{station.channels ?? 1}</td>
+                <td className="num">
+                  {station.channels ?? 1}
+                  {station.channel_unit === 'sample' ? <div className="tiny muted">按样本</div> : null}
+                </td>
                 <td className="small">
                   {Object.keys(station.limits).map((capability) => (
                     <span key={capability} className="tag" title={capability}>
@@ -879,7 +898,9 @@ function LimitsEditor({
 function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[]; onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
-  const [form, setForm] = useState({ id: 'ST-', name: '', island: 1, model: '', channels: 1 });
+  const [form, setForm] = useState<{
+    id: string; name: string; island: number; model: string; channels: number; channel_unit: ChannelUnit;
+  }>({ id: 'ST-', name: '', island: 1, model: '', channels: 1, channel_unit: 'batch' });
   const [protocol, setProtocol] = useState('');
   const [adapterVersion, setAdapterVersion] = useState('');
   const [adapterKind, setAdapterKind] = useState<'simulation' | 'real'>('simulation');
@@ -993,6 +1014,9 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
         <Field label="并行通道数" hint={CHANNELS_HINT}>
           <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
         </Field>
+        <Field label="通道计法" hint={CHANNEL_UNIT_HINT}>
+          <ChannelUnitSelect value={form.channel_unit} onChange={(value) => setForm({ ...form, channel_unit: value })} />
+        </Field>
       </div>
       <div className="grid cols-2">
         <Field label="型号" hint="只给没有资产档案的工位填（如 AGV、机械臂）；关联资产后以资产登记的型号为准">
@@ -1089,8 +1113,11 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
 function StationLedgerForm({ station, onClose }: { station: StationRow; onClose: () => void }) {
   const toast = useToast();
   const linked = Boolean(station.asset);
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<{
+    name: string; model: string; island: number; channels: number; channel_unit: ChannelUnit;
+  }>({
     name: station.name, model: station.model, island: station.island, channels: station.channels ?? 1,
+    channel_unit: station.channel_unit ?? 'batch',
   });
   const [error, setError] = useState('');
 
@@ -1150,9 +1177,14 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
           <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
       </div>
-      <Field label="并行通道数" hint={CHANNELS_HINT}>
-        <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
-      </Field>
+      <div className="grid cols-2">
+        <Field label="并行通道数" hint={CHANNELS_HINT}>
+          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
+        </Field>
+        <Field label="通道计法" hint={CHANNEL_UNIT_HINT}>
+          <ChannelUnitSelect value={form.channel_unit} onChange={(value) => setForm({ ...form, channel_unit: value })} />
+        </Field>
+      </div>
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
   );

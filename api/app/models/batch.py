@@ -49,6 +49,8 @@ class Allocation(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime)
     ends_at: Mapped[datetime] = mapped_column(DateTime)
     kind: Mapped[str] = mapped_column(String, default="work")  # work | transfer | clean
+    # 这段时间窗在工位上占几份通道：按样本计通道的工位是本批次的样本数，其余为 1
+    units: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class Sample(Base):

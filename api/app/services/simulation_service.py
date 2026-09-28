@@ -175,7 +175,8 @@ class SimulationService:
         empty.stations = [replace(spec, status="idle") for spec in empty.stations if not spec.retired]
         planned = []
         try:
-            planned = plan_steps(steps, begin, empty)
+            # 按样本计通道的工位按满批（流程每批样品位）算份数：一批放不下就不是排程能解决的问题
+            planned = plan_steps(steps, begin, empty, samples=max(1, int(recipe.plate or 1)))
             span = round(makespan(planned).total_seconds() / 60)
             used = "、".join(sorted({a.station_id for a in planned if a.kind == WORK}))
             checks.append(_check(
@@ -201,7 +202,9 @@ class SimulationService:
         # 5 当前时间线 + 并发
         load: dict[str, float] = {}
         if use_timeline:
-            checks.append(self._timeline_check(steps, begin, concurrency, planned, load))
+            checks.append(self._timeline_check(
+                steps, begin, concurrency, planned, load, max(1, int(recipe.plate or 1)),
+            ))
 
         # 6 物料
         checks.append(self._material_check(bom, concurrency))
@@ -218,10 +221,12 @@ class SimulationService:
         ))
         return self._finish(recipe, checks, path_rows, loops, load, concurrency, persist)
 
-    def _timeline_check(self, steps: list[dict], begin: datetime, concurrency: int, alone, load: dict) -> dict:
+    def _timeline_check(
+        self, steps: list[dict], begin: datetime, concurrency: int, alone, load: dict, samples: int = 1,
+    ) -> dict:
         context = self.schedule.context({"__none__"})
         try:
-            plans = [plan_steps(steps, begin, context) for _ in range(concurrency)]
+            plans = [plan_steps(steps, begin, context, samples=samples) for _ in range(concurrency)]
         except SchedulingError as error:
             return _check("timeline", f"当前时间线上 {concurrency} 个批次", WARN, f"排不下：{error.message}")
         work = [a for plan in plans for a in plan if a.kind == WORK]

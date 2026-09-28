@@ -660,6 +660,7 @@ class TransferService:
             stations.append({
                 "id": station.id, "name": station.name, "island": station.island, "status": station.status,
                 "retired": station.retired, "channels": station.channels or 1,
+                "channel_unit": station.channel_unit or "batch",
                 "capabilities": sorted((station.limits or {}).keys()),
                 # 只做转运的承运工位（AGV）：不在现场做工艺动作，不涉及清洗
                 "carrier": bool(station.limits) and set(station.limits) <= {TRANSFER_CAPABILITY},

@@ -185,6 +185,17 @@ class ExperimentTask(Base):
     # 上游怎样才算满足：run_completed 运行结束 / data_validated 数据复核通过 / released 报告发布放行
     dependency_gate: Mapped[str] = mapped_column(String, default="run_completed")
     sample_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 子任务在父任务里负责的那一份（`domain/tasks.py` 的 portion_*）：按数量拆出的样本数 count、
+    # 矩阵按重复拆出的重复次数 repeats、补测的条件组与个数 groups、第一个样本 / 重复的全局序号偏移 offset。
+    # 空表示按样本清单或方案整体执行
+    portion: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 父任务怎么拆的：parallel 并行（排程按设备决定先后）/ pilot 首批验证后放行其余 / sequential 逐批顺序 /
+    # replicate 整体重复。空表示没拆过
+    split_mode: Mapped[str] = mapped_column(String, default="")
+    # retest：补测子任务，补的是别的子任务的短缺，不计入父任务的计划量
+    purpose: Mapped[str] = mapped_column(String, default="")
+    # 父任务上「按现有结果结束、不再补测」的签名记录：[{count, reason, user_id, user, at, signature_id}]
+    shortfall_decisions: Mapped[list] = mapped_column(JSON, default=list)
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, default=2)
     # unassigned | pending_accept | accepted | running | data_review | reporting | done | cancelled
