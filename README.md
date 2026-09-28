@@ -198,7 +198,7 @@ api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
 simulators/  外部模拟设备：SiLA 2 / Modbus TCP / OPC UA / HTTPS 网关，同一套设备行为与故障注入，见 simulators/README.md
 web/         React 前端：shared 基础设施 + features 页面
-scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）
+scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为三个操作案例）
 contracts/   OpenAPI 快照；设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
 docs/        需求文档与迁移报告
 ```
@@ -327,7 +327,7 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply \
   --station ST-03=http_json_v1@gateway-sim-coater:8443:SIM-COAT-01
 ```
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
-（方法修订 → 矩阵方案 → 排程下发 → 质检关卡 → 多通道 → 故障演练 → 闭环提案）见 [试点操作案例](docs/试点操作案例.md)；`scripts/reset-pilot-case.sh` 可把演示库重置为该案例跑完的结果。
+（注液、循环测试、AGV / 机械臂串行，外加故障演练）见 [操作案例](docs/操作案例.md)；`scripts/reset-demo-cases.sh` 可把演示库重置为三个案例跑完的结果。
 
 ### PostgreSQL 与附件备份恢复演练
 
