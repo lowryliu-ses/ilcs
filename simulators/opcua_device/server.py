@@ -30,18 +30,15 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
     sys.path.insert(0, str(ROOT))
 
 from asyncua import Server, ua  # noqa: E402
-from cryptography import x509  # noqa: E402
 
-from simulators.common.certs import ensure_certificate, self_signed_certificate  # noqa: E402
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.opcua import CLIENT_NAME, CLIENT_URI, ServerSecurity  # noqa: E402,F401
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
 CONTRACT = json.loads((ROOT / "contracts" / "opcua" / "TaskExecution.json").read_text(encoding="utf-8"))
 REJECTION_CODES = {
     identifier: getattr(ua.StatusCodes, code) for code, identifier in CONTRACT["rejections"].items()
 }
-CLIENT_NAME = "ilcs-client"
-CLIENT_URI = "urn:ilcs:client"
 log = logging.getLogger("ilcs.opcua-sim")
 
 
@@ -113,30 +110,12 @@ class SimulatorRunner:
         self.variables: dict = {}
         self.lock = threading.Lock()
         self.heartbeat = 0
-        self.credentials = None if args.insecure else self._credentials()
-
-    def _credentials(self) -> dict:
-        directory = Path(self.args.cert_dir)
-        server_key, server_cert = ensure_certificate(directory, self.args.device_id, lambda: self_signed_certificate(
-            self.args.host_name, "ILCS OPC UA Simulator", application_uri=self.application_uri,
-        ))
-        client_key, client_cert = ensure_certificate(directory, CLIENT_NAME, lambda: self_signed_certificate(
-            "ilcs", "ILCS", application_uri=CLIENT_URI, client=True,
-        ))
-        descriptor = directory / f"{CLIENT_NAME}.json"
-        if not descriptor.exists():
-            descriptor.write_text(json.dumps({"certificate": client_cert.name, "private_key": client_key.name}))
-        trusted = x509.load_pem_x509_certificate(client_cert.read_bytes())
-        return {"key": server_key, "cert": server_cert, "trusted": trusted.fingerprint(trusted.signature_hash_algorithm)}
+        self.credentials = None if args.insecure else ServerSecurity(
+            args.cert_dir, args.device_id, args.host_name, self.application_uri, "ILCS OPC UA Simulator",
+        )
 
     def _call(self, coroutine, timeout: float = 30):
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result(timeout)
-
-    async def _validate(self, certificate: x509.Certificate, _description) -> None:
-        if certificate.fingerprint(certificate.signature_hash_algorithm) != self.credentials["trusted"]:
-            from asyncua.ua.uaerrors import ServiceError
-
-            raise ServiceError(ua.StatusCodes.BadCertificateUntrusted)
 
     async def _build(self) -> Server:
         server = Server()
@@ -147,12 +126,7 @@ class SimulatorRunner:
         if self.credentials is None:
             server.set_security_policy([ua.SecurityPolicyType.NoSecurity])
         else:
-            server.set_security_policy([
-                ua.SecurityPolicyType.Basic256Sha256_SignAndEncrypt, ua.SecurityPolicyType.Basic256Sha256_Sign,
-            ])
-            await server.load_certificate(str(self.credentials["cert"]), format="pem")
-            await server.load_private_key(str(self.credentials["key"]), format="pem")
-            server.set_certificate_validator(self._validate)
+            await self.credentials.apply(server)
         index = await server.register_namespace(CONTRACT["namespace"])
         root = await server.nodes.objects.add_object(index, CONTRACT["path"][0])
         task = await root.add_object(index, CONTRACT["path"][1])

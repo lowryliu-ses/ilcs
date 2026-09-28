@@ -26,6 +26,8 @@ if not (_database_name.endswith("_test") or _database_name.startswith("test_")):
     raise RuntimeError("ILCS_TEST_DATABASE_URL 只允许指向名称以 _test 结尾或 test_ 开头的数据库")
 os.environ["ILCS_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["ILCS_FILE_ROOT"] = str(API_DIR / "test_files")
+# 驱动作业台账跟附件一样放测试目录，会话开始时一并清掉
+os.environ["ILCS_ADAPTER_STATE_ROOT"] = str(API_DIR / "test_files" / "adapter-state")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

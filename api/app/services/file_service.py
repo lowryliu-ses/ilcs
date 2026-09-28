@@ -77,9 +77,10 @@ class FileService:
     # ---------- 写 ----------
 
     def upload(
-        self, filename: str, media_type: str, stream, user: User,
+        self, filename: str, media_type: str, stream, user: User | None,
         ref_type: str = "", ref_id: str = "", note: str = "",
     ) -> dict:
+        """user 为 None 时是集成服务上传（结果原始文件）：上传人记服务身份，审计记服务来源。"""
         if media_type not in settings.allowed_media_types:
             raise ValidationFailed(
                 f"不支持的文件类型 {media_type}；允许 "
@@ -91,7 +92,7 @@ class FileService:
         storage_key = f"{self.ctx.org_id}/{now():%Y/%m}/{uuid4().hex}{suffix}"
         record = FileObject(
             org_id=self.ctx.org_id, filename=filename[:255], media_type=media_type,
-            storage_key=storage_key, uploaded_by=user.id, state="uploading",
+            storage_key=storage_key, uploaded_by=user.id if user is not None else self.ctx.subject_id, state="uploading",
             ref_type=ref_type, ref_id=ref_id, note=note, origin="upload",
         )
         self.files.add(record)

@@ -19,6 +19,8 @@ COPY --chown=ilcs:ilcs scripts /opt/ilcs/scripts
 # 设备契约（SiLA 2 特性、Modbus 寄存器表、OPC UA 节点）与外部模拟设备：驱动与模拟器读同一份定义
 COPY --chown=ilcs:ilcs contracts /opt/ilcs/contracts
 COPY --chown=ilcs:ilcs simulators /opt/ilcs/simulators
+# 设备侧连接器（结果文件接收器等）：随镜像分发，按需以独立容器运行
+COPY --chown=ilcs:ilcs connectors /opt/ilcs/connectors
 
 WORKDIR /opt/ilcs/api
 USER ilcs

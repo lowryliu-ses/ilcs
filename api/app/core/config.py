@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # 防止适配器配置把带凭据的请求发往任意内网地址。正式环境必须显式列出设备网关。
     adapter_allowed_hosts: str = "127.0.0.1,localhost"
     adapter_credential_root: str = "/run/secrets/ilcs"
+    # 驱动自记的作业台账（串口命令、PLC 点表、REST 映射这类设备不认识 ILCS 指令号）。
+    # 必须放持久卷：执行器重启后要靠它按原指令号回答「设备上怎样了」。留空 = file_root 的上一级 /adapter-state
+    adapter_state_root: str = ""
 
     # ---------- 出向事件（Webhook） ----------
     # 只向列出的主机投递；正式环境只允许 https。不跟随重定向：重定向可以把请求带出允许清单
@@ -175,6 +178,12 @@ class Settings(BaseSettings):
     def simulation_allowed(self) -> bool:
         """模拟适配器只在开发与测试环境可用。正式环境没有例外开关。"""
         return self.environment != "production"
+
+    @property
+    def adapter_state_dir(self) -> str:
+        from pathlib import Path
+
+        return self.adapter_state_root or str(Path(self.file_root).resolve().parent / "adapter-state")
 
     @property
     def adapter_allowed_host_set(self) -> set[str]:

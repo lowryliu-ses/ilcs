@@ -168,6 +168,12 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 设备遥测上报 | 同一 `event_id` 只入库一次；设备时钟超前 5 分钟整批拒收；保留 1 年 |
 | 维护工单 | 建单即登记维护占用；开工资产转维护状态；完工写记录签名，不合格资产保持维护状态 |
 | 工位接到 SiLA 2（`sila2_v1`）/ Modbus TCP（`modbus_tcp_v1`）/ OPC UA（`opcua_v1`）设备 | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
+| 设备不认识 ILCS 指令号（PLC 点表、串口命令、MT-SICS 天平、车队 REST） | 驱动作业台账先落盘再动设备：重投同一指令号回放原作业；执行器重启后按原指令号回答；设备在运行就明确拒绝新作业 |
+| 启动命令发出后没拿到确认 | 结果未知不重发；之后见到设备在运行（或按 PLC 回显 / 请求里的指令号找回）才按运行处理，质量标 uncertain |
+| 启动命令回了确认，设备却一直没进入运行也没有完成信号 | 超过启动时限转结果未知，不猜「做完了」 |
+| 映射驱动收到没有写入点 / 命令模板的参数，或孔位矩阵 | 明确拒绝，不静默丢弃设定值 |
+| 一个工位由几台接口不同的仪器组成（`composite_v1`） | 按能力分派到各自驱动；任一台离线即整站离线，任一台联锁即联锁 |
+| 检测软件只导出结果文件 | 结果文件接收器按内容摘要去重回传，原始文件关联到结果；被拒的文件移到 rejected/ 并写明原因 |
 | Modbus 指令带孔位矩阵、未映射的参数或能力 | 驱动直接拒绝，不写触发寄存器 |
 | Modbus 写了触发等不到应答 / 执行器重启 | 结果未知不重写触发；新实例从设备当前的触发与应答序号里较大的一个接着编号 |
 | OPC UA 未钉住服务器证书、客户端证书不受信任、正式环境用 None 安全策略 | 配置或握手阶段拒绝 |
@@ -188,7 +194,7 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
-未验证项：**现场真实设备试点（AC-37）**。系统已内置 `http_json_v1`（HTTPS 网关）、`sila2_v1`、`modbus_tcp_v1`、`opcua_v1` 四个真实驱动，覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测；与各协议外部模拟设备的联调测试已通过。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
+未验证项：**现场真实设备试点（AC-37）**。系统已内置十一个真实驱动——设备实现 ILCS 契约的 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务）、`sila2_v1`、`opcua_v1`、`modbus_tcp_v1`，按设备自有接口映射的 `opcua_map_v1`、`modbus_map_v1`、`line_command_v1`（串口 / TCP 命令）、`mt_sics_v1`（梅特勒天平）、`rest_map_v1`（车队等 REST 接口），按中间库契约交换作业的 `sql_table_v1`（数据库中间表），以及组合工位 `composite_v1`——另有结果文件接收器；覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过。选哪种驱动见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
 
 ## 目录
 
@@ -196,7 +202,8 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 api/         FastAPI 服务：core / models / domain / repositories / services / adapters / api
 api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单 → 0011 并行通道 / 设计空间 / 闭环提案 → 0012 角色权限 → 0013 队列索引 → 0014 执行器明细 → 0015 载具与位置 → 0016 流程控制 → 0017 任务树 → 0018 异常引擎 → 0019 重排建议 → 0020 出向事件
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
-simulators/  外部模拟设备：SiLA 2 / Modbus TCP / OPC UA / HTTPS 网关，同一套设备行为与故障注入，见 simulators/README.md
+simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，同一套设备行为与故障注入，见 simulators/README.md
+connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为三个操作案例）
 contracts/   OpenAPI 快照；设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
@@ -294,38 +301,39 @@ Compose 将网络拆成 `frontend` 与 `backend`：nginx 只能访问 API，Post
 
 Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到同机其他 `deploy-*` 容器。
 
-### 试点：外部 SiLA 2 模拟设备
+### 试点：外部模拟设备（每个示例工位一台）
 
-真机到位前，可随 `ilcs` 项目启动两台外部 SiLA 2 模拟设备（配液工作站 `sila-sim-lh`、8 通道充放电柜
-`sila-sim-cycler`），只在后端网络可见、不占宿主端口：
+真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：每个示例工位一台，走各自的真实协议，
+只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [simulators/README.md](simulators/README.md)：
 
-```bash
-sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/sila     # 证书目录，模拟设备首次启动写入自签证书
-# deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加 sila-sim-lh,sila-sim-cycler
-cd /opt/ilcs/deploy && docker compose --profile pilot up -d sila-sim-lh sila-sim-cycler
-```
-
-然后在「工位配置」页把试点工位的适配器改成 `kind=real`、`driver=sila2_v1`，配置示例见
-[设备适配器配置模板](docs/设备适配器配置模板.md)；在线状态由执行器探测。模拟设备自报为模拟器，
-`ILCS_ENVIRONMENT=production` 时会被拒绝接入。故障注入与验收用法见 [simulators/README.md](simulators/README.md)。
-
-其他协议同样有外部模拟设备（同一 `pilot` profile），和 SiLA 2 那两台共用设备行为与故障注入：
-
-| 服务 | 协议 / 驱动 | 试点工位 | 凭据目录 |
-|---|---|---|---|
-| `modbus-sim-mixer`（SIM-MIX-01） | Modbus TCP / `modbus_tcp_v1` | ST-02 中试匀浆罐 | 无（明文 Modbus，只在后端网络） |
-| `opcua-sim-calender`（SIM-CAL-01） | OPC UA / `opcua_v1`，Basic256Sha256 + SignAndEncrypt | ST-04 辊压冲切机 | `secrets/opcua/` |
-| `gateway-sim-coater`（SIM-COAT-01） | HTTPS JSON / `http_json_v1`，TLS + Bearer 令牌 | ST-03 涂布烘干线 | `secrets/gateway/` |
+| 工位 | 模拟设备 | 驱动 |
+|---|---|---|
+| ST-01-A | `sila-sim-slurry-a` | `sila2_v1` |
+| ST-01-B | `sql-sim-slurry-b` + 中间库 `sql-sim-exchange` | `sql_table_v1`（数据库中间表） |
+| ST-02 | `plc-sim-mixer` | `modbus_map_v1`（Modbus 点表） |
+| ST-03 | `plc-sim-coater` | `opcua_map_v1`（OPC UA 节点映射） |
+| ST-04 | `opcua-sim-calender` | `opcua_v1`（OPC UA TaskExecution） |
+| ST-05 | `line-sim-oven` + `mtsics-sim-balance` | `composite_v1` = `line_command_v1` + `mt_sics_v1` |
+| ST-06 | `sila-sim-lh` | `sila2_v1` |
+| ST-07 | `gateway-sim-cycler` | `http_json_v1`（厂家 SDK 接口服务） |
+| AGV-01 / AGV-02 | `fleet-sim` | `rest_map_v1`（MiR 风格车队 REST） |
+| ARM-01（演示导入时登记） | `line-sim-arm` | `line_command_v1`（UR 仪表盘服务） |
 
 ```bash
-sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/opcua /opt/ilcs/secrets/gateway
-# deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 再追加 modbus-sim-mixer,opcua-sim-calender,gateway-sim-coater
-docker compose --profile pilot up -d modbus-sim-mixer opcua-sim-calender gateway-sim-coater
-docker compose exec api python ../scripts/configure-pilot-adapters.py apply \
-  --station ST-02=modbus_tcp_v1@modbus-sim-mixer:5020:SIM-MIX-01 \
-  --station ST-04=opcua_v1@opcua-sim-calender:4840:SIM-CAL-01 \
-  --station ST-03=http_json_v1@gateway-sim-coater:8443:SIM-COAT-01
+# 证书 / 凭据目录，模拟设备首次启动写入（属主是容器里的 10001）
+sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,fleet}
+# deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
+#   sila-sim-slurry-a,sql-sim-exchange,sila-sim-lh,plc-sim-mixer,plc-sim-coater,opcua-sim-calender,
+#   line-sim-oven,mtsics-sim-balance,gateway-sim-cycler,fleet-sim,line-sim-arm
+cd /opt/ilcs/deploy && docker compose --profile pilot up -d
+docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 simulators/pilot-devices.json 全部切换
 ```
+
+切换写审计、可 `revert`；在线状态由执行器探测。模拟设备自报为模拟器，`ILCS_ENVIRONMENT=production` 时会被拒绝接入。
+以前版本的 `sila-sim-cycler`、`modbus-sim-mixer`、`gateway-sim-coater` 已不在 compose 里：升级后
+`docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
+检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [connectors/result_files/README.md](connectors/result_files/README.md)）。
+
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
 （注液、循环测试、AGV / 机械臂串行，外加故障演练）见 [操作案例](docs/操作案例.md)；`scripts/reset-demo-cases.sh` 可把演示库重置为三个案例跑完的结果。
 

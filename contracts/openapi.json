@@ -761,6 +761,25 @@
         "title": "BatchSignalIn",
         "type": "object"
       },
+      "Body_ingest_raw_file_api_integrations_files_post": {
+        "properties": {
+          "file": {
+            "format": "binary",
+            "title": "File",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_ingest_raw_file_api_integrations_files_post",
+        "type": "object"
+      },
       "Body_upload_file_api_files_post": {
         "properties": {
           "file": {
@@ -13709,6 +13728,80 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/api/integrations/files": {
+      "post": {
+        "description": "结果原始文件上传（集成服务）。先上传拿到文件编号，再在结果回传里引用 `raw_file_id`。\n\n只给有检测任务回传授权的服务身份用；类型与大小限制和人工上传一样。没被结果引用的文件按暂存文件\n在保留期后由执行器清理，不会冒充正式附件。",
+        "operationId": "ingest_raw_file_api_integrations_files_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_raw_file_api_integrations_files_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Raw File",
+        "tags": [
+          "analysis"
+        ]
       }
     },
     "/api/integrations/results": {

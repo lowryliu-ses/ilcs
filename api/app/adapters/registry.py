@@ -1,18 +1,39 @@
 """适配器注册表。
 
-当前内置模拟适配器与四个真实驱动：`http_json_v1`（HTTPS 网关）、`sila2_v1`（SiLA 2）、
-`modbus_tcp_v1`（Modbus TCP 任务寄存器）、`opcua_v1`（OPC UA TaskExecution）。其他厂商协议在 DEC-02
-确认后继续登记专用驱动；执行层始终按 Adapter.kind/driver 取实现。
+当前内置模拟适配器与这些真实驱动：
+
+| 驱动 | 设备侧 | 指令号 / 去重 / 查询 |
+|---|---|---|
+| `http_json_v1` | 实现 ILCS 网关契约的 HTTPS 服务（含厂家 SDK 接口服务） | 设备侧 |
+| `sila2_v1` | 实现 ILCS TaskExecution 特性的 SiLA 2 服务器 | 设备侧 |
+| `opcua_v1` | 实现 ILCS TaskExecution 节点的 OPC UA 服务器 | 设备侧 |
+| `modbus_tcp_v1` | 按 ILCS 任务寄存器表编程的 PLC | 设备侧 |
+| `opcua_map_v1` | 设备自有 OPC UA 节点（PLC、视觉系统） | 驱动作业台账 |
+| `modbus_map_v1` | 设备自有 Modbus 寄存器表（PLC、温控仪表） | 驱动作业台账 |
+| `line_command_v1` | 串口 / TCP 文本命令（RS232、RS485、仪表盘服务） | 驱动作业台账 |
+| `mt_sics_v1` | 梅特勒 MT-SICS 天平 | 驱动作业台账 |
+| `rest_map_v1` | 设备或调度系统自有 REST 接口（AGV 车队等） | 驱动作业台账 + 设备任务号 |
+| `sql_table_v1` | 数据库中间表（设备侧软件轮询 ILCS 中间库契约的作业表） | 中间库（作业表主键是指令号） |
+| `composite_v1` | 一个工位多台仪器，按能力分派到上面的驱动 | 各子驱动 |
+
+执行层始终按 Adapter.kind/driver 取实现。
 """
 from __future__ import annotations
 
 from ..core.config import settings
 from ..models import Adapter
 from .base import AdapterContract, AdapterError, DeviceAdapter
+from .composite import DRIVER as COMPOSITE_DRIVER, CompositeAdapter
 from .http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
+from .line_command import DRIVER as LINE_COMMAND_DRIVER, LineCommandAdapter
+from .modbus_map import DRIVER as MODBUS_MAP_DRIVER, ModbusMapAdapter
 from .modbus_tcp import DRIVER as MODBUS_TCP_DRIVER, ModbusTcpAdapter
+from .mt_sics import DRIVER as MT_SICS_DRIVER, MtSicsAdapter
 from .opcua import DRIVER as OPCUA_DRIVER, OpcUaAdapter
+from .opcua_map import DRIVER as OPCUA_MAP_DRIVER, OpcUaMapAdapter
+from .rest_map import DRIVER as REST_MAP_DRIVER, RestMapAdapter
 from .sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
+from .sql_table import DRIVER as SQL_TABLE_DRIVER, SqlTableAdapter
 from .simulation import SimulationAdapter
 
 _CACHE: dict[str, DeviceAdapter] = {}
@@ -21,9 +42,19 @@ REAL_IMPLEMENTATIONS: dict[str, type] = {
     SILA2_DRIVER: Sila2Adapter,
     MODBUS_TCP_DRIVER: ModbusTcpAdapter,
     OPCUA_DRIVER: OpcUaAdapter,
+    OPCUA_MAP_DRIVER: OpcUaMapAdapter,
+    MODBUS_MAP_DRIVER: ModbusMapAdapter,
+    LINE_COMMAND_DRIVER: LineCommandAdapter,
+    MT_SICS_DRIVER: MtSicsAdapter,
+    REST_MAP_DRIVER: RestMapAdapter,
+    SQL_TABLE_DRIVER: SqlTableAdapter,
+    COMPOSITE_DRIVER: CompositeAdapter,
 }
 # 这些协议的设备不会往系统推心跳：在线状态由执行器按周期读取设备身份得到
-PROBE_DRIVERS = {SILA2_DRIVER, MODBUS_TCP_DRIVER, OPCUA_DRIVER}
+PROBE_DRIVERS = {
+    SILA2_DRIVER, MODBUS_TCP_DRIVER, OPCUA_DRIVER, OPCUA_MAP_DRIVER, MODBUS_MAP_DRIVER, LINE_COMMAND_DRIVER,
+    MT_SICS_DRIVER, REST_MAP_DRIVER, SQL_TABLE_DRIVER, COMPOSITE_DRIVER,
+}
 
 
 def adapter_for(record: Adapter, capabilities: tuple[str, ...] = ()) -> DeviceAdapter:
@@ -101,7 +132,8 @@ def describe(instance: DeviceAdapter, record: Adapter) -> dict:
     config = record.config or {}
     reported = raw.get("methods")
     if isinstance(reported, list):
-        methods, source = reported, "device"
+        # 组合工位把各路由的目录汇总上来，并说明来源（设备自报还是按配置登记）
+        methods, source = reported, str(raw.get("methods_source") or "device")
     elif isinstance(config.get("methods"), list):
         methods, source = config["methods"], "config"
     else:
@@ -132,7 +164,7 @@ def reset_cache() -> None:
 def probe_interval(record: Adapter) -> float | None:
     """由执行器主动探测在线的适配器返回探测周期（秒）；设备自己推心跳的返回 None。
 
-    `heartbeat_mode` 可在适配器配置里显式指定；sila2_v1 / modbus_tcp_v1 / opcua_v1 默认探测，
+    `heartbeat_mode` 可在适配器配置里显式指定；除 http_json_v1 外的真实驱动默认探测，
     http_json_v1 默认推送（网关也可以配成 probe，由执行器读 /health）。
     """
     if record.kind != "real":

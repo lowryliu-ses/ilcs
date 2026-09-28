@@ -6,6 +6,23 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "5"
 
+# 试点模拟设备的公共设置：只在后端网络可见、不占宿主端口，根文件系统只读，不保留 Linux capabilities
+x-pilot-sim: &pilot-sim
+  image: ilcs-api:latest
+  profiles: ["pilot"]
+  restart: unless-stopped
+  logging: *default-logging
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  working_dir: /opt/ilcs
+  networks:
+    - backend
+
 # PostgreSQL + 三个应用容器 + 一个一次性迁移任务。迁移不在应用启动里做：
 # 多副本发布时那样会让两个版本各改一半结构。
 services:
@@ -113,102 +130,108 @@ services:
     networks:
       - backend
 
-  # ---------- 试点：外部 SiLA 2 模拟设备（可选，--profile pilot 才启动） ----------
-  # 与真设备一样走网络接入：系统侧把工位适配器配成 sila2_v1，host 填服务名。
-  # 首次启动生成自签证书到 ../secrets/sila/，适配器 ca_file 指向 /run/secrets/ilcs/sila/<设备ID>.crt。
-  # 设备自报 simulator=true：正式环境（ILCS_ENVIRONMENT=production）会拒绝接入它们。
-  sila-sim-lh:
-    image: ilcs-api:latest
-    container_name: ilcs-sila-sim-lh
-    profiles: ["pilot"]
-    restart: unless-stopped
-    logging: *default-logging
+  # ---------- 试点：外部模拟设备（可选，--profile pilot 才启动） ----------
+  # 每个示例工位一台，与真设备一样走网络接入；系统侧的驱动与连接配置见 simulators/pilot-devices.json，
+  # 用 `docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset` 一次切换。
+  # 首次启动把证书 / 令牌写到 ../secrets/<sila|opcua|gateway|fleet>/，适配器配置里引用的就是这些文件。
+  # 模拟设备自报是模拟器（身份里带 ILCS-SIMULATOR）：正式环境（ILCS_ENVIRONMENT=production）拒绝接入。
+  #
+  #   工位       模拟设备               协议 / 驱动
+  #   ST-01-A    sila-sim-slurry-a      SiLA 2 / sila2_v1
+  #   ST-01-B    sql-sim-slurry-b       数据库中间表 / sql_table_v1（中间库 sql-sim-exchange）
+  #   ST-02      plc-sim-mixer          Modbus TCP 点表 / modbus_map_v1
+  #   ST-03      plc-sim-coater         OPC UA 节点映射 / opcua_map_v1
+  #   ST-04      opcua-sim-calender     OPC UA TaskExecution / opcua_v1
+  #   ST-05      line-sim-oven          串口 / TCP 命令 / line_command_v1  ┐ composite_v1
+  #              mtsics-sim-balance     MT-SICS / mt_sics_v1              ┘
+  #   ST-06      sila-sim-lh            SiLA 2 / sila2_v1
+  #   ST-07      gateway-sim-cycler     HTTPS JSON（厂家 SDK 接口服务）/ http_json_v1
+  #   AGV-01/02  fleet-sim              REST（MiR 风格车队接口）/ rest_map_v1
+  #   ARM-01     line-sim-arm           UR 仪表盘服务（TCP 命令）/ line_command_v1
+  sila-sim-slurry-a:
+    <<: *pilot-sim
+    container_name: ilcs-sila-sim-slurry-a
     environment:
-      SIM_DEVICE_ID: SIM-LH-01
-      SIM_PROFILE: liquid_handler
-      SIM_PORT: "50052"
-      SIM_HOST_NAME: sila-sim-lh
+      SIM_DEVICE_ID: SIM-SLR-A
+      SIM_MODEL: EXP-SLURRY-24
+      SIM_PROFILE: generic
+      SIM_PORT: "50054"
+      SIM_HOST_NAME: sila-sim-slurry-a
       SIM_CERT_DIR: /run/secrets/ilcs/sila
       SIM_TASK_SECONDS: "20"
-      SIM_MATERIAL_MAP: '{"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}'
     volumes:
       - ../secrets/sila:/run/secrets/ilcs/sila
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
     command: ["python", "simulators/sila_device/server.py"]
-    networks:
-      - backend
 
-  sila-sim-cycler:
-    image: ilcs-api:latest
-    container_name: ilcs-sila-sim-cycler
+  # ST-01-B 的中间库：试点用的 PostgreSQL（只在后端网络、信任认证、数据不落盘），
+  # 设备侧轮询进程 sql-sim-slurry-b 扮演厂家调度软件。正式中间库要有口令，口令放 credential_ref 指向的文件。
+  sql-sim-exchange:
+    image: postgres:16-alpine
+    container_name: ilcs-sql-sim-exchange
     profiles: ["pilot"]
     restart: unless-stopped
     logging: *default-logging
     environment:
-      SIM_DEVICE_ID: SIM-CYC-01
-      SIM_PROFILE: cycler
-      SIM_PORT: "50053"
-      SIM_HOST_NAME: sila-sim-cycler
-      SIM_CERT_DIR: /run/secrets/ilcs/sila
-      SIM_CHANNELS: "8"
-      SIM_TASK_SECONDS: "60"
-    volumes:
-      - ../secrets/sila:/run/secrets/ilcs/sila
-    read_only: true
+      POSTGRES_DB: exchange
+      POSTGRES_USER: exchange
+      POSTGRES_HOST_AUTH_METHOD: trust
     tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
-    command: ["python", "simulators/sila_device/server.py"]
+      - /var/lib/postgresql/data:size=256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exchange -d exchange"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - backend
 
-  # ---------- 试点：其他协议的外部模拟设备（同样 --profile pilot） ----------
-  # 与 SiLA 2 模拟设备同一套设备行为与故障注入，只是协议层不同。系统侧驱动与凭据位置：
-  #   modbus-sim-mixer    → ST-02，modbus_tcp_v1（明文 Modbus TCP，只在后端网络可见）
-  #   opcua-sim-calender  → ST-04，opcua_v1（Basic256Sha256 + SignAndEncrypt，证书写到 ../secrets/opcua/）
-  #   gateway-sim-coater  → ST-03，http_json_v1（HTTPS + Bearer 令牌，证书与令牌写到 ../secrets/gateway/）
-  # 切换命令见 scripts/configure-pilot-adapters.py 开头说明。
-  modbus-sim-mixer:
-    image: ilcs-api:latest
-    container_name: ilcs-modbus-sim-mixer
-    profiles: ["pilot"]
-    restart: unless-stopped
-    logging: *default-logging
+  sql-sim-slurry-b:
+    <<: *pilot-sim
+    container_name: ilcs-sql-sim-slurry-b
     environment:
+      SIM_DEVICE_ID: SIM-SLR-B
+      SIM_MODEL: EXP-SLURRY-24
+      SIM_PROFILE: generic
+      SIM_TASK_SECONDS: "20"
+      SIM_DATABASE_URL: postgresql+psycopg2://exchange@sql-sim-exchange:5432/exchange
+    command: ["python", "simulators/sql_device/worker.py"]
+    depends_on:
+      sql-sim-exchange:
+        condition: service_healthy
+
+  plc-sim-mixer:
+    <<: *pilot-sim
+    container_name: ilcs-plc-sim-mixer
+    environment:
+      SIM_PROTOCOL: modbus
+      SIM_MACHINE: Mixer
       SIM_DEVICE_ID: SIM-MIX-01
       SIM_MODEL: PILOT-MIX-8
-      SIM_PROFILE: generic
-      SIM_PORT: "5020"
+      SIM_SETPOINTS: mass,volume,rate,temp,rpm,vacuum
+      SIM_PORT: "5021"
       SIM_TASK_SECONDS: "20"
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
-    command: ["python", "simulators/modbus_device/server.py"]
-    networks:
-      - backend
+    command: ["python", "simulators/plc_device/server.py"]
+
+  plc-sim-coater:
+    <<: *pilot-sim
+    container_name: ilcs-plc-sim-coater
+    environment:
+      SIM_PROTOCOL: opcua
+      SIM_MACHINE: Coater
+      SIM_DEVICE_ID: SIM-COAT-01
+      SIM_MODEL: COATER-150
+      SIM_SETPOINTS: thickness,temp
+      SIM_PORT: "4841"
+      SIM_HOST_NAME: plc-sim-coater
+      SIM_CERT_DIR: /run/secrets/ilcs/opcua
+      SIM_TASK_SECONDS: "30"
+    volumes:
+      - ../secrets/opcua:/run/secrets/ilcs/opcua
+    command: ["python", "simulators/plc_device/server.py"]
 
   opcua-sim-calender:
-    image: ilcs-api:latest
+    <<: *pilot-sim
     container_name: ilcs-opcua-sim-calender
-    profiles: ["pilot"]
-    restart: unless-stopped
-    logging: *default-logging
     environment:
       SIM_DEVICE_ID: SIM-CAL-01
       SIM_MODEL: CALENDER-P2
@@ -219,34 +242,99 @@ services:
       SIM_TASK_SECONDS: "20"
     volumes:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
     command: ["python", "simulators/opcua_device/server.py"]
-    networks:
-      - backend
 
-  gateway-sim-coater:
+  line-sim-oven:
+    <<: *pilot-sim
+    container_name: ilcs-line-sim-oven
+    environment:
+      SIM_DIALECT: oven
+      SIM_DEVICE_ID: SIM-OVEN-01
+      SIM_MODEL: VAC-OVEN-80
+      SIM_METHODS: VD-120,VD-90
+      SIM_PORT: "4001"
+      SIM_TASK_SECONDS: "15"
+    command: ["python", "simulators/line_device/server.py"]
+
+  mtsics-sim-balance:
+    <<: *pilot-sim
+    container_name: ilcs-mtsics-sim-balance
+    environment:
+      SIM_DEVICE_ID: SIM-BAL-01
+      SIM_MODEL: XPR226
+      SIM_PORT: "4305"
+      SIM_SAMPLE_MASS: "0.0152"
+    command: ["python", "simulators/mt_sics/server.py"]
+
+  sila-sim-lh:
+    <<: *pilot-sim
+    container_name: ilcs-sila-sim-lh
+    environment:
+      SIM_DEVICE_ID: SIM-LH-01
+      SIM_PROFILE: liquid_handler
+      SIM_PORT: "50052"
+      SIM_HOST_NAME: sila-sim-lh
+      SIM_CERT_DIR: /run/secrets/ilcs/sila
+      SIM_TASK_SECONDS: "20"
+      SIM_MATERIAL_MAP: '{"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}'
+    volumes:
+      - ../secrets/sila:/run/secrets/ilcs/sila
+    command: ["python", "simulators/sila_device/server.py"]
+
+  gateway-sim-cycler:
+    <<: *pilot-sim
+    container_name: ilcs-gateway-sim-cycler
+    environment:
+      SIM_DEVICE_ID: SIM-CYC-01
+      SIM_MODEL: CYCLER-32
+      SIM_PROFILE: cycler
+      SIM_CHANNELS: "8"
+      SIM_PORT: "8443"
+      SIM_HOST_NAME: gateway-sim-cycler
+      SIM_CERT_DIR: /run/secrets/ilcs/gateway
+      SIM_TASK_SECONDS: "60"
+    volumes:
+      - ../secrets/gateway:/run/secrets/ilcs/gateway
+    command: ["python", "simulators/http_gateway/server.py"]
+
+  fleet-sim:
+    <<: *pilot-sim
+    container_name: ilcs-fleet-sim
+    environment:
+      SIM_ROBOTS: AGV-01,AGV-02
+      SIM_PORT: "8080"
+      SIM_TASK_SECONDS: "8"
+      SIM_CERT_DIR: /run/secrets/ilcs/fleet
+    volumes:
+      - ../secrets/fleet:/run/secrets/ilcs/fleet
+    command: ["python", "simulators/fleet/server.py"]
+
+  line-sim-arm:
+    <<: *pilot-sim
+    container_name: ilcs-line-sim-arm
+    environment:
+      SIM_DIALECT: ur
+      SIM_DEVICE_ID: SIM-ARM-01
+      SIM_MODEL: UR5e
+      SIM_METHODS: load_glovebox
+      SIM_PORT: "29999"
+      SIM_TASK_SECONDS: "10"
+    command: ["python", "simulators/line_device/server.py"]
+
+  # 结果文件接收器（可选，--profile results）：检测软件导出目录 → 关联检测任务 → 结果回传。
+  # 先在「系统治理」创建服务身份并授权检测任务，口令写到 ../secrets/result-files/secret，
+  # 规则写到 ../secrets/result-files/result-files.json（示例见 connectors/result_files/README.md）。
+  result-files:
     image: ilcs-api:latest
-    container_name: ilcs-gateway-sim-coater
-    profiles: ["pilot"]
+    container_name: ilcs-result-files
+    profiles: ["results"]
     restart: unless-stopped
     logging: *default-logging
     environment:
-      SIM_DEVICE_ID: SIM-COAT-01
-      SIM_MODEL: COATER-150
-      SIM_PROFILE: generic
-      SIM_PORT: "8443"
-      SIM_HOST_NAME: gateway-sim-coater
-      SIM_CERT_DIR: /run/secrets/ilcs/gateway
-      SIM_TASK_SECONDS: "30"
+      RESULT_FILES_CONFIG: /run/secrets/ilcs/result-files/result-files.json
     volumes:
-      - ../secrets/gateway:/run/secrets/ilcs/gateway
+      - ../secrets/result-files:/run/secrets/ilcs/result-files:ro
+      - ../data/instrument-exports:/data/instrument-exports
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -255,7 +343,10 @@ services:
     cap_drop:
       - ALL
     working_dir: /opt/ilcs
-    command: ["python", "simulators/http_gateway/server.py"]
+    command: ["python", "connectors/result_files/receiver.py"]
+    depends_on:
+      api:
+        condition: service_healthy
     networks:
       - backend
 

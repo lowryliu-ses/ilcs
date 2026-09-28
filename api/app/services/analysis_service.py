@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 
@@ -171,6 +172,10 @@ class AnalysisService:
         整次原子：任务归属、样本、指标是否在要求集合中、类型与单位任一不匹配，
         整个事件拒绝，不留部分结果。
         """
+        collected_at = payload.get("collected_at")
+        if isinstance(collected_at, datetime) and collected_at.tzinfo is not None:
+            # 库内时间一律是无时区 UTC；带偏移的采集时间先换算
+            payload = {**payload, "collected_at": collected_at.astimezone(timezone.utc).replace(tzinfo=None)}
         event_id = (payload.get("event_id") or "").strip()
         if not event_id:
             self._reject("event_id_required", "回传缺少事件编号")
@@ -325,7 +330,8 @@ class AnalysisService:
             org_id=self.ctx.org_id, source=source,
             service_identity_id=self.ctx.subject_id if self.ctx.subject_kind == SERVICE else "",
             analysis_task_id=task.id, event_id=event_id, digest=digest(payload),
-            payload=payload, state="accepted",
+            # 事件原文进 JSON 列：采集时间这类 datetime 按 ISO 文本存，不能让回传因为序列化失败
+            payload=json.loads(json.dumps(payload, ensure_ascii=False, default=str)), state="accepted",
         )
         self.db.add(event)
         try:

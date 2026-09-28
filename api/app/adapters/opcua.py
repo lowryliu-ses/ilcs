@@ -43,43 +43,37 @@ COMMUNICATION = {
 }
 
 
-class OpcUaAdapter:
-    def __init__(self, record):
-        self.station_id = record.station_id
-        self.config = dict(record.config or {})
-        self.endpoint = str(self.config.get("endpoint") or "")
+class OpcUaSession:
+    """opc.tcp 会话：端点白名单、安全策略、服务器证书钉住、客户端证书、超时与断线重建。
+
+    `opcua_v1`（ILCS TaskExecution）与 `opcua_map_v1`（设备自有节点映射）共用。
+    """
+
+    def __init__(self, config: dict, credential_ref: str, driver: str):
+        self.config = config
+        self.driver = driver
+        self.endpoint = str(config.get("endpoint") or "")
         parsed = urlparse(self.endpoint)
         if parsed.scheme != "opc.tcp" or not parsed.hostname:
-            raise AdapterError("opcua_v1 必须配置 opc.tcp:// 开头的 endpoint")
+            raise AdapterError(f"{driver} 必须配置 opc.tcp:// 开头的 endpoint")
         self.host, self.port = parsed.hostname, parsed.port or 4840
         if self.host.lower() not in settings.adapter_allowed_host_set:
             raise AdapterError(f"OPC UA 服务器主机 {self.host} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
-        self.policy = str(self.config.get("security_policy") or "Basic256Sha256")
+        self.policy = str(config.get("security_policy") or "Basic256Sha256")
         if self.policy not in {"Basic256Sha256", "None"}:
             raise AdapterError("security_policy 只支持 Basic256Sha256 或 None")
         if self.policy == "None" and settings.environment == "production":
             raise AdapterError("production 模式禁止不加密的 OPC UA 连接")
-        self.mode = str(self.config.get("security_mode") or "SignAndEncrypt")
+        self.mode = str(config.get("security_mode") or "SignAndEncrypt")
         if self.mode not in {"SignAndEncrypt", "Sign"}:
             raise AdapterError("security_mode 只支持 SignAndEncrypt 或 Sign")
-        self.application_uri = str(self.config.get("application_uri") or "urn:ilcs:client")
+        self.application_uri = str(config.get("application_uri") or "urn:ilcs:client")
         self.connect_timeout = self._positive("connect_timeout_sec", 3.0)
         self.request_timeout = self._positive("request_timeout_sec", 10.0)
-        self.expected_device_id = str(self.config.get("expected_device_id") or "")
-        from .http_json import HttpJsonAdapter
-
-        self.device_timezone = HttpJsonAdapter._timezone(str(self.config.get("device_timezone") or "UTC"))
-        self.credential_ref = record.credential_ref or ""
+        self.credential_ref = credential_ref or ""
         self.security = self._security() if self.policy != "None" else None
-        self._client = None
-        self._nodes: dict = {}
-        self._lock = threading.Lock()
-        self.contract = AdapterContract(
-            kind="real", protocol=record.protocol or "OPC UA", version=record.version or "1.0",
-            supports_hold=bool(record.supports_hold), supports_abort=bool(record.supports_abort),
-            supports_query=bool(record.supports_query), supports_dedup=bool(record.supports_dedup),
-            note=record.note or "OPC UA TaskExecution 设备",
-        )
+        self.client = None
+        self.lock = threading.RLock()
 
     def _positive(self, key: str, default: float) -> float:
         try:
@@ -120,11 +114,10 @@ class OpcUaAdapter:
             "private_key": str(self._within_root(descriptor.parent / described["private_key"], "客户端私钥")),
         }
 
-    # ---------- 连接 ----------
-
-    def _connect(self):
-        if self._client is not None:
-            return self._client
+    def connect(self):
+        """返回已连接的 sync Client；连不上抛 AdapterUnreachable。"""
+        if self.client is not None:
+            return self.client
         try:  # 先用短超时探测端口：黑洞地址不能挂住执行器
             socket.create_connection((self.host, self.port), timeout=self.connect_timeout).close()
         except OSError as exc:
@@ -159,18 +152,7 @@ class OpcUaAdapter:
         except Exception as exc:
             self._close(client)
             raise AdapterUnreachable(f"OPC UA 连接失败：{exc.__class__.__name__}: {exc}") from exc
-        try:
-            index = client.get_namespace_index(CONTRACT["namespace"])
-            task = client.nodes.objects.get_child([f"{index}:{name}" for name in CONTRACT["path"]])
-            self._nodes = {
-                "task": task,
-                "identity": task.get_child(f"{index}:DeviceIdentity"),
-                **{name: f"{index}:{name}" for name in CONTRACT["methods"]},
-            }
-        except Exception as exc:
-            self._close(client)
-            raise AdapterError(f"服务器没有实现 ILCS TaskExecution 契约（{CONTRACT['namespace']}）：{exc}") from exc
-        self._client = client
+        self.client = client
         return client
 
     @staticmethod
@@ -184,31 +166,93 @@ class OpcUaAdapter:
         except Exception:
             pass
 
+    def drop(self) -> None:
+        if self.client is not None:
+            self._close(self.client)
+        self.client = None
+
+    def classify(self, exc: Exception, action: str, rejections: dict | None = None) -> Exception:
+        """Bad 状态码：约定的拒绝 → 明确失败；通信层 → 结果未知并重建会话；其他 → 无法确认。"""
+        from asyncua import ua
+
+        if isinstance(exc, AdapterError):
+            return exc
+        if isinstance(exc, ua.UaStatusCodeError):
+            name = ua.status_codes.get_name_and_doc(exc.code)[0]
+            rejection = (rejections or {}).get(name)
+            if rejection:
+                return AdapterError(f"设备拒绝（{rejection}）")
+            if name in COMMUNICATION:
+                self.drop()
+                return AdapterUnreachable(f"{action}无结论：{name}")
+            return AdapterIndeterminate(f"{action}返回未约定的状态 {name}")
+        self.drop()  # 超时、连接中断、事件循环异常
+        return AdapterUnreachable(f"{action}无结论：{exc.__class__.__name__}")
+
+
+class OpcUaAdapter:
+    def __init__(self, record):
+        self.station_id = record.station_id
+        self.config = dict(record.config or {})
+        self.session = OpcUaSession(self.config, record.credential_ref or "", DRIVER)
+        self.expected_device_id = str(self.config.get("expected_device_id") or "")
+        from .http_json import HttpJsonAdapter
+
+        self.device_timezone = HttpJsonAdapter._timezone(str(self.config.get("device_timezone") or "UTC"))
+        self._nodes: dict = {}
+        self._lock = self.session.lock
+        self.contract = AdapterContract(
+            kind="real", protocol=record.protocol or "OPC UA", version=record.version or "1.0",
+            supports_hold=bool(record.supports_hold), supports_abort=bool(record.supports_abort),
+            supports_query=bool(record.supports_query), supports_dedup=bool(record.supports_dedup),
+            note=record.note or "OPC UA TaskExecution 设备",
+        )
+
+    @property
+    def policy(self) -> str:
+        return self.session.policy
+
+    @property
+    def mode(self) -> str:
+        return self.session.mode
+
+    @property
+    def security(self):
+        return self.session.security
+
+    # ---------- 连接 ----------
+
+    def _connect(self):
+        if self.session.client is not None and self._nodes:
+            return self.session.client
+        client = self.session.connect()
+        try:
+            index = client.get_namespace_index(CONTRACT["namespace"])
+            task = client.nodes.objects.get_child([f"{index}:{name}" for name in CONTRACT["path"]])
+            self._nodes = {
+                "task": task,
+                "identity": task.get_child(f"{index}:DeviceIdentity"),
+                **{name: f"{index}:{name}" for name in CONTRACT["methods"]},
+            }
+        except Exception as exc:
+            self.session.drop()
+            raise AdapterError(f"服务器没有实现 ILCS TaskExecution 契约（{CONTRACT['namespace']}）：{exc}") from exc
+        return client
+
     def close(self) -> None:
         """配置换版本或缓存清空时由注册表调用：关掉会话，不留悬空的连接与线程。"""
         with self._lock:
             self._drop()
 
     def _drop(self) -> None:
-        if self._client is not None:
-            self._close(self._client)
-        self._client = None
+        self.session.drop()
         self._nodes = {}
 
     def _classify(self, exc: Exception, action: str) -> Exception:
-        from asyncua import ua
-
-        if isinstance(exc, ua.UaStatusCodeError):
-            name = ua.status_codes.get_name_and_doc(exc.code)[0]
-            rejection = CONTRACT["rejections"].get(name)
-            if rejection:
-                return AdapterError(f"设备拒绝（{rejection}）")
-            if name in COMMUNICATION:
-                self._drop()
-                return AdapterUnreachable(f"{action}无结论：{name}")
-            return AdapterIndeterminate(f"{action}返回未约定的状态 {name}")
-        self._drop()  # 超时、连接中断、事件循环异常
-        return AdapterUnreachable(f"{action}无结论：{exc.__class__.__name__}")
+        error = self.session.classify(exc, action, CONTRACT["rejections"])
+        if self.session.client is None:
+            self._nodes = {}
+        return error
 
     def _invoke(self, method: str, *arguments: str) -> dict:
         with self._lock:

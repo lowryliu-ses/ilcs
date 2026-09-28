@@ -3,7 +3,8 @@
 #
 # 做法与 reset-demo.sh 相同（备份 → 空库 → 迁移 → 播种），之后：
 # - 删掉种子里的全部演示流程、方案与报警：案例只保留主数据，流程与方案由案例自己建；
-# - 把 ST-06 / ST-07 接回两台外部 SiLA 2 模拟设备（配液站、8 通道充放电柜），等执行器探测在线；
+# - 按 simulators/pilot-devices.json 把全部示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
+#   串口命令、MT-SICS、HTTPS 网关、车队 REST），等执行器探测在线；机械臂 ARM-01 由导入脚本登记时接好；
 # - 用 load-demo-cases.py 走和界面相同的 HTTP 接口把三个案例真实跑一遍：
 #     案例 A 注液（ST-05 → ST-06），案例 B 循环测试（ST-07），
 #     案例 C 注液 → 循环测试串行（托盘由 AGV 在工位间转运，注液时手套箱机械臂协同上下料）。
@@ -80,28 +81,27 @@ PY
     sleep 2
   done
 
-  echo "==> ST-06 / ST-07 接回 SiLA 2 模拟设备"
-  docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply \
-    --station ST-06=sila-sim-lh:50052:SIM-LH-01 \
-    --station ST-07=sila-sim-cycler:50053:SIM-CYC-01 --channels ST-07=8
+  echo "==> 全部示例工位按预设接到外部模拟设备（simulators/pilot-devices.json）"
+  docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply --preset --skip-missing
 fi
 
-echo "==> 等执行器探测到 SiLA 2 设备在线"
+echo "==> 等执行器探测到外部模拟设备在线"
 docker compose exec -T api python - <<'PY'
 import json, time, urllib.request
-for _ in range(40):
+stations = set(json.load(open("/opt/ilcs/simulators/pilot-devices.json", encoding="utf-8"))["stations"]) - {"ARM-01"}
+for _ in range(60):
     gate = json.load(urllib.request.urlopen("http://127.0.0.1:8000/api/gate"))
-    blocked = {k for k in gate.get("blocked_stations") or {} if k in {"ST-06", "ST-07"}}
+    blocked = {k for k in gate.get("blocked_stations") or {} if k in stations}
     if gate["open"] and not blocked:
         print("  在线"); break
     time.sleep(3)
 else:
-    raise SystemExit(f"SiLA 设备未上线：{gate}")
+    raise SystemExit(f"外部模拟设备未全部上线：{sorted(blocked)} {gate['reasons']}")
 PY
 
 echo "==> 导入三个参考案例（约 8 分钟：设备按模拟时长真实执行）"
 # 只走 HTTP：宿主机的 python3 打 nginx 端口即可
-python3 "$ROOT/scripts/load-demo-cases.py" "$BASE_URL"
+python3 "$ROOT/scripts/load-demo-cases.py" "$BASE_URL" --pilot-devices="$ROOT/simulators/pilot-devices.json"
 
 echo
 if [ "$KEEP_DATA" != "--keep-data" ]; then

@@ -2,32 +2,40 @@
 """把三个参考案例（docs/操作案例.md）真实跑一遍导进演示库。
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署（`POST /signatures`），
-与在界面上签的一样。批次由执行器真实投递：ST-06 / ST-07 是外部 SiLA 2 模拟设备，
-ST-05、AGV、机械臂是系统内置模拟适配器。
+与在界面上签的一样。批次由执行器真实投递到外部模拟设备（reset-demo-cases.sh 已按
+simulators/pilot-devices.json 把示例工位接好）：ST-05 干燥箱走串口命令、天平走 MT-SICS，ST-06 走 SiLA 2，
+ST-07 走 HTTPS 网关（厂家 SDK 接口服务），AGV 走车队 REST 接口；机械臂 ARM-01 登记时就接 UR 仪表盘服务。
 
     python3 scripts/load-demo-cases.py http://127.0.0.1:8090
+    python3 scripts/load-demo-cases.py http://127.0.0.1:8090 --pilot-devices=simulators/pilot-devices.json
 
     案例 A 注液：        真空干燥 → 称重 → 按孔位注液封口（SiLA 2）→ 逐孔注液量质检 → 人工封口检查 → QA 复核
-    案例 B 循环测试：    上柜检查 → 化成 → 静置 → 循环测试（SiLA 2，8 通道，引用设备方法）→ 放电容量质检 → QA 复核
+    案例 B 循环测试：    上柜检查 → 化成 → 静置 → 循环测试（8 通道，引用设备方法）→ 放电容量质检 → QA 复核
     案例 C 串行：        托盘绑定批次，AGV 在 板库 → ST-05 → ST-06 → ST-07 之间自动转运，
                          注液时手套箱机械臂协同上下料；注液与循环测试在一个批次里串起来
 
 每个案例都走完：流程发布 → 方案审批 → 任务 → 批次 → 排程 → 开跑检查 → 签名下发 → 执行 →
 检测录入 → 数据复核 → 报告发布。
 
-前提：刚用 reset-demo-cases.sh 重置过（种子主数据、没有演示流程与方案），SiLA 2 设备在线。
+前提：刚用 reset-demo-cases.sh 重置过（种子主数据、没有演示流程与方案），外部模拟设备在线。
+不带 `--pilot-devices` 时机械臂 ARM-01 登记为内置模拟适配器。
 正式环境不要运行：它会登记演示用的机械臂工位、能力与指标。
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 
-BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090").rstrip("/") + "/api"
+ARGS = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+BASE = (ARGS[0] if ARGS else "http://127.0.0.1:8090").rstrip("/") + "/api"
+# 试点设备预设：ARM-01 按它登记真实驱动（UR 仪表盘服务）；没给就用内置模拟适配器
+PILOT_DEVICES = next((arg.split("=", 1)[1] for arg in sys.argv[1:] if arg.startswith("--pilot-devices=")),
+                     os.environ.get("ILCS_PILOT_DEVICES", ""))
 PASSWORD = "ilcs1234"
 RUN = uuid.uuid4().hex[:6]
 
@@ -149,18 +157,28 @@ def prepare(admin: Actor, operator: Actor) -> None:
                          "sideEffect": "重试前确认夹爪上没有电芯", "verify": ["夹爪状态", "托盘孔位"]},
             "signature_id": admin.sign("登记新能力", "cap.robot_load"),
         })
+    arm_driver = "内置模拟适配器"
     if "ARM-01" not in stations:
+        adapter = {"protocol": "UR 仪表盘服务（TCP 命令）", "adapter_version": "5.12"}
+        if PILOT_DEVICES:
+            with open(PILOT_DEVICES, encoding="utf-8") as handle:
+                preset = json.load(handle)["stations"]["ARM-01"]
+            adapter = {
+                "protocol": preset["protocol"], "adapter_version": "5.12", "adapter_kind": "real",
+                "adapter_driver": preset["driver"], "adapter_config": preset["config"],
+                "credential_ref": preset.get("credential_ref", ""),
+            }
+            arm_driver = f"{preset['driver']}（{preset['protocol']}）"
         admin.post("/stations", {
             "id": "ARM-01", "name": "手套箱上下料机械臂", "island": 5, "model": "UR5e-GB",
-            "limits": {"cap.robot_load": {}}, "protocol": "自定义 · URScript", "adapter_version": "5.12",
-            "signature_id": admin.sign("登记新工位", "ARM-01"),
+            "limits": {"cap.robot_load": {}}, **adapter, "signature_id": admin.sign("登记新工位", "ARM-01"),
         })
     if (admin.get("/gate").get("blocked_stations") or {}).get("ARM-01"):
         # 新登记的适配器是离线的：在「现场监控」该工位卡片上点「重连」做一次握手，之后由心跳维持在线
         admin.post("/stations/ARM-01/adapter/reconnect")
     wait_for("ARM-01 适配器在线", lambda: not (admin.get("/gate").get("blocked_stations") or {}).get("ARM-01"),
              timeout=60)
-    ok("机械臂 ARM-01", "能力 cap.robot_load，内置模拟适配器")
+    ok("机械臂 ARM-01", f"能力 cap.robot_load，{arm_driver}")
 
     # 操作员要有新能力的资质，否则任务分配按资质挡住
     people = admin.get("/people?limit=200")
@@ -600,10 +618,10 @@ def main() -> int:
     gate = operator.get("/gate")
     blocked = {k: v for k, v in (gate.get("blocked_stations") or {}).items() if k in {"ST-05", "ST-06", "ST-07"}}
     if not gate["open"] or blocked:
-        raise Failed(f"执行门未就绪：{gate['reasons']} {blocked}（SiLA 2 模拟设备在线了吗？）")
+        raise Failed(f"执行门未就绪：{gate['reasons']} {blocked}（外部模拟设备在线了吗？）")
     if researcher.get("/recipes"):
         print("  注意：库里已有流程，本次会再建一套案例（同名不同编号）")
-    # ST-06 / ST-07 刚切到 SiLA 2 时探测到在线之前会报一次「适配器失联」；条件已恢复的确认后关闭
+    # 工位刚切到外部模拟设备、探测到在线之前会报一次「适配器失联」；条件已恢复的确认后关闭
     for alarm in operator.get("/alarms"):
         if alarm["state"] == "active" and not alarm.get("condition_active") and "失联" in alarm.get("message", ""):
             operator.post(f"/alarms/{alarm['id']}/ack")

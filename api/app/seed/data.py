@@ -103,13 +103,15 @@ STATIONS = [
          clean=True, limits={"cap.transfer": {}}),
 ]
 
+# 协议名写的是这台设备现场用的接口；种子里都是内置模拟适配器。接外部模拟设备或真机时按
+# simulators/pilot-devices.json 的预设切到对应驱动（scripts/configure-pilot-adapters.py apply --preset）。
 ADAPTERS = [
-    ("ST-01-A", "SiLA 2", "1.1", ""), ("ST-01-B", "SiLA 2", "1.1", ""),
-    ("ST-02", "自定义 · Modbus/TCP", "0.9", ""), ("ST-03", "SiLA 2", "1.0", ""),
-    ("ST-04", "自定义 · OPC UA", "0.7", "心跳间隔偏长，超过 5 s 阈值时标记为降级，仍接受查询"),
-    ("ST-05", "SiLA 2", "1.1", ""), ("ST-06", "SiLA 2", "1.1", ""),
-    ("ST-07", "自定义 · 厂商 SDK", "2.3", ""),
-    ("AGV-01", "Open-RMF", "23.12", ""), ("AGV-02", "Open-RMF", "23.12", ""),
+    ("ST-01-A", "SiLA 2", "1.1", ""), ("ST-01-B", "数据库中间表", "1.0", ""),
+    ("ST-02", "Modbus TCP 点表", "1.0", ""), ("ST-03", "OPC UA 节点映射", "1.0", ""),
+    ("ST-04", "OPC UA TaskExecution", "0.7", "心跳间隔偏长，超过 5 s 阈值时标记为降级，仍接受查询"),
+    ("ST-05", "组合工位（串口命令 + MT-SICS）", "1.0", ""), ("ST-06", "SiLA 2", "1.1", ""),
+    ("ST-07", "HTTPS JSON（厂家 SDK 接口服务）", "2.3", ""),
+    ("AGV-01", "REST 接口映射（MiR）", "2.0.0", ""), ("AGV-02", "REST 接口映射（MiR）", "2.0.0", ""),
 ]
 
 RECIPES = [

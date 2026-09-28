@@ -306,10 +306,80 @@ function AssetCalibration({ asset }: { asset: StationAsset | null }) {
   );
 }
 
-type DriverTemplate = 'http_json_v1' | 'sila2_v1' | 'modbus_tcp_v1' | 'opcua_v1';
+type DriverTemplate =
+  | 'http_json_v1' | 'sila2_v1' | 'modbus_tcp_v1' | 'opcua_v1'
+  | 'opcua_map_v1' | 'modbus_map_v1' | 'line_command_v1' | 'mt_sics_v1' | 'rest_map_v1' | 'sql_table_v1' | 'composite_v1';
 const DRIVER_TEMPLATES: [DriverTemplate, string][] = [
-  ['http_json_v1', 'HTTPS JSON 网关'], ['sila2_v1', 'SiLA 2'], ['modbus_tcp_v1', 'Modbus TCP'], ['opcua_v1', 'OPC UA'],
+  ['http_json_v1', 'HTTPS JSON 网关'], ['sila2_v1', 'SiLA 2'], ['opcua_v1', 'OPC UA TaskExecution'],
+  ['modbus_tcp_v1', 'Modbus 任务寄存器'], ['opcua_map_v1', 'OPC UA 节点映射'], ['modbus_map_v1', 'Modbus 点表'],
+  ['line_command_v1', '串口 / TCP 命令'], ['mt_sics_v1', 'MT-SICS 天平'], ['rest_map_v1', 'REST 接口'],
+  ['sql_table_v1', '数据库中间表'], ['composite_v1', '组合工位'],
 ];
+const DRIVER_HINT =
+  '已内置：http_json_v1、sila2_v1、opcua_v1、modbus_tcp_v1（设备实现 ILCS 契约）；opcua_map_v1、modbus_map_v1、'
+  + 'line_command_v1、mt_sics_v1、rest_map_v1（按设备自有接口映射，驱动记作业台账）；sql_table_v1（数据库中间表）；'
+  + 'composite_v1（一个工位多台仪器）';
+const PLC_STATES = { 0: 'idle', 1: 'running', 2: 'held', 3: 'done', 4: 'failed' };
+const PULSE = { value: true, pulse_ms: 300 };
+
+/** PLC 点表模板：每个参数一个设定值点、一个实测点，外加状态 / 故障 / 启停 / 就绪 / 联锁 / 心跳；地址是占位，必须按 PLC 点表改 */
+function plcTemplate(kind: 'opcua' | 'modbus', capabilities: string[], paramsOf: (cap: string) => string[]) {
+  const params = [...new Set(capabilities.flatMap(paramsOf))].sort();
+  let register = 10;
+  const point = (name: string, type: string, table = 'holding') => {
+    if (kind === 'opcua') return `ns=3;s="DB_ILCS"."${name}"`;
+    const address = table === 'coil' ? ['CmdStart', 'CmdHold', 'CmdResume', 'CmdAbort', 'CmdAck'].indexOf(name) : register;
+    if (table !== 'coil') register += type === 'float32' ? 2 : 1;
+    return { table, address, type };
+  };
+  const points: Record<string, unknown> = {
+    state: point('State', 'uint16'), error: point('ErrorCode', 'uint16'), heartbeat: point('Heartbeat', 'uint16'),
+    remote: point('RemoteMode', 'uint16'), safety: point('SafetyOk', 'uint16'),
+    cmd_start: point('CmdStart', 'bool', 'coil'), cmd_hold: point('CmdHold', 'bool', 'coil'),
+    cmd_resume: point('CmdResume', 'bool', 'coil'), cmd_abort: point('CmdAbort', 'bool', 'coil'),
+    cmd_ack: point('CmdAck', 'bool', 'coil'),
+  };
+  for (const name of params) {
+    points[`sp_${name}`] = point(`SP_${name}`, 'float32');
+    points[`pv_${name}`] = point(`PV_${name}`, 'float32');
+  }
+  return {
+    points,
+    ready: { point: 'remote', ok: [true, 1] }, interlock: { point: 'safety', ok: [true, 1] },
+    heartbeat: { point: 'heartbeat', stale_sec: 30 },
+    capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
+      write: Object.fromEntries(paramsOf(cap).map((name) => [name, `sp_${name}`])),
+      actuals: Object.fromEntries(paramsOf(cap).map((name) => [name, `pv_${name}`])),
+      start: { point: 'cmd_start', ...PULSE },
+    }])),
+    status: { point: 'state', states: PLC_STATES }, error: { point: 'error', codes: {} },
+    hold: { point: 'cmd_hold', ...PULSE }, resume: { point: 'cmd_resume', ...PULSE },
+    abort: { point: 'cmd_abort', ...PULSE }, acknowledge: { point: 'cmd_ack', ...PULSE },
+  };
+}
+
+/** 串口 / TCP 命令模板：命令与回复格式是占位，必须按设备的命令手册改 */
+function lineTemplate(capabilities: string[], paramsOf: (cap: string) => string[]) {
+  return {
+    transport: { kind: 'serial', port: 'rfc2217://serial-server.lab.internal:4001', baudrate: 9600, parity: 'N' },
+    write_terminator: '\r\n', read_terminator: '\r\n', request_timeout_sec: 3, probe_interval_sec: 10,
+    identity: { send: '*IDN?', pattern: '^(?P<vendor>[^,]*),(?P<model>[^,]*),(?P<device_id>[^,]*),(?P<firmware>.*)$' },
+    error_pattern: '^ERR',
+    capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
+      start: [
+        ...paramsOf(cap).map((name) => ({ send: `SET ${name.toUpperCase()} {${name}}`, expect: '^OK$' })),
+        { send: 'RUN', expect: '^OK$' },
+      ],
+    }])),
+    status: {
+      send: 'STAT?', pattern: '^(?P<state>[A-Z]+)(,(?P<detail>.*))?$',
+      states: { IDLE: 'idle', RUN: 'running', HOLD: 'held', DONE: 'done', ALARM: 'failed' },
+    },
+    actuals: [],
+    hold: [{ send: 'HOLD', expect: '^OK$' }], resume: [{ send: 'CONT', expect: '^OK$' }],
+    abort: [{ send: 'STOP', expect: '^OK$' }], acknowledge: [{ send: 'ACK', expect: '^OK$' }],
+  };
+}
 
 function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () => void }) {
   const toast = useToast();
@@ -363,7 +433,8 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
   // 各内置驱动的配置模板；Modbus 的能力码与参数槽位按本工位的能力限值依次编号，必须与 PLC 程序核对
   const applyTemplate = (driver: DriverTemplate) => {
     const capabilities = Object.keys(station.limits ?? {}).sort();
-    const params = [...new Set(capabilities.flatMap((cap) => Object.keys(station.limits[cap] ?? {})))].sort();
+    const paramsOf = (cap: string) => Object.keys(station.limits?.[cap] ?? {}).sort();
+    const params = [...new Set(capabilities.flatMap(paramsOf))].sort();
     const templates: Record<DriverTemplate, { protocol: string; config: Record<string, unknown>; credential?: string }> = {
       http_json_v1: {
         protocol: 'HTTPS JSON',
@@ -408,6 +479,82 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
           security_policy: 'Basic256Sha256', security_mode: 'SignAndEncrypt',
           server_certificate: `/run/secrets/ilcs/opcua/${station.id}.crt`, application_uri: 'urn:ilcs:client',
           expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
+        },
+      },
+      opcua_map_v1: {
+        protocol: 'OPC UA 节点映射',
+        credential: 'file:///run/secrets/ilcs/opcua/ilcs-client.json',
+        config: {
+          endpoint: 'opc.tcp://plc.lab.internal:4840/', security_policy: 'Basic256Sha256', security_mode: 'SignAndEncrypt',
+          server_certificate: `/run/secrets/ilcs/opcua/${station.id}.crt`, application_uri: 'urn:ilcs:client',
+          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
+          ...plcTemplate('opcua', capabilities, paramsOf),
+        },
+      },
+      modbus_map_v1: {
+        protocol: 'Modbus TCP 点表',
+        config: {
+          host: 'plc.lab.internal', port: 502, unit_id: 1, request_timeout_sec: 3, probe_interval_sec: 10,
+          ...plcTemplate('modbus', capabilities, paramsOf),
+        },
+      },
+      line_command_v1: {
+        protocol: '串口 / TCP 命令',
+        config: { ...lineTemplate(capabilities, paramsOf), expected_device_id: station.id },
+      },
+      mt_sics_v1: {
+        protocol: 'MT-SICS',
+        config: {
+          transport: { kind: 'tcp', host: 'balance.lab.internal', port: 4305 }, request_timeout_sec: 3, probe_interval_sec: 10,
+          expected_device_id: '', device_id_source: 'serial',
+          capabilities: Object.fromEntries((capabilities.length ? capabilities : ['cap.weigh']).map((cap) => [cap, {
+            action: 'weigh', result: paramsOf(cap)[0] ?? 'mass', unit: 'g', stable_timeout_sec: 15,
+          }])),
+        },
+      },
+      rest_map_v1: {
+        protocol: 'REST 接口映射',
+        credential: `file:///run/secrets/ilcs/${station.id}.json`,
+        config: {
+          base_url: 'https://fleet.lab.internal/api/v2.0.0', verify_tls: true, request_timeout_sec: 10, probe_interval_sec: 10,
+          expected_device_id: station.id,
+          identity: {
+            method: 'GET', path: '/status', fields: { device_id: 'robot_name', model: 'model', firmware: 'software_version' },
+            interlock: { field: 'state_text', values: ['EmergencyStop', 'Error'] },
+          },
+          capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
+            method: 'POST', path: '/mission_queue', handle: 'id',
+            body: cap === 'cap.transfer'
+              ? { mission_id: '{mission}', message: 'ILCS {command_id}', parameters: [{ id: 'From', value: '{from_position}' }, { id: 'To', value: '{to_position}' }] }
+              : { mission_id: '{mission}', message: 'ILCS {command_id}', ...Object.fromEntries(paramsOf(cap).map((name) => [name, `{${name}}`])) },
+            defaults: { mission: '<任务模板编号>' },
+          }])),
+          positions: {},
+          status: {
+            method: 'GET', path: '/mission_queue/{handle}', field: 'state',
+            states: { Pending: 'accepted', Executing: 'running', Paused: 'held', Done: 'done', Aborted: 'failed' },
+          },
+          lookup: { method: 'GET', path: '/mission_queue', detail_path: '/mission_queue/{id}', id_field: 'id', match_field: 'message', match: 'ILCS {command_id}' },
+          abort: { method: 'DELETE', path: '/mission_queue/{handle}' },
+        },
+      },
+      sql_table_v1: {
+        protocol: '数据库中间表',
+        credential: `file:///run/secrets/ilcs/${station.id}.dbpass`,
+        config: {
+          url: 'postgresql+psycopg2://ilcs_exchange@exchange-db.lab.internal:5432/exchange',
+          jobs_table: 'ilcs_jobs', device_table: 'ilcs_device', device_id: station.id,
+          heartbeat_stale_sec: 30, request_timeout_sec: 10, probe_interval_sec: 10,
+        },
+      },
+      composite_v1: {
+        protocol: '组合工位',
+        config: {
+          probe_interval_sec: 10,
+          routes: capabilities.map((cap, index) => ({
+            name: `route${index + 1}`, capabilities: [cap], driver: 'line_command_v1',
+            config: lineTemplate([cap], paramsOf),
+          })),
         },
       },
     };
@@ -501,7 +648,7 @@ function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () 
             <option value="real">真实设备</option>
           </select>
         </Field>
-        <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）、sila2_v1（SiLA 2）、modbus_tcp_v1（Modbus TCP 任务寄存器）、opcua_v1（OPC UA）；其他键必须先在后端注册">
+        <Field label="驱动键" hint={DRIVER_HINT}>
           <input
             className="mono"
             value={draft.kind === 'simulation' ? 'simulation' : draft.driver}
@@ -872,7 +1019,7 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
                 <option value="real">真实设备</option>
               </select>
             </Field>
-            <Field label="驱动键" hint="已内置 http_json_v1（HTTPS 网关）、sila2_v1（SiLA 2）、modbus_tcp_v1（Modbus TCP 任务寄存器）、opcua_v1（OPC UA）；其他键必须先在后端注册">
+            <Field label="驱动键" hint={DRIVER_HINT}>
               <input
                 className="mono"
                 value={adapterKind === 'simulation' ? 'simulation' : adapterDriver}

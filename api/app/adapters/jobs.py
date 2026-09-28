@@ -1,0 +1,627 @@
+"""没有 ILCS 任务契约的设备：驱动自己记作业台账。
+
+串口命令仪器、PLC 点表、厂家 REST 接口这类设备不认识 ILCS 指令号，不会按指令号查询，也不会去重。
+`MappedJobAdapter` 在驱动侧补上这一层，子类只写设备 I/O：
+
+- 每台设备一份作业台账（`ILCS_ADAPTER_STATE_ROOT/<工位>.json`），**先落盘再动设备**：执行器重启后仍能
+  按原指令号回答「这条指令在设备上怎样了」；同一指令号重复投递回放原作业，不再动作。
+- 同一时刻只有一个在途作业。设备在运行或保持中就明确拒绝（DeviceBusy），不排队、不覆盖；
+  设备停在上一个作业的完成 / 故障状态时先复位，复位不了也拒绝。
+- 结论看设备状态：见到运行后回到空闲或报完成 → 完成；报故障 → 失败（带实测值与故障说明）。
+  发了启动命令却一直没见到运行、也没有完成信号，超过 `start_timeout_sec` 就是**结果未知**，转人工核查，不猜。
+- 启动命令发出之前的失败（参数写不进、回复报错）设备没有动作 → 明确失败；启动命令发出之后
+  没拿到确认 → 台账记「未确认」，回执是结果未知，之后见到设备在运行才按运行处理，质量标 uncertain。
+
+设备没有时钟时，回执里的 device_ts 用驱动观测到状态的时间；遥测的设定值取指令参数里的同名数值。
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import math
+import os
+from pathlib import Path
+import re
+import string
+import threading
+import time
+
+from ..core.config import settings
+from .base import (
+    AdapterContract, AdapterError, AdapterIndeterminate, AdapterUnreachable, CommandRequest,
+    CommandResult,
+)
+from .contract import parse_receipt
+
+# 模拟设备在身份里带这个标记（厂商、型号或序列号任一字段），正式环境一律拒绝
+SIMULATOR_MARK = "ILCS-SIMULATOR"
+# accepted：设备明确说「排队中、还没开始」（调度系统的任务队列）；排队期间不按启动超时判结果未知
+NORMALIZED_STATES = {"idle", "accepted", "running", "held", "done", "failed"}
+TERMINAL = {"done", "failed", "aborted", "rejected"}
+KEEP_JOBS = 200
+BUILTINS = {"command_id", "batch_id", "step_id", "capability", "program", "type"}
+_FORMATTER = string.Formatter()
+_FIELD = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+# ---------- 模板 ----------
+
+def placeholders(template: str) -> set[str]:
+    """模板里引用的参数名（`{temp:.1f}` → temp）。"""
+    names = set()
+    for _, field, _, _ in _FORMATTER.parse(template):
+        if field is not None:
+            names.add(field)
+    return names
+
+
+def render(template: str, values: dict) -> str:
+    """只做「按名字取值 + 格式说明」，不允许属性访问、下标与 !r 转换：模板来自配置，值来自指令。"""
+    parts = []
+    try:
+        parsed = list(_FORMATTER.parse(template))
+    except ValueError as exc:
+        raise AdapterError(f"命令模板 {template!r} 格式错误：{exc}") from exc
+    for literal, field, spec, conversion in parsed:
+        parts.append(literal)
+        if field is None:
+            continue
+        if conversion or not _FIELD.fullmatch(field) or "{" in (spec or ""):
+            raise AdapterError(f"命令模板字段 {{{field}}} 不合法：只允许参数名与格式说明")
+        if field not in values:
+            raise AdapterError(f"命令模板需要参数 {field}，但指令里没有、配置也没有给缺省值")
+        value = values[field]
+        try:
+            text = format(value, spec or "")
+        except (TypeError, ValueError) as exc:
+            raise AdapterError(f"参数 {field} = {value!r} 不能按格式 {spec!r} 输出") from exc
+        if any(ord(char) < 32 for char in text):
+            raise AdapterError(f"参数 {field} 含控制字符，拒绝发往设备")
+        parts.append(text)
+    return "".join(parts)
+
+
+def render_value(template, values: dict):
+    """JSON 模板：字符串逐个渲染；整串就是一个占位符时保留原值类型（数字不变字符串）。"""
+    if isinstance(template, str):
+        whole = re.fullmatch(r"\{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\}", template)
+        if whole:
+            if whole.group(1) not in values:
+                raise AdapterError(f"请求模板需要参数 {whole.group(1)}，但指令里没有、配置也没有给缺省值")
+            return values[whole.group(1)]
+        return render(template, values)
+    if isinstance(template, list):
+        return [render_value(item, values) for item in template]
+    if isinstance(template, dict):
+        return {key: render_value(item, values) for key, item in template.items()}
+    return template
+
+
+def template_fields(template) -> set[str]:
+    if isinstance(template, str):
+        return placeholders(template)
+    if isinstance(template, list):
+        return set().union(*(template_fields(item) for item in template)) if template else set()
+    if isinstance(template, dict):
+        return set().union(*(template_fields(item) for item in template.values())) if template else set()
+    return set()
+
+
+def flatten(params: dict, prefix: str = "") -> dict:
+    """转运这类嵌套参数按点号展开：{"to": {"location_id": "X"}} → {"to.location_id": "X"}。"""
+    flat = {}
+    for key, value in (params or {}).items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(flatten(value, f"{name}."))
+        else:
+            flat[name] = value
+    return flat
+
+
+# ---------- 作业台账 ----------
+
+def _safe(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._#-]", "_", name)
+    if not cleaned or cleaned.startswith("."):
+        raise AdapterError(f"工位编号 {name!r} 不能用作台账文件名")
+    return cleaned
+
+
+class JobJournal:
+    """一台设备一份 JSON：作业、别名（恢复指令沿用原作业）、当前在途作业。原子替换写入。"""
+
+    def __init__(self, key: str):
+        root = Path(settings.adapter_state_dir)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AdapterError(f"作业台账目录 {root} 无法创建：{exc}；不能在没有台账的情况下驱动设备") from exc
+        self.path = root / f"{_safe(key)}.json"
+        self.jobs: dict[str, dict] = {}
+        self.aliases: dict[str, str] = {}
+        self.active = ""
+        if self.path.exists():
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                self.jobs = dict(raw.get("jobs") or {})
+                self.aliases = dict(raw.get("aliases") or {})
+                self.active = str(raw.get("active") or "")
+            except (OSError, ValueError, AttributeError) as exc:
+                # 台账坏了就不知道设备上有哪些作业：不能当成空台账继续
+                raise AdapterError(f"作业台账 {self.path} 无法读取（{exc}）；请人工核对设备后再处理") from exc
+
+    def find(self, command_id: str) -> dict | None:
+        return self.jobs.get(self.aliases.get(command_id, command_id))
+
+    def put(self, job: dict, *, active: bool | None = None) -> None:
+        self.jobs[job["id"]] = job
+        if active is True:
+            self.active = job["id"]
+        elif active is False and self.active == job["id"]:
+            self.active = ""
+
+    def alias(self, command_id: str, job_id: str) -> None:
+        self.aliases[command_id] = job_id
+
+    def current(self) -> dict | None:
+        return self.jobs.get(self.active) if self.active else None
+
+    def save(self) -> None:
+        # 只留在途作业与最近的已结束作业
+        finished = sorted(
+            (job for job in self.jobs.values() if job["state"] in TERMINAL and job["id"] != self.active),
+            key=lambda job: job.get("updated_at", 0),
+        )
+        for job in finished[:-KEEP_JOBS] if len(finished) > KEEP_JOBS else []:
+            self.jobs.pop(job["id"], None)
+        self.aliases = {alias: target for alias, target in self.aliases.items() if target in self.jobs}
+        payload = json.dumps({"jobs": self.jobs, "aliases": self.aliases, "active": self.active},
+                             ensure_ascii=False, indent=1)
+        temporary = self.path.with_suffix(".tmp")
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+        except OSError as exc:
+            raise AdapterError(f"作业台账 {self.path} 写不进去：{exc}") from exc
+
+
+# ---------- 驱动基类 ----------
+
+class MappedJobAdapter:
+    """子类实现：`read_identity`、`start_job`、`read_status`、`read_actuals`，按需实现
+    `hold_job` / `resume_job` / `abort_job` / `acknowledge` / `precheck`。"""
+
+    DRIVER = ""
+    PROTOCOL = ""
+    NOTE = ""
+    # 称重这类即时动作：start_job 直接返回结果，作业当场完成
+    SYNCHRONOUS = False
+
+    def __init__(self, record, journal_key: str = ""):
+        self.record = record
+        self.station_id = record.station_id
+        self.config = dict(record.config or {})
+        self.credential_ref = getattr(record, "credential_ref", "") or ""
+        self.expected_device_id = str(self.config.get("expected_device_id") or "")
+        self.start_timeout = self._seconds("start_timeout_sec", 30.0)
+        self.material_map = self.config.get("material_map") or {}
+        if not isinstance(self.material_map, dict):
+            raise AdapterError("material_map 必须是 {实测参数: {material, unit, factor}}")
+        self._lock = threading.RLock()
+        self.contract = AdapterContract(
+            kind="real", protocol=record.protocol or self.PROTOCOL, version=record.version or "1.0",
+            supports_hold=bool(record.supports_hold), supports_abort=bool(record.supports_abort),
+            supports_query=bool(record.supports_query), supports_dedup=bool(record.supports_dedup),
+            note=record.note or self.NOTE,
+        )
+        self.journal = JobJournal(journal_key or self.station_id)
+
+    # ---------- 配置工具 ----------
+
+    def _seconds(self, key: str, default: float, *, maximum: float = 24 * 3600, source: dict | None = None) -> float:
+        source = self.config if source is None else source
+        try:
+            value = float(source.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise AdapterError(f"{key} 必须是正数") from exc
+        if not math.isfinite(value) or value <= 0 or value > maximum:
+            raise AdapterError(f"{key} 超出允许范围（0–{maximum:g}）")
+        return value
+
+    def capability_spec(self, capability: str) -> dict:
+        specs = self.config.get("capabilities") or {}
+        if not isinstance(specs, dict):
+            raise AdapterError("capabilities 必须是 {能力: 映射}")
+        spec = specs.get(capability)
+        if not isinstance(spec, dict):
+            raise AdapterError(f"能力 {capability} 没有在适配器配置 capabilities 里映射到设备命令，设备没有动作")
+        return spec
+
+    # ---------- 子类钩子 ----------
+
+    def read_identity(self) -> dict:
+        raise NotImplementedError
+
+    def accepted_params(self, spec: dict) -> set[str] | None:
+        """这项能力接受哪些参数；None 表示不检查（例如转运指令的系统参数）。"""
+        return None
+
+    def precheck(self, spec: dict) -> None:
+        """启动前的就绪 / 联锁检查；不满足抛 AdapterError（设备没动）。"""
+
+    def start_job(self, job: dict, spec: dict, values: dict) -> dict | None:
+        raise NotImplementedError
+
+    def read_status(self, job: dict) -> tuple[str, str]:
+        raise NotImplementedError
+
+    def read_actuals(self, job: dict, spec: dict) -> dict:
+        return dict(job.get("actuals") or {})
+
+    def device_state(self) -> str:
+        """设备整体状态（空闲 / 运行 / 保持 / 完成 / 故障），投递新作业前判忙用。缺省就是读状态点。"""
+        return self.read_status({})[0]
+
+    def hold_job(self, job: dict) -> None:
+        raise AdapterError("该设备的映射没有配置保持命令")
+
+    def resume_job(self, job: dict) -> None:
+        raise AdapterError("该设备的映射没有配置恢复命令")
+
+    def abort_job(self, job: dict | None) -> None:
+        raise AdapterError("该设备的映射没有配置终止命令")
+
+    def acknowledge(self) -> bool:
+        """复位完成 / 故障状态；没有配置复位命令返回 False。"""
+        return False
+
+    def lookup(self, job: dict) -> bool:
+        """启动未确认的作业能否在设备侧找回（REST 按请求里带的指令号查）；找回了返回 True。"""
+        return False
+
+    def close(self) -> None:
+        """释放连接；注册表在配置换版本时调用。"""
+
+    # ---------- 身份与健康 ----------
+
+    def identity(self) -> dict:
+        with self._lock:
+            raw = dict(self.read_identity() or {})
+        marker = " ".join(str(raw.get(key) or "") for key in ("vendor", "model", "serial", "device_id", "firmware"))
+        raw["simulator"] = bool(raw.get("simulator")) or SIMULATOR_MARK in marker
+        raw.setdefault("vendor", self.config.get("vendor", ""))
+        return raw
+
+    def healthcheck(self) -> dict:
+        identity = self.identity()
+        if identity["simulator"] and settings.environment == "production":
+            raise AdapterError(f"该设备自报为模拟器（{SIMULATOR_MARK}）；正式环境不接入模拟设备")
+        actual = str(identity.get("device_id") or identity.get("serial") or "")
+        if self.expected_device_id and actual != self.expected_device_id:
+            raise AdapterError(f"设备身份不匹配：期望 {self.expected_device_id}，实际 {actual or '缺失'}")
+        return {
+            "reachable": True, "driver": self.DRIVER, "protocol": self.contract.protocol,
+            "device_id": actual, "model": identity.get("model", ""), "simulator": identity["simulator"],
+            "interlock": bool(identity.get("interlock")),
+            "accepts_commands": bool(identity.get("accepts_commands", True)),
+        }
+
+    # ---------- 参数与模板取值 ----------
+
+    def values_for(self, request: CommandRequest, spec: dict) -> dict:
+        params = request.params or {}
+        accepted = self.accepted_params(spec)
+        if request.type != "transfer" and accepted is not None:
+            for name, value in params.items():
+                if isinstance(value, (dict, list)):
+                    raise AdapterError(
+                        f"{self.PROTOCOL} 映射只接受标量参数，不支持 {name} 这类结构化参数（如孔位矩阵）；"
+                        f"请改用能传 JSON 的驱动（SiLA 2 / OPC UA TaskExecution / HTTPS 网关）"
+                    )
+                if name not in accepted:
+                    raise AdapterError(f"参数 {name} 在设备映射里没有对应的写入点或命令，拒绝下发（不静默丢弃设定值）")
+        values = {**(spec.get("defaults") or {}), **flatten(params)}
+        default = spec.get("program") if isinstance(spec.get("program"), str) else ""
+        program = str((request.method or {}).get("program") or default or "")
+        values.update({
+            "command_id": request.command_id, "batch_id": request.batch_id, "step_id": request.step_id,
+            "capability": request.capability, "program": program, "type": request.type,
+        })
+        return values
+
+    # ---------- 回执 ----------
+
+    def _receipt(self, job: dict, command_id: str) -> CommandResult:
+        state = job["state"]
+        mapped = {
+            "accepted": "accepted", "running": "running", "done": "done", "failed": "failed",
+            "aborted": "failed", "rejected": "failed", "unknown": "unknown", "unconfirmed": "unknown",
+            "starting": "unknown",
+        }[state]
+        telemetry = [
+            {"metric": metric, "value": value, "setpoint": setpoint}
+            for metric, value, setpoint in job.get("telemetry") or []
+        ]
+        quality = job.get("quality") or "good"
+        if mapped in {"failed", "unknown"} and quality == "good":
+            quality = "bad" if mapped == "failed" else "uncertain"
+        return parse_receipt({
+            "command_id": command_id, "state": mapped, "quality": quality,
+            "device_ts": _iso(job.get("updated_at") or time.time()),
+            "delivered": job.get("delivered") or {}, "telemetry": telemetry, "error": job.get("error") or "",
+        }, command_id, f"real:{self.DRIVER}")
+
+    def _control_receipt(self, command_id: str, note: str) -> CommandResult:
+        return parse_receipt({
+            "command_id": command_id, "state": "done", "quality": "good", "device_ts": _iso(time.time()),
+            "delivered": {"note": note}, "telemetry": [], "error": "",
+        }, command_id, f"real:{self.DRIVER}")
+
+    def _materials(self, actuals: dict) -> list[dict]:
+        rows = []
+        for name, mapping in self.material_map.items():
+            if name in actuals and isinstance(mapping, dict) and mapping.get("material"):
+                rows.append({
+                    "material": mapping["material"], "unit": mapping.get("unit", ""),
+                    "quantity": round(float(actuals[name]) * float(mapping.get("factor", 1)), 6),
+                })
+        return rows
+
+    def _finish(self, job: dict, state: str, error: str = "") -> None:
+        spec = self.capability_spec(job["capability"]) if job.get("capability") else {}
+        # 数值实测值进遥测并参与物料折算；文本结果（如读码器读到的条码）只进回执
+        raw = self.read_actuals(job, spec) or {}
+        actuals = {name: round(float(value), 6) for name, value in raw.items()
+                   if isinstance(value, (int, float)) and not isinstance(value, bool)}
+        texts = {name: value for name, value in raw.items() if name not in actuals}
+        delivered = {**(job.get("delivered") or {}), **texts, **actuals}
+        materials = self._materials(actuals)
+        if materials:
+            delivered["materials"] = materials
+        setpoints = job.get("params") or {}
+        job["telemetry"] = [
+            [name, value, float(setpoints[name]) if isinstance(setpoints.get(name), (int, float))
+             and not isinstance(setpoints.get(name), bool) else None]
+            for name, value in actuals.items()
+        ] if state == "done" else []
+        job["delivered"] = delivered
+        job["state"] = state
+        job["phase"] = ""
+        if error:
+            job["error"] = error
+        job["updated_at"] = time.time()
+        self.journal.put(job, active=False)
+
+    # ---------- 状态推进 ----------
+
+    def _poll(self, job: dict) -> None:
+        """按设备状态推进一次；读不到状态照常抛 AdapterUnreachable（执行器下一轮再查）。"""
+        if job["state"] in TERMINAL:
+            return
+        state, detail = self.read_status(job)
+        if state not in NORMALIZED_STATES:
+            raise AdapterIndeterminate(f"设备状态 {state!r} 没有映射到 idle/running/held/done/failed")
+        elapsed = time.time() - job["started_at"]
+        before = (job["state"], job.get("phase"), job.get("seen_running"))
+        unconfirmed = job["state"] == "unconfirmed" or job.get("unconfirmed")
+        stale_done = job.get("pre_state") == "done" and not job.get("seen_running")
+        if state == "accepted":
+            pass
+        elif state in {"running", "held"}:
+            job["seen_running"] = True
+            job["state"] = "running"
+            job["phase"] = "held" if state == "held" else ""
+        elif state == "failed" and not (job.get("pre_state") == "failed" and not job.get("seen_running")):
+            if unconfirmed:
+                job["quality"] = "uncertain"
+            self._finish(job, "failed", detail or "设备报告故障")
+        elif (state == "done" and not stale_done) or (state == "idle" and (
+            job.get("seen_running") or (job.get("idle_after_start") == "done" and not unconfirmed)
+        )):
+            if unconfirmed:
+                job["quality"] = "uncertain"
+            self._finish(job, "done")
+        elif elapsed > self.start_timeout and job["state"] not in {"unconfirmed", "unknown"}:
+            job["state"] = "unknown"
+            job["error"] = (
+                f"发出启动命令 {elapsed:.0f} s 后设备仍未进入运行，也没有完成信号（当前 {state}）；"
+                f"结果未知，转人工核查"
+            )
+        if unconfirmed and job["state"] == "running":
+            job["quality"] = "uncertain"
+        if (job["state"], job.get("phase"), job.get("seen_running")) != before:
+            job["updated_at"] = time.time()
+            self.journal.put(job)
+            try:
+                self.journal.save()
+            except AdapterError as exc:
+                raise AdapterIndeterminate(str(exc)) from exc
+
+    # ---------- 契约 ----------
+
+    def submit(self, request: CommandRequest) -> CommandResult:
+        with self._lock:
+            existing = self.journal.find(request.command_id)
+            if existing is not None:
+                if existing["state"] == "rejected":
+                    raise AdapterError(existing.get("error") or "设备曾明确拒绝这条指令")
+                return self._receipt(existing, request.command_id)  # 重复投递：回放原作业，不再动作
+            if request.type == "resume":
+                held = self._held_for(request)
+                if held is not None:
+                    return self._resume(held, request)
+            spec = self.capability_spec(request.capability)
+            values = self.values_for(request, spec)
+            pre_state = self._ensure_idle()
+            self.precheck(spec)
+            job = {
+                "id": request.command_id, "capability": request.capability, "program": values.get("program", ""),
+                "params": {k: v for k, v in (request.params or {}).items() if not isinstance(v, (dict, list))},
+                "context": {"batch_id": request.batch_id, "step_id": request.step_id},
+                "state": "starting", "phase": "", "seen_running": False, "quality": "good",
+                "pre_state": pre_state, "idle_after_start": spec.get("idle_after_start")
+                or self.config.get("idle_after_start") or "unknown",
+                "started_at": time.time(), "updated_at": time.time(), "delivered": {}, "telemetry": [], "error": "",
+            }
+            # 先落盘再动设备：执行器在这之后任何时刻重启，都知道这条指令可能已经发给设备
+            self.journal.put(job, active=True)
+            self.journal.save()
+            try:
+                result = self.start_job(job, spec, values)
+            except AdapterUnreachable as exc:
+                job["state"] = "unconfirmed"
+                job["unconfirmed"] = True
+                job["error"] = f"启动命令已发出但没有拿到确认：{exc}"
+                job["updated_at"] = time.time()
+                self.journal.put(job)
+                self._save_quietly()
+                raise
+            except AdapterError as exc:
+                job["state"] = "rejected"
+                job["error"] = str(exc)
+                job["updated_at"] = time.time()
+                self.journal.put(job, active=False)
+                self.journal.save()
+                raise
+            except Exception as exc:
+                job["state"] = "unconfirmed"
+                job["unconfirmed"] = True
+                job["error"] = f"驱动内部错误：{exc}"
+                self.journal.put(job)
+                self._save_quietly()
+                raise AdapterIndeterminate(f"驱动内部错误（{exc.__class__.__name__}），启动命令可能已发出") from exc
+            try:
+                if isinstance(result, dict):  # 即时动作（称重、读码）：结果随启动命令一起回来
+                    job["delivered"] = dict(result.get("delivered") or {})
+                    job["actuals"] = dict(result.get("actuals") or {})
+                    job["seen_running"] = True
+                    self._finish(job, "failed" if result.get("error") else "done", result.get("error", ""))
+                else:
+                    job["state"] = "accepted"
+                    job["updated_at"] = time.time()
+                    self.journal.put(job)
+                self.journal.save()
+            except AdapterError as exc:
+                # 设备已经确认启动，台账却写不进去：结论只能是未知，不能报「设备没动」
+                raise AdapterIndeterminate(f"设备已确认启动，但作业台账没有记下：{exc}") from exc
+            return self._receipt(job, request.command_id)
+
+    def _ensure_idle(self) -> str:
+        """在途作业先按设备状态推进；设备仍在运行就明确拒绝，停在结束状态就先复位。返回启动前的设备状态。"""
+        current = self.journal.current()
+        if current is not None and current["state"] not in TERMINAL:
+            self._poll(current)
+        if self.SYNCHRONOUS:
+            return "idle"
+        state = self.device_state()
+        if state in {"running", "held"}:
+            busy = current["id"][:8] if current is not None and current["state"] not in TERMINAL else "未登记的作业"
+            raise AdapterError(f"设备忙（DeviceBusy）：正在执行 {busy}，未接受新作业")
+        if state in {"done", "failed"} and self.acknowledge():
+            state = self.device_state()
+        return state
+
+    def _held_for(self, request: CommandRequest) -> dict | None:
+        current = self.journal.current()
+        if current is None or current["state"] != "running" or current.get("phase") != "held":
+            return None
+        context = current.get("context") or {}
+        if context.get("batch_id") != request.batch_id or context.get("step_id") != request.step_id:
+            return None
+        return current
+
+    def _save_quietly(self) -> None:
+        """已经要报「结果未知」时再写台账：写不进去也不能把结论改成别的（落盘前的「启动中」记录仍在）。"""
+        try:
+            self.journal.save()
+        except AdapterError:
+            pass
+
+    def _saved(self, action: str) -> None:
+        """设备已经执行了动作之后再写台账：写不进去只能报结果未知，不能说「设备没动」。"""
+        try:
+            self.journal.save()
+        except AdapterError as exc:
+            raise AdapterIndeterminate(f"{action}已发给设备，但作业台账没有记下：{exc}") from exc
+
+    def _resume(self, job: dict, request: CommandRequest) -> CommandResult:
+        self.resume_job(job)
+        job["phase"] = ""
+        job["updated_at"] = time.time()
+        self.journal.alias(request.command_id, job["id"])
+        self.journal.put(job)
+        self._saved("恢复")
+        return self._receipt(job, request.command_id)
+
+    def query(self, command_id: str) -> CommandResult | None:
+        if not self.contract.supports_query:
+            return None
+        with self._lock:
+            job = self.journal.find(command_id)
+            if job is None:
+                return None
+            if job.get("control"):
+                return self._control_receipt(command_id, job.get("error") or "已执行")
+            if job["state"] == "unconfirmed" and not job.get("handle") and self.lookup(job):
+                job["updated_at"] = time.time()
+                self.journal.put(job)
+                self.journal.save()
+            if job["state"] not in TERMINAL:
+                self._poll(job)
+            return self._receipt(job, command_id)
+
+    def _control(self, request: CommandRequest, kind: str, action) -> CommandResult:
+        with self._lock:
+            existing = self.journal.find(request.command_id)
+            if existing is not None and existing.get("control"):
+                return self._control_receipt(request.command_id, existing.get("error") or "已执行")
+            target = self.journal.find(request.target_command_id) if request.target_command_id else self.journal.current()
+            note = action(target)
+            self.journal.put({
+                "id": request.command_id, "control": kind, "state": "done", "error": note,
+                "updated_at": time.time(), "started_at": time.time(),
+            })
+            self._saved({"hold": "保持", "abort": "终止"}.get(kind, kind))
+            return self._control_receipt(request.command_id, note)
+
+    def hold(self, request: CommandRequest) -> CommandResult:
+        if not self.contract.supports_hold:
+            raise AdapterError("设备声明不支持保持")
+
+        def act(target):
+            if target is None or target["state"] not in {"accepted", "running"} or target.get("phase") == "held":
+                raise AdapterError(f"没有可保持的在途作业 {request.target_command_id[:8] or '（未指定）'}")
+            self.hold_job(target)
+            target["phase"] = "held"
+            target["state"] = "running"
+            target["updated_at"] = time.time()
+            self.journal.put(target)
+            return f"作业 {target['id'][:8]} 已保持"
+
+        return self._control(request, "hold", act)
+
+    def abort(self, request: CommandRequest) -> CommandResult:
+        if not self.contract.supports_abort:
+            raise AdapterError("设备声明不支持终止")
+
+        def act(target):
+            self.abort_job(target)
+            if target is not None and target["state"] not in TERMINAL:
+                try:
+                    self._finish(target, "aborted", f"被 {request.command_id[:8]} 终止")
+                except AdapterUnreachable:
+                    target["state"] = "aborted"
+                    target["error"] = f"被 {request.command_id[:8]} 终止（实测值未读到）"
+                    target["updated_at"] = time.time()
+                    self.journal.put(target, active=False)
+            return "设备已终止并处于安全状态"
+
+        return self._control(request, "abort", act)

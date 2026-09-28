@@ -1,10 +1,12 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, UploadFile
 
+from ...core.errors import PermissionDenied
 from ...schemas import (
     AnalysisTaskCreateIn, CancelIn, ManualResultIn, ResultIngestIn, ResultReviewIn,
     ResultRevisionIn, RetestIn,
 )
 from ...services.analysis_service import AnalysisService
+from ...services.file_service import FileService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, Paging, ServiceCtx, require
 
 router = APIRouter(tags=["analysis"])
@@ -57,6 +59,25 @@ def enter_manual_result(
 ):
     """人工录入。记录录入人，之后本人不能审核这条记录。"""
     return AnalysisService(db, ctx).enter_manual(task_id, payload.model_dump(), user)
+
+
+@router.post("/integrations/files", status_code=201)
+def ingest_raw_file(
+    db: DbSession, ctx: ServiceCtx, file: UploadFile = File(...), note: str = Form(""),
+):
+    """结果原始文件上传（集成服务）。先上传拿到文件编号，再在结果回传里引用 `raw_file_id`。
+
+    只给有检测任务回传授权的服务身份用；类型与大小限制和人工上传一样。没被结果引用的文件按暂存文件
+    在保留期后由执行器清理，不会冒充正式附件。
+    """
+    if not (ctx.scopes or {}).get("analysis_tasks"):
+        raise PermissionDenied(
+            "该服务身份没有检测结果回传授权，不能上传原始文件", code="file_upload_not_authorized",
+        )
+    return FileService(db, ctx).upload(
+        file.filename or "unnamed", file.content_type or "application/octet-stream", file.file, None,
+        note=note or f"{ctx.subject_label or ctx.subject_id} 回传的原始文件",
+    )
 
 
 @router.post("/integrations/results")
