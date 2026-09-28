@@ -395,7 +395,7 @@ class AssetService:
         kind = payload.get("kind", "maintenance")
         if kind not in BOOKING_KINDS:
             raise ValidationFailed(f"占用类型只能是 {'、'.join(sorted(BOOKING_KINDS))}")
-        starts_at, ends_at = payload["starts_at"], payload["ends_at"]
+        starts_at, ends_at = as_utc(payload["starts_at"]), as_utc(payload["ends_at"])
         if ends_at <= starts_at:
             raise ValidationFailed("结束时间必须晚于开始时间")
         window = Window(starts_at, ends_at)

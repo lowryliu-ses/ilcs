@@ -7,12 +7,19 @@
 """
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+from ..core.clock import as_utc
 
 # 数量：接受字符串或整数，拒绝浮点字面量
 Quantity = Decimal | int | str
+
+# 时间：库里一律存无时区 UTC。前端发的是带偏移的 ISO（toISOString 带 Z），在入口按偏移换算、去掉时区，
+# 不带偏移的视为 UTC（与 core.clock.as_utc 同一口径）。不在入口换算的话，服务里拿它和 now() 一比较
+# （到期判断、区间重叠）就是 TypeError，接口直接 500
+UtcDatetime = Annotated[datetime, AfterValidator(as_utc)]
 
 
 class Versioned(BaseModel):
@@ -130,8 +137,8 @@ class QualificationIn(BaseModel):
     scope_ref: str
     label: str = ""
     evidence_file_id: str = ""
-    effective_from: datetime | None = None
-    expires_at: datetime | None = None
+    effective_from: UtcDatetime | None = None
+    expires_at: UtcDatetime | None = None
 
 
 class RevokeIn(BaseModel):
@@ -178,8 +185,8 @@ class AssetPatchIn(Versioned):
 class CalibrationIn(BaseModel):
     capability_scope: list[str] = []
     result: Literal["pass", "fail"] = "pass"
-    effective_from: datetime | None = None
-    expires_at: datetime | None = None
+    effective_from: UtcDatetime | None = None
+    expires_at: UtcDatetime | None = None
     certificate_file_id: str = ""
     note: str = ""
 
@@ -193,8 +200,8 @@ class MaintenanceOrderIn(BaseModel):
     kind: Literal["preventive", "corrective", "inspection"] = "preventive"
     title: str = Field(min_length=1)
     detail: str = ""
-    planned_start: datetime
-    planned_end: datetime
+    planned_start: UtcDatetime
+    planned_end: UtcDatetime
     assignee_user_id: str = ""
 
 
@@ -211,8 +218,8 @@ class BookingIn(BaseModel):
     asset_id: str
     station_id: str = ""
     kind: Literal["maintenance", "manual", "calibration"] = "maintenance"
-    starts_at: datetime
-    ends_at: datetime
+    starts_at: UtcDatetime
+    ends_at: UtcDatetime
     reason: str = ""
     state: Literal["pending", "confirmed"] = "confirmed"
 
@@ -396,7 +403,7 @@ class EnvironmentReadingIn(BaseModel):
     # NaN / 无穷不收：它们和任何上下限比较都是假，会让越界的环境悄悄「通过」
     value: float = Field(allow_inf_nan=False)
     unit: str = ""
-    measured_at: datetime | None = None
+    measured_at: UtcDatetime | None = None
     note: str = ""
 
 
@@ -406,8 +413,8 @@ class EnvironmentBatchIn(BaseModel):
 
 class PersonBookingIn(BaseModel):
     kind: Literal["leave", "training", "duty"] = "leave"
-    starts_at: datetime
-    ends_at: datetime
+    starts_at: UtcDatetime
+    ends_at: UtcDatetime
     reason: str = ""
 
 
@@ -415,7 +422,7 @@ class SimulateIn(BaseModel):
     """执行前仿真：并发几个批次、从什么时候开始、是否叠加当前时间线。"""
 
     concurrency: int = Field(default=1, ge=1, le=20)
-    start_from: datetime | None = None
+    start_from: UtcDatetime | None = None
     use_timeline: bool = True
 
 
@@ -490,7 +497,7 @@ class DecisionIn(BaseModel):
     conclusion: Literal["approved", "rejected"]
     reason: str = ""
     signature_id: str | None = None
-    effective_from: datetime | None = None
+    effective_from: UtcDatetime | None = None
 
 
 # ---------- 实验任务 ----------
@@ -501,7 +508,7 @@ class TaskCreateIn(BaseModel):
     owner_user_id: str = ""
     reviewer_user_id: str = ""
     sample_ids: list[str] = []
-    due_at: datetime | None = None
+    due_at: UtcDatetime | None = None
     priority: int = Field(default=2, ge=1, le=5)
     note: str = ""
     # 任务树与依赖：挂在哪个父任务下、依赖哪些上游任务
@@ -550,13 +557,13 @@ class BatchCreateIn(BaseModel):
 
 
 class ScheduleIn(BaseModel):
-    start_from: datetime | None = None
+    start_from: UtcDatetime | None = None
     prefer_station_id: str | None = None
 
 
 class RescheduleIn(BaseModel):
     from_step: int = Field(ge=0)
-    start_from: datetime
+    start_from: UtcDatetime
 
 
 class DispatchIn(Signed):
@@ -579,7 +586,7 @@ class AbortIn(Signed):
 
 class OptimizeIn(BaseModel):
     batch_ids: list[str]
-    start_from: datetime | None = None
+    start_from: UtcDatetime | None = None
     # optimize（先按交付期拖期、再按总跨度搜索顺序）/ priority / deadline / fifo；缺省取部署配置
     mode: Literal["optimize", "priority", "deadline", "fifo"] | None = None
 
@@ -598,7 +605,7 @@ class ProposalDismissIn(BaseModel):
 
 class ApplyOptimizedIn(BaseModel):
     order: list[str]
-    start_from: datetime | None = None
+    start_from: UtcDatetime | None = None
 
 
 # ---------- 步骤运行 ----------
@@ -749,7 +756,7 @@ class SampleReceiveIn(BaseModel):
     unit: str = ""
     confirm_method: Literal["barcode", "manual", "signature"] = "barcode"
     note: str = ""
-    occurred_at: datetime | None = None
+    occurred_at: UtcDatetime | None = None
 
 
 class SampleTransferIn(BaseModel):
@@ -765,7 +772,7 @@ class SampleTransferIn(BaseModel):
     unit: str = ""
     confirm_method: Literal["barcode", "manual", "signature"] = "barcode"
     note: str = ""
-    occurred_at: datetime | None = None
+    occurred_at: UtcDatetime | None = None
 
 
 class SplitChildIn(BaseModel):
@@ -946,7 +953,7 @@ class ResultIngestIn(BaseModel):
     event_id: str
     task_id: str
     sample_id: str = ""
-    collected_at: datetime | None = None
+    collected_at: UtcDatetime | None = None
     parser_version: str = ""
     raw_file_id: str = ""
     instrument_serial: str = ""
@@ -958,7 +965,7 @@ class ResultIngestIn(BaseModel):
 class ManualResultIn(BaseModel):
     event_id: str
     sample_id: str = ""
-    collected_at: datetime | None = None
+    collected_at: UtcDatetime | None = None
     parser_version: str = ""
     raw_file_id: str = ""
     station_id: str = ""
@@ -979,7 +986,7 @@ class ResultRevisionIn(BaseModel):
     value: Any | None = None
     unit: str = ""
     not_measured_reason: str = ""
-    collected_at: datetime | None = None
+    collected_at: UtcDatetime | None = None
     raw_file_id: str = ""
     parser_version: str = ""
     reason: str
@@ -1000,8 +1007,8 @@ class SopVersionCreateIn(BaseModel):
     capability_scope: list[str] = []
     sample_types: list[str] = []
     requires_training_ack: bool = False
-    effective_from: datetime | None = None
-    effective_to: datetime | None = None
+    effective_from: UtcDatetime | None = None
+    effective_to: UtcDatetime | None = None
     review_due: date | None = None
     category: str | None = None
     owner_id: str | None = None
@@ -1016,8 +1023,8 @@ class SopVersionPatchIn(Versioned):
     capability_scope: list[str] | None = None
     sample_types: list[str] | None = None
     requires_training_ack: bool | None = None
-    effective_from: datetime | None = None
-    effective_to: datetime | None = None
+    effective_from: UtcDatetime | None = None
+    effective_to: UtcDatetime | None = None
     review_due: date | None = None
     category: str | None = None
     owner_id: str | None = None
@@ -1161,7 +1168,7 @@ class TelemetryPointIn(BaseModel):
     metric: str = Field(min_length=1, max_length=64)
     value: float
     setpoint: float | None = None
-    device_ts: datetime
+    device_ts: UtcDatetime
     quality: Literal["good", "bad", "uncertain"] = "good"
     # 可选：设备按孔位或样本报的点，归到本批次对应样本；整板遥测不填
     well: str = Field(default="", max_length=16)
@@ -1180,7 +1187,7 @@ class CommandEventIn(BaseModel):
     """设备回执。必须绑定原 command_id（在路径上），并给出明确结论。"""
 
     outcome: Literal["accepted", "done", "failed"]
-    device_ts: datetime | None = None
+    device_ts: UtcDatetime | None = None
     quality: str = "good"
     delivered: dict[str, Any] = {}
     error: str = ""

@@ -31,6 +31,23 @@ export class ApiError extends Error {
   }
 }
 
+/** 出错响应的正文。服务崩溃或代理出错时返回的是纯文本 / HTML（「Internal Server Error」、nginx 的 502 页），
+    不能让 JSON.parse 的 SyntaxError 冒充错误信息——换成一句看得懂的话。 */
+function errorBody(text: string, status: number): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const message =
+      status === 502 || status === 503 || status === 504
+        ? `服务暂时不可用（${status}），请稍后重试`
+        : status >= 500
+          ? `服务器内部错误（${status}），操作没有完成，请稍后重试或联系管理员`
+          : `请求失败（${status}）`;
+    return { detail: { message, code: 'non_json_response' } };
+  }
+}
+
 function messageOf(payload: unknown): string {
   const detail = (payload as { detail?: unknown })?.detail;
   if (typeof detail === 'string') return detail;
@@ -132,14 +149,13 @@ async function request<T>(path: string, options: Options = {}): Promise<T> {
     window.dispatchEvent(new Event('ilcs:unauthorized'));
   }
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
     // 4xx 是服务端已经做出的裁决，重试同一个键没有意义；5xx 与网络错误保留键以便重试
     if (options.idempotent && response.status < 500) pendingKeys.delete(signature);
-    throw new ApiError(response.status, payload);
+    throw new ApiError(response.status, errorBody(text, response.status));
   }
   if (options.idempotent) pendingKeys.delete(signature);
-  return payload as T;
+  return (text ? JSON.parse(text) : null) as T;
 }
 
 export const api = {
@@ -162,9 +178,8 @@ export const api = {
     if (org) headers['X-Organization-Id'] = org;
     const response = await fetch(`/api${path}`, { method: 'POST', headers, body: form });
     const text = await response.text();
-    const payload = text ? JSON.parse(text) : null;
-    if (!response.ok) throw new ApiError(response.status, payload);
-    return payload as T;
+    if (!response.ok) throw new ApiError(response.status, errorBody(text, response.status));
+    return (text ? JSON.parse(text) : null) as T;
   },
 
   /** CSV、PDF 等非 JSON 响应走这里，交给浏览器下载。
@@ -175,10 +190,7 @@ export const api = {
     const org = organization.get();
     if (org) headers['X-Organization-Id'] = org;
     const response = await fetch(`/api${path}`, { headers });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new ApiError(response.status, text ? JSON.parse(text) : null);
-    }
+    if (!response.ok) throw new ApiError(response.status, errorBody(await response.text(), response.status));
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = Object.assign(document.createElement('a'), { href: url, download: filename });

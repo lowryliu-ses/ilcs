@@ -73,6 +73,22 @@ async def domain_error_handler(_: Request, exc: DomainError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.as_payload()})
 
 
+@app.exception_handler(Exception)
+async def unexpected_error_handler(_: Request, exc: Exception):
+    """没料到的异常也按统一的 `{detail: {code, message}}` 回 JSON。
+
+    默认的纯文本「Internal Server Error」会让界面按 JSON 解析时报 SyntaxError，用户只看到一句看不懂的话。
+    异常本身照样进服务日志：Starlette 发完这个响应会把异常再抛给服务器记录。
+    """
+    return JSONResponse(
+        status_code=500,
+        content={"detail": {
+            "code": "internal_error",
+            "message": "服务器内部错误，操作没有完成；请稍后重试，仍不行请联系管理员查看服务日志",
+        }},
+    )
+
+
 @app.get("/api/health")
 def health():
     status = "ok" if STATE["ready"] else (STATE["error_code"] or "not_ready")

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from ..core.clock import now
+from ..core.clock import as_utc, now
 from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.errors import NotFound, StateConflict, ValidationFailed
@@ -215,8 +215,8 @@ class PeopleService:
             raise ValidationFailed(f"资质类型只能是 {'、'.join(sorted(SCOPE_KINDS))}")
         if scope_kind == "capability" and not self.capabilities.get(payload["scope_ref"]):
             raise NotFound(f"能力 {payload['scope_ref']} 未登记")
-        effective_from = payload.get("effective_from") or now()
-        expires_at = payload.get("expires_at")
+        effective_from = as_utc(payload.get("effective_from")) or now()
+        expires_at = as_utc(payload.get("expires_at"))
         if expires_at and expires_at <= effective_from:
             raise ValidationFailed("到期时间必须晚于生效时间")
         evidence_file_id = (payload.get("evidence_file_id") or "").strip()

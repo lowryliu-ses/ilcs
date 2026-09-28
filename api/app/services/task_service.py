@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from ..core.clock import now
+from ..core.clock import as_utc, now
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import tasks as task_rules
@@ -646,7 +646,8 @@ class TaskService:
             owner_user_id=payload.get("owner_user_id") or user.id,
             reviewer_user_id=payload.get("reviewer_user_id", ""),
             sample_ids=payload.get("sample_ids") or [],
-            due_at=payload.get("due_at"), priority=payload.get("priority", 2),
+            # 库里存无时区 UTC；带偏移的截止时间留在对象上，返回时和 now() 比「是否逾期」会直接报错
+            due_at=as_utc(payload.get("due_at")), priority=payload.get("priority", 2),
             note=payload.get("note", ""), created_by=user.id, state="unassigned",
             parent_id=payload.get("parent_id") or "",
         )
