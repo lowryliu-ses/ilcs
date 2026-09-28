@@ -207,16 +207,23 @@ class RecipeService:
         label = f"SOP {brief['code']} {brief['version']}"
         if not brief["current_version_id"]:
             return [f"{label} {brief['status_label']}，同编号没有生效版本"]
-        scope = set(brief["capability_scope"])
-        if not scope:
-            return []
-        outside = sorted({
-            str(step.get("cap")) for step in normalize(recipe.steps or [])
-            if kind_of(step) == "device" and step.get("cap") and step.get("cap") not in scope
-        })
+        from ..domain.sop_steps import mapping_issues, scope_outside
+        from .sop_service import SopService
+
+        steps = normalize(recipe.steps or [])
+        problems: list[str] = []
+        outside = scope_outside(steps, brief["capability_scope"])
         if outside:
-            return [f"设备能力 {'、'.join(outside)} 不在 SOP {brief['code']} {brief['current_version']} 的适用范围内"]
-        return []
+            problems.append(
+                f"设备能力 {'、'.join(outside)} 不在 SOP {brief['code']} {brief['current_version']} 的适用范围内"
+            )
+        broken = mapping_issues(steps, SopService(self.db, self.ctx).mapping_snapshot(recipe.sop_version_id))
+        if broken:
+            problems.append(
+                f"节点 {'、'.join(broken[:5])} 对应的 SOP 步骤在 {brief['code']} {brief['current_version']} 里对不上"
+                f"（映射失效）：请在流程里重新选择对应的 SOP 步骤"
+            )
+        return problems
 
     def _require_sop_usable(self, recipe: Recipe, action: str) -> None:
         problems = self.sop_problems(recipe)

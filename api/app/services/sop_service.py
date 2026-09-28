@@ -1,7 +1,7 @@
 """SOP 与受控版本。已发布内容不可原位编辑；修订和恢复历史内容都产生新版本。"""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,9 @@ from .identity_service import IdentityService, admin_self_approval, user_may
 STATES = ("draft", "review", "published", "retired")
 STATE_LABEL = {"draft": "草稿", "review": "评审中", "published": "已发布", "retired": "已退役"}
 # 已发布版本按时间再细分：生效中 / 待生效 / 已被取代 / 已失效。state 不变，只是展示与判定
+# 批准时生效时间可以比现在早这么多（审批耗时、时钟误差），再早就算回溯生效
+BACKDATE_TOLERANCE = timedelta(minutes=5)
+
 STATUS_LABEL = {
     "draft": "草稿", "review": "评审中", "retired": "已退役",
     "effective": "生效中", "pending": "待生效", "superseded": "已被取代", "expired": "已失效",
@@ -194,6 +197,22 @@ class SopService:
             linked = self.versions.get(linked_version_id)
             snapshot["linked_version_id"] = linked_version_id
             snapshot["linked_version"] = linked.version if linked else ""
+            snapshot["linked_steps"] = sop_steps.compact(linked.steps if linked else [])
+        return snapshot
+
+    def mapping_snapshot(self, linked_version_id: str) -> dict:
+        """新批次会采用的版本（流程关联版本所属 SOP 的当前生效版本），按批次快照的形状给出，供解析映射。"""
+        linked = self.versions.get(linked_version_id)
+        if linked is None:
+            return {}
+        moment = now()
+        current = linked if is_effective(linked, moment) else self.versions.effective(linked.sop_id, moment)
+        if current is None:
+            return {}
+        snapshot = {"steps": list(current.steps or []), "version": current.version}
+        if current.id != linked.id:
+            snapshot["linked_version_id"] = linked.id
+            snapshot["linked_steps"] = sop_steps.compact(linked.steps)
         return snapshot
 
     def resolve_for_new_batch(self, linked_version_id: str) -> SopVersion:
@@ -222,11 +241,12 @@ class SopService:
             )
         return current
 
-    def run_checks(self, snapshot: dict, sample_types: list[str]) -> dict:
-        """开跑检查里的 SOP 一项：固化版本现在的状态、复审日期、样本类型是否在适用范围内。
+    def run_checks(self, snapshot: dict, sample_types: list[str], steps: list[dict] | None = None) -> dict:
+        """开跑检查里的 SOP 一项：固化版本现在的状态、复审日期、样本类型与设备能力是否在适用范围内。
 
         固化版本之后被取代、退役或失效：在途批次不自动改版（DEV-13.3），只提醒，由负责人决定继续还是
-        新建批次。样本类型不符是硬条件：SOP 写明了只适用于哪些样本，就不能拿别的样本照着做。
+        新建批次。样本类型与设备能力不符是硬条件：SOP 写明了只适用于哪些样本、哪些能力，就不能拿别的
+        样本、别的设备动作照着做。`steps` 是这一版 SOP 管的批次步骤（快照里展开后的）。
         """
         version = self.versions.get(snapshot.get("sop_version_id", ""))
         label = f"SOP {snapshot.get('code', '')} {snapshot.get('version', '')}"
@@ -255,7 +275,107 @@ class SopService:
             wrong = sorted({kind for kind in sample_types if kind and kind not in allowed})
             if wrong:
                 blockers.append(f"样本类型 {'、'.join(wrong)} 不在 SOP 适用范围（{'、'.join(allowed)}）内")
+            missing = len([kind for kind in sample_types if not kind])
+            if missing:
+                # 没登记类型不等于类型相符：说清楚没核对，而不是报「在适用范围内」
+                warnings.append(
+                    f"{missing} 个样本没有登记样本类型，无法核对是否在 SOP 适用范围（{'、'.join(allowed)}）内"
+                )
+        if steps is not None:
+            broken = sop_steps.mapping_issues(steps, snapshot)
+            if broken:
+                warnings.append(
+                    f"节点 {'、'.join(broken[:5])} 对应的 SOP 步骤在 {snapshot.get('version', '')} 里对不上"
+                    f"（映射失效），执行时按 SOP 原文核对"
+                )
+            outside = sop_steps.scope_outside(steps, snapshot.get("capability_scope"))
+            if outside:
+                blockers.append(
+                    f"设备能力 {'、'.join(outside)} 不在 SOP {snapshot.get('code', '')} {snapshot.get('version', '')} "
+                    f"的适用范围（{'、'.join(snapshot.get('capability_scope') or [])}）内"
+                )
         return {"label": label, "warnings": warnings, "blockers": blockers}
+
+    # ---------- 批次采用的全部 SOP ----------
+
+    @staticmethod
+    def batch_snapshots(batch) -> list[tuple[str, dict, str | None]]:
+        """批次实际采用的 SOP：主流程的一份，加上子流程各自的（建批次时解析并固化在子流程归属上）。
+
+        返回 (标签前缀, 固化快照, 子流程节点)；主流程的子流程节点为空。
+        """
+        rows: list[tuple[str, dict, str | None]] = []
+        main = batch.sop_snapshot or {}
+        if main.get("sop_version_id"):
+            rows.append(("", main, None))
+        for group in (batch.recipe_snapshot or {}).get("subflows") or []:
+            snapshot = group.get("sop") or {}
+            if snapshot.get("sop_version_id"):
+                rows.append((f"子流程「{group.get('name') or group.get('step_id')}」", snapshot, str(group["step_id"])))
+        return rows
+
+    def batch_checks(self, batch, sample_types: list[str]) -> dict | None:
+        """开跑检查的 SOP 一项：主流程与各子流程的 SOP 一起判，每一版只管它自己的步骤。"""
+        from ..domain.steps import normalize
+
+        rows = self.batch_snapshots(batch)
+        if not rows:
+            return None
+        steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
+        sop_groups = {group for _, _, group in rows if group}
+        labels, warnings, blockers = [], [], []
+        for prefix, snapshot, group in rows:
+            result = self.run_checks(snapshot, sample_types, sop_steps.governed_steps(steps, group, sop_groups))
+            labels.append(f"{prefix}{result['label']}")
+            warnings.extend(f"{prefix}{text}" for text in result["warnings"])
+            blockers.extend(f"{prefix}{text}" for text in result["blockers"])
+        return {"label": "；".join(labels), "warnings": warnings, "blockers": blockers}
+
+    def batch_ack_blockers(self, batch, user_id: str) -> list[str] | None:
+        """批次采用的 SOP 里要求阅读确认的版本，这个人还缺哪些确认。没有任何一版要求确认时返回 None。
+
+        按批次固化的版本判，不按「当前生效版本」：在途批次不自动改版，执行人确认的必须是批次照着做的那一版。
+        """
+        required = False
+        blockers: list[str] = []
+        for prefix, snapshot, _ in self.batch_snapshots(batch):
+            version = self.versions.get(snapshot.get("sop_version_id", ""))
+            if version is None or not version.requires_training_ack:
+                continue
+            required = True
+            blockers.extend(f"{prefix}{text}" for text in self.ack_blockers(version.id, user_id))
+        return blockers if required else None
+
+    def acknowledge_for_batch(self, batch, user: User) -> dict:
+        """确认批次采用的 SOP 版本：在途批次按旧版固化、旧版之后被取代时，执行人仍能确认它照着做的那一版。
+
+        通用的阅读确认只接受当前生效的版本；这里的对象限定为这个批次固化的版本（主流程与子流程），
+        审计写明批次号。只能确认已发布过的版本（生效中、已被取代、已失效或已退役），草稿不行。
+        """
+        if batch.state in {"done", "aborted"}:
+            raise StateConflict("批次已结束，不需要再确认 SOP")
+        person = self.people.by_user(user.id)
+        if person is None:
+            raise StateConflict("当前账号没有关联人员档案，无法记录阅读确认", code="person_required")
+        acked: list[str] = []
+        for _, snapshot, _ in self.batch_snapshots(batch):
+            version = self.versions.get(snapshot.get("sop_version_id", ""))
+            if version is None or not version.requires_training_ack:
+                continue
+            if version.state not in {"published", "retired"}:
+                raise StateConflict(f"{snapshot.get('code', '')} {version.version} 不是已发布的版本")
+            if self.acks.find(version.id, person.id) is not None:
+                continue
+            self.acks.add(SopAck(sop_version_id=version.id, person_id=person.id, user_id=user.id))
+            sop = self.sops.get(version.sop_id)
+            label = f"{sop.code if sop else ''} {version.version}"
+            self.audit.record(
+                user, "SOP 阅读确认", version.id,
+                detail=f"{person.name} 确认 {label}（批次 {batch.id} 按此版执行，状态：{STATUS_LABEL.get(status_of(version, now()), version.state)}）",
+            )
+            acked.append(label)
+        self.db.commit()
+        return {"acked": acked, "blockers": self.batch_ack_blockers(batch, user.id) or []}
 
     def batch_sample_types(self, batch_id: str) -> list[str]:
         samples = SampleRepository(self.db, self.ctx).for_batch(batch_id)
@@ -263,8 +383,8 @@ class SopService:
         kinds: list[str] = []
         for row in samples:
             entity = physical.get(row.physical_sample_id) if row.physical_sample_id else None
-            if entity is not None and entity.sample_type:
-                kinds.append(entity.sample_type)
+            # 没有物理样本或没登记类型的记空串：开跑检查据此提醒「无法核对」，不当成类型相符
+            kinds.append(entity.sample_type if entity is not None and entity.sample_type else "")
         return kinds
 
     def _active_batches(self, version_ids: set[str]) -> list[dict]:
@@ -356,6 +476,11 @@ class SopService:
             effective_from=payload.get("effective_from"), effective_to=payload.get("effective_to"),
             review_due=payload.get("review_due"), author_id=user.id,
         )
+        if payload.get("copy_steps"):
+            # 修订从当前生效版本出发：步骤连同稳定标识一起带过来，引用旧版的流程节点在新版里仍对得上
+            current = self.versions.effective(sop.id, now()) if existing else None
+            if current is not None:
+                version.steps = sop_steps.with_keys(list(current.steps or []))
         self.versions.add(version)
         if attachment is not None:
             attachment.ref_type = "sop_version"
@@ -433,7 +558,8 @@ class SopService:
         if problems:
             raise ValidationFailed("；".join(problems[:5]), code="sop_steps_invalid")
         before = len(version.steps or [])
-        version.steps = steps
+        # 每一步带稳定标识：流程节点按它引用，新版本在前面插入步骤时旧节点仍对得上原来那一步
+        version.steps = sop_steps.with_keys(steps)
         self.versions.bump(version)
         self.audit.record(user, "编辑 SOP 结构化步骤", version.id, before=f"{before} 步", after=f"{len(steps)} 步",
                           object_version=version.row_version)
@@ -590,6 +716,7 @@ class SopService:
         )
         effective_from = as_utc(payload.get("effective_from")) or version.effective_from or now()
         self._check_window(effective_from, version.effective_to)
+        self._check_effective_from(version, effective_from, reason)
         version.state = "published"
         version.approver_id = user.id
         version.effective_from = effective_from
@@ -628,6 +755,7 @@ class SopService:
             object_version=version.row_version,
             detail=(
                 f"生效 {effective_from:%Y-%m-%d %H:%M}；"
+                + (f"回溯生效，理由：{reason}；" if effective_from < now() - BACKDATE_TOLERANCE else "")
                 + (f"取代 {'、'.join(superseded)}；" if superseded else "")
                 + f"{len(impact['impacted_recipes'])} 个流程关联旧版本，新批次改按本版本执行；"
                 f"{len(impact['impacted_batches'])} 个在途批次按旧版本执行，不自动改版"
@@ -635,6 +763,28 @@ class SopService:
         )
         self.db.commit()
         return {**self.version_out(version), **impact, "superseded_versions": superseded}
+
+    def _check_effective_from(self, version: SopVersion, effective_from: datetime, reason: str) -> None:
+        """批准时的生效时间。
+
+        早于当前生效版本的起始：新版本一发布就被旧版本「取代」，死在发布那一刻，拒绝。早于现在：
+        回溯生效会把在途批次固化的版本改成「已被取代」、让它不能再被确认，要写明理由（记进审计）。
+        """
+        current = self.versions.effective(version.sop_id, now())
+        if (
+            current is not None and current.id != version.id and current.effective_from is not None
+            and effective_from < current.effective_from
+        ):
+            raise ValidationFailed(
+                f"生效时间 {effective_from:%Y-%m-%d %H:%M} 早于当前生效的 {current.version}"
+                f"（{current.effective_from:%Y-%m-%d %H:%M} 起）：新版本一发布就会被旧版本取代",
+                code="sop_effective_before_current",
+            )
+        if effective_from < now() - BACKDATE_TOLERANCE and not reason:
+            raise ValidationFailed(
+                "生效时间早于现在：回溯生效会让已按旧版本开的批次变成「已被取代」，请在理由里写明为什么回溯",
+                code="sop_backdate_reason_required",
+            )
 
     def retire(self, version_id: str, reason: str, user: User) -> dict:
         version = self.versions.get(version_id)

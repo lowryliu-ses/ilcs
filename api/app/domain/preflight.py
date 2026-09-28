@@ -45,6 +45,8 @@ class PreflightContext:
     sop_snapshot: dict | None = None
     # SOP：None 表示流程没有关联 SOP（不适用）；{label, warnings, blockers}
     sop_checks: dict | None = None
+    # 批次采用的 SOP 里要求阅读确认的版本、执行人还缺的确认；None 表示没有任何一版要求确认
+    sop_ack_blockers: list[str] | None = None
     # 任务上游：None 表示任务没有声明依赖（不适用）；空列表表示依赖都已满足
     dependency_blockers: list[str] | None = None
     # 首工位之外的其余工位：[{id, status, cal_due, interlock, alarm}]。故障、离线、校准过期、联锁、活动报警都挡下发
@@ -247,8 +249,18 @@ def evaluate(context: PreflightContext) -> list[Check]:
         elif warnings:
             state, detail = WARN, f"{label}；提醒：" + "；".join(warnings)
         else:
-            state, detail = PASS, f"{label}；生效中，样本类型在适用范围内"
+            state, detail = PASS, f"{label}；生效中，样本类型与设备能力在适用范围内"
         checks.append(Check("sop", "受控 SOP", state, detail))
+
+    # ---------- 5f SOP 阅读确认 ----------
+    # 独立成项：不能并在资质里——流程没有需资质的节点（纯人工流程）时资质一项整体不适用，确认就被丢掉了
+    if context.sop_ack_blockers is None:
+        checks.append(Check("sop_ack", "SOP 阅读确认", NOT_APPLICABLE, "批次采用的 SOP 不要求阅读确认"))
+    else:
+        checks.append(Check(
+            "sop_ack", "SOP 阅读确认", _state(not context.sop_ack_blockers),
+            "；".join(context.sop_ack_blockers) or "执行人已确认批次采用的 SOP 版本",
+        ))
 
     # ---------- 6 执行门 ----------
     checks.append(

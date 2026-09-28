@@ -13,6 +13,10 @@ from .base import Repository, ScopedRepository
 TERMINAL_STATES = {"done", "aborted"}
 
 
+# 不再是处理对象的运行分配状态：已拆分（母样）与失败（剔除、报废、返工作废）
+INACTIVE_SAMPLE_STATES = frozenset({"split", "failed"})
+
+
 class BatchRepository(ScopedRepository[Batch]):
     model = Batch
 
@@ -208,6 +212,10 @@ class SampleRepository(ScopedRepository[Sample]):
 
     def for_batch(self, batch_id: str) -> list[Sample]:
         return list(self.query().filter(Sample.batch_id == batch_id).order_by(Sample.position).all())
+
+    def active_for_batch(self, batch_id: str) -> list[Sample]:
+        """在用样本：当前步骤的有效输入。已拆分的母样与判为失败的样本即使仍占着孔位，也不再是处理对象。"""
+        return [sample for sample in self.for_batch(batch_id) if sample.state not in INACTIVE_SAMPLE_STATES]
 
     def for_physical(self, physical_sample_id: str) -> list[Sample]:
         return list(self.query().filter(Sample.physical_sample_id == physical_sample_id).all())

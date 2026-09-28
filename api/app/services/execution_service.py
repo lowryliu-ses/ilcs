@@ -33,6 +33,8 @@ from .audit_service import AuditService
 from .file_service import FileService
 from .gate_service import GateService
 
+# 搬运能力：AGV、机械臂转运这类承运工位不承接工步，没有校准档案要核（与迁移核对同一口径）
+TRANSPORT_CAPABILITY = "cap.transfer"
 
 
 class ExecutionService:
@@ -234,7 +236,7 @@ class ExecutionService:
 
         for helper_id in command.assist_station_ids or []:
             helper = self.db.get(Station, helper_id)
-            problem = self._helper_blocker(helper, helper_id)
+            problem = self._helper_blocker(batch, command, helper, helper_id)
             if problem:
                 return f"协同资源{problem}；动作指令未投递，不自动重试"
         station = self.db.get(Station, command.station_id)
@@ -260,8 +262,14 @@ class ExecutionService:
         problems = calibration_blockers(self._asset_spec(asset), command.capability, window)
         return f"{problems[0]}；动作指令未投递，不自动重试" if problems else ""
 
-    def _helper_blocker(self, helper: Station | None, helper_id: str) -> str:
-        """协同工位此刻能不能用：不存在、停用、故障 / 离线、所属资产维护或退役都不行。"""
+    def _helper_blocker(self, batch: Batch, command: Command, helper: Station | None, helper_id: str) -> str:
+        """协同工位此刻能不能用：与主工位同一套判断。
+
+        工位对象的状态不等于设备在线：排程之后适配器失联、心跳超时、拒绝动作时工位仍可能是 idle，
+        所以还要看适配器。协同能力的校准按它在这一步承担的能力判；搬运（AGV、机械臂转运）不做校准，
+        与迁移核对的口径一致。
+        """
+        from ..domain.resources import Window, calibration_blockers
         from ..models import Asset
 
         if helper is None:
@@ -270,9 +278,29 @@ class ExecutionService:
             return f" {helper.id} 已停用"
         if helper.status in {"fault", "offline"}:
             return f" {helper.id} 处于{'故障' if helper.status == 'fault' else '离线'}状态"
+        record = self.adapters.get(helper.id)
+        if record is None:
+            return f" {helper.id} 没有可用适配器"
+        problem = self.delivery_blocker(command, record)
+        if problem:
+            return f" {helper.id} {problem.split('；')[0]}"
         asset = self.db.get(Asset, helper.asset_id) if helper.asset_id else None
-        if asset is not None and asset.state in {"maintenance", "retired"}:
+        if asset is None:
+            return ""
+        if asset.state in {"maintenance", "retired"}:
             return f" {helper.id} 所属资产 {asset.asset_no} {'处于维护状态' if asset.state == 'maintenance' else '已退役'}"
+        if command.type not in DISPATCHING:
+            return ""
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        step = steps[command.step_index] if command.step_index < len(steps) else {}
+        moment = now()
+        window = Window(moment, moment + timedelta(minutes=max(0.0, float(step.get("dur") or 0))))
+        for capability in assist_capabilities(step):
+            if capability == TRANSPORT_CAPABILITY or capability not in (helper.limits or {}):
+                continue
+            problems = calibration_blockers(self._asset_spec(asset), capability, window)
+            if problems:
+                return f" {helper.id} {problems[0]}"
         return ""
 
     def _asset_spec(self, asset):
@@ -393,6 +421,10 @@ class ExecutionService:
                 None, "撤回未投递指令", command.id, before="排队中", after="已撤回",
                 detail=f"{reason}；设备侧从未收到该指令", command_id=command.id,
             )
+            # 以它为前置的设备动作（等转运把板送到）不会再有投递的机会：一并撤回，恢复时重新生成转运与动作。
+            # 不撤回的话它一直留在队列里，并行分支续跑时会被当成「还在队列里的动作」而不再下发
+            for dependent in self.commands.dependents_of(command.id):
+                self.withdraw(dependent, f"前置指令 {command.id[:8]} 已撤回，设备动作未投递")
         return bool(withdrawn)
 
     def _perform(
@@ -439,8 +471,11 @@ class ExecutionService:
             else:
                 violation = self.check_hard_window(batch, command)
                 if violation:
+                    # 设备确定没见过这条指令：按「未投递」记（与环境拒发一致），异常引擎可按策略处理，
+                    # 也不要求到现场核查一条设备从未收到的指令
                     ledger.state = "rejected"
-                    self.fault(batch, command, violation, delivery="delivered")
+                    command.started_at = None
+                    self.fault(batch, command, violation, delivery="unreachable")
                     self._release(record, command)
                     return
                 environment = self.check_environment(batch, command)
@@ -651,7 +686,14 @@ class ExecutionService:
         closed = 0
         for row in self.commands.for_batch(batch.id):
             if row.id != own and row.state in {"unknown", "manual"}:
-                # 设备没见过或已明确失败的指令：随批次终止结束，不再挂在结果未知清单里
+                # 设备没见过或已明确失败的指令：随批次终止结束，不再挂在结果未知清单里。转运例外：
+                # 送到了承运设备、报了失败或结论不明的，板可能已经被拿起、停在半路，位置不能再当真
+                if row.type == "transfer" and row.delivery_state in {"delivered", "maybe_sent"}:
+                    from .transfer_service import TransferService
+
+                    TransferService(self.db, self.ctx).lost_by_command(
+                        row, "批次终止时转运结论不明（可能已经动过），载具位置不可信，需扫码重新定位",
+                    )
                 row.state = "cancelled"
                 row.error = (row.error + "；" if row.error else "") + "随批次终止结束"
                 row.updated_at = now()
@@ -969,6 +1011,7 @@ class ExecutorLoop:
         executed = self.execute_pending(limit)
         aborts_finished = self.finish_hanging_aborts()
         advanced = self.advance()
+        stalls = self.check_liveness()
         from .integration_service import deliver_due
 
         webhooks = deliver_due(self.db)
@@ -983,8 +1026,8 @@ class ExecutorLoop:
             "telemetry_purged": telemetry_purged,
             "overdue": overdue["overdue"],
             "timed_out": overdue["timed_out"],
-            "alarms_raised": stations["raised"] + assets["raised"],
-            "alarms_cleared": stations["cleared"] + assets["cleared"],
+            "alarms_raised": stations["raised"] + assets["raised"] + stalls["raised"],
+            "alarms_cleared": stations["cleared"] + assets["cleared"] + stalls["cleared"],
             "webhooks_sent": webhooks["sent"],
             "aborts_finished": aborts_finished,
             "at": now().isoformat(timespec="seconds"),
@@ -1052,11 +1095,20 @@ class ExecutorLoop:
         assets = monitor.calibrations() if monitor_assets else {"raised": 0, "cleared": 0}
         self.db.commit()
         aborts_finished = self.finish_hanging_aborts()
+        stalls = self.check_liveness()
         return {
-            "alarms_raised": stations["raised"] + assets["raised"],
-            "alarms_cleared": stations["cleared"] + assets["cleared"],
+            "alarms_raised": stations["raised"] + assets["raised"] + stalls["raised"],
+            "alarms_cleared": stations["cleared"] + assets["cleared"] + stalls["cleared"],
             "aborts_finished": aborts_finished,
         }
+
+    def check_liveness(self) -> dict:
+        """运行中的批次没有任何可推进对象超过宽限期就报警（见 `BatchLiveness`）。只碰数据库。"""
+        from .monitoring_service import BatchLiveness
+
+        outcome = BatchLiveness(self.db).check()
+        self.db.commit()
+        return outcome
 
     def stations_needing_work(self) -> set[str]:
         """本轮要派活的工位：有指令要处理的，加上到了探测周期的主动探测设备。"""

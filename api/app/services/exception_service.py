@@ -288,8 +288,11 @@ class ExceptionService:
         kind = command.type
         if kind == "resume" and run is not None and not CommandRepository(self.db, self.ctx).ever_delivered_for_run(run.id):
             kind = "dispatch"
+        # 续跑 / 重试接续的那个被保持的动作不变：不带接续目标，被保持的动作会一直占着通道，新指令永远排队
+        target = command.target_command_id if kind in {"resume", "retry"} else ""
         return BatchService(self.db, self.ctx).issue_command(
             batch, kind, command.step_index, step_run_id=command.step_run_id, station_id=station_id,
+            target_command_id=target,
         )
 
     def _retry(self, batch: Batch, command: Command, delay_sec: float) -> tuple[bool, str]:
@@ -309,6 +312,13 @@ class ExceptionService:
         from ..repositories.resources import StationRepository
         from .schedule_service import ScheduleService, lock_schedule
 
+        if command.type in {"resume", "retry"} and command.target_command_id:
+            held = self.db.get(Command, command.target_command_id)
+            if held is not None and held.state == "held":
+                # 被保持的动作停在原工位上：换一台工位续跑等于同一步另起一个动作，原动作仍占着原工位
+                return False, (
+                    f"被保持的动作 {held.id[:8]} 停在 {held.station_id} 上，不能改派到别的工位：先终止原动作再重试"
+                )
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         index = command.step_index
         step = steps[index]
@@ -516,6 +526,23 @@ class ExceptionService:
         return event
 
     # ---------- 收尾 ----------
+
+    def settle_source(self, batch: Batch, source_id: str, final: str, user: User | None = None) -> int:
+        """只结算某一个来源（一个步骤实例、一条指令）的开着的异常。人工判定一个关卡或分支，
+        不代表批次上别的异常（另一条分支的故障）也处理完了。"""
+        count = 0
+        for event in self._query().filter(
+            ExceptionEvent.batch_id == batch.id, ExceptionEvent.source_id == source_id,
+            ExceptionEvent.state.in_(list(OPEN)),
+        ).all():
+            event.state = "resolved"
+            event.final_result = final
+            if user is not None and not event.manual_by:
+                event.manual_by = user.display_name
+            event.resolved_at = now()
+            event.updated_at = now()
+            count += 1
+        return count
 
     def settle_batch(self, batch: Batch, final: str, user: User | None = None) -> int:
         """批次恢复 / 跳过 / 重做 / 终止 / 完成：它还开着的异常写上最终结果。"""

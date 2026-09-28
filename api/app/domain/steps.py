@@ -292,6 +292,8 @@ def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int)
             issues.append(f"{label} 回环目标必须是分支之前的步骤")
         elif target and kind_of(steps[ids.index(target)]) == SUBFLOW:
             issues.append(f"{label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
+        elif target:
+            issues.extend(f"{label} {text}" for text in _irreversible_issues(steps, ids.index(target), index, "回环"))
     default = str(config.get("default") or "")
     if default and default not in seen:
         issues.append(f"默认出口 {default} 不存在")
@@ -390,6 +392,8 @@ def gate_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -
             issues.append("返工目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
         elif source in ids and ids.index(target) > ids.index(source):
             issues.append("返工目标不能晚于测量来源：否则返工不会重新测量")
+        else:
+            issues.extend(_irreversible_issues(steps, ids.index(target), index, "返工"))
         rounds = gate.get("max_rework")
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 5:
             issues.append("最多返工次数必须是 1–5 的整数；超过后转人工判断")
@@ -397,6 +401,26 @@ def gate_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -
 
 
 SPLIT_MODES = ("logical", "physical")
+
+
+def _irreversible_issues(steps: list[dict[str, Any]], target: int, trigger: int, action: str) -> list[str]:
+    """返工 / 回环要重做的区间里不能有实体分装：分装不可逆，作废记录不会让实物回到分装之前。
+
+    区间按依赖图取：目标步骤，加上目标的下游里同时是触发节点上游的那些（线性流程里就是两者之间的连续几步）。
+    """
+    from . import graph
+
+    region = {target} | (graph.descendants(steps, target) & graph.ancestors(steps, trigger))
+    physical = [
+        position for position in sorted(region)
+        if kind_of(steps[position]) == SPLIT and split_mode(steps[position]) == "physical"
+    ]
+    if not physical:
+        return []
+    name = steps[physical[0]].get("name") or f"第 {physical[0] + 1} 步"
+    return [
+        f"{action}区间包含实体分装「{name}」：实体分装不可逆，{action}目标要放在分装之后，或改为新建批次"
+    ]
 
 
 def split_mode(step: dict[str, Any]) -> str:

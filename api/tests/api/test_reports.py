@@ -122,9 +122,10 @@ def test_sop_training_acknowledgement_gates_dispatch(
     assert operator.post(f"/api/batches/{batch_id}/schedule", {}).status_code == 200
 
     preflight = operator.get(f"/api/batches/{batch_id}/preflight?manual_review=true").json()
-    qualification = next(row for row in preflight["checks"] if row["key"] == "qualification")
-    assert qualification["state"] == "blocked"
-    assert "阅读确认" in qualification["detail"]
+    # 阅读确认独立成项（不并在资质里：纯人工流程没有需资质的节点时，资质一项整体不适用）
+    acknowledgement = next(row for row in preflight["checks"] if row["key"] == "sop_ack")
+    assert acknowledgement["state"] == "blocked"
+    assert "阅读确认" in acknowledgement["detail"]
 
     assert operator.post(f"/api/sops/{version['id']}/acknowledge").status_code == 200
     after = operator.get(f"/api/batches/{batch_id}/preflight?manual_review=true").json()

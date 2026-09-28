@@ -143,6 +143,8 @@ class Settings(BaseSettings):
     command_timeout_grace_min: float = 5.0
     # 保持 / 终止这类安全指令没有步骤时长可参照，用固定上限
     control_command_timeout_min: float = 10.0
+    # 运行中的批次没有任何可推进对象（开着的步骤、在途指令、待处理事件）超过这么久就报警
+    stall_alarm_sec: int = 120
 
     # ---------- 设备回传的物料消耗 ----------
     # 设备回报的实际消耗与计划量偏差超过这个百分比时报警并标记待复核（仍按实际量入账）

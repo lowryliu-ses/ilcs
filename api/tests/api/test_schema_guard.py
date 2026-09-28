@@ -195,12 +195,14 @@ def test_migration_reconciliation_report_passes_on_the_seeded_database(fresh_app
     keys = {row["key"] for row in report["lines"]}
     assert keys == {
         "schema", "counts", "org_scope", "sample_link", "balance", "legacy_review",
-        "plan_approval", "execution_master_data", "pending",
+        "plan_approval", "execution_master_data", "pending", "unsettled_outcome",
     }
     rows = {row["key"]: row for row in report["lines"]}
     # 种子库上这些核对项必须全部通过：记录数、组织归属、样本关联、库存对平、
-    # 历史结果未被补造审核、锁定方案未被当成已审批。
-    invariant = [row for key, row in rows.items() if key != "execution_master_data" and not row["ok"]]
+    # 历史结果未被补造审核、锁定方案未被当成已审批。执行前置主数据与结论待核查的指令按库里当下的行算，
+    # 整套测试跑下来前面的用例会留下这类行，这里不断言它们必然通过
+    live = {"execution_master_data", "unsettled_outcome"}
+    invariant = [row for key, row in rows.items() if key not in live and not row["ok"]]
     assert not invariant, invariant
 
     # 执行前置主数据这一项是「会不会阻塞下发」的预警，按库里当下的行算。整套测试跑下来，

@@ -130,6 +130,69 @@ class DeviceMonitor:
         return {"raised": raised, "cleared": cleared}
 
 
+class BatchLiveness:
+    """运行中批次的活性看门狗。
+
+    返工、驳回、人工判定之后流程节点没有重新开出，批次就会一直停在「运行中」：没有指令在动、
+    没有步骤在等，界面上看不出异常。这里按 `domain.liveness` 判定，状态持续超过宽限期就报警；
+    批次恢复推进或不再运行时自动复位条件（确认与关闭仍由人做）。
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def check(self) -> dict:
+        from ..domain.liveness import stall_reason
+        from ..models import Alarm, Batch, Command, StepRun, WorkflowEvent
+
+        raised = cleared = 0
+        moment = now()
+        grace = timedelta(seconds=max(0, settings.stall_alarm_sec))
+        watched = {
+            row.source_id for row in self.db.query(Alarm).filter(
+                Alarm.condition_key.like("batch:%:stalled"), Alarm.condition_active.is_(True),
+            ).all()
+        }
+        running = self.db.query(Batch).filter(Batch.state == "running").all()
+        batches = {batch.id: batch for batch in running}
+        for batch_id in watched - set(batches):
+            batch = self.db.get(Batch, batch_id)
+            if batch is not None:
+                batches[batch_id] = batch
+        for batch in batches.values():
+            runs = self.db.query(StepRun).filter(StepRun.batch_id == batch.id).all()
+            commands = self.db.query(Command).filter(Command.batch_id == batch.id).all()
+            pending = self.db.query(WorkflowEvent).filter(
+                WorkflowEvent.batch_id == batch.id, WorkflowEvent.state.in_(["pending", "processing"]),
+            ).count()
+            reason = stall_reason(batch.state, runs, commands, pending)
+            alarms = AlarmService(self.db, system_context(batch.org_id, "流程活性检查"))
+            key = f"batch:{batch.id}:stalled"
+            if not reason:
+                if alarms.resolve_condition(key, f"{batch.id} 已恢复推进或不再运行"):
+                    cleared += 1
+                continue
+            moments = [
+                *(value for row in runs for value in (row.created_at, row.started_at, row.ended_at) if value),
+                *(value for row in commands for value in (row.created_at, row.updated_at) if value),
+            ]
+            last_change = max(moments, default=None)
+            if last_change is not None and moment - last_change < grace:
+                continue
+            before = alarms.alarms.open_by_condition(key)
+            alarms.raise_alarm(
+                severity=2, source_type="batch", source_id=batch.id,
+                message=f"{batch.id} 显示运行中，但{reason}",
+                response=(
+                    "在批次页核对流程节点：返工、驳回或人工判定之后可能没有重新开出节点。"
+                    "请保持批次后走恢复评估，必要时联系管理员。"
+                ),
+                owner="调度", origin="system", condition_key=key,
+            )
+            raised += before is None
+        return {"raised": raised, "cleared": cleared}
+
+
 class ExecutorLiveness:
     """执行器的存活记录。执行器停了，界面上仍能下发，却没有人投递、没有人推进。"""
 

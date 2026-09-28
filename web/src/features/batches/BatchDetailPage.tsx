@@ -203,6 +203,9 @@ export function BatchDetailPage() {
                   {step.sop_guide?.index ? (
                     <span className="tag" title={step.sop_guide.instructions}> SOP 第 {step.sop_guide.index} 步</span>
                   ) : null}
+                  {step.sop_guide?.mapping_broken ? (
+                    <span className="tag bad" title={step.sop_guide.message}> SOP 步骤映射失效</span>
+                  ) : null}
                   <div className="tiny muted mono">{step.step_id}</div>
                   {step.groups?.length ? (
                     <div className="tiny muted">子流程 · {step.groups.map((group) => group.name).join(' › ')}</div>
@@ -725,6 +728,11 @@ function PreflightDialog({
 
   const checks = preflight.data?.checks ?? [];
   const blockedByOthers = checks.filter((check) => !check.ok && check.key !== 'authority');
+  // 批次按固化的 SOP 版本执行：执行人确认的是这一版（旧版被取代后通用的阅读确认不再接受它）
+  const ackBlocked = checks.some((check) => check.key === 'sop_ack' && !check.ok);
+  const acknowledge = useMutation(() => api.post(`/batches/${batchId}/sop-ack`), {
+    invalidates: [`preflight:${batchId}`, ...invalidates],
+  });
 
   const submit = async () => {
     const signatureId = await sign('下发批次执行', batchId, SIGN_MEANINGS.dispatch);
@@ -759,6 +767,15 @@ function PreflightDialog({
         {preflight.data?.sample_count ?? 0} 个样品。
       </div>
       <CheckList checks={checks} />
+      {ackBlocked ? (
+        <div className="note warn">
+          执行人还没有确认本批次采用的 SOP 版本。已阅读后可以在这里确认（记录确认人与批次号）。{' '}
+          <button className="btn" disabled={acknowledge.pending} onClick={() => acknowledge.run().catch(() => undefined)}>
+            确认本批次 SOP
+          </button>
+          {acknowledge.error ? <div className="small">{acknowledge.error.message}</div> : null}
+        </div>
+      ) : null}
       <label className="check">
         <input type="checkbox" checked={manualReview} onChange={(event) => setManualReview(event.target.checked)} />
         已核对托盘条码 <span className="mono">{palletCode}</span> 与物料清单（人工复核）
@@ -1156,7 +1173,8 @@ function ManualSubmitDialog({
 }
 
 /** 审核节点。批准才继续，退回生成上一个人工步骤的新尝试；不接受任意目标状态。 */
-/* 保持中的质检关卡：测量不合格或取不到数值时由 QA 判定。放行要写依据；判不合格按报废处理。 */
+/* 保持中的质检关卡：测量不合格或取不到数值时由 QA 判定。放行要写依据；判不合格按报废处理。
+   逐样本关卡放行时可以勾选要剔除的样本（不合格或无读数的孔位），不勾就是全部放行。 */
 function GateDecisionDialog({
   run,
   onClose,
@@ -1170,9 +1188,19 @@ function GateDecisionDialog({
   const { sign } = useSignature();
   const [conclusion, setConclusion] = useState<'approved' | 'rejected'>('rejected');
   const [reason, setReason] = useState('');
+  const [exclude, setExclude] = useState<string[]>([]);
   const decide = useMutation(
     (signatureId: string) =>
-      api.post(`/step-runs/${run.id}/gate-decision`, { conclusion, reason, signature_id: signatureId }, true),
+      api.post(
+        `/step-runs/${run.id}/gate-decision`,
+        {
+          conclusion,
+          reason,
+          exclude_wells: conclusion === 'approved' ? exclude : [],
+          signature_id: signatureId,
+        },
+        true,
+      ),
     {
       invalidates,
       onSuccess: () => {
@@ -1181,7 +1209,19 @@ function GateDecisionDialog({
       },
     },
   );
-  const measured = run.form_data as { field?: string; value?: unknown; min?: unknown; max?: unknown } | undefined;
+  const measured = run.form_data as
+    | {
+        field?: string;
+        value?: unknown;
+        min?: unknown;
+        max?: unknown;
+        scope?: string;
+        failed?: string[];
+        undecided?: string[];
+      }
+    | undefined;
+  const perSample = measured?.scope === 'sample';
+  const candidates = perSample ? [...(measured?.failed ?? []), ...(measured?.undecided ?? [])] : [];
   return (
     <Modal
       title={`质检判定 · ${run.step_name}`}
@@ -1206,10 +1246,17 @@ function GateDecisionDialog({
       }
     >
       <div className="note warn">{run.reason || '关卡待人工判断'}</div>
-      {measured?.field ? (
+      {measured?.field && !perSample ? (
         <div className="small mono">
           {measured.field} = {String(measured.value ?? '无数值')}（下限 {String(measured.min ?? '—')}，上限{' '}
           {String(measured.max ?? '—')}）
+        </div>
+      ) : null}
+      {perSample ? (
+        <div className="small mono">
+          {measured?.field}（下限 {String(measured?.min ?? '—')}，上限 {String(measured?.max ?? '—')}）：不合格{' '}
+          {measured?.failed?.length ? measured.failed.join('、') : '无'}；无读数{' '}
+          {measured?.undecided?.length ? measured.undecided.join('、') : '无'}
         </div>
       ) : null}
       <Field label="结论">
@@ -1218,6 +1265,22 @@ function GateDecisionDialog({
           <option value="approved">放行，流程继续</option>
         </select>
       </Field>
+      {conclusion === 'approved' && candidates.length ? (
+        <Field label="放行时剔除的样本（可选）" hint="勾选的样本判为失败、不再进入后续步骤；不勾就是全部放行">
+          {candidates.map((well) => (
+            <label key={well} className="small">
+              <input
+                type="checkbox"
+                checked={exclude.includes(well)}
+                onChange={(event) =>
+                  setExclude(event.target.checked ? [...exclude, well] : exclude.filter((row) => row !== well))
+                }
+              />
+              {well}
+            </label>
+          ))}
+        </Field>
+      ) : null}
       <Field label="判定依据（必填）">
         <textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} />
       </Field>
@@ -2123,12 +2186,18 @@ function BatchExceptions({ batchId }: { batchId: string }) {
 /** 执行人在人工记录里看到的 SOP 指导：这一步照着做什么、逐项核对什么。 */
 function SopGuideNote({ guide, sopLabel }: { guide: SopGuide; sopLabel: string }) {
   return (
-    <div className="note">
+    <div className={guide.mapping_broken ? 'note warn' : 'note'}>
       <b>
         按 SOP {sopLabel}
         {guide.index ? ` 第 ${guide.index} 步${guide.title ? `「${guide.title}」` : ''}` : ''}
       </b>
-      {guide.instructions ? <div className="small">{guide.instructions}</div> : null}
+      {guide.mapping_broken ? <div className="small">{guide.message}</div> : null}
+      {guide.instructions ? (
+        <div className="small">
+          {guide.mapping_broken ? '生成流程时抄下的说明（可能已过时）：' : ''}
+          {guide.instructions}
+        </div>
+      ) : null}
       {guide.checks.length ? (
         <ul className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
           {guide.checks.map((check) => (

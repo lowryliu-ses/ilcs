@@ -166,6 +166,15 @@ class WorkflowService:
             raise NotFound("批次不存在")
         if workflow.hold_blocks_device_action(batch.state) and batch.state != "paused":
             raise StateConflict(f"批次状态为 {batch.state}，人工提交已停止")
+        from .sop_service import SopService
+
+        # 照着 SOP 做人工记录的人，要确认过批次采用的那一版
+        ack = SopService(self.db, self.ctx).batch_ack_blockers(batch, user.id) or []
+        if ack:
+            raise StateConflict(
+                f"提交人工记录前需要阅读确认：{ack[0]}；可在批次页确认本批次采用的 SOP",
+                {"blocked": [{"key": "sop_ack", "label": text} for text in ack]}, code="sop_ack_required",
+            )
 
         step = run.step_snapshot or {}
         values = payload.get("form_data") or {}
@@ -491,10 +500,15 @@ class WorkflowService:
 
     @staticmethod
     def flow_state(rows: list[StepRun]) -> tuple[dict[str, str], dict[str, str]]:
-        """每一步最新一次有效实例的状态，以及已完成分支选中的出口。作废与取消的记录不算。"""
+        """每一步最新一次有效实例的状态，以及已完成分支选中的出口。
+
+        作废与取消的记录不算；返工 / 退回之后待重评的失败记录也不算——那一步要等重做完再评估一次。
+        """
         latest: dict[str, StepRun] = {}
         for row in sorted(rows, key=lambda r: (r.step_index, r.attempt)):
             if row.state in workflow.VOID_STATES:
+                continue
+            if row.state == workflow.FAILED and (row.form_data or {}).get(workflow.REEVALUATE):
                 continue
             latest[row.step_id] = row
         status = {step_id: row.state for step_id, row in latest.items()}
@@ -573,8 +587,13 @@ class WorkflowService:
         )
 
     def _release_waiting_devices(self, batch: Batch, rows: list[StepRun], finished: StepRun) -> None:
-        """设备步骤结束后，把因载具被占而等着的并行设备步骤开起来：每块板按步骤顺序一次一个。"""
-        if finished.kind != DEVICE or batch.state != "running":
+        """把挂起等待的设备步骤开起来：每块板按步骤顺序一次一个。
+
+        挂起有两种原因：载具被并行分支的设备步骤占着（那一步结束时板空出来），或开出时批次在保持中
+        （人工判定关卡、选择分支、跳过步骤让批次回到运行时就该放出）。所以只要批次在运行、板空着就放，
+        不只在设备步骤结束时——否则判定之后挂起的设备步骤没有任何事件会再开出它。
+        """
+        if batch.state != "running":
             return
         waiting = [row for row in rows if row.kind == DEVICE and row.state == workflow.PENDING]
         from .batch_service import BatchService
@@ -639,7 +658,32 @@ class WorkflowService:
     # ---------- 质检关卡 ----------
 
     def _active_samples(self, batch: Batch) -> list[Sample]:
-        return [s for s in self.samples.for_batch(batch.id) if s.state not in {"failed", "split"}]
+        return self.samples.active_for_batch(batch.id)
+
+    def _irreversible_in_region(self, batch: Batch, trigger_index: int, target_id: str) -> str:
+        """返工 / 回环要作废的区间里有没有已经完成的实体分装。
+
+        实体分装不可逆：把分装记录作废、母样改回在用，并不会让实物回到分装之前。区间按依赖图取：目标步骤，
+        加上目标的下游里同时是触发节点上游的那些（线性流程里就是两者之间的连续几步）。
+        """
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        if target_id not in ids:
+            return ""
+        target = ids.index(target_id)
+        region = {target} | (graph.descendants(steps, target) & graph.ancestors(steps, trigger_index))
+        done = sorted({
+            row.step_index for row in self.runs.for_batch(batch.id)
+            if row.kind == SPLIT and row.state == workflow.COMPLETED and row.step_index in region
+            and (row.form_data or {}).get("physical")
+        })
+        if not done:
+            return ""
+        name = steps[done[0]].get("name") or f"第 {done[0] + 1} 步"
+        return (
+            f"区间内第 {done[0] + 1} 步实体分装「{name}」已经完成：实体分装不可逆，不自动重做，"
+            f"请人工判定继续、报废或新建批次"
+        )
 
     def _evaluate_gate(self, batch: Batch, run: StepRun, index: int) -> dict:
         """读测量来源步骤最近一次检查点里的测量值，按阈值判定。
@@ -669,30 +713,43 @@ class WorkflowService:
             wells = delivered.get("wells") or {}
             # 设备按实体孔位回报：与下发逐孔参数同一个口径（布局放进不同板型、分装到别的孔都照样对得上）
             positions = SampleService(self.db, self.ctx).device_wells(batch.id)
+            active = self._active_samples(batch)
             values, failed, undecided = {}, [], []
-            for sample in self._active_samples(batch):
+            # 先记结论，判定过程中不改样本状态：去向（剔除后继续、返工、保持、报废）定了才改
+            for sample in active:
                 value = (wells.get(positions.get(sample.id, sample.well)) or {}).get(field)
                 values[sample.well] = value
                 verdict = workflow.judge(value, low, high)
                 if verdict is True:
                     continue
                 (undecided if verdict is None else failed).append(sample.well)
-                sample.state = "failed"
-                sample.flag_note = (
-                    f"质检关卡「{name}」{'无测量值，无法判定' if verdict is None else f'不合格：{field}={value}'}"
-                )
             run.form_data = {"field": field, "min": low, "max": high, "scope": "sample",
                              "values": values, "failed": failed, "undecided": undecided,
                              "checkpoint_id": checkpoint.id if checkpoint else ""}
-            if len(failed) + len(undecided) < len(values):
-                self._close_run(run, workflow.COMPLETED, (
-                    f"{len(values) - len(failed) - len(undecided)} 个样本合格；"
-                    f"剔除不合格 {len(failed)} 个、无法判定 {len(undecided)} 个"
+            if not active:
+                return self._gate_hold(batch, run, f"{name}：没有在用样本可判定")
+            if undecided:
+                # 取不到数值不等于合格，也不等于不合格：转人工判断，不剔除、不自动返工
+                return self._gate_hold(batch, run, (
+                    f"{len(undecided)} 个样本没有 {field} 读数，无法判定"
+                    + (f"；另有 {len(failed)} 个不合格" if failed else "")
                 ))
-                self.audit.record(None, "质检关卡判定", batch.id, before="待判定", after="合格（部分剔除）",
-                                  detail=f"{name}：{run.reason}")
-                return self._advance(run, batch)
-            return self._gate_failed(batch, run, index, gate, f"全部 {len(values)} 个样本不合格或无法判定")
+            if failed and len(failed) == len(values):
+                # 全部不合格：按关卡的不合格去向处理整批。返工重测全部样本，不预先剔除
+                return self._gate_failed(batch, run, index, gate, f"全部 {len(values)} 个样本不合格")
+            bad = set(failed)
+            for sample in active:
+                if sample.well in bad:
+                    sample.state = "failed"
+                    sample.flag_note = f"质检关卡「{name}」不合格：{field}={values[sample.well]}"
+            self._close_run(run, workflow.COMPLETED, (
+                f"{len(values) - len(failed)} 个样本合格" + (f"；剔除不合格 {len(failed)} 个" if failed else "")
+            ))
+            self.audit.record(
+                None, "质检关卡判定", batch.id, before="待判定", after="合格（部分剔除）" if failed else "合格",
+                detail=f"{name}：{run.reason}",
+            )
+            return self._advance(run, batch)
 
         value = delivered.get(field)
         verdict = workflow.judge(value, low, high)
@@ -722,6 +779,9 @@ class WorkflowService:
         if on_fail == "rework":
             rounds = len([r for r in self.runs.for_batch(batch.id)
                           if r.step_id == run.step_id and r.state == workflow.FAILED]) + 1
+            blocker = self._irreversible_in_region(batch, index, str(gate.get("rework_to") or ""))
+            if blocker:
+                return self._gate_hold(batch, run, f"{reason}；返工{blocker}")
             if rounds <= int(gate.get("max_rework") or 0):
                 self._close_run(run, workflow.FAILED, f"{reason}；第 {rounds} 次返工")
                 return self._rework(batch, run, index, gate, rounds)
@@ -732,18 +792,24 @@ class WorkflowService:
         return self._gate_hold(batch, run, reason)
 
     def _rework(self, batch: Batch, run: StepRun, index: int, gate: dict, rounds: int) -> dict:
-        """返工：从返工目标到关卡之间已完成的步骤作废（记录保留），流程从返工目标重做。"""
+        """返工：返工目标到关卡之间的步骤作废（记录保留），流程从返工目标重做，关卡在重做完后再评估。
+
+        区间按依赖图取（目标，加上目标的下游里同时是关卡上游的那些）：列表位置夹在中间、与关卡无关的
+        并行分支不作废、不重跑。未走此分支的记录一并作废，重做时分支可以改选另一出口。
+        """
         steps = self.steps_of(batch)
         ids = [step_id_of(step, position) for position, step in enumerate(steps)]
         target = ids.index(gate["rework_to"])
         if not self.advances.claim(batch.id, run.step_id, run.attempt, f"rework:{gate['rework_to']}"):
             return {"next": None, "duplicate": True}
+        region = {target} | (graph.descendants(steps, target) & graph.ancestors(steps, index))
         for row in self.runs.for_batch(batch.id):
-            if target <= row.step_index < index and row.state == workflow.COMPLETED:
+            if row.step_index in region and row.state in {workflow.COMPLETED, workflow.NOT_TAKEN}:
                 row.state = workflow.SUPERSEDED
                 row.reason = f"质检关卡第 {rounds} 次返工，本次结论作废"
                 row.row_version = int(row.row_version or 0) + 1
                 self._retire_split_children(row)
+        run.form_data = {**(run.form_data or {}), workflow.REEVALUATE: True}
         new_run = self.open_step(batch, target)
         self.audit.record(
             None, "质检不合格返工", batch.id, before=run.reason,
@@ -802,17 +868,30 @@ class WorkflowService:
         reason = (payload.get("reason") or "").strip()
         if not reason:
             raise ValidationFailed("人工判定必须写明依据")
+        exclude = [str(well) for well in payload.get("exclude_wells") or []]
+        if exclude and conclusion != "approved":
+            raise ValidationFailed("只有放行时才能指定剔除的样本；判不合格按报废处理整批")
         signature = self.identity.consume_signature(
             payload.get("signature_id"), user, f"质检关卡人工判定：{conclusion}",
             object_ref=run.id, strict=True,
         )
-        batch = self.batches.get(run.batch_id)
+        batch = self.batches.lock(run.batch_id)
+        if batch is None:
+            raise NotFound("批次不存在")
+        if batch.state in {"aborting", "aborted", "done"}:
+            raise StateConflict(f"批次状态为 {batch.state}，不能再判定质检关卡")
+        # 批次是不是因为这个关卡而保持：另一条分支的故障、操作员的保持不能被这次判定一并解除
+        held_here = batch.state == "paused" and (batch.failure_reason or "").startswith("质检关卡待人工判断") and not (
+            batch.note or ""
+        ).startswith("操作员请求保持") and not any(
+            command.state == "held" for command in CommandRepository(self.db, self.ctx).for_batch(batch.id)
+        ) and not self._held_by_other_nodes(batch, run)
         from .alarm_service import AlarmService
 
         AlarmService(self.db, self.ctx).resolve_condition(f"gate:{run.id}", f"QA 判定：{conclusion}；{reason}")
         from .exception_service import ExceptionService
 
-        ExceptionService(self.db, self.ctx).settle_batch(batch, f"QA 质检判定 {conclusion}：{reason}", user)
+        ExceptionService(self.db, self.ctx).settle_source(batch, run.id, f"QA 质检判定 {conclusion}：{reason}", user)
         run.form_data = {**(run.form_data or {}), "decision": conclusion, "decision_reason": reason,
                          "decided_by": user.id}
         run.reviewed_by = user.id
@@ -822,16 +901,50 @@ class WorkflowService:
             after="放行" if conclusion == "approved" else "不合格", detail=reason,
         )
         if conclusion == "approved":
-            self._close_run(run, workflow.COMPLETED, f"人工放行：{reason}")
-            batch.state = "running"
-            batch.held_at = None
-            batch.failure_reason = ""
+            if exclude:
+                self._exclude_samples(batch, run, exclude, reason)
+            self._close_run(run, workflow.COMPLETED, f"人工放行：{reason}" + (
+                f"；剔除 {'、'.join(exclude)}" if exclude else ""
+            ))
+            if held_here:
+                batch.state = "running"
+                batch.held_at = None
+                batch.failure_reason = ""
             outcome = self._advance(run, batch)
         else:
             self._close_run(run, workflow.FAILED, f"人工判不合格：{reason}")
             outcome = self._gate_scrap(batch, run, reason)
         self.db.commit()
         return {"step_run": self.run_out(run), "advance": outcome}
+
+    def _held_by_other_nodes(self, batch: Batch, run: StepRun) -> bool:
+        """除了这个节点，批次上还有别的关卡、分支、拆分节点挂起等人判定吗（报警条件仍在）。
+
+        两个并行关卡都挂起时，判定其中一个不能让批次回到运行：另一个还在等 QA。
+        """
+        from ..repositories.governance import AlarmRepository
+
+        alarms = AlarmRepository(self.db, self.ctx)
+        prefixes = {GATE: "gate", BRANCH: "branch", SPLIT: "split"}
+        return any(
+            alarms.open_by_condition(f"{prefixes[row.kind]}:{row.id}") is not None
+            for row in self.runs.for_batch(batch.id)
+            if row.id != run.id and row.state == workflow.READY and row.kind in prefixes
+        )
+
+    def _exclude_samples(self, batch: Batch, run: StepRun, wells: list[str], reason: str) -> None:
+        """QA 放行逐样本关卡时指定剔除的样本：只能是在用样本，按布局孔位指明。"""
+        by_well = {sample.well: sample for sample in self._active_samples(batch)}
+        unknown = [well for well in wells if well not in by_well]
+        if unknown:
+            raise ValidationFailed(f"{'、'.join(unknown)} 不是在用样本的孔位")
+        if len(set(wells)) == len(by_well):
+            raise ValidationFailed("不能剔除全部在用样本：全部不合格请判不合格")
+        name = (run.step_snapshot or {}).get("name") or "质检关卡"
+        for well in wells:
+            sample = by_well[well]
+            sample.state = "failed"
+            sample.flag_note = f"质检关卡「{name}」QA 放行时剔除：{reason}"
 
     # ---------- 消息通知 ----------
 
@@ -914,6 +1027,11 @@ class WorkflowService:
                 return self._branch_hold(
                     batch, run, f"判据落在回环出口「{case_label(step, case)}」，但已回环 {done} 次、达到上限 {limit}",
                 )
+            blocker = self._irreversible_in_region(batch, index, loop_to)
+            if blocker:
+                if not auto:
+                    raise StateConflict(f"回环{blocker}", code="irreversible_split")
+                return self._branch_hold(batch, run, f"判据落在回环出口「{case_label(step, case)}」，但回环{blocker}")
         run.conclusion = case
         run.form_data = {**(run.form_data or {}), "case": case, "label": case_label(step, case),
                          "auto": auto, "decision_reason": reason}
@@ -971,6 +1089,26 @@ class WorkflowService:
         # 回环把后续步骤整体推后：按回环后的实际路径重算尚未开出的尾段
         self._roll(batch, f"分支第 {rounds} 次回环")
         return {**outcome, "loop": rounds}
+
+    def _split_hold(self, batch: Batch, run: StepRun, reason: str) -> dict:
+        """拆分节点没有输入：节点留在待办，批次保持，等人核对样本状态后处置。"""
+        from .alarm_service import AlarmService
+        from .exception_service import ExceptionService
+
+        run.reason = reason
+        run.started_at = run.started_at or now()
+        run.row_version = int(run.row_version or 0) + 1
+        batch.state = "paused"
+        batch.held_at = batch.held_at or now()
+        batch.failure_reason = f"样本拆分无法进行：{reason}"
+        batch.current_step = run.step_index
+        alarm = AlarmService(self.db, self.ctx).raise_alarm(
+            severity=2, source_type="batch", source_id=batch.id, message=batch.failure_reason[:500],
+            response="核对样本状态：确认继续、报废或终止后按新批次重做。", owner="QA", origin="system",
+            condition_key=f"split:{run.id}",
+        )
+        ExceptionService(self.db, self.ctx).on_hold(batch, run, "split", batch.failure_reason, alarm.id)
+        return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_decision": True}
 
     def _branch_hold(self, batch: Batch, run: StepRun, reason: str) -> dict:
         """判据缺失或回环到上限：分支留在待判定，批次保持，等有权限的人选出口。"""
@@ -1043,10 +1181,13 @@ class WorkflowService:
             from .exception_service import ExceptionService
 
             AlarmService(self.db, self.ctx).resolve_condition(f"branch:{run.id}", f"人工选择出口 {case}：{reason}")
-            ExceptionService(self.db, self.ctx).settle_batch(batch, f"QA 选择分支出口「{case_label(step, case)}」：{reason}", user)
-            batch.state = "running"
-            batch.held_at = None
-            batch.failure_reason = ""
+            ExceptionService(self.db, self.ctx).settle_source(
+                batch, run.id, f"QA 选择分支出口「{case_label(step, case)}」：{reason}", user,
+            )
+            if not self._held_by_other_nodes(batch, run):
+                batch.state = "running"
+                batch.held_at = None
+                batch.failure_reason = ""
         outcome = self._take_branch(batch, run, run.step_index, case, auto=False, reason=reason)
         self.db.commit()
         return {"step_run": self.run_out(run), "advance": outcome}
@@ -1180,6 +1321,8 @@ class WorkflowService:
         """
         from ..domain.steps import split_mode
 
+        if not self._active_samples(batch):
+            return self._split_hold(batch, run, "没有可分装的在用样本（全部已拆分或已判为失败）")
         if split_mode(run.step_snapshot or {}) == "physical":
             run.started_at = run.started_at or now()
             run.reason = "等待实体分装确认：按实际分装结果登记每个子样本的孔位后推进"
@@ -1241,7 +1384,8 @@ class WorkflowService:
             sample.flag_note = f"第 {run.step_index + 1} 步拆分为 {count} 个{child_type}"
         self.db.flush()
         run.form_data = {
-            "parents": len(parents), "count": count, "child_type": child_type, "children": children,
+            "parents": len(parents), "parent_ids": [sample.id for sample in parents],
+            "count": count, "child_type": child_type, "children": children,
             **({"physical": True, "labware": labware.barcode if labware is not None else "", "note": note}
                if placements is not None else {}),
         }
@@ -1311,6 +1455,12 @@ class WorkflowService:
         split = (run.step_snapshot or {}).get("split") or {}
         count = int(split.get("count") or 0)
         parents = self._active_samples(batch)
+        if not parents:
+            # 空母样集合配空孔位集合看起来「完整」，但登记的是一次没有样本的分装，下游设备会空跑
+            raise StateConflict(
+                "没有可分装的在用样本：全部已拆分或已判为失败。请核对样本状态后决定继续、报废或新建批次",
+                code="split_no_active_samples",
+            )
         placements: dict[tuple[str, int], str] = {}
         for row in payload.get("placements") or []:
             key = (str(row.get("parent_sample_id") or ""), int(row.get("number") or 0))
@@ -1359,13 +1509,40 @@ class WorkflowService:
         return {"step_run": self.run_out(run), "advance": outcome}
 
     def _retire_split_children(self, run: StepRun) -> None:
+        """返工 / 回环作废一次拆分：子样作废；系统内分组的母样恢复在用，重做时按母样重新拆分。
+
+        实体分装不可逆，返工与回环不会跨过已完成的实体分装（流程校验与运行期都挡住）。万一走到这里，
+        子样照样作废，但孔位占用保留：实物还在孔里，释放占用会让别的样本被放进同一个孔。
+        """
         if run.kind != SPLIT:
             return
-        for child_id in (run.form_data or {}).get("children") or []:
-            child = self.db.get(Sample, child_id)
-            if child is not None:
-                child.state = "failed"
-                child.flag_note = "所属拆分步骤被质检返工作废"
+        data = run.form_data or {}
+        children = [row for row in (self.db.get(Sample, child_id) for child_id in data.get("children") or []) if row]
+        for child in children:
+            child.state = "failed"
+            child.flag_note = "所属拆分步骤被返工或回环作废"
+        if data.get("physical"):
+            return
+        parent_ids = list(data.get("parent_ids") or [])
+        if not parent_ids:
+            # 早先的记录没有写母样：按子样的物理谱系找回母样
+            from ..models import PhysicalSample
+
+            physical_parents = {
+                parent for parent in (
+                    getattr(self.db.get(PhysicalSample, child.physical_sample_id), "parent_id", None)
+                    for child in children if child.physical_sample_id
+                ) if parent
+            }
+            parent_ids = [
+                sample.id for sample in self.samples.for_batch(run.batch_id)
+                if sample.physical_sample_id in physical_parents
+            ]
+        for parent_id in parent_ids:
+            parent = self.db.get(Sample, parent_id)
+            if parent is not None and parent.state == "split":
+                parent.state = "running"
+                parent.flag_note = "拆分被返工或回环作废，恢复在用，按母样重新拆分"
 
     def finish_batch(self, batch: Batch, user: User | None = None, detail: str = "") -> None:
         from .exception_service import ExceptionService
@@ -1442,9 +1619,13 @@ class WorkflowService:
         跳过它们才是「不自动回退重跑已执行的物理设备步骤」。已完成的步骤不会被
         重新开一个实例，流程直接回到没完成的那一步——通常就是那个审核节点。
         """
+        resolved = {workflow.COMPLETED, workflow.SKIPPED}
+        if graph.graph_mode(steps):
+            # 依赖图里没走的分支已有结论：恢复时不能把它当成待办重新开出（那会下发未选路径上的设备动作）
+            resolved.add(workflow.NOT_TAKEN)
         completed = {
             row.step_id for row in self.runs.for_batch(batch.id)
-            if row.state in {workflow.COMPLETED, workflow.SKIPPED}
+            if row.state in resolved
         }
         for index in range(from_index + 1, len(steps)):
             step_id = step_id_of(steps[index], index)
@@ -1459,13 +1640,22 @@ class WorkflowService:
         物理动作已经发生，重做要走恢复评估或新建运行。
         """
         steps = self.steps_of(batch)
-        # 退回落在最近的人工步骤上：那是记录可以更正的地方
+        # 退回落在最近的人工祖先上：那是记录可以更正的地方。按依赖往上找，不按列表位置——
+        # 并行分支上的人工记录与这次审核无关
         target_step_id = ""
         index = None
-        for position in range(run.step_index - 1, -1, -1):
-            if kind_of(steps[position]) == MANUAL:
-                index, target_step_id = position, step_id_of(steps[position], position)
+        before = graph.predecessors(steps)
+        seen: set[int] = set()
+        level = list(before[run.step_index])
+        while level and index is None:
+            level = sorted(set(level) - seen, reverse=True)
+            seen.update(level)
+            manual = [position for position in level if kind_of(steps[position]) == MANUAL]
+            if manual:
+                index = manual[0]
+                target_step_id = step_id_of(steps[index], index)
                 break
+            level = [parent for position in level for parent in before[position]]
         if index is None:
             # 上游没有人工节点，只有设备步骤：物理动作已经发生，不能自动回退重跑
             batch.state = "paused"
@@ -1480,6 +1670,8 @@ class WorkflowService:
             return {"next": None, "batch_state": batch.state, "needs_recovery": True}
         if not self.advances.claim(batch.id, run.step_id, run.attempt, target_step_id):
             return {"next": None, "duplicate": True}
+        # 审核要等人工记录重做完再做一次
+        run.form_data = {**(run.form_data or {}), workflow.REEVALUATE: True}
         new_run = self.open_step(batch, index)
         self.audit.record(
             None, "审核退回生成新的人工尝试", batch.id, before="审核退回",

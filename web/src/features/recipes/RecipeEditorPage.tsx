@@ -798,8 +798,16 @@ function StepProperties({
             disabled={readOnly}
             onChange={(event) =>
               onSet((current) => {
-                if (event.target.value) current.sop_step = Number(event.target.value);
-                else delete current.sop_step;
+                if (event.target.value) {
+                  current.sop_step = Number(event.target.value);
+                  // 按稳定标识引用：新版本在前面插入步骤时，这个节点仍对得上原来那一步
+                  const picked = sopSteps[current.sop_step - 1];
+                  if (picked?.key) current.sop_step_key = picked.key;
+                  else delete current.sop_step_key;
+                } else {
+                  delete current.sop_step;
+                  delete current.sop_step_key;
+                }
               })
             }
           >

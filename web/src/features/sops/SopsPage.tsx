@@ -809,6 +809,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
   const [scope, setScope] = useState<string[]>([]);
   const [sampleTypes, setSampleTypes] = useState('');
   const [needsAck, setNeedsAck] = useState(false);
+  const [copySteps, setCopySteps] = useState(true);
   const [category, setCategory] = useState('');
   const [owner, setOwner] = useState('');
   const [reviewDue, setReviewDue] = useState('');
@@ -826,6 +827,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         capability_scope: scope,
         sample_types: splitTypes(sampleTypes),
         requires_training_ack: needsAck,
+        copy_steps: copySteps,
         category,
         owner_id: owner,
         review_due: reviewDue || null,
@@ -903,6 +905,12 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         <label className="small">
           <input type="checkbox" checked={needsAck} onChange={(event) => setNeedsAck(event.target.checked)} />
           执行相关节点前必须有该版本的阅读确认或等效资质
+        </label>
+      </Field>
+      <Field label="结构化步骤" hint="同编号修订时建议复制：步骤连同标识带过去，引用旧版的流程节点在新版里仍对得上">
+        <label className="small">
+          <input type="checkbox" checked={copySteps} onChange={(event) => setCopySteps(event.target.checked)} />
+          从当前生效版本复制结构化步骤
         </label>
       </Field>
       <FileUpload

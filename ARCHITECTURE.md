@@ -262,6 +262,8 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0031_automation_extensions` | 任务依赖的放行条件 `experiment_tasks.dependency_gate`、动作指令的协同工位 `commands.assist_station_ids`、载具在批次里的角色 `labware.role`；已有数据按原行为回填 |
 | `0032_outcome_and_labware_wells` | 设备给出的结论 `commands.outcome`（与投递事实分开记，已有指令为空、行为不变）；孔位占用的实体孔位 `slot_occupancies.labware_well` 与「载具 + 实体孔位」部分唯一索引（只约束在途占用）。回填：母样取物理样本上的实体孔位，分装子样取登记孔位，统一规范化；历史上同一实体孔位已有多个在途占用时只给最早一条回填，其余留空待现场核对 |
 | `0033_sop_controls` | SOP 分类与负责人 `sops.category` / `sops.owner_id`；版本失效时间 `effective_to`、下次复审日期 `review_due`、取代关系 `superseded_by` / `superseded_at`。回填：同一 SOP 下多个已发布版本按生效时间排序，除最后一个外都记为被下一个取代、失效时间取下一个的生效时间 |
+| `0034_backfill_command_outcome` | 只回填数据：0032 之前已形成的「设备收到、结论未知」指令按幂等台账补上结论——台账为 unknown 的记 unknown（继续占用工位直到现场核查），为 failed 的记 failed；判断不了的保持空串，迁移核对的「结论待核查的指令」逐条列出 |
+| `0035_sop_step_keys` | 只回填数据：已有 SOP 版本的每个结构化步骤补一个版本内唯一的稳定标识 `key`。流程与在途批次快照不改；没有标识的旧节点按序号、经流程关联版本的标识、按类型与能力唯一匹配依次解析，对不上时明示映射失效 |
 
 规则：
 

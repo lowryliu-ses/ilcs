@@ -137,11 +137,13 @@ class RescheduleService:
             batch = by_id[batch_id]
             steps = normalize(batch.recipe_snapshot.get("steps") or [])
             replan = self._replan(batch, steps)
-            if not replan:
-                continue
             protected = [row for row in self.allocations.for_batch(batch.id) if row.step_index not in replan]
+            # 全部步骤都已开出的批次也要压进时间线：context 排除了全部受影响批次，不压回去，
+            # 别的批次会被排到它正在运行的时间窗上
             for row in protected:
                 context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
+            if not replan:
+                continue
             plans[batch_id] = (steps, replan, protected)
         for batch_id in order:
             if batch_id not in plans:
@@ -169,6 +171,10 @@ class RescheduleService:
                     )
             except SchedulingError as error:
                 unplanned.append({"batch_id": batch.id, "reason": error.message})
+                # 排不进的批次保留原来的时间窗：后面的批次不能排到它们上面
+                for row in self.allocations.for_batch(batch.id):
+                    if row.step_index in replan:
+                        context.busy.setdefault(row.station_id, []).append(Interval(row.starts_at, row.ends_at))
                 continue
             rows = [
                 {"step_index": item.step_index, "station_id": item.station_id, "kind": item.kind,
@@ -177,6 +183,9 @@ class RescheduleService:
                 for item in planned
             ]
             after[batch.id] = {"from_step": from_step, "replan": replan, "allocations": rows}
+            if self.schedule._replans_the_start(batch, steps, replan):
+                # 计划起点一并记下：纯等待流程没有任何时间窗，只重排时间窗等于什么也没改
+                after[batch.id]["planned_start"] = begin.isoformat(timespec="seconds")
             old = [row for row in self.allocations.for_batch(batch.id) if row.step_index in replan and row.kind == WORK]
             new = [item for item in planned if item.kind == WORK]
             # 完成时间按全部工艺时间算：设备做完之后的静置同样推迟下游与交期
@@ -270,6 +279,11 @@ class RescheduleService:
                 continue
             from_step = int(proposal.after[batch_id]["from_step"])
             replanned = self._replanned(proposal.after[batch_id])
+            if batch.state == "scheduled" and replanned is not None and "planned_start" not in proposal.after[batch_id]:
+                steps = normalize(batch.recipe_snapshot.get("steps") or [])
+                if self.schedule._replans_the_start(batch, steps, sorted(replanned)):
+                    stale.append(f"{batch_id} 的建议没有记计划起点（旧格式），按它应用起点不会跟着改")
+                    continue
             opened = self._live_indices(batch)
             if replanned is not None and opened & replanned:
                 stale.append(f"{batch_id} 第 {min(opened & replanned) + 1} 步在建议生成后已经开出")
@@ -345,6 +359,10 @@ class RescheduleService:
                     asset_id=asset_of.get(row["station_id"], ""), kind=row["kind"],
                     starts_at=datetime.fromisoformat(row["starts_at"]), ends_at=datetime.fromisoformat(row["ends_at"]),
                 ))
+            if plan.get("planned_start"):
+                batch = self.batches.get(batch_id)
+                if batch is not None:
+                    batch.planned_start_at = datetime.fromisoformat(plan["planned_start"])
         self.db.flush()
 
     def _final_problems(self, proposal: ScheduleProposal) -> list[str]:

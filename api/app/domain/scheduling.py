@@ -51,6 +51,10 @@ class SchedulingContext:
     asset_capacity: dict[str, int] = field(default_factory=dict)
     # 资产上的预约：(区间, 占用份数)。维护与校准占满整台资产
     asset_bookings: dict[str, list[tuple[Interval, int]]] = field(default_factory=dict)
+    # 校准：(工位, 能力) 此刻就无效的原因；有效但会到期的到期时刻。时间窗越过到期时刻的工位不承接这一步——
+    # 与开跑检查、投递前检查同一个判断，排出来的时间窗不会在开跑时才被校准挡住
+    calibration_invalid: dict[tuple[str, str], str] = field(default_factory=dict)
+    calibration_expiry: dict[tuple[str, str], datetime] = field(default_factory=dict)
 
 
 class SchedulingError(Exception):
@@ -188,13 +192,14 @@ def _assist_candidates(
 
 def _with_assists(
     context: SchedulingContext, step: dict[str, Any], index: int, main: StationSpec, begin: datetime,
-    duration: timedelta,
+    duration: timedelta, main_span: timedelta | None = None,
 ) -> tuple[datetime, list[StationSpec]]:
     """主设备与每种协同资源在同一时段都空着的最早时刻，以及选中的协同工位。
 
     协同资源与主设备一起取得、一起释放：任何一种凑不齐，这一步就整体往后排，不会只占到一半。
     评估每个候选时，主设备与已经选中的协同工位在这一时段的占用先临时记上：它们可能与候选同属一台
     资产，份数要一起算——各自与原有时间线比较，会选中一个与主设备抢同一份容量的候选，而放过真正空着的。
+    `main_span` 是主设备要空着的时长（工作加随后的清洗窗口），缺省同 `duration`。
     """
     options = {
         capability: _assist_candidates(context, step, index, capability, {main.id})
@@ -224,7 +229,7 @@ def _with_assists(
                 context.busy[station_id].remove(slot)
         if latest == begin:
             return begin, chosen
-        begin = earliest_free(context, main.id, latest, duration)
+        begin = earliest_free(context, main.id, latest, main_span or duration)
     raise SchedulingError(
         f"第 {index + 1} 步「{step.get('name')}」主设备与协同资源在可见时间范围内凑不到同一时段", index,
     )
@@ -265,6 +270,11 @@ def plan_steps(
 
     步骤声明了协同资源（`assist`）时，主设备与每种协同资源要在同一时段都空着，协同工位记一段
     `assist` 时间窗，与主设备的时间窗同起同止。
+
+    清洗缓冲：每次用完工位都先按「工作 + 清洗」整体找空档，清洗窗口紧跟工作窗口预留（与别的批次的
+    时间窗不重叠）。本批次的下一步在这段清洗结束之前就能在同一工位开工时，它接手这台工位，中间的
+    清洗撤销、挪到它之后——同一批次的后续步骤可以接着用未清洗的工位，与运行期的待清洗阻挡一致。
+    是否需要清洗按实际落位判，不按列表里的下一项预判。
     """
     allocations: list[PlannedAllocation] = []
     not_before = start_from
@@ -285,6 +295,23 @@ def plan_steps(
     plate_at: dict[str, str] = {
         role: station for role, (_, station) in (plate_state or {}).items() if role in roles
     }
+
+    clean_span = timedelta(minutes=context.clean_min or 0)
+    # 每台工位上本批次最后一次用完后预留的清洗窗口，以及它跟在哪一步后面；后继接手时撤销
+    pending_clean: dict[str, tuple[PlannedAllocation, int]] = {}
+
+    def _drop_clean(station_id: str) -> PlannedAllocation | None:
+        held = pending_clean.pop(station_id, None)
+        if held is None:
+            return None
+        clean, _ = held
+        allocations.remove(clean)
+        busy = context.busy.get(station_id, [])
+        for position, interval in enumerate(busy):
+            if interval.start == clean.starts_at and interval.end == clean.ends_at:
+                busy.pop(position)
+                break
+        return clean
 
     for index, step in enumerate(steps):
         if index < first_index or index in skipped:
@@ -315,18 +342,48 @@ def plan_steps(
             # 另一块板第一次上设备：它不在前驱所在的工位上
             previous_station = None
 
-        best: tuple[datetime, StationSpec, bool] | None = None
+        best: tuple[datetime, StationSpec, bool, bool] | None = None
+        capability = str(step.get("cap") or "")
+        excluded: list[str] = []
         for station in candidates:
+            invalid = context.calibration_invalid.get((station.id, capability))
+            if invalid:
+                excluded.append(invalid)
+                continue
             needs_transfer = previous_station is not None and station.id != previous_station
             ready_at = max(
                 not_before,
                 ready_from + (timedelta(minutes=context.transfer_min) if needs_transfer else timedelta()),
             )
-            begin = earliest_free(context, station.id, ready_at, duration)
+            takeover = False
+            held = pending_clean.get(station.id)
+            if held is not None and not needs_transfer:
+                # 本批次刚在这台工位上做完一步、板还在这里：清洗结束之前就能开工的话，接手它（中间不清洗）
+                clean, _ = held
+                busy = context.busy.get(station.id, [])
+                probe = [row for row in busy if not (row.start == clean.starts_at and row.end == clean.ends_at)]
+                context.busy[station.id] = probe
+                try:
+                    begin = earliest_free(context, station.id, ready_at, duration + clean_span)
+                finally:
+                    context.busy[station.id] = busy
+                takeover = begin < clean.ends_at
+            if not takeover:
+                begin = earliest_free(context, station.id, ready_at, duration + clean_span)
+            expiry = context.calibration_expiry.get((station.id, capability))
+            if expiry is not None and begin + duration > expiry:
+                excluded.append(f"{station.id} 的校准 {expiry:%m-%d %H:%M} 到期，覆盖不了最早可开工的时段")
+                continue
             if best is None or begin < best[0] or (begin == best[0] and station.id < best[1].id):
-                best = (begin, station, needs_transfer)
+                best = (begin, station, needs_transfer, takeover)
 
-        begin, station, needs_transfer = best  # type: ignore[misc]
+        if best is None:
+            raise SchedulingError(
+                f"第 {index + 1} 步「{step.get('name')}」无可执行工位：{'；'.join(excluded)}", index,
+            )
+        begin, station, needs_transfer, takeover = best
+        if takeover:
+            _drop_clean(station.id)
 
         if needs_transfer and context.transfer_station_ids:
             transfer_duration = timedelta(minutes=context.transfer_min)
@@ -338,13 +395,13 @@ def plan_steps(
             transfer = PlannedAllocation(index, carrier, transfer_start, transfer_start + transfer_duration, TRANSFER)
             allocations.append(transfer)
             _occupy(context, transfer)
-            # 设备工作开始不得早于实际转运完成：不是画面上画一个区间就算
+            # 设备工作开始不得早于实际转运完成：不是画面上画一个区间就算（清洗窗口一样要空着）
             if transfer.ends_at > begin:
-                begin = earliest_free(context, station.id, transfer.ends_at, duration)
+                begin = earliest_free(context, station.id, transfer.ends_at, duration + clean_span)
 
         helpers: list[StationSpec] = []
         if assist_capabilities(step):
-            begin, helpers = _with_assists(context, step, index, station, begin, duration)
+            begin, helpers = _with_assists(context, step, index, station, begin, duration, duration + clean_span)
 
         # 硬时限必须在转运把开工时间往后推之后再判：先判后推会放过转运车忙导致的超时
         hard = step.get("hard") or {}
@@ -365,16 +422,11 @@ def plan_steps(
             allocations.append(assist)
             _occupy(context, assist)
 
-        next_step = next(
-            (steps[i] for i in range(index + 1, len(steps)) if needs_station(steps[i])), None
-        )
-        stays = next_step is not None and station_fits(station, next_step)
-        if not stays and context.clean_min:
-            clean = PlannedAllocation(
-                index, station.id, work.ends_at, work.ends_at + timedelta(minutes=context.clean_min), CLEAN
-            )
+        if context.clean_min:
+            clean = PlannedAllocation(index, station.id, work.ends_at, work.ends_at + clean_span, CLEAN)
             allocations.append(clean)
             _occupy(context, clean)
+            pending_clean[station.id] = (clean, index)
 
         ends[index] = work.ends_at
         where[index] = station.id

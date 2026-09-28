@@ -35,6 +35,7 @@ from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
 from ..repositories.batches import AllocationRepository, BatchRepository, ResultRepository, SampleRepository
 from ..repositories.execution import (
     DISPATCHING, MOTION, CheckpointRepository, CommandRepository, TelemetryRepository, outcome_unknown,
+    still_occupying,
 )
 from ..repositories.governance import AlarmRepository
 from ..repositories.materials import ReservationRepository
@@ -125,10 +126,13 @@ class BatchService:
         return first_work.starts_at - timedelta(minutes=dag.lead_min(steps, first_work.step_index))
 
     def _station_ids(self, batch: Batch, from_step: int = 0) -> set[str]:
-        """本批次（自某一步起）占用的设备工位。执行门按它们判定单台设备的失联 / 超时。"""
+        """本批次（自某一步起）要用的设备工位：主工位与协同工位。执行门按它们判定单台设备的失联 / 超时。
+
+        协同资源与主设备一起取得：协同设备失联时主动作同样不能开始，开跑与续跑都要挡住。
+        """
         return {
             a.station_id for a in self.allocations.for_batch(batch.id)
-            if a.step_index >= from_step and a.kind == WORK
+            if a.step_index >= from_step and a.kind in {WORK, "assist"}
         }
 
     def _withdraw_queued(self, batch: Batch, reason: str) -> int:
@@ -140,6 +144,43 @@ class BatchService:
             1 for command in self.commands.queued_for_batch(batch.id)
             if execution.withdraw(command, reason)
         )
+
+    def _assist_resource_checks(self, steps: list[dict], allocations) -> list[dict]:
+        """协同工位的设备许可：所属资产的状态，以及它在这一步承担的协同能力的校准。
+
+        没有映射资产的协同工位（例如 AGV）没有校准档案要核；搬运能力不做校准，与投递前的判断一致。
+        """
+        from ..domain.resources import calibration_blockers
+        from ..domain.steps import assist_capabilities
+        from .execution_service import TRANSPORT_CAPABILITY
+
+        specs = self.assets.specs_by_station()
+        rows: list[dict] = []
+        for allocation in allocations:
+            if allocation.kind != "assist" or allocation.step_index >= len(steps):
+                continue
+            spec = specs.get(allocation.station_id)
+            if spec is None:
+                continue
+            step = steps[allocation.step_index]
+            station = self.stations.get(allocation.station_id)
+            limits = set((station.limits or {}) if station is not None else {})
+            reasons: list[str] = []
+            if spec.state in {"maintenance", "retired"}:
+                reasons.append(f"{spec.name} {'处于维护状态' if spec.state == 'maintenance' else '已退役'}")
+            else:
+                window = Window(allocation.starts_at, allocation.ends_at)
+                for capability in assist_capabilities(step):
+                    if capability == TRANSPORT_CAPABILITY or capability not in limits:
+                        continue
+                    reasons.extend(calibration_blockers(spec, capability, window))
+            rows.append({
+                "step_index": allocation.step_index,
+                "step_id": step_id_of(step, allocation.step_index),
+                "step_name": f"{step.get('name') or f'第 {allocation.step_index + 1} 步'}（协同 {allocation.station_id}）",
+                "applicable": True, "ok": not reasons, "reasons": reasons,
+            })
+        return rows
 
     def _simulation_blockers(self, batch: Batch) -> list[dict]:
         """正式环境里仍是模拟适配器的工位。它们会在没有硬件的情况下报告完成。"""
@@ -298,7 +339,7 @@ class BatchService:
                     "assist": step.get("assist") or [],
                     "labware": step.get("labware") or "",
                     "split": step.get("split") or {},
-                    "sop_guide": sop_steps.step_guide(step, batch.sop_snapshot),
+                    "sop_guide": sop_steps.step_guide(step, self._guide_snapshot(batch, step)),
                     # 承诺窗口还是预测窗口（分支未定的下游、冻结期之后）
                     "forecast_reason": self.schedule.forecast_of(work, marks, moment) if work else marks.get(index, ""),
                     "checkpoint_id": checkpoint.id if checkpoint else None,
@@ -556,6 +597,16 @@ class BatchService:
             raise StateConflict("只能从有效的已发布流程创建批次")
         # 新批次按流程所关联 SOP 的当前生效版本执行；没有生效版本就不建（先于物料预留判）
         sop_version = self.sops.resolve_for_new_batch(recipe.sop_version_id) if recipe.sop_version_id else None
+        if sop_version is not None:
+            # 范围与步骤映射按这个批次实际采用的版本判：流程关联的旧版被取代后，新版可能收窄了适用能力、
+            # 插入或删掉了步骤
+            self._require_sop_scope(sop_version, normalize(recipe.steps or []), "")
+            self._require_sop_mapping(
+                self.sops.snapshot_for(sop_version.id, linked_version_id=recipe.sop_version_id),
+                normalize(recipe.steps or []), "",
+            )
+        recipe_snapshot = self._freeze_recipe(recipe)
+        self._attach_subflow_sops(recipe_snapshot)
 
         batch = Batch(
             id=self.batches.next_id(now()),
@@ -567,7 +618,7 @@ class BatchService:
             priority=priority,
             operator=user.display_name,
             note=note,
-            recipe_snapshot=self._freeze_recipe(recipe),
+            recipe_snapshot=recipe_snapshot,
             plan_snapshot=self._freeze_plan(content),
             sop_snapshot=(
                 self.sops.snapshot_for(sop_version.id, linked_version_id=recipe.sop_version_id)
@@ -603,6 +654,74 @@ class BatchService:
         )
         self.db.commit()
         return self.summary_out(batch)
+
+    def _require_sop_scope(self, version, steps: list[dict], prefix: str) -> None:
+        from ..domain.sop_steps import scope_outside
+
+        outside = scope_outside(steps, version.capability_scope)
+        if outside:
+            label = f"{prefix}SOP {version.version}"
+            raise StateConflict(
+                f"{prefix}设备能力 {'、'.join(outside)} 不在批次将采用的 {label} 的适用范围内，不能建批次："
+                f"请修订流程或 SOP",
+                {"blocked": [{"key": "sop", "label": f"{label} 适用范围 {'、'.join(version.capability_scope or [])}"}]},
+                code="sop_scope_mismatch",
+            )
+
+    def _require_sop_mapping(self, snapshot: dict, steps: list[dict], prefix: str) -> None:
+        from ..domain.sop_steps import mapping_issues
+
+        broken = mapping_issues(steps, snapshot)
+        if broken:
+            label = f"{prefix}SOP {snapshot.get('code', '')} {snapshot.get('version', '')}"
+            raise StateConflict(
+                f"{prefix}节点 {'、'.join(broken[:5])} 对应的 SOP 步骤在批次将采用的 {label} 里对不上（映射失效），"
+                f"不能建批次：请在流程里重新选择对应的 SOP 步骤",
+                {"blocked": [{"key": "sop", "label": f"{label}：{name}"} for name in broken]},
+                code="sop_mapping_broken",
+            )
+
+    def _guide_snapshot(self, batch: Batch, step: dict) -> dict | None:
+        """节点的作业指导取哪一版 SOP：子流程里的步骤取最近一层带 SOP 的子流程的，其余取主流程的。"""
+        sops = {
+            str(group.get("step_id")): group.get("sop")
+            for group in (batch.recipe_snapshot or {}).get("subflows") or [] if group.get("sop")
+        }
+        for group in reversed(step.get("groups") or []):
+            if str(group.get("step_id")) in sops:
+                return sops[str(group.get("step_id"))]
+        return None if step.get("groups") else batch.sop_snapshot
+
+    def _attach_subflow_sops(self, snapshot: dict) -> None:
+        """子流程关联的 SOP：按它的当前生效版本解析，校验适用能力，固化在子流程归属上。
+
+        子流程里的步骤由子流程自己的 SOP 管（流程发布时同一口径）：它没有生效版本、或范围不覆盖
+        子流程的设备步骤时，同样不建批次；执行时的状态、样本类型、阅读确认按固化的这一版判。
+        """
+        from ..domain.sop_steps import governed_steps
+
+        groups = snapshot.get("subflows") or []
+        resolved: dict[str, tuple] = {}
+        for group in groups:
+            sub = self.recipes.get(group.get("recipe_id") or "")
+            if sub is None or not sub.sop_version_id:
+                continue
+            resolved[str(group["step_id"])] = (sub, self.sops.resolve_for_new_batch(sub.sop_version_id))
+        steps = normalize(snapshot.get("steps") or [])
+        for group in groups:
+            if str(group["step_id"]) not in resolved:
+                continue
+            sub, version = resolved[str(group["step_id"])]
+            prefix = f"子流程「{group.get('name') or group['step_id']}」"
+            governed = governed_steps(steps, str(group["step_id"]), set(resolved))
+            self._require_sop_scope(version, governed, prefix)
+            group["sop"] = self.sops.snapshot_for(version.id, linked_version_id=sub.sop_version_id)
+            self._require_sop_mapping(group["sop"], governed, prefix)
+
+    def acknowledge_sop(self, batch_id: str, user: User) -> dict:
+        """执行人确认批次采用的 SOP 版本（含子流程的）。见 SopService.acknowledge_for_batch。"""
+        batch = self._require(batch_id)
+        return self.sops.acknowledge_for_batch(batch, user)
 
     def _freeze_recipe(self, recipe) -> dict:
         """冻结流程快照。子流程在这里展开：之后被引用的方法怎么修订，这个批次的步骤都不变。"""
@@ -885,7 +1004,7 @@ class BatchService:
         resource_checks = [
             row.as_dict()
             for row in evaluate_steps(steps, windows, self.assets.specs_by_station(), station_of_step)
-        ]
+        ] + self._assist_resource_checks(steps, allocations)
         task = self.tasks.get(batch.task_id) if batch.task_id else None
         executor_id = (task.assignee_user_id if task else "") or user.id
         # 资质覆盖整个计划执行时段：首步开始有效、中途到期同样挡住
@@ -893,10 +1012,6 @@ class BatchService:
         qualification_blockers = self.people.blockers_for_steps(
             executor_id, steps, first_work.starts_at if first_work else now(), until=last_end,
         )
-        if batch.sop_snapshot:
-            qualification_blockers += self.sops.ack_blockers(
-                batch.sop_snapshot.get("sop_version_id", ""), executor_id
-            )
         personnel = StaffingService(self.db, self.ctx).conflicts(batch)
         context = preflight.PreflightContext(
             recipe_state=source.state if source else "",
@@ -935,10 +1050,9 @@ class BatchService:
             qualification_required=self.people.requires_qualification(steps),
             qualification_blockers=qualification_blockers,
             sop_snapshot=batch.sop_snapshot or None,
-            sop_checks=(
-                self.sops.run_checks(batch.sop_snapshot, self.sops.batch_sample_types(batch.id))
-                if batch.sop_snapshot else None
-            ),
+            sop_checks=self.sops.batch_checks(batch, self.sops.batch_sample_types(batch.id)),
+            # 阅读确认独立成项：流程没有需资质的节点（纯人工流程）时照样要确认
+            sop_ack_blockers=self.sops.batch_ack_blockers(batch, executor_id),
             dependency_blockers=self._dependency_blockers(task),
             other_stations=self._other_stations(work, station.id if station else ""),
             environment_blockers=EnvironmentService(self.db, self.ctx).batch_checks(batch),
@@ -1051,6 +1165,8 @@ class BatchService:
         保持 / 终止可以指定工位：在途的是转运时，要停的是承运工位而不是步骤工位。
         `target_command_id`：保持 / 终止要停的动作，或续跑 / 重试要接续的那个被保持的动作。
         """
+        if command_type in DISPATCHING:
+            self._refuse_second_action(batch, step_index, command_type, target_command_id)
         steps = self.steps_of(batch)
         step = steps[step_index] if step_index < len(steps) else {}
         allocation = self.allocations.work_step(batch.id, step_index)
@@ -1118,6 +1234,7 @@ class BatchService:
         建批次时冻结的是方案的条件（因子水平与作用目标），孔位不能冻结：实体分装会把子样落到另一块板的
         别的孔上，布局放不进板型时实体孔位也与布局孔位不同。子样本继承母样的水平，条件跟着样本走。
         板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
+        只投影在用样本：已拆分的母样、被剔除的样本仍占着孔位（实物还在），但不再是下游处理对象。
         """
         from ..domain.labware import container_of
         from ..domain.matrix import step_condition
@@ -1130,18 +1247,25 @@ class BatchService:
         factors = (batch.plan_snapshot or {}).get("factors") or []
         base, role = container_of(batch.id), labware_role(step)
         containers = [f"{base}:{role}"] if role else [base, f"{base}:main"]
-        samples = {sample.id: sample for sample in self.samples.for_batch(batch.id)}
+        active = self.samples.active_for_batch(batch.id)
+        samples = {sample.id: sample for sample in active}
         projected: dict[str, dict] = {}
+        occupied = False
         for slot in self.db.query(SlotOccupancy).filter(
             SlotOccupancy.container_id.in_(containers), SlotOccupancy.released_at.is_(None),
         ).all():
+            occupied = True
             sample = samples.get(slot.assignment_id)
             values = step_condition(factors, step_id, list(sample.levels or [])) if sample is not None else {}
             if values:
                 projected[slot.labware_well or slot.well] = values
         if projected:
             return projected
-        return None if role else dict(frozen)
+        if role or occupied:
+            # 板上有占用却没有一个在用样本：这一步没有处理对象，不能退回布局孔位把失效样本也带上
+            return None
+        wells = {sample.well for sample in active}
+        return {well: values for well, values in frozen.items() if well in wells}
 
     def _refuse_unsent(self, batch: Batch, command: Command, reason: str) -> None:
         """指令没离开系统就判为不能投递：记入幂等台账，批次挂起报警。不提交——由调用方的事务决定。"""
@@ -1334,6 +1458,19 @@ class BatchService:
                         allowed=False,
                         reason=f"设备保持尚未确认（{'、'.join(sorted({c.station_id for c in holding}))}）",
                     )
+        acting = self._acting_actions(batch)
+        if acting:
+            # 保持或终止没有送到设备：动作一直在跑。续跑就是重新挂接它；重试会让设备把这一步再做一遍
+            label = "、".join(str(index + 1) for index in sorted({c.step_index for c in acting}))
+            for option in options:
+                if option["id"] == recovery.RETRY:
+                    option.update(
+                        allowed=False, reason=f"设备上第 {label} 步的动作仍在执行：先保持并确认，或终止",
+                    )
+                elif option["id"] == recovery.RESUME:
+                    option.update(
+                        impact=f"设备上第 {label} 步的动作仍在执行：恢复后批次回到运行，等它的回执，不再下发新指令",
+                    )
         steps = self.steps_of(batch)
         current = steps[batch.current_step] if batch.current_step < len(steps) else {}
         blockers = self._blind_blockers(batch)
@@ -1374,8 +1511,16 @@ class BatchService:
     def _flow_complete(self, batch: Batch) -> bool:
         if self.runs.current(batch.id) is not None:
             return False
-        index, _ = self.workflow.next_open_step(self.steps_of(batch), batch, -1)
-        return index is None and bool(self.runs.for_batch(batch.id))
+        steps = self.steps_of(batch)
+        rows = self.runs.for_batch(batch.id)
+        if not rows:
+            return False
+        if dag.graph_mode(steps):
+            # 依赖图：每一步都有结论（完成、跳过或未走此分支）才算走完
+            status, _ = self.workflow.flow_state(rows)
+            return dag.all_resolved(steps, status)
+        index, _ = self.workflow.next_open_step(steps, batch, -1)
+        return index is None
 
     def recover(self, batch_id: str, strategy: str, verified: bool, signature_id: str, user: User) -> dict:
         if not self.ctx.has("batch.recover"):
@@ -1411,10 +1556,13 @@ class BatchService:
             (a.ends_at for a in self.allocations.for_batch(batch.id) if a.step_index >= batch.current_step),
             default=None,
         )
+        executor_id = (task.assignee_user_id if task else user.id) or user.id
         self.people.require_for_steps(
-            (task.assignee_user_id if task else user.id) or user.id, steps, now(), action="恢复运行",
+            executor_id, steps, now(), action="恢复运行",
             until=(remaining_end + timedelta(minutes=held_min_estimate(batch))) if remaining_end else None,
         )
+        if strategy != recovery.ABORT:
+            self._require_sop_ack(batch, executor_id, "恢复运行")
         if strategy != recovery.ABORT and batch.current_step < len(steps) and kind_of(steps[batch.current_step]) == DEVICE:
             from .transfer_service import TransferService
 
@@ -1439,12 +1587,16 @@ class BatchService:
         from .schedule_service import lock_schedule
 
         lock_schedule(self.db)
+        # 保持或终止没有送到设备的动作一直在跑：步骤实例改回执行中，恢复只是重新挂接它
+        acting = self._acting_actions(batch)
+        acting_steps = {command.step_index for command in acting}
+        self._reattach_acting(batch, acting)
         # 被保持的每一步（并行时可能不止当前这一步）时间窗延长，它们还没开出的后继跟着后移；
-        # 另一条分支上已开出的步骤、与它们无关的步骤不动
-        held = {
+        # 另一条分支上已开出的步骤、与它们无关的步骤不动。动作没停过的步骤不延长
+        held = ({
             command.step_index for command in self.commands.for_batch(batch.id)
             if command.state == "held" and command.type in DISPATCHING
-        } | {batch.current_step}
+        } | {batch.current_step}) - acting_steps
         self.schedule.extend_after_hold(batch, held, shift)
         overlaps = [
             row for row in self.schedule.conflicts()
@@ -1505,11 +1657,13 @@ class BatchService:
                 batch, batch.current_step,
                 assignee_user_id=(task.assignee_user_id if task else user.id),
             )
+        elif run.kind == DEVICE and run.step_index in acting_steps:
+            pass  # 动作还在设备上执行：不改实例状态，等它的回执
         else:
             run.state = "ready" if run.kind != "wait" else "waiting"
             run.row_version = int(run.row_version or 0) + 1
         command = None
-        if run.kind == DEVICE:
+        if run.kind == DEVICE and run.step_index not in acting_steps:
             command = self._reissue(batch, run, strategy)
         # 依赖图里一起被保持的其他设备分支：只续跑当前步骤，其余分支会永远停在保持里
         others = self._resume_other_branches(batch, run) if dag.graph_mode(steps) else []
@@ -1535,6 +1689,63 @@ class BatchService:
         self._settle_exceptions(batch, f"恢复评估：{option['label']}", user)
         self.db.commit()
         return self.summary_out(batch)
+
+    def _refuse_second_action(
+        self, batch: Batch, step_index: int, command_type: str, target_command_id: str,
+    ) -> None:
+        """同一步骤同一时刻至多一条活动动作指令。
+
+        这一步已有排队、在途、已保持或结果未知可能仍在动作的指令时再发一条，设备会把同一步做两遍。
+        续跑 / 重试只能接续被保持的那条：设备接受后旧指令到此为止，不会各完成一次。
+        """
+        live = [
+            command for command in self.commands.for_batch(batch.id)
+            if command.type in DISPATCHING and command.step_index == step_index and (
+                (command.state == "sent" and command.delivery_state == "queued") or still_occupying(command)
+            )
+        ]
+        if not live:
+            return
+        held = {command.id for command in live if command.state == "held"}
+        acting = [command for command in live if command.state != "held"]
+        if command_type in {recovery.RESUME, recovery.RETRY} and not acting and target_command_id in held:
+            return
+        blocking = (acting or live)[0]
+        raise StateConflict(
+            f"第 {step_index + 1} 步已有动作指令 {blocking.id[:8]}（{blocking.state}），不能再下发一条："
+            f"设备会把同一步做两遍",
+            {"blocked": [{"key": "command", "label": f"{blocking.id}：{blocking.state}"}]},
+            code="duplicate_action",
+        )
+
+    def _require_sop_ack(self, batch: Batch, user_id: str, action: str) -> None:
+        """执行人对批次采用的 SOP（按固化版本）要有阅读确认；改派、恢复之后执行人可能换了。"""
+        blockers = self.sops.batch_ack_blockers(batch, user_id) or []
+        if blockers:
+            raise StateConflict(
+                f"{action}前需要阅读确认：{blockers[0]}；可在批次页确认本批次采用的 SOP",
+                {"blocked": [{"key": "sop_ack", "label": text} for text in blockers]},
+                code="sop_ack_required",
+            )
+
+    def _acting_actions(self, batch: Batch) -> list[Command]:
+        """设备上仍在执行、没有被保持的动作指令。保持或终止没有送到设备时，它们一直在跑。"""
+        return [
+            command for command in self.commands.for_batch(batch.id)
+            if command.type in DISPATCHING and command.state in {"accepted", "running"}
+        ]
+
+    def _reattach_acting(self, batch: Batch, acting: list[Command]) -> None:
+        """保持 / 终止没送到设备时，`fault()` 把动作的步骤实例记成了结果未知：动作其实一直在跑，改回执行中。"""
+        from .execution_service import ExecutionService
+
+        execution = ExecutionService(self.db, self.ctx)
+        for command in acting:
+            run = execution._run_for(command, batch)
+            if run is not None and run.state == "unknown":
+                run.state = "running"
+                run.reason = "保持或终止没有送到设备，动作一直在执行"
+                run.row_version = int(run.row_version or 0) + 1
 
     def _reissue(self, batch: Batch, run, strategy: str) -> Command:
         """恢复时给一个设备步骤重新发指令。
@@ -1904,6 +2115,13 @@ class BatchService:
                 run.ended_at = now()
                 run.reason = verdict
                 run.row_version = int(run.row_version or 0) + 1
+            if command.type in {"hold", "abort"}:
+                # 保持 / 终止没送到设备：它要停的动作仍在执行，步骤实例改回执行中；恢复评估据此重新挂接，
+                # 不会再下发一次同一步
+                self._reattach_acting(
+                    batch, [row for row in execution._control_target(batch, command) if row.type in DISPATCHING
+                            and row.state in {"accepted", "running"}],
+                )
             if command.type == "abort" and batch.state in {"fault", "aborting"}:
                 # 终止没发到设备：批次回到可评估状态，由操作员重新决定终止或恢复
                 batch.state = "fault"

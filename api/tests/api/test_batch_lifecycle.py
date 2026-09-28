@@ -80,7 +80,8 @@ def test_locked_but_unapproved_plan_cannot_start_a_batch(operator, researcher, r
 def test_dispatch_requires_manual_review_and_server_checks(operator, scheduled_batch):
     preflight = operator.get(f"/api/batches/{scheduled_batch}/preflight?manual_review=true").json()
     assert preflight["ok"], preflight["blocked"]
-    assert len(preflight["checks"]) == 14
+    # SOP 阅读确认独立成项之后是 15 项
+    assert len(preflight["checks"]) == 15
     assert {c["state"] for c in preflight["checks"]} <= {"pass", "warn", "blocked", "not_applicable"}
 
     without_review = operator.post(

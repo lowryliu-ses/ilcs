@@ -364,6 +364,8 @@ class CommentIn(BaseModel):
 
 
 class SopStepIn(BaseModel):
+    # 稳定标识：流程节点按它引用这一步。编辑时原样带回；新加的步骤留空，由服务端生成
+    key: str = Field(default="", max_length=32)
     title: str
     kind: Literal["device", "manual", "wait", "review"] = "manual"
     capability: str = ""
@@ -611,10 +613,14 @@ class StepSubmitIn(Versioned):
 
 
 class GateDecisionIn(Signed):
-    """保持中的质检关卡人工判定：放行或判不合格，都要写依据。"""
+    """保持中的质检关卡人工判定：放行或判不合格，都要写依据。
+
+    逐样本关卡放行时可以指定要剔除的样本（布局孔位）；不指定就是全部放行。
+    """
 
     conclusion: Literal["approved", "rejected"]
     reason: str
+    exclude_wells: list[str] = Field(default_factory=list, max_length=384)
 
 
 class SplitPlacementIn(BaseModel):
@@ -999,6 +1005,8 @@ class SopVersionCreateIn(BaseModel):
     review_due: date | None = None
     category: str | None = None
     owner_id: str | None = None
+    # 同编号修订时从当前生效版本复制结构化步骤（连同稳定标识）
+    copy_steps: bool = False
 
 
 class SopVersionPatchIn(Versioned):

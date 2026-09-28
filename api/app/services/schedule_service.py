@@ -113,6 +113,7 @@ class ScheduleService:
             # 失联 / 心跳超时的设备、处于维护或已退役资产上的工位不承接新排程
             unavailable_station_ids=self._unavailable_stations(),
             **self._asset_constraints(),
+            **self._calibration_constraints(),
             transfer_station_ids=self.stations.transfer_station_ids(),
             transfer_min=settings.transfer_min,
             clean_min=settings.clean_min,
@@ -132,6 +133,43 @@ class ScheduleService:
                 label = "处于维护状态" if asset.state == "maintenance" else "已退役"
                 blocked[station.id] = f"{station.id} 所属资产 {asset.asset_no} {label}"
         return blocked
+
+    def _calibration_constraints(self) -> dict:
+        """每个工位上每种能力的校准：此刻就无效的原因，或有效期的到期时刻。
+
+        维护 / 退役已在不可用工位里；搬运能力不做校准（承运工位没有校准档案要核）。
+        """
+        from ..domain.resources import Window, calibration_blockers, governing_calibration
+        from ..models import Asset
+        from .execution_service import TRANSPORT_CAPABILITY
+
+        moment = now()
+        window = Window(moment, moment + timedelta(minutes=1))
+        invalid: dict[tuple[str, str], str] = {}
+        expiry: dict[tuple[str, str], datetime] = {}
+        specs: dict[str, object] = {}
+        for station in self.stations.list():
+            if not station.asset_id or station.retired:
+                continue
+            if station.asset_id not in specs:
+                asset = self.db.get(Asset, station.asset_id)
+                if asset is None:
+                    continue
+                specs[station.asset_id] = AssetService(self.db, self.ctx).spec_for(asset)
+            spec = specs[station.asset_id]
+            if spec.state in {"maintenance", "retired"}:
+                continue
+            for capability in (station.limits or {}):
+                if capability == TRANSPORT_CAPABILITY:
+                    continue
+                problems = calibration_blockers(spec, capability, window)
+                if problems:
+                    invalid[(station.id, capability)] = f"{station.id}：{problems[0]}"
+                    continue
+                governing = governing_calibration(spec, capability, moment)
+                if governing is not None and governing.expires_at is not None:
+                    expiry[(station.id, capability)] = governing.expires_at
+        return {"calibration_invalid": invalid, "calibration_expiry": expiry}
 
     def _asset_constraints(self) -> dict:
         """资产容量与预约。维护 / 校准占满整台资产；人工预约占一份；排程占用由时间窗本身表达。"""
@@ -496,17 +534,34 @@ class ScheduleService:
                 code="asset_capacity_exceeded",
             )
 
-    def _asset_overloads(self, batch_id: str, planned: list[PlannedAllocation] | None = None) -> list[str]:
+    def _own_clean_overlaps(self, batch_id: str) -> list[Allocation]:
+        """本批次的清洗窗口被本批次另一步的工作窗口压着（同一工位）：后一步接手了未清洗的工位。"""
+        rows = self.allocations.for_batch(batch_id)
+        work = [row for row in rows if row.kind in {WORK, "assist"}]
+        return [
+            clean for clean in rows if clean.kind == CLEAN and any(
+                row.station_id == clean.station_id and row.step_index != clean.step_index
+                and row.starts_at < clean.ends_at and clean.starts_at < row.ends_at
+                for row in work
+            )
+        ]
+
+    def _asset_overloads(
+        self, batch_id: str, planned: list[PlannedAllocation] | None = None, ignore_ids: set | frozenset = frozenset(),
+    ) -> list[str]:
         """本批次的时间窗落在哪些资产的超容量时段里。资产是跨组织共享的物理对象，按全站占用算。
 
         `planned` 给了就按这份还没写入的计划算（预览用）：本批次库里的旧时间窗不计。预览与写入前的
-        最后一道检查用同一个口径，不会出现「预览可行、应用失败」。
+        最后一道检查用同一个口径，不会出现「预览可行、应用失败」。`ignore_ids` 是不计入的时间窗
+        （按实际进度对齐时，被本批次下一步接手、随之撤销的清洗窗口）。
         """
         from ..models import Asset, ResourceBooking, Station
 
         station_asset = {sid: aid for sid, aid in self.db.query(Station.id, Station.asset_id).all() if aid}
         rows = self.allocations.for_batch(batch_id) if planned is None else planned
-        mine = [row for row in rows if row.station_id in station_asset]
+        mine = [
+            row for row in rows if row.station_id in station_asset and getattr(row, "id", None) not in ignore_ids
+        ]
         found: list[str] = []
         for asset_id in sorted({station_asset[row.station_id] for row in mine}):
             asset = self.db.get(Asset, asset_id)
@@ -517,7 +572,7 @@ class ScheduleService:
             )
             if planned is not None:
                 existing = existing.filter(Allocation.batch_id != batch_id)
-            occupied = [(Interval(row.starts_at, row.ends_at), 1) for row in existing.all()]
+            occupied = [(Interval(row.starts_at, row.ends_at), 1) for row in existing.all() if row.id not in ignore_ids]
             if planned is not None:
                 occupied += [
                     (Interval(row.starts_at, row.ends_at), 1) for row in mine if station_asset[row.station_id] == asset_id
@@ -1043,6 +1098,17 @@ class ScheduleService:
                 code="step_in_progress",
             )
         replan = [index for index in range(from_step, len(steps)) if index not in frozen]
+        if batch.state in {"planned", "scheduled"}:
+            # 与初次排程、重排建议同一条规则：上游任务的批次结束之前不开工
+            floor, missing = self.dependency_floor(batch)
+            if missing:
+                raise StateConflict(
+                    "上游任务还定不下来，无法重排",
+                    {"blocked": [{"key": "dependency", "label": text} for text in missing]},
+                    code="dependency_unscheduled",
+                )
+            if floor is not None and floor > start_from:
+                start_from = floor
         protected = [a for a in self.allocations.for_batch(batch.id) if a.step_index not in replan]
         keep = {index for index in range(len(steps)) if index not in replan}
         known_ends, known_where, plate_state = self._known_tail(batch, steps, keep, protected)
@@ -1072,6 +1138,10 @@ class ScheduleService:
                     starts_at=item.starts_at, ends_at=item.ends_at, kind=item.kind,
                 )
             )
+        if self._replans_the_start(batch, steps, replan):
+            # 没有前驱的非设备节点（开头的备料、静置）按计划起点推算：起点不跟着改，
+            # 之后的尾段重排、交期与下游依赖都会拿旧起点算，设备被排到静置结束之前
+            batch.planned_start_at = start_from
         self.db.flush()
         self._refuse_overlaps(batch.id)
         self._book_people(batch, None)
@@ -1089,6 +1159,17 @@ class ScheduleService:
             "protected_steps": sorted({a.step_index for a in protected}),
             "replanned": [self._planned_out(item, tail) for item in planned],
         }
+
+    @staticmethod
+    def _replans_the_start(batch: Batch, steps: list[dict], replan: list[int]) -> bool:
+        """这次重排是否重新决定了批次的开始：还没开跑，且全部没有前驱的步骤都在重排范围里。"""
+        from ..domain import graph
+
+        if batch.state not in {"planned", "scheduled"}:
+            return False
+        before = graph.predecessors(steps)
+        roots = [index for index in range(len(steps)) if not before[index]]
+        return bool(roots) and set(roots) <= set(replan)
 
     def _cross_batch_overlaps(self, batch_id: str) -> list[dict]:
         return [
@@ -1124,14 +1205,21 @@ class ScheduleService:
         shifts = self._realign_shifts(batch, steps, step_index, delay) if steps else {step_index: delay}
         self.allocations.shift_steps(batch.id, shifts)
         self.db.flush()
+        # 本批次的下一步提前到了前一步的清洗窗口里：同一批次接着用未清洗的工位，那段清洗不再需要
+        absorbed = self._own_clean_overlaps(batch.id)
         conflicts = self._cross_batch_overlaps(batch.id)
+        # 与初次排程写入前同一组检查：工位通道之外，共享资产容量（含维护 / 校准预约）也不能被挤爆
+        overloads = self._asset_overloads(batch.id, ignore_ids={row.id for row in absorbed})
         minutes = delay.total_seconds() / 60
         moved = len([index for index, value in shifts.items() if value])
         if delay < timedelta():
-            if conflicts:
+            if conflicts or overloads:
                 self.allocations.shift_steps(batch.id, {index: -value for index, value in shifts.items()})
                 self.db.flush()
                 return {"shifted_min": 0, "conflicts": [], "waiting": True}
+            for row in absorbed:
+                self.db.delete(row)
+            self.db.flush()
             self.audit.record(
                 None, "按实际进度提前", batch.id, before=f"第 {step_index + 1} 步计划开工",
                 after=f"提前 {-minutes:.0f} min",
@@ -1147,6 +1235,15 @@ class ScheduleService:
             ),
         )
         self._raise_dependency_alarm(batch, self.dependency_conflicts(batch))
+        if overloads:
+            from .alarm_service import AlarmService
+
+            AlarmService(self.db, self.ctx).raise_alarm(
+                severity=2, source_type="batch", source_id=batch.id,
+                message=f"{batch.id} 顺延 {minutes:.0f} min 后共享资产超容量：{overloads[0]}",
+                response="在排程页决定哪一方让路（重排其一），或调整维护 / 校准预约。",
+                owner="调度", origin="system", condition_key=f"batch:{batch.id}:asset_overload",
+            )
         if conflicts:
             from .alarm_service import AlarmService
 
@@ -1171,6 +1268,8 @@ class ScheduleService:
 
         按图的拓扑顺序（前驱序号总在前面）传递：每个后继至少与它在平移范围内的前驱移动同样的量，
         原有的间隔（转运、清洗）不被压缩；提前时也不早于它不在范围内的前驱（另一条分支）结束。
+        静置、等待这类非设备节点没有时间窗，也要参与这条约束：它的原计划开始取计划结束减去时长，
+        经它汇合的下游才会等另一条分支结束，而不是跟着这一支一起提前。
         """
         from ..domain import graph
 
@@ -1185,9 +1284,12 @@ class ScheduleService:
                 shifts[index] = delay
                 continue
             candidates = [delay, *(shifts[parent] for parent in before[index] if parent in shifts)]
-            if index in starts:
+            start = starts.get(index)
+            if start is None and index in ends:
+                start = ends[index] - timedelta(minutes=float(steps[index].get("dur") or 0))
+            if start is not None:
                 candidates += [
-                    ends[parent] - starts[index] for parent in before[index] if parent not in shifts and parent in ends
+                    ends[parent] - start for parent in before[index] if parent not in shifts and parent in ends
                 ]
             shifts[index] = max(candidates)
         return shifts
@@ -1207,8 +1309,13 @@ class ScheduleService:
             if index < len(steps):
                 later |= graph.descendants(steps, index)
         later = {index for index in later - held if index not in frozen}
+        moment = now()
         for allocation in self.allocations.for_batch(batch.id):
             if allocation.step_index in held:
+                if allocation.kind == TRANSFER and allocation.starts_at <= moment:
+                    # 转运在开工前就做完了（保持只发生在动作进行中）：它不随保持延长，否则承运工位上
+                    # 多出一段幻影占用，别的批次排不进这台本来空着的 AGV
+                    continue
                 allocation.ends_at = allocation.ends_at + delta
                 if allocation.kind not in {WORK, "assist"}:
                     allocation.starts_at = allocation.starts_at + delta

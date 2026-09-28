@@ -101,7 +101,15 @@ export type StepTimeout = { minutes: number; action: 'alarm' | 'fail' | 'skip' }
 export type SubflowGroup = { step_id: string; name: string; recipe_id: string; recipe_name: string; version: string };
 
 /** 节点对应的 SOP 指导：从批次固化的 SOP 快照取。index 为 0 表示只有生成流程时抄下的说明 */
-export type SopGuide = { index: number; title: string; instructions: string; checks: string[] };
+export type SopGuide = {
+  index: number;
+  title: string;
+  instructions: string;
+  checks: string[];
+  /** 节点引用的 SOP 步骤在批次采用的版本里对不上 */
+  mapping_broken?: boolean;
+  message?: string;
+};
 
 export type StepRow = {
   index: number;
@@ -464,8 +472,10 @@ export type RecipeStep = {
   step_id?: string;
   kind?: StepKindName;
   name: string;
-  /** 对应的 SOP 步骤序号（从 1 起）：批次页按它把 SOP 说明与核对项带给执行人 */
+  /** 对应的 SOP 步骤序号（从 1 起），只作显示与旧数据回退 */
   sop_step?: number;
+  /** 对应的 SOP 步骤的稳定标识：批次页按它把 SOP 说明与核对项带给执行人，新版本插入步骤也对得上 */
+  sop_step_key?: string;
   /** 由 SOP 生成流程时抄下的说明 */
   sop_instructions?: string;
   cap: string;
@@ -1540,6 +1550,8 @@ export type AnalysisTaskRow = {
 /* ---------- SOP ---------- */
 
 export type SopStep = {
+  /** 稳定标识：编辑时原样带回，新加的步骤留空由服务端生成 */
+  key?: string;
   title: string;
   kind: 'device' | 'manual' | 'wait' | 'review';
   capability: string;

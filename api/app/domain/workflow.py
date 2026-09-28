@@ -31,6 +31,9 @@ OPEN_STATES = {PENDING, READY, RUNNING, WAITING}
 TERMINAL_STATES = {COMPLETED, FAILED, CANCELLED, SUPERSEDED, SKIPPED, NOT_TAKEN}
 # 不代表「这一步当前的结论」的记录：找每一步最新有效实例时跳过它们
 VOID_STATES = {SUPERSEDED, CANCELLED}
+# 失败记录上的标记（记在 form_data）：质检不合格返工、审核退回之后，这一步要等重做完再评估一次，
+# 这次失败不是它的最终结论。报废、超时这类失败不带标记，仍是终态
+REEVALUATE = "reevaluate"
 
 STATE_LABEL = {
     PENDING: "待开始", READY: "待办", RUNNING: "执行中", WAITING: "等待中",

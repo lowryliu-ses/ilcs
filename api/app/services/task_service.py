@@ -695,6 +695,7 @@ class TaskService:
         # 实际下发与恢复时还会再校验一次
         steps, start, end = self._execution_window(task)
         self.people.require_for_steps(assignee_id, steps, start, action="分配该任务", until=end)
+        self._require_sop_ack_in_flight(task, assignee_id, "转派该任务")
         previous = task.assignee_user_id
         task.assignee_user_id = assignee_id
         task.accepted_at = None
@@ -724,6 +725,26 @@ class TaskService:
         self.db.commit()
         return self.out(task)
 
+    def _require_sop_ack_in_flight(self, task, user_id: str, action: str) -> None:
+        """批次已经开跑时换执行人：新执行人要确认过批次采用的 SOP（按固化版本）。
+
+        还没开跑的批次由开跑检查核对；开跑之后下一个关口是恢复或提交人工记录，改派时就说清楚更好。
+        """
+        if not task.batch_id:
+            return
+        from ..models import Batch
+        from .sop_service import SopService
+
+        batch = self.db.get(Batch, task.batch_id)
+        if batch is None or batch.state not in {"running", "paused", "fault"}:
+            return
+        blockers = SopService(self.db, self.ctx).batch_ack_blockers(batch, user_id) or []
+        if blockers:
+            raise StateConflict(
+                f"{action}前需要阅读确认：{blockers[0]}；执行人可在批次页确认本批次采用的 SOP",
+                {"blocked": [{"key": "sop_ack", "label": text} for text in blockers]}, code="sop_ack_required",
+            )
+
     def accept(self, task_id: str, user: User) -> dict:
         task = self.tasks.get(task_id)
         if not task:
@@ -734,6 +755,7 @@ class TaskService:
             raise StateConflict("任务已接单")
         steps = self._steps_for(task)
         self.people.require_for_steps(user.id, steps, now(), action="接单")
+        self._require_sop_ack_in_flight(task, user.id, "接单")
         task.accepted_at = now()
         task.state = "accepted"
         self.tasks.bump(task)

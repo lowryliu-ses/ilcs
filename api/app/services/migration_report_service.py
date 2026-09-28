@@ -210,8 +210,38 @@ class MigrationReportService:
             }
         )
 
+        lines.append(self._unsettled_outcomes())
+
         return {
             "ok": all(row["ok"] for row in lines),
             "lines": lines,
             "counts": counts,
+        }
+
+    def _unsettled_outcomes(self) -> dict:
+        """结论待核查的指令：设备收到了（投递 delivered），却没有结论，台账也判断不了设备是否仍在动作。
+
+        0034 按幂等台账回填了能判断的（unknown 继续占用、failed 放行）；剩下的不猜。它们不在未知占用
+        规则里，工位会被当作空闲，所以必须清零：到现场核查后在批次页给出核查结论。台账是 rejected
+        的指令从未交给设备，不在其中。
+        """
+        from ..models import AdapterExecution
+
+        rows = []
+        for command in self.db.query(Command).filter(
+            Command.state.in_(["unknown", "manual"]), Command.delivery_state == "delivered", Command.outcome == "",
+        ).order_by(Command.created_at).all():
+            ledger = self.db.get(AdapterExecution, command.id)
+            if ledger is not None and ledger.state in {"rejected", "failed"}:
+                continue
+            rows.append(command)
+        return {
+            "key": "unsettled_outcome", "label": "结论待核查的指令", "ok": not rows,
+            "detail": (
+                "没有已送达设备却结论不明的指令" if not rows
+                else f"{len(rows)} 条已送达设备、结论不明的指令："
+                + "、".join(f"{row.id[:8]}（{row.batch_id} 第 {row.step_index + 1} 步 {row.station_id}）" for row in rows[:6])
+                + (f" 等 {len(rows)} 条" if len(rows) > 6 else "")
+                + "；台账判断不了设备是否仍在动作，请逐条到现场核查并给出结论"
+            ),
         }

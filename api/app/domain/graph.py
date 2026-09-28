@@ -35,6 +35,8 @@ SKIPPED = "skipped"
 NOT_TAKEN = "not_taken"
 PASSED = {COMPLETED, SKIPPED}
 RESOLVED = {COMPLETED, SKIPPED, NOT_TAKEN}
+# 还在进行中的状态（含本轮刚决定开出的）：祖先处于这些状态时，后代不开出
+UNSETTLED = {"pending", "ready", "running", "waiting", "opening"}
 
 
 def graph_mode(steps: list[dict[str, Any]]) -> bool:
@@ -217,12 +219,15 @@ def frontier(
     `status`：每一步最新一次有效实例的状态（没开过的不在里面）；`chosen`：已完成分支选中的出口。
     没开过、且所有入边都有结论的步骤才会被判定：「从未尝试」刻意排除失败、结果未知、进行中的
     步骤——一个分支完成不能顺手把另一个分支上失败的设备步骤重新开出来，那等于盲目重试物理动作。
+    任一祖先仍在进行中时也不开出：审核退回后重做人工记录，中间的设备步骤仍是已完成（物理动作不重跑），
+    审核节点要等人工记录重做完才重开。正常推进里祖先总是先有结论，这条规则不改变其他情形。
     """
     ids = [step_id_of(step, index) for index, step in enumerate(steps)]
     before = predecessors(steps)
     status = dict(status)
     to_open: list[int] = []
     to_prune: list[int] = []
+    ancestry: dict[int, set[int]] = {}
     changed = True
     while changed:
         changed = False
@@ -246,6 +251,10 @@ def frontier(
             if "pending" in edges:
                 continue
             if not edges or "active" in edges:
+                if index not in ancestry:
+                    ancestry[index] = ancestors(steps, index)
+                if any(status.get(ids[parent]) in UNSETTLED for parent in ancestry[index]):
+                    continue
                 to_open.append(index)
                 status[step_id] = "opening"
             else:

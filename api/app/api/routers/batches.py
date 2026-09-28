@@ -131,6 +131,15 @@ def hold(
     return guard.remember(BatchService(db, ctx).hold(batch_id, payload.reason, user))
 
 
+@router.post("/{batch_id}/sop-ack")
+def acknowledge_sop(batch_id: str, db: DbSession, user: CurrentUser, ctx: Ctx):
+    """执行人确认本批次采用的 SOP 版本（含子流程的）。
+
+    在途批次按固化版本执行：旧版之后被取代，通用的阅读确认不再接受它，但照着它做的人仍要确认它。
+    """
+    return BatchService(db, ctx).acknowledge_sop(batch_id, user)
+
+
 @router.get("/{batch_id}/recovery-options")
 def recovery_options(batch_id: str, db: DbSession, ctx: Ctx):
     return BatchService(db, ctx).recovery_options(batch_id)

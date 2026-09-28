@@ -1868,7 +1868,7 @@
         "type": "object"
       },
       "GateDecisionIn": {
-        "description": "保持中的质检关卡人工判定：放行或判不合格，都要写依据。",
+        "description": "保持中的质检关卡人工判定：放行或判不合格，都要写依据。\n\n逐样本关卡放行时可以指定要剔除的样本（布局孔位）；不指定就是全部放行。",
         "properties": {
           "conclusion": {
             "enum": [
@@ -1877,6 +1877,14 @@
             ],
             "title": "Conclusion",
             "type": "string"
+          },
+          "exclude_wells": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 384,
+            "title": "Exclude Wells",
+            "type": "array"
           },
           "reason": {
             "title": "Reason",
@@ -5313,6 +5321,12 @@
             "title": "Instructions",
             "type": "string"
           },
+          "key": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Key",
+            "type": "string"
+          },
           "kind": {
             "default": "manual",
             "enum": [
@@ -5395,6 +5409,11 @@
           "code": {
             "title": "Code",
             "type": "string"
+          },
+          "copy_steps": {
+            "default": false,
+            "title": "Copy Steps",
+            "type": "boolean"
           },
           "effective_from": {
             "anyOf": [
@@ -10276,6 +10295,68 @@
           }
         ],
         "summary": "Skip Step",
+        "tags": [
+          "batch"
+        ]
+      }
+    },
+    "/api/batches/{batch_id}/sop-ack": {
+      "post": {
+        "description": "执行人确认本批次采用的 SOP 版本（含子流程的）。\n\n在途批次按固化版本执行：旧版之后被取代，通用的阅读确认不再接受它，但照着它做的人仍要确认它。",
+        "operationId": "acknowledge_sop_api_batches__batch_id__sop_ack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Acknowledge Sop",
         "tags": [
           "batch"
         ]
