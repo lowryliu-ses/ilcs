@@ -57,6 +57,13 @@ def main() -> int:
         if "discharge_capacity_mAh" in delivered:
             print(f"  实测：通道 {delivered.get('channel')} · 完成 {delivered.get('cycles_completed')} 圈 · "
                   f"放电容量 {delivered['discharge_capacity_mAh']} mAh")
+        else:
+            # 干燥箱回报箱温与真空度、天平回报质量：整批一个值，不按孔位
+            scalars = {k: v for k, v in delivered.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            if scalars:
+                unit = f" {delivered['unit']}" if isinstance(delivered.get("unit"), str) else ""
+                print("  实测：" + "  ".join(f"{k}={v}" for k, v in scalars.items()) + unit)
         wells = delivered.get("wells") or {}
         if params.get("wells") and not wells:
             # 设备只回报整体结果（如充放电柜）：列出按孔位下发的设定

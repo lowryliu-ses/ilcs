@@ -5,7 +5,7 @@ import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { BatchSummary, Gate, PlanSummary } from '../../shared/types';
+import type { BatchSummary, Gate, Paged, PlanSummary, TaskRow } from '../../shared/types';
 import { ConfirmDialog, Empty, Field, GateBanner, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 export function BatchesPage() {
@@ -17,13 +17,25 @@ export function BatchesPage() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<BatchSummary | null>(null);
   const [planId, setPlanId] = useState('');
+  const [taskId, setTaskId] = useState('');
   const [priority, setPriority] = useState(2);
   const [note, setNote] = useState('');
+  // 任务中心派下来的任务：批次与它绑定，任务状态随批次推进。不选时服务端补建一条（执行人是建批次的人）
+  const tasks = useQuery<Paged<TaskRow>>(
+    creating && planId ? `tasks:for-batch:${planId}` : null,
+    () => api.get<Paged<TaskRow>>(`/experiment-tasks?plan_id=${encodeURIComponent(planId)}&page_size=100`),
+  );
+  const openTasks = (tasks.data?.items ?? []).filter(
+    (task) => !task.batch_id && !task.children.length && !['cancelled', 'done'].includes(task.state),
+  );
 
   const create = useMutation(
-    () => api.post<BatchSummary>('/batches', { plan_id: planId, priority, note }, true),
+    () =>
+      api.post<BatchSummary>(
+        '/batches', { plan_id: planId, priority, note, ...(taskId ? { task_id: taskId } : {}) }, true,
+      ),
     {
-      invalidates: ['batches', 'dashboard', 'plans', 'lots'],
+      invalidates: ['batches', 'dashboard', 'plans', 'lots', 'tasks'],
       onSuccess: (batch) => {
         toast.push(`${batch.id} 已创建，物料已按 BOM 预留`);
         setCreating(false);
@@ -61,6 +73,7 @@ export function BatchesPage() {
             className="btn primary"
             onClick={() => {
               setPlanId(lockedPlans[0]?.id ?? '');
+              setTaskId('');
               setCreating(true);
             }}
           >
@@ -198,10 +211,29 @@ export function BatchesPage() {
             按条件矩阵生成样品孔位，三者在同一事务内完成。
           </div>
           <Field label="实验计划">
-            <select value={planId} onChange={(event) => setPlanId(event.target.value)}>
+            <select
+              value={planId}
+              onChange={(event) => {
+                setPlanId(event.target.value);
+                setTaskId('');
+              }}
+            >
               {lockedPlans.map((plan) => (
                 <option key={plan.id} value={plan.id}>
                   {plan.id} · {plan.name}（{plan.sample_count} 样品）
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field
+            label="实验任务"
+            hint="任务中心分配、接单的任务选在这里，批次与它绑定；不选则系统补建一条任务，执行人是你"
+          >
+            <select value={taskId} disabled={!planId} onChange={(event) => setTaskId(event.target.value)}>
+              <option value="">不关联已有任务（系统补建）</option>
+              {openTasks.map((task) => (
+                <option key={task.id} value={task.id}>
+                  {task.id} · 执行人 {task.assignee_name || '未分配'} · {task.state_label}
                 </option>
               ))}
             </select>

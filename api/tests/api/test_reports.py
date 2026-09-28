@@ -279,6 +279,37 @@ def test_report_publish_requires_reviewed_results_and_blocks_self_approval(
     assert admin.patch(f"/api/reports/{version_id}", {"conclusion": "改一下"}).status_code == 409
 
 
+def test_task_created_by_physical_sample_counts_for_its_batch(
+    researcher, qa, operator, lims, reviewed_batch
+):
+    """界面建检测任务只给物理样本：只在一次运行里出现过的样本自动挂到那次运行，结果进批次的正式统计。"""
+    batch_id = reviewed_batch["batch_id"]
+    assignment = operator.get(f"/api/batches/{batch_id}").json()["samples"][4]
+    task = researcher.post(
+        "/api/analysis-tasks",
+        {"physical_sample_id": assignment["physical_sample_id"], "method": "电性能测试",
+         "required_metrics": [CAPACITY]},
+    )
+    assert task.status_code == 201, task.text
+    assert task.json()["sample_id"] == assignment["id"]
+    ingested = lims.post(
+        "/api/integrations/results",
+        {"event_id": f"by-physical-{batch_id}", "task_id": task.json()["id"],
+         "metrics": [{"metric_version_id": CAPACITY, "value": 201.5, "unit": "mAh/g"}]},
+    )
+    assert ingested.status_code == 200, ingested.text
+    value = ingested.json()["results"][0]
+    reviewed = qa.post(
+        f"/api/result-values/{value['id']}/review",
+        {"conclusion": "approved", "quality": "valid", "reason": "曲线正常",
+         "signature_id": qa.sign("复核", target=value["id"], object_version=1)},
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    block = next(row for row in operator.get(f"/api/results/{batch_id}").json()["metrics"]
+                 if row["metric_id"] == CAPACITY)
+    assert block["summary"]["included"] == 3
+
+
 def test_unreviewed_result_blocks_report_submission(
     researcher, qa, operator, lims, reviewed_batch
 ):

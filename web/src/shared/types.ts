@@ -1560,6 +1560,9 @@ export type AnalysisTaskRow = {
     code: string;
     name: string;
     unit: string;
+    /** 录入控件按它给：number 以数值回传，enum 从 options 里选 */
+    value_type?: 'number' | 'text' | 'enum';
+    options?: string[];
     collected: boolean;
     not_measured: boolean;
   }[];

@@ -361,6 +361,31 @@ def test_retest_creates_a_new_task_and_round(researcher, sample_and_tasks):
     assert researcher.get(f"/api/analysis-tasks/{task_id}").json()["state"] == before["state"]
 
 
+def test_task_tells_the_entry_form_each_metric_type(researcher, sample_and_tasks):
+    """录入界面按类型给控件：任务带出每个要求指标的值类型与枚举可选值，数值按数值录入才入账。"""
+    numeric = researcher.get(f"/api/analysis-tasks/{sample_and_tasks['first']}").json()
+    assert {row["id"]: row["value_type"] for row in numeric["required_metrics"]} == {
+        CAPACITY: "number", DENSITY: "number",
+    }
+    enum = researcher.get(f"/api/analysis-tasks/{sample_and_tasks['second']}").json()["required_metrics"][0]
+    assert enum["value_type"] == "enum" and "合格" in enum["options"]
+
+    as_text = researcher.post(
+        f"/api/analysis-tasks/{sample_and_tasks['first']}/results",
+        {"event_id": "manual-as-text", "metrics": [
+            {"metric_version_id": CAPACITY, "value": "205.1", "unit": "mAh/g"},
+        ]},
+    )
+    assert as_text.status_code == 409 and "不是数值" in as_text.text
+    as_number = researcher.post(
+        f"/api/analysis-tasks/{sample_and_tasks['first']}/results",
+        {"event_id": "manual-as-number", "metrics": [
+            {"metric_version_id": CAPACITY, "value": 205.1, "unit": "mAh/g"},
+        ]},
+    )
+    assert as_number.status_code == 200, as_number.text
+
+
 def test_metric_definition_lifecycle_is_reachable_and_versioned(researcher, reset_runtime):
     """指标定义页新接的动作：登记、改本版、修订、停用，以及「被引用后只能修订」。"""
     created = researcher.post(

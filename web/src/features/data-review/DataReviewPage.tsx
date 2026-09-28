@@ -404,6 +404,15 @@ function CreateTaskDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/* 数值指标以数值回传：服务端按类型校验，字符串 '3.02' 会被整次拒收。填的不是数就原样交给服务端，
+   让它逐项说清哪一项不是数值，而不是在这里悄悄丢掉或当成 0。 */
+function typed(valueType: string | undefined, raw: string): string | number {
+  if (valueType !== 'number') return raw;
+  const text = raw.trim();
+  const parsed = Number(text);
+  return text !== '' && Number.isFinite(parsed) ? parsed : raw;
+}
+
 /* 人工录入。没有对接 LIMS 的仪器靠它入账，所以它必须在界面上有——
    但录入人之后不能审核自己录的这条，那条规则在服务端。 */
 function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: () => void }) {
@@ -424,7 +433,7 @@ function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: 
           .filter((row) => entries[row.id]?.value !== '' || entries[row.id]?.missing)
           .map((row) => ({
             metric_version_id: row.id,
-            value: entries[row.id].missing ? null : entries[row.id].value,
+            value: entries[row.id].missing ? null : typed(row.value_type, entries[row.id].value),
             unit: row.unit,
             not_measured_reason: entries[row.id].missing,
           })),
@@ -482,16 +491,37 @@ function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: 
                 {row.collected ? <div className="tiny muted">已有记录</div> : null}
               </td>
               <td>
-                <input
-                  value={entries[row.id]?.value ?? ''}
-                  disabled={Boolean(entries[row.id]?.missing)}
-                  onChange={(event) =>
-                    setEntries({
-                      ...entries,
-                      [row.id]: { value: event.target.value, missing: '' },
-                    })
-                  }
-                />
+                {row.value_type === 'enum' && row.options?.length ? (
+                  <select
+                    value={entries[row.id]?.value ?? ''}
+                    disabled={Boolean(entries[row.id]?.missing)}
+                    onChange={(event) =>
+                      setEntries({
+                        ...entries,
+                        [row.id]: { value: event.target.value, missing: '' },
+                      })
+                    }
+                  >
+                    <option value="">请选择</option>
+                    {row.options.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={entries[row.id]?.value ?? ''}
+                    inputMode={row.value_type === 'number' ? 'decimal' : undefined}
+                    disabled={Boolean(entries[row.id]?.missing)}
+                    onChange={(event) =>
+                      setEntries({
+                        ...entries,
+                        [row.id]: { value: event.target.value, missing: '' },
+                      })
+                    }
+                  />
+                )}
               </td>
               <td>
                 <input

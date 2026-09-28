@@ -83,6 +83,13 @@ class AnalysisService:
             raise ValidationFailed("检测任务必须绑定一个样本")
         if physical_id and not self.physical.get(physical_id):
             raise NotFound("物理样本不存在或不在当前组织范围内")
+        if assignment is None and physical_id:
+            # 只给了物理样本（界面按样本选）：它只在一次运行里出现过就挂到那次运行，
+            # 否则结果进不了该批次的正式统计与报告。出现在多次运行里时不替人猜，保持不挂
+            runs = self.assignments.for_physical(physical_id)
+            if len(runs) == 1:
+                assignment = runs[0]
+                assignment_id = assignment.id
         required = list(payload.get("required_metrics") or [])
         if not required:
             raise ValidationFailed("检测任务必须至少要求一个指标", code="metrics_required")
@@ -712,6 +719,10 @@ class AnalysisService:
                     "code": definitions[metric_id].code if metric_id in definitions else metric_id,
                     "name": definitions[metric_id].name if metric_id in definitions else "",
                     "unit": definitions[metric_id].unit if metric_id in definitions else "",
+                    # 录入界面按类型给控件：数值要以数值回传，枚举只能从可选值里选
+                    "value_type": definitions[metric_id].value_type if metric_id in definitions else "number",
+                    "options": list((definitions[metric_id].rules or {}).get("options") or [])
+                    if metric_id in definitions and definitions[metric_id].value_type == "enum" else [],
                     "collected": metric_id in current,
                     "not_measured": bool(
                         metric_id in current and current[metric_id].not_measured_reason

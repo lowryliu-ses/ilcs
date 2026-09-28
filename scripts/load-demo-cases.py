@@ -241,6 +241,12 @@ def release_recipe(researcher: Actor, qa: Actor, name: str, design: str, steps: 
     sop = next((row for row in sops if row.get("code") == "SOP-EC-02" and row.get("effective")), None)
     if sop is None:
         raise Failed("SOP-EC-02 没有生效版本：案例流程要关联它")
+    # 节点按 SOP 步骤的稳定标识引用（编辑器里选「对应 SOP 步骤」也是这样存的）：新版本插入步骤时仍对得上
+    sop_steps = sop.get("steps") or []
+    for row in steps:
+        position = row.get("sop_step")
+        if position and 1 <= position <= len(sop_steps) and sop_steps[position - 1].get("key"):
+            row["sop_step_key"] = sop_steps[position - 1]["key"]
     researcher.patch(f"/recipes/{recipe_id}", {
         "steps": steps, "bom": bom, "design": design, "risk": "RA-205 v2",
         **({"sop_version_id": sop["id"]} if sop else {}),
@@ -437,9 +443,11 @@ def formation_step(step_id: str) -> dict:
 
 def cycling_step(step_id: str, method_id: str = "") -> dict:
     if method_id:
-        # 引用设备方法：只写要改的倍率，截止电压、圈数、时长取方法缺省，程序与输出规则随方法冻结进批次
+        # 引用设备方法：参数与时长按方法缺省写全（与编辑器里选方法时自动带出的一样，复制这个流程也能直接用），
+        # 倍率由方案因子按孔位覆盖；程序与输出规则随方法冻结进批次
+        defaults = {key: rule["default"] for key, rule in CYCLING_METHOD["params"].items()}
         return {"step_id": step_id, "kind": "device", "name": "循环测试", "cap": "cap.test",
-                "params": {"rate": 0.5}, "method": {"id": method_id}}
+                "params": defaults, "dur": CYCLING_METHOD["dur_min"], "method": {"id": method_id}}
     return {"step_id": step_id, "kind": "device", "name": "循环测试", "cap": "cap.test",
             "params": {"rate": 0.5, "vmax": 4.3, "cycles": 50}, "dur": 120}
 
@@ -483,7 +491,7 @@ def case_filling(researcher: Actor, qa: Actor, operator: Actor) -> dict:
              ]},
             review_step("s06", "QA 复核注液记录"),
         ],
-        [{"material": "电解液 LP57", "qty": 0.44, "unit": "mL"}],
+        [{"material": "电解液 LP57", "qty": 0.45, "unit": "mL"}],
     )
     plan_id = approve_plan(researcher, qa, {
         "name": "案例A 注液量梯度", "recipe_id": recipe_id, "plan_type": "matrix",
@@ -558,7 +566,7 @@ def case_cycling(researcher: Actor, qa: Actor, operator: Actor, method_id: str) 
     return {"流程": recipe_id, "方案": plan_id, "批次": batch_id, "报告": report_id}
 
 
-def case_serial(researcher: Actor, qa: Actor, operator: Actor) -> dict:
+def case_serial(researcher: Actor, qa: Actor, operator: Actor, method_id: str) -> dict:
     step("C 串行：托盘绑定批次，AGV 板库 → ST-05 → ST-06（机械臂协同）→ ST-07，注液接循环测试")
     recipe_id = release_recipe(
         researcher, qa, "案例C 注液—循环测试串行",
@@ -569,11 +577,11 @@ def case_serial(researcher: Actor, qa: Actor, operator: Actor) -> dict:
             filling_step("s03", assist=True),
             rest_step("s04", "注液后静置浸润"),
             formation_step("s05"),
-            cycling_step("s06"),
+            cycling_step("s06", method_id),
             capacity_gate("s07", "s06"),
             review_step("s08", "QA 复核注液与循环记录"),
         ],
-        [{"material": "电解液 LP57", "qty": 0.44, "unit": "mL"}],
+        [{"material": "电解液 LP57", "qty": 0.45, "unit": "mL"}],
     )
     plan_id = approve_plan(researcher, qa, {
         "name": "案例C 注液量 × 循环倍率", "recipe_id": recipe_id, "plan_type": "matrix",
@@ -633,11 +641,18 @@ def main() -> int:
     summary = {
         "案例A 注液": case_filling(researcher, qa, operator),
         "案例B 循环测试": case_cycling(researcher, qa, operator, method_id),
-        "案例C 串行": case_serial(researcher, qa, operator),
+        "案例C 串行": case_serial(researcher, qa, operator, method_id),
     }
+    # 参考案例应当干净地跑完：案例批次上不该留下报警（消耗被拒、偏差、数据越界都说明案例数据有问题）
+    batches = {ids["批次"] for ids in summary.values()}
+    raised = [row for row in operator.get("/alarms") if row.get("source_id") in batches]
+    for alarm in raised:
+        print(f"  ! 报警 {alarm['id']} {alarm['source_id']}：{alarm['message']}")
     print("\n完成：")
     for name, ids in summary.items():
         print(f"  {name}：" + " · ".join(f"{key} {value}" for key, value in ids.items()))
+    if raised:
+        raise Failed(f"案例批次上有 {len(raised)} 条报警，见上")
     return 0
 
 
