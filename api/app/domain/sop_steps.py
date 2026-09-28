@@ -5,6 +5,8 @@ SOP 步骤写的是「人照着做什么」：标题、说明、类型（设备 
 - 设备步骤 → 设备节点（能力、参数、时长照抄；要不要引用设备方法由方法作者在编辑器里再定）；
 - 人工步骤 → 人工节点，说明与核对清单变成结构化记录表单（每条核对一个勾选项，说明作为备注字段的提示）；
 - 等待 → 定时等待节点；审核 → 审核节点（默认 QA）。
+每个生成的节点记下 `sop_step`（SOP 步骤序号，从 1 起），批次页据此把 SOP 说明带到执行人面前；
+手写的流程也可以在编辑器里给节点选对应的 SOP 步骤。
 生成的只是草稿：照常走方法校验、仿真、评审与批准，SOP 改了不会回头改已经生成的方法。
 """
 from __future__ import annotations
@@ -63,7 +65,28 @@ def to_recipe_steps(steps: list[dict]) -> list[dict[str, Any]]:
             form.append({"key": "note", "label": "记录", "type": "text", "required": False,
                          "hint": str(step.get("instructions") or "")[:200]})
             row.update({"kind": "manual", "cap": "", "params": {}, "form": form})
+        # 记下对应的 SOP 步骤序号：批次页按它从固化的 SOP 快照里取说明与核对项给执行人看
+        row["sop_step"] = index
         if step.get("instructions"):
             row["sop_instructions"] = str(step["instructions"])
         out.append(row)
     return out
+
+
+def step_guide(step: dict, snapshot: dict | None) -> dict | None:
+    """批次里某个节点对应的 SOP 指导：按 `sop_step` 从批次固化的 SOP 快照取，取不到用生成时抄下的说明。"""
+    rows = (snapshot or {}).get("steps") or []
+    try:
+        position = int(step.get("sop_step") or 0)
+    except (TypeError, ValueError):
+        position = 0
+    if 1 <= position <= len(rows):
+        row = rows[position - 1]
+        return {
+            "index": position, "title": str(row.get("title") or ""),
+            "instructions": str(row.get("instructions") or ""),
+            "checks": [str(item) for item in row.get("checks") or []],
+        }
+    if step.get("sop_instructions"):
+        return {"index": 0, "title": "", "instructions": str(step["sop_instructions"]), "checks": []}
+    return None

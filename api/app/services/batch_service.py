@@ -19,7 +19,7 @@ from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import graph as dag
-from ..domain import preflight, recovery
+from ..domain import preflight, recovery, sop_steps
 from ..domain.labware import container_of
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
@@ -298,6 +298,7 @@ class BatchService:
                     "assist": step.get("assist") or [],
                     "labware": step.get("labware") or "",
                     "split": step.get("split") or {},
+                    "sop_guide": sop_steps.step_guide(step, batch.sop_snapshot),
                     # 承诺窗口还是预测窗口（分支未定的下游、冻结期之后）
                     "forecast_reason": self.schedule.forecast_of(work, marks, moment) if work else marks.get(index, ""),
                     "checkpoint_id": checkpoint.id if checkpoint else None,
@@ -553,6 +554,8 @@ class BatchService:
             raise NotFound("流程不存在")
         if recipe.state != "released" or recipe.needs_revision:
             raise StateConflict("只能从有效的已发布流程创建批次")
+        # 新批次按流程所关联 SOP 的当前生效版本执行；没有生效版本就不建（先于物料预留判）
+        sop_version = self.sops.resolve_for_new_batch(recipe.sop_version_id) if recipe.sop_version_id else None
 
         batch = Batch(
             id=self.batches.next_id(now()),
@@ -566,7 +569,10 @@ class BatchService:
             note=note,
             recipe_snapshot=self._freeze_recipe(recipe),
             plan_snapshot=self._freeze_plan(content),
-            sop_snapshot=self.sops.snapshot_for(recipe.sop_version_id) if recipe.sop_version_id else {},
+            sop_snapshot=(
+                self.sops.snapshot_for(sop_version.id, linked_version_id=recipe.sop_version_id)
+                if sop_version is not None else {}
+            ),
         )
         self.batches.add(batch)
         bom = batch.recipe_snapshot.get("bom") or []
@@ -929,6 +935,10 @@ class BatchService:
             qualification_required=self.people.requires_qualification(steps),
             qualification_blockers=qualification_blockers,
             sop_snapshot=batch.sop_snapshot or None,
+            sop_checks=(
+                self.sops.run_checks(batch.sop_snapshot, self.sops.batch_sample_types(batch.id))
+                if batch.sop_snapshot else None
+            ),
             dependency_blockers=self._dependency_blockers(task),
             other_stations=self._other_stations(work, station.id if station else ""),
             environment_blockers=EnvironmentService(self.db, self.ctx).batch_checks(batch),

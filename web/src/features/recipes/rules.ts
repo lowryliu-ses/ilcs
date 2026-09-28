@@ -618,7 +618,7 @@ export function editorChecks(
   risk: string,
   stations: StationRow[] | undefined,
   capabilities: CapabilityIndex,
-  sopVersionId = '',
+  sop?: SopLink,
   subflows?: SubflowIndex,
   selfId = '',
 ): Check[] {
@@ -682,13 +682,26 @@ export function editorChecks(
         : '存在消耗物料的步骤但未定义 BOM，排程前无法预留',
     },
     { key: 'risk', label: '风险评估编号', ok: true, detail: risk || '缺失：允许保存草稿，发布前必须补齐' },
-    {
-      key: 'sop',
-      label: '关联 SOP 版本',
-      ok: true,
-      detail: sopVersionId || '未关联：允许保存草稿；需要受控作业指导的流程请补上',
-    },
+    sopCheck(steps, sop),
   ];
+}
+
+/** 流程关联的 SOP：给人看的名字、新批次实际会用的那一版的适用能力；problem 是后端判定的硬问题（如无生效版本）。 */
+export type SopLink = { label: string; scope: string[]; problem?: string };
+
+/** 对应后端 recipe_service.sop_problems：不关联允许；关联了就得有生效版本，设备能力在适用范围内。 */
+function sopCheck(steps: RecipeStep[], sop?: SopLink): Check {
+  if (!sop) {
+    return { key: 'sop', label: '关联 SOP 版本', ok: true, detail: '未关联：允许保存草稿；需要受控作业指导的流程请补上' };
+  }
+  const outside = sop.scope.length
+    ? [...new Set(steps.filter((step) => kindOf(step) === 'device' && step.cap && !sop.scope.includes(step.cap)).map((step) => step.cap))]
+    : [];
+  const problems = [
+    ...(sop.problem ? [sop.problem] : []),
+    ...(outside.length ? [`设备能力 ${outside.join('、')} 不在 SOP 适用范围内`] : []),
+  ];
+  return { key: 'sop', label: '关联 SOP 版本', ok: problems.length === 0, detail: [sop.label, ...problems].join('；') };
 }
 
 export const SUBMITTABLE_CHECKS = 5;

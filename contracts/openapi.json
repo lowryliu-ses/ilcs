@@ -5228,6 +5228,35 @@
         "title": "SkipStepIn",
         "type": "object"
       },
+      "SopDocumentPatchIn": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          }
+        },
+        "title": "SopDocumentPatchIn",
+        "type": "object"
+      },
       "SopRecipeIn": {
         "properties": {
           "name": {
@@ -5352,6 +5381,17 @@
             "title": "Capability Scope",
             "type": "array"
           },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
           "code": {
             "title": "Code",
             "type": "string"
@@ -5368,15 +5408,50 @@
             ],
             "title": "Effective From"
           },
+          "effective_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective To"
+          },
           "file_id": {
             "default": "",
             "title": "File Id",
             "type": "string"
           },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          },
           "requires_training_ack": {
             "default": false,
             "title": "Requires Training Ack",
             "type": "boolean"
+          },
+          "review_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Due"
           },
           "sample_types": {
             "default": [],
@@ -5420,6 +5495,17 @@
             ],
             "title": "Capability Scope"
           },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
           "effective_from": {
             "anyOf": [
               {
@@ -5432,6 +5518,18 @@
             ],
             "title": "Effective From"
           },
+          "effective_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective To"
+          },
           "file_id": {
             "anyOf": [
               {
@@ -5443,6 +5541,17 @@
             ],
             "title": "File Id"
           },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          },
           "requires_training_ack": {
             "anyOf": [
               {
@@ -5453,6 +5562,18 @@
               }
             ],
             "title": "Requires Training Ack"
+          },
+          "review_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Due"
           },
           "row_version": {
             "anyOf": [
@@ -22736,6 +22857,22 @@
           },
           {
             "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
             "name": "page",
             "required": false,
             "schema": {
@@ -22862,6 +22999,78 @@
         ]
       }
     },
+    "/api/sops/documents/{sop_id}": {
+      "patch": {
+        "description": "分类与负责人属于受控文件本身，不是版本内容：已发布版本也能改，改动进审计。",
+        "operationId": "update_document_api_sops_documents__sop_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sop_id",
+            "required": true,
+            "schema": {
+              "title": "Sop Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SopDocumentPatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Document",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
     "/api/sops/effective": {
       "get": {
         "description": "给流程编辑器用：某能力当前生效的 SOP 版本。",
@@ -22920,6 +23129,59 @@
           }
         ],
         "summary": "Effective",
+        "tags": [
+          "sop"
+        ]
+      }
+    },
+    "/api/sops/meta": {
+      "get": {
+        "description": "新建与编辑表单用：已有分类、可选负责人（本组织能编写或批准 SOP 的有效成员）。",
+        "operationId": "sop_meta_api_sops_meta_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Sop Meta",
         "tags": [
           "sop"
         ]

@@ -100,11 +100,15 @@ export type BranchCase = {
 export type StepTimeout = { minutes: number; action: 'alarm' | 'fail' | 'skip' };
 export type SubflowGroup = { step_id: string; name: string; recipe_id: string; recipe_name: string; version: string };
 
+/** 节点对应的 SOP 指导：从批次固化的 SOP 快照取。index 为 0 表示只有生成流程时抄下的说明 */
+export type SopGuide = { index: number; title: string; instructions: string; checks: string[] };
+
 export type StepRow = {
   index: number;
   step_id: string;
   kind: StepKindName;
   kind_label: string;
+  sop_guide?: SopGuide | null;
   /** 人工 / 等待 / 审核节点默认不占工位，除非显式声明 */
   needs_station: boolean;
   name: string;
@@ -207,15 +211,8 @@ export type BatchDetail = BatchSummary & {
     sop_version_id?: string;
   };
   plan_snapshot: { id: string; name: string; goal: string; repeats: number; factors: Factor[] };
-  /** 批次固化的 SOP 版本与附件摘要 */
-  sop_snapshot: {
-    sop_version_id?: string;
-    code?: string;
-    title?: string;
-    version?: string;
-    file_id?: string;
-    file_checksum?: string;
-  };
+  /** 批次固化的 SOP 版本、附件与结构化步骤：执行人照着它干活 */
+  sop_snapshot: SopSnapshot;
   steps: StepRow[];
   allocations: Allocation[];
   samples: AssignmentRow[];
@@ -432,9 +429,15 @@ export type RecipeDetail = RecipeSummary & {
     title: string;
     version: string;
     state: string;
+    status: SopStatus;
+    status_label: string;
     file_id: string;
     file_checksum: string;
     requires_training_ack: boolean;
+    capability_scope: string[];
+    /** 新批次实际会用的版本：关联版本被取代时是同编号的当前生效版本；没有生效版本时为空 */
+    current_version_id: string;
+    current_version: string;
   } | null;
 };
 
@@ -461,6 +464,10 @@ export type RecipeStep = {
   step_id?: string;
   kind?: StepKindName;
   name: string;
+  /** 对应的 SOP 步骤序号（从 1 起）：批次页按它把 SOP 说明与核对项带给执行人 */
+  sop_step?: number;
+  /** 由 SOP 生成流程时抄下的说明 */
+  sop_instructions?: string;
   cap: string;
   params: Record<string, number | ''>;
   dur: number;
@@ -1542,6 +1549,34 @@ export type SopStep = {
   checks: string[];
 };
 
+/** 已发布版本按时间细分：生效中 / 待生效 / 已被取代 / 已失效；其余与 state 相同 */
+export type SopStatus = 'draft' | 'review' | 'retired' | 'effective' | 'pending' | 'superseded' | 'expired';
+
+export type SopSnapshot = {
+  sop_version_id?: string;
+  sop_id?: string;
+  code?: string;
+  title?: string;
+  version?: string;
+  file_id?: string;
+  filename?: string;
+  file_checksum?: string;
+  capability_scope?: string[];
+  sample_types?: string[];
+  requires_training_ack?: boolean;
+  steps?: SopStep[];
+  effective_from?: string | null;
+  frozen_at?: string;
+  /** 流程关联的版本在开批时已被取代：记下原关联版本 */
+  linked_version_id?: string;
+  linked_version?: string;
+};
+
+export type SopImpact = {
+  impacted_recipes: { id: string; name: string; version: string; state: string; sop_version?: string }[];
+  impacted_batches: { id: string; state: string; sop_version: string }[];
+};
+
 export type SopVersionRow = {
   id: string;
   sop_id: string;
@@ -1550,6 +1585,17 @@ export type SopVersionRow = {
   version: string;
   state: string;
   state_label: string;
+  status: SopStatus;
+  status_label: string;
+  effective: boolean;
+  category: string;
+  owner_id: string;
+  owner_name: string;
+  effective_to: string | null;
+  review_due: string | null;
+  review_overdue: boolean;
+  superseded_by: string;
+  superseded_by_version: string;
   file_id: string;
   filename: string;
   file_checksum: string;
@@ -1572,6 +1618,7 @@ export type SopVersionRow = {
   restored_from: string;
   acks?: { person_id: string; person_name: string; acked_at: string }[];
   using_recipes?: { id: string; name: string; version: string; state: string }[];
+  active_batches?: { id: string; state: string; sop_version: string }[];
   audit?: AuditRow[];
 };
 

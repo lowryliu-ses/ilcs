@@ -14,7 +14,7 @@ from ..core.security import hash_password, hash_secret
 from ..models import (
     Adapter, Alarm, Asset, CalibrationRecord, Capability, Island, Lot, Material, Membership,
     MetricDefinition, Organization, Person, Plan, PlanVersion, Qualification, Recipe,
-    ServiceIdentity, Sop,
+    FileObject, ServiceIdentity, Sop, SopAck,
     SopVersion, Station, User, WasteTank,
 )
 from . import data
@@ -264,13 +264,15 @@ def seed(
         metrics[row["code"]] = metric
 
     # ---------- SOP ----------
-    # 种子里的 SOP 版本是 published 但没有附件，作者与批准人还挂在真人账号上——
-    # 一份「已发布、已生效、里面什么都没有」的受控文件。演示够用，正式库不能要。
+    # 演示 SOP 带附件、结构化步骤、分类与负责人，作者与批准人挂在演示账号上。
+    # 附件按种子内容生成，封面写明「演示受控文件」——正式库不播这些（master_only）。
     sop_versions: dict[str, SopVersion] = {}
     for row in (data.SOPS if not master_only else []):
         sop = db.query(Sop).filter(Sop.org_id == org_id, Sop.code == row["code"]).first()
+        owner = users.get(row.get("owner", ""))
         if not sop:
-            sop = Sop(org_id=org_id, code=row["code"], title=row["title"], created_at=stamp)
+            sop = Sop(org_id=org_id, code=row["code"], title=row["title"], created_at=stamp,
+                      category=row.get("category", ""), owner_id=owner.id if owner else "")
             db.add(sop)
             db.flush()
         version = (
@@ -279,17 +281,37 @@ def seed(
             .first()
         )
         if not version:
+            superseded = row.get("superseded", False)
+            effective_from = stamp - timedelta(days=120 if superseded else 30)
             version = SopVersion(
                 org_id=org_id, sop_id=sop.id, version=row["version"], state="published",
                 capability_scope=row["capability_scope"], sample_types=row["sample_types"],
-                requires_training_ack=row["requires_training_ack"],
-                effective_from=stamp - timedelta(days=30),
+                requires_training_ack=row["requires_training_ack"], steps=row.get("steps") or [],
+                effective_from=effective_from,
+                effective_to=stamp - timedelta(days=30) if superseded else None,
+                review_due=(stamp + timedelta(days=row["review_due_days"])).date()
+                if "review_due_days" in row else None,
                 author_id=users["researcher"].id if "researcher" in users else "",
                 approver_id=users["qa"].id if "qa" in users else "",
-                published_at=stamp - timedelta(days=30), created_at=stamp,
+                published_at=effective_from, created_at=effective_from,
             )
             db.add(version)
             db.flush()
+            attachment = _seed_sop_attachment(db, org_id, row, version, owner.display_name if owner else "")
+            version.file_id, version.file_checksum = attachment.id, attachment.checksum
+            previous = sop_versions.get(row["code"])
+            if previous is not None and previous.sop_id == sop.id and previous.effective_to is not None \
+                    and not previous.superseded_by:
+                previous.superseded_by = version.id
+                previous.superseded_at = version.effective_from
+            for username in row.get("acked_by") or []:
+                account = users.get(username)
+                person = db.query(Person).filter(
+                    Person.org_id == org_id, Person.user_id == account.id,
+                ).first() if account else None
+                if person is not None:
+                    db.add(SopAck(sop_version_id=version.id, person_id=person.id, user_id=account.id,
+                                  acked_at=stamp - timedelta(days=20)))
             summary["sop_versions"] = summary.get("sop_versions", 0) + 1
         sop_versions[row["code"]] = version
 
@@ -442,3 +464,22 @@ def _opening_ledger(db: Session, org_id: str, lot: Lot, material_id: str, stamp)
             note="期初余额，非实际收货", created_at=stamp,
         )
     )
+
+
+def _seed_sop_attachment(db: Session, org_id: str, row: dict, version: SopVersion, owner_name: str) -> FileObject:
+    """演示 SOP 的 PDF 附件：写进受控文件目录，登记成已可用的文件对象。"""
+    import io
+
+    from ..services.file_service import FileStore
+    from .sop_document import render
+
+    storage_key = f"{org_id}/seed/sop/{row['code']}-{row['version']}-{version.id[:8]}.pdf"
+    size, checksum = FileStore().write(storage_key, io.BytesIO(render(row, owner_name)))
+    record = FileObject(
+        org_id=org_id, filename=f"{row['code']}-{row['version']}.pdf", media_type="application/pdf",
+        byte_size=size, checksum=checksum, storage_key=storage_key, state="available",
+        ref_type="sop_version", ref_id=version.id, origin="seed", note="演示 SOP 附件，由种子生成",
+    )
+    db.add(record)
+    db.flush()
+    return record

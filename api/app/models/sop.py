@@ -1,7 +1,7 @@
 """SOP 与受控版本。已发布内容不可原位编辑，修订生成新版本。"""
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -15,6 +15,9 @@ class Sop(Base):
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     code: Mapped[str] = mapped_column(String)
     title: Mapped[str] = mapped_column(String)
+    # 受控文件的分类与负责人：属于文件本身，不随版本变
+    category: Mapped[str] = mapped_column(String, default="")
+    owner_id: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     __table_args__ = (UniqueConstraint("org_id", "code", name="uq_sop_org_code"),)
 
@@ -33,6 +36,12 @@ class SopVersion(Base):
     sample_types: Mapped[list] = mapped_column(JSON, default=list)
     requires_training_ack: Mapped[bool] = mapped_column(default=False)
     effective_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 失效时间：到点后不再是生效版本。被同编号新版本取代时取新版本的生效时间
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 下次复审日期：过期只提醒，不自动失效
+    review_due: Mapped[date | None] = mapped_column(Date, nullable=True)
+    superseded_by: Mapped[str] = mapped_column(String, default="")
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     author_id: Mapped[str] = mapped_column(String, default="")
     approver_id: Mapped[str] = mapped_column(String, default="")
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

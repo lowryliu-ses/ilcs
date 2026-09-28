@@ -17,7 +17,7 @@ import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type F
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type {
-  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary,
+  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary, SopStep,
   SopVersionRow, StationRow,
 } from '../../shared/types';
 import { CheckList, Field, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
@@ -50,6 +50,7 @@ import {
   topoSort,
   whenOf,
   wouldCycle,
+  type SopLink,
   type StepKind,
   type SubflowIndex,
 } from './rules';
@@ -66,11 +67,21 @@ type Draft = { steps: RecipeStep[]; bom: BomItem[]; meta: Meta };
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-/* 校验清单里显示的是人看得懂的 SOP 名，不是版本 UUID。 */
-function sopLabel(versions: SopVersionRow[] | undefined, versionId: string): string {
-  if (!versionId) return '';
+/* 校验清单里显示的是人看得懂的 SOP 名，不是版本 UUID；范围按新批次实际会用的那一版。
+   选的是生效清单里的版本就用它；不在清单里（已被取代、退役）用后端给的摘要。 */
+function sopLink(
+  versions: SopVersionRow[] | undefined, versionId: string, brief: RecipeDetail['sop'] | undefined,
+): SopLink | undefined {
+  if (!versionId) return undefined;
   const hit = (versions ?? []).find((row) => row.id === versionId);
-  return hit ? `${hit.code} ${hit.title} ${hit.version}` : versionId;
+  if (hit) return { label: `${hit.code} ${hit.title} ${hit.version}`, scope: hit.capability_scope };
+  if (brief && brief.sop_version_id === versionId) {
+    const base = `${brief.code} ${brief.title} ${brief.version}（${brief.status_label}`;
+    return brief.current_version_id
+      ? { label: `${base}，新批次按 ${brief.current_version} 执行）`, scope: brief.capability_scope }
+      : { label: `${base}）`, scope: [], problem: `SOP ${brief.code} 同编号没有生效版本` };
+  }
+  return { label: versionId, scope: [] };
 }
 
 /** 新节点的默认内容。不同类型适用的字段不同，这里只填各自必需的那些。 */
@@ -193,12 +204,12 @@ export function RecipeEditorPage() {
             draft.meta.risk,
             stations.data,
             capabilityIndex,
-            sopLabel(sops.data, draft.meta.sop_version_id),
+            sopLink(sops.data, draft.meta.sop_version_id, recipe.data?.sop),
             recipes.data ? subflowIndex : undefined,
             recipeId,
           )
         : [],
-    [draft, stations.data, capabilityIndex, sops.data, subflowIndex, recipes.data, recipeId],
+    [draft, stations.data, capabilityIndex, sops.data, subflowIndex, recipes.data, recipeId, recipe.data?.sop],
   );
 
   if (!recipe.data || !draft) {
@@ -608,6 +619,7 @@ export function RecipeEditorPage() {
             capabilityIndex={capabilityIndex}
             stations={stations.data}
             methods={methods.data ?? []}
+            sopSteps={(sops.data ?? []).find((row) => row.id === draft.meta.sop_version_id)?.steps ?? []}
             readOnly={readOnly}
             onBack={() => setSelected(null)}
             onSet={(change) => setStep(ids[selectedIndex], change)}
@@ -627,6 +639,7 @@ export function RecipeEditorPage() {
             unitOf={unitOf}
             readOnly={readOnly}
             sops={sops.data}
+            brief={recipe.data?.sop}
             onMeta={(key, value) =>
               mutate((current) => {
                 (current.meta as Record<string, unknown>)[key] = value;
@@ -726,6 +739,7 @@ function StepProperties({
   capabilityIndex,
   stations,
   methods,
+  sopSteps,
   readOnly,
   onBack,
   onSet,
@@ -747,6 +761,8 @@ function StepProperties({
   capabilityIndex: Record<string, CapabilityRow>;
   stations: StationRow[] | undefined;
   methods: DeviceMethodRow[];
+  /** 流程关联的 SOP 版本的结构化步骤；没有关联或没有步骤时为空 */
+  sopSteps: SopStep[];
   readOnly: boolean;
   onBack: () => void;
   onSet: (change: (step: RecipeStep) => void) => void;
@@ -774,6 +790,31 @@ function StepProperties({
           onChange={(event) => onSet((current) => void (current.name = event.target.value))}
         />
       </Field>
+
+      {sopSteps.length || step.sop_step ? (
+        <Field label="对应 SOP 步骤" hint="执行这一步时，批次页会把该 SOP 步骤的说明与核对项带给执行人">
+          <select
+            value={step.sop_step ?? ''}
+            disabled={readOnly}
+            onChange={(event) =>
+              onSet((current) => {
+                if (event.target.value) current.sop_step = Number(event.target.value);
+                else delete current.sop_step;
+              })
+            }
+          >
+            <option value="">不对应</option>
+            {sopSteps.map((row, at) => (
+              <option key={at} value={at + 1}>
+                {at + 1}. {row.title}
+              </option>
+            ))}
+            {step.sop_step && step.sop_step > sopSteps.length ? (
+              <option value={step.sop_step}>第 {step.sop_step} 步（当前 SOP 版本没有这一步）</option>
+            ) : null}
+          </select>
+        </Field>
+      ) : null}
 
       <Field label="步骤类型" hint="不同类型适用不同字段；界面只显示适用的那些">
         <select
@@ -1234,6 +1275,7 @@ function RecipeProperties({
   unitOf,
   readOnly,
   sops,
+  brief,
   onMeta,
   onBom,
 }: {
@@ -1243,6 +1285,8 @@ function RecipeProperties({
   unitOf: (material: string) => string;
   readOnly: boolean;
   sops: SopVersionRow[] | undefined;
+  /** 后端给的已关联 SOP 摘要（含被取代后新批次会用的版本） */
+  brief: RecipeDetail['sop'] | undefined;
   onMeta: (key: keyof Meta, value: string | number | '') => void;
   onBom: (rows: BomItem[]) => void;
 }) {
@@ -1284,6 +1328,12 @@ function RecipeProperties({
           onChange={(event) => onMeta('sop_version_id', event.target.value)}
         >
           <option value="">不关联</option>
+          {/* 已关联但不在生效清单里的版本也列出来，否则下拉会显示成「不关联」 */}
+          {brief && meta.sop_version_id === brief.sop_version_id && !(sops ?? []).some((row) => row.id === brief.sop_version_id) ? (
+            <option value={brief.sop_version_id}>
+              {brief.code} {brief.title} · {brief.version}（{brief.status_label}）
+            </option>
+          ) : null}
           {(sops ?? []).map((row) => (
             <option key={row.id} value={row.id}>
               {row.code} {row.title} · {row.version}
@@ -1293,10 +1343,17 @@ function RecipeProperties({
         </select>
       </Field>
       {meta.sop_version_id && sops && !sops.some((row) => row.id === meta.sop_version_id) ? (
-        <div className="note">
-          当前关联的版本不在有效清单里（可能已退役或被新版本替代）。历史批次仍指向它固化的快照，
-          但新批次会按这条引用校验——要么改到新版本，要么在 SOP 页把它重新发布。
-        </div>
+        brief && brief.sop_version_id === meta.sop_version_id && brief.current_version_id ? (
+          <div className="note">
+            关联的 {brief.code} {brief.version} {brief.status_label}：新批次会按同编号当前生效的 {brief.current_version} 执行
+            （历史批次仍按各自固化的版本）。建议把关联改到 {brief.current_version}，下拉里选它即可。
+          </div>
+        ) : (
+          <div className="note bad">
+            关联的 SOP 版本已不可用，同编号也没有生效版本：这个流程不能提交、发布，也不能再建新批次。
+            请改关联其他 SOP，或先在 SOP 页发布新版本。
+          </div>
+        )
       ) : null}
       {selectedSop?.requires_training_ack ? (
         <div className="note">

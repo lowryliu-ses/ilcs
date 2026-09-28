@@ -4,7 +4,7 @@ import copy
 
 from sqlalchemy.orm import Session
 
-from ..core.clock import today_iso
+from ..core.clock import now, today_iso
 from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain.access import same_person
@@ -123,8 +123,9 @@ class RecipeService:
                 "checks": recipe_checks(
                     normalize(recipe.steps or []), validation, recipe.bom or [], recipe.risk,
                     recipe.sop_version_id,
-                    f"{brief['code']} {brief['title']} {brief['version']}" if brief else "",
+                    self._sop_label(brief),
                     self._expanded_critical(recipe),
+                    sop_problems=self.sop_problems(recipe),
                 ),
                 "recovery_by_capability": {
                     step.get("cap"): recoveries.get(step.get("cap"), {}) for step in recipe.steps or []
@@ -154,22 +155,76 @@ class RecipeService:
         return self.to_dict(recipe, detail=True)
 
     def _sop_brief(self, sop_version_id: str) -> dict | None:
+        from ..models import Sop
+        from .sop_service import STATUS_LABEL, status_of
+
         version = self.sop_versions.get(sop_version_id)
         if version is None:
             return None
-        from ..models import Sop
-
         sop = self.db.get(Sop, version.sop_id)
+        status = status_of(version, now())
+        # 新批次实际会用的版本：关联版本本身生效就是它，被取代了就是同编号当前生效的版本
+        current = version if status == "effective" else self.sop_versions.effective(version.sop_id, now())
         return {
             "sop_version_id": version.id,
             "code": sop.code if sop else "",
             "title": sop.title if sop else "",
             "version": version.version,
             "state": version.state,
+            "status": status,
+            "status_label": STATUS_LABEL.get(status, status),
             "file_id": version.file_id,
             "file_checksum": version.file_checksum,
             "requires_training_ack": version.requires_training_ack,
+            "capability_scope": list((current or version).capability_scope or []),
+            "current_version_id": current.id if current else "",
+            "current_version": current.version if current else "",
         }
+
+    @staticmethod
+    def _sop_label(brief: dict | None) -> str:
+        if not brief:
+            return ""
+        label = f"{brief['code']} {brief['title']} {brief['version']}"
+        if brief["status"] != "effective":
+            label += f"（{brief['status_label']}"
+            if brief["current_version"]:
+                label += f"，新批次按 {brief['current_version']} 执行"
+            label += "）"
+        return label
+
+    def sop_problems(self, recipe: Recipe) -> list[str]:
+        """关联 SOP 的硬问题：SOP 已无生效版本，或流程的设备能力超出 SOP 适用范围。
+
+        范围按新批次实际会用的那一版判：流程关联的旧版被取代后，新批次按新版执行，新版收窄了
+        适用能力，流程就不能再按它跑。子流程里的步骤由子流程自己的 SOP 管，这里不看。
+        """
+        if not recipe.sop_version_id:
+            return []
+        brief = self._sop_brief(recipe.sop_version_id)
+        if brief is None:
+            return ["关联的 SOP 版本不存在"]
+        label = f"SOP {brief['code']} {brief['version']}"
+        if not brief["current_version_id"]:
+            return [f"{label} {brief['status_label']}，同编号没有生效版本"]
+        scope = set(brief["capability_scope"])
+        if not scope:
+            return []
+        outside = sorted({
+            str(step.get("cap")) for step in normalize(recipe.steps or [])
+            if kind_of(step) == "device" and step.get("cap") and step.get("cap") not in scope
+        })
+        if outside:
+            return [f"设备能力 {'、'.join(outside)} 不在 SOP {brief['code']} {brief['current_version']} 的适用范围内"]
+        return []
+
+    def _require_sop_usable(self, recipe: Recipe, action: str) -> None:
+        problems = self.sop_problems(recipe)
+        if problems:
+            raise StateConflict(
+                f"关联的 SOP 不满足，已阻止{action}：{problems[0]}",
+                {"blocked": [{"key": "sop", "label": row} for row in problems]}, code="sop_unusable",
+            )
 
     # ---------- 写 ----------
 
@@ -252,6 +307,9 @@ class RecipeService:
                 raise NotFound("SOP 版本不存在")
             if version.state != "published":
                 raise ValidationFailed("只能关联已发布的 SOP 版本")
+            if changes["sop_version_id"] != recipe.sop_version_id and version.effective_to is not None \
+                    and version.effective_to <= now():
+                raise ValidationFailed("这个 SOP 版本已失效或被取代，请关联当前生效的版本", code="sop_not_effective")
         step_diff = self._step_diff(before.get("steps") or [], changes["steps"]) if "steps" in changes else []
         for key, value in changes.items():
             setattr(recipe, key, value)
@@ -308,6 +366,7 @@ class RecipeService:
             raise StateConflict("能力校验未通过，已阻止提交")
         if not recipe.steps:
             raise StateConflict("流程没有步骤")
+        self._require_sop_usable(recipe, "提交")
 
         # 执行前仿真：结构、所有分支路径、可达性、能力与硬时限在空实验室里排得下
         SimulationService(self.db, self.ctx).require_feasible(recipe, "提交评审")
@@ -337,6 +396,8 @@ class RecipeService:
             raise StateConflict(f"只有{STATE_LABEL[required_state]}流程可{action[:2]}")
         if target_state != "retired" and not is_valid(self.validation_of(recipe)):
             raise StateConflict("能力校验未通过，已阻止")
+        if target_state != "retired":
+            self._require_sop_usable(recipe, "批准" if target_state == "approved" else "发布")
         if target_state == "approved":
 
             # 批准时按当时的工位与能力再跑一次：评审期间工位退役、能力停用都可能让它排不下

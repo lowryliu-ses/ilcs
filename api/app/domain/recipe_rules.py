@@ -186,6 +186,7 @@ def is_valid(validation: list[dict]) -> bool:
 def recipe_checks(
     recipe_steps: list[dict[str, Any]], validation: list[dict], bom: list[dict], risk: str,
     sop_version_id: str = "", sop_label: str = "", expanded_critical_min: float | None = None,
+    sop_problems: list[str] | None = None,
 ) -> list[dict]:
     """流程级检查清单。编辑器与详情页显示同一份，提交评审按前五项裁决。"""
     no_station = [
@@ -256,12 +257,13 @@ def recipe_checks(
         {
             "key": "sop",
             "label": "关联 SOP 版本",
-            "ok": True,
+            # 不关联允许；关联了就得可用：同编号有生效版本，设备能力在适用范围内
+            "ok": not sop_problems,
             # 显示编号与版本，不显示版本 UUID：清单是给人看的
-            "detail": (
-                sop_label or sop_version_id
-                or "未关联：允许保存草稿；需要受控作业指导的流程请补上"
-            ),
+            "detail": "；".join([
+                sop_label or sop_version_id or "未关联：允许保存草稿；需要受控作业指导的流程请补上",
+                *(sop_problems or []),
+            ]),
         },
     ]
 

@@ -5,7 +5,7 @@
 - 数量一律用字符串或整数写，不用浮点——账实差额不允许被二进制浮点吃掉。
 - 事件类接口必带稳定的 `event_id`；它是业务级去重键，和请求头的幂等键不是一回事。
 """
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -995,6 +995,10 @@ class SopVersionCreateIn(BaseModel):
     sample_types: list[str] = []
     requires_training_ack: bool = False
     effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    review_due: date | None = None
+    category: str | None = None
+    owner_id: str | None = None
 
 
 class SopVersionPatchIn(Versioned):
@@ -1005,6 +1009,17 @@ class SopVersionPatchIn(Versioned):
     sample_types: list[str] | None = None
     requires_training_ack: bool | None = None
     effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    review_due: date | None = None
+    category: str | None = None
+    owner_id: str | None = None
+
+
+class SopDocumentPatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str | None = None
+    owner_id: str | None = None
 
 
 class RetireIn(BaseModel):

@@ -43,6 +43,8 @@ class PreflightContext:
     qualification_blockers: list[str] = field(default_factory=list)
     qualification_required: bool = True
     sop_snapshot: dict | None = None
+    # SOP：None 表示流程没有关联 SOP（不适用）；{label, warnings, blockers}
+    sop_checks: dict | None = None
     # 任务上游：None 表示任务没有声明依赖（不适用）；空列表表示依赖都已满足
     dependency_blockers: list[str] | None = None
     # 首工位之外的其余工位：[{id, status, cal_due, interlock, alarm}]。故障、离线、校准过期、联锁、活动报警都挡下发
@@ -232,6 +234,21 @@ def evaluate(context: PreflightContext) -> list[Check]:
         else:
             state, detail = PASS, "执行人在人工步骤的时间里没有别的批次、请假或培训"
         checks.append(Check("personnel", "执行人时间预占", state, detail))
+
+    # ---------- 5e SOP ----------
+    if context.sop_checks is None:
+        checks.append(Check("sop", "受控 SOP", NOT_APPLICABLE, "流程没有关联 SOP"))
+    else:
+        blockers = context.sop_checks.get("blockers") or []
+        warnings = context.sop_checks.get("warnings") or []
+        label = context.sop_checks.get("label") or "SOP"
+        if blockers:
+            state, detail = BLOCKED, f"{label}；" + "；".join([*blockers, *warnings])
+        elif warnings:
+            state, detail = WARN, f"{label}；提醒：" + "；".join(warnings)
+        else:
+            state, detail = PASS, f"{label}；生效中，样本类型在适用范围内"
+        checks.append(Check("sop", "受控 SOP", state, detail))
 
     # ---------- 6 执行门 ----------
     checks.append(

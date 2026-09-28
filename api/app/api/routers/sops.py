@@ -1,6 +1,9 @@
 from fastapi import APIRouter
 
-from ...schemas import DecisionIn, RetireIn, SopRecipeIn, SopRestoreIn, SopStepsIn, SopVersionCreateIn, SopVersionPatchIn
+from ...schemas import (
+    DecisionIn, RetireIn, SopDocumentPatchIn, SopRecipeIn, SopRestoreIn, SopStepsIn, SopVersionCreateIn,
+    SopVersionPatchIn,
+)
 from ...services.sop_service import SopService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
 
@@ -8,9 +11,24 @@ router = APIRouter(prefix="/sops", tags=["sop"])
 
 
 @router.get("")
-def list_sops(db: DbSession, ctx: Ctx, paging: Paging, state: str | None = None):
-    items, total = SopService(db, ctx).page(paging.offset, paging.page_size, state)
+def list_sops(db: DbSession, ctx: Ctx, paging: Paging, state: str | None = None, category: str | None = None):
+    items, total = SopService(db, ctx).page(paging.offset, paging.page_size, state, category)
     return paging.wrap(items, total)
+
+
+@router.get("/meta")
+def sop_meta(db: DbSession, ctx: Ctx):
+    """新建与编辑表单用：已有分类、可选负责人（本组织能编写或批准 SOP 的有效成员）。"""
+    service = SopService(db, ctx)
+    return {"categories": service.sops.categories(), "owners": service.owners()}
+
+
+@router.patch("/documents/{sop_id}")
+def update_document(
+    sop_id: str, payload: SopDocumentPatchIn, db: DbSession, user: CurrentUser, ctx=require("sop.edit"),
+):
+    """分类与负责人属于受控文件本身，不是版本内容：已发布版本也能改，改动进审计。"""
+    return SopService(db, ctx).update_document(sop_id, payload.model_dump(exclude_none=True), user)
 
 
 @router.get("/effective")
@@ -38,6 +56,10 @@ def update_version(
 ):
     """只改草稿。已发布内容不可原位编辑，请建立新版本。"""
     changes = payload.model_dump(exclude_unset=True, exclude_none=True, exclude={"row_version"})
+    # 失效时间与复审日期允许显式清空
+    for key in ("effective_to", "review_due"):
+        if key in payload.model_fields_set and getattr(payload, key) is None:
+            changes[key] = None
     return SopService(db, ctx).update_version(version_id, changes, payload.row_version, user)
 
 

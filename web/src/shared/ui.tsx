@@ -15,7 +15,7 @@ const STATE_CLASS: Record<string, string> = {
   data_review: 'scheduled', reporting: 'scheduled', received: 'scheduled', queued: 'scheduled',
   // 进行中、有效
   running: 'running', released: 'running', approved: 'running', accepted: 'running',
-  valid: 'running', published: 'running', in_use: 'running', collected: 'running',
+  valid: 'running', published: 'running', effective: 'running', in_use: 'running', collected: 'running',
   available: 'running', delivered: 'running', on_duty: 'running',
   // 保持、可疑、需人工判断
   paused: 'paused', held: 'paused', shelved: 'paused', suspect: 'paused', manual: 'paused',

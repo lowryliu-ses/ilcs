@@ -355,13 +355,65 @@ METRICS = [
 
 # ---------- SOP ----------
 
+# 演示用受控 SOP：带附件（播种时按内容生成 PDF）、结构化步骤、分类与负责人。
+# SOP-EC-02 要求阅读确认，播种时给操作员与研究员记上确认，其他人没有——SOP 页面能看到谁确认了；
+# SOP-SLR-01 有 v2 → v3 两版，v2 已被 v3 取代，可以对比两版差异。
 SOPS = [
     dict(code="SOP-EC-02", title="扣电组装与首次充放电作业指导书", version="v2",
-         capability_scope=["cap.assemble", "cap.test"], sample_types=["极片"],
-         requires_training_ack=False),
-    dict(code="SOP-SLR-01", title="浆料制备与称量作业指导书", version="v3",
+         category="电芯制备", owner="qa", review_due_days=335,
+         capability_scope=["cap.vacuum_dry", "cap.weigh", "cap.assemble", "cap.test"],
+         sample_types=["极片", "扣电"], requires_training_ack=True, acked_by=["operator", "researcher"],
+         purpose="保证扣电组装的水分、注液量与封口质量一致，首次充放电数据可比。",
+         safety="电解液在手套箱内操作（H2O、O2 < 0.1 ppm）；佩戴丁腈手套与护目镜；废电解液进有机废液桶。",
+         steps=[
+             dict(title="极片真空干燥", kind="device", capability="cap.vacuum_dry", params={}, duration_min=240,
+                  instructions="极片放入真空烘箱，120 ℃ 干燥不少于 4 h，出箱后 10 min 内转入手套箱。", checks=[]),
+             dict(title="称重选片", kind="device", capability="cap.weigh", params={}, duration_min=20,
+                  instructions="逐片称重，面密度偏差超过 ±2% 的极片剔除并记录片号。", checks=[]),
+             dict(title="组装前核对", kind="manual", capability="", params={}, duration_min=10,
+                  instructions="核对手套箱气氛、电解液批号与有效期、隔膜与壳体规格。",
+                  checks=["手套箱 H2O、O2 < 0.1 ppm", "电解液批号在有效期内", "隔膜与壳体规格与方案一致"]),
+             dict(title="注液封口", kind="device", capability="cap.assemble", params={}, duration_min=30,
+                  instructions="按孔位注液，注液后静置 30 s 再封口；封口压力按设备方法。", checks=[]),
+             dict(title="封口外观检查", kind="manual", capability="", params={}, duration_min=10,
+                  instructions="目视检查漏液、壳体变形与极耳位置，不合格件单独隔离并登记。",
+                  checks=["无漏液", "壳体无变形", "不合格件已隔离登记"]),
+             dict(title="化成静置", kind="wait", capability="", params={}, duration_min=720,
+                  instructions="室温静置 12 h 充分浸润后再化成。", checks=[]),
+             dict(title="首次充放电", kind="device", capability="cap.test", params={}, duration_min=600,
+                  instructions="0.1C 首次充放电；开路电压低于 2.5 V 的电芯不上柜，记为异常。", checks=[]),
+             dict(title="QA 复核", kind="review", capability="", params={}, duration_min=0,
+                  instructions="复核注液量、封口检查与首次效率，异常样本附说明。", checks=[]),
+         ]),
+    dict(code="SOP-SLR-01", title="浆料制备与称量作业指导书", version="v2", superseded=True,
+         category="浆料制备", owner="researcher", review_due_days=-30,
          capability_scope=["cap.dose_solid", "cap.dose_liquid", "cap.mix"], sample_types=["极片"],
-         requires_training_ack=False),
+         requires_training_ack=False,
+         purpose="统一浆料称量与匀浆操作，保证固含量与粘度可重复。",
+         safety="NMP 在通风橱内操作；佩戴防化手套；洒落用吸附棉处理后进危废桶。",
+         steps=[
+             dict(title="人工称量备料", kind="manual", capability="", params={}, duration_min=20,
+                  instructions="按配方称量正极粉与溶剂。", checks=["已复核称量读数"]),
+             dict(title="控温匀浆", kind="device", capability="cap.mix", params={"temp": 25, "rpm": 1800},
+                  duration_min=45, instructions="25 ℃ 匀浆 45 min。", checks=[]),
+         ]),
+    dict(code="SOP-SLR-01", title="浆料制备与称量作业指导书", version="v3",
+         category="浆料制备", owner="researcher", review_due_days=180,
+         capability_scope=["cap.dose_solid", "cap.dose_liquid", "cap.mix"], sample_types=["极片"],
+         requires_training_ack=False,
+         purpose="统一浆料称量与匀浆操作，保证固含量与粘度可重复。v3 起匀浆转速提到 2000 rpm，增加静置与复核。",
+         safety="NMP 在通风橱内操作；佩戴防化手套；洒落用吸附棉处理后进危废桶。",
+         steps=[
+             dict(title="人工称量备料", kind="manual", capability="", params={}, duration_min=20,
+                  instructions="按配方称量正极粉与溶剂；天平使用前做点检，读数由第二人复核。",
+                  checks=["天平已点检", "已复核称量读数", "物料批号已扫码"]),
+             dict(title="控温匀浆", kind="device", capability="cap.mix", params={"temp": 25, "rpm": 2000},
+                  duration_min=45, instructions="25 ℃、2000 rpm 匀浆 45 min；出现结块立即停机上报。", checks=[]),
+             dict(title="匀浆后静置", kind="wait", capability="", params={}, duration_min=30,
+                  instructions="匀浆结束 90 min 内必须进入下一步，否则浆料作废。", checks=[]),
+             dict(title="QA 复核备料与匀浆记录", kind="review", capability="", params={}, duration_min=0,
+                  instructions="复核称量记录、匀浆参数与时间间隔。", checks=[]),
+         ]),
 ]
 
 # ---------- 单条件样本实验：四类节点的样例方法与方案 ----------

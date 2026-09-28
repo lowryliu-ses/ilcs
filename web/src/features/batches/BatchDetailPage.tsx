@@ -8,7 +8,8 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import { useSession } from '../../shared/session';
 import type {
-  AssignmentRow, BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, StepRow, StepRunRow, TelemetryFeed,
+  AssignmentRow, BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, SopGuide, SopSnapshot, StepRow,
+  StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
 import { FlowGraph, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
@@ -199,6 +200,9 @@ export function BatchDetailPage() {
               <tr key={step.step_id} className={step.index === data.current_step ? 'current' : ''}>
                 <td>
                   {step.index + 1}. {step.name}
+                  {step.sop_guide?.index ? (
+                    <span className="tag" title={step.sop_guide.instructions}> SOP 第 {step.sop_guide.index} 步</span>
+                  ) : null}
                   <div className="tiny muted mono">{step.step_id}</div>
                   {step.groups?.length ? (
                     <div className="tiny muted">子流程 · {step.groups.map((group) => group.name).join(' › ')}</div>
@@ -301,6 +305,8 @@ export function BatchDetailPage() {
           它预约的工位时间窗已归还；只有流程标了「可跳过」的步骤才出现跳过按钮。
         </div>
       </Panel>
+
+      {data.sop_snapshot?.code ? <SopPanel snapshot={data.sop_snapshot} /> : null}
 
       <div className="grid cols-2">
         <Panel title={`运行分配（${data.samples.length}）`} flush>
@@ -546,6 +552,8 @@ export function BatchDetailPage() {
       {submitting ? (
         <ManualSubmitDialog
           run={submitting}
+          guide={data.steps.find((step) => step.step_id === submitting.step_id)?.sop_guide ?? null}
+          sopLabel={data.sop_snapshot?.code ? `${data.sop_snapshot.code} ${data.sop_snapshot.version}` : ''}
           needsMaterialCheck={data.reservations.length > 0}
           onClose={() => setSubmitting(null)}
           invalidates={invalidates}
@@ -1007,11 +1015,15 @@ function stepContent(step: StepRow): string {
 /** 人工步骤提交。缺必填项、缺样本或物料核对都不推进，服务端会逐项列出缺什么。 */
 function ManualSubmitDialog({
   run,
+  guide,
+  sopLabel,
   needsMaterialCheck,
   onClose,
   invalidates,
 }: {
   run: StepRunRow;
+  guide: SopGuide | null;
+  sopLabel: string;
   needsMaterialCheck: boolean;
   onClose: () => void;
   invalidates: string[];
@@ -1070,6 +1082,7 @@ function ManualSubmitDialog({
         </>
       }
     >
+      {guide ? <SopGuideNote guide={guide} sopLabel={sopLabel} /> : null}
       {run.attempt > 1 ? (
         <div className="note warn">
           这是第 {run.attempt} 次尝试（上一次被审核退回）。旧记录保留，不会被覆盖。
@@ -2106,3 +2119,87 @@ function BatchExceptions({ batchId }: { batchId: string }) {
     </Panel>
   );
 }
+
+/** 执行人在人工记录里看到的 SOP 指导：这一步照着做什么、逐项核对什么。 */
+function SopGuideNote({ guide, sopLabel }: { guide: SopGuide; sopLabel: string }) {
+  return (
+    <div className="note">
+      <b>
+        按 SOP {sopLabel}
+        {guide.index ? ` 第 ${guide.index} 步${guide.title ? `「${guide.title}」` : ''}` : ''}
+      </b>
+      {guide.instructions ? <div className="small">{guide.instructions}</div> : null}
+      {guide.checks.length ? (
+        <ul className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+          {guide.checks.map((check) => (
+            <li key={check}>{check}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** 批次固化的 SOP：附件下载与结构化步骤。执行中 SOP 修订了，这里仍是开批时的版本。 */
+function SopPanel({ snapshot }: { snapshot: SopSnapshot }) {
+  const toast = useToast();
+  const steps = snapshot.steps ?? [];
+  return (
+    <Panel
+      title={`作业指导 · SOP ${snapshot.code} ${snapshot.version}`}
+      aside={
+        snapshot.file_id ? (
+          <button
+            className="btn sm"
+            onClick={() =>
+              api
+                .download(`/files/${snapshot.file_id}/download`, snapshot.filename || `${snapshot.code}-${snapshot.version}.pdf`)
+                .catch((error) => toast.push(error.message))
+            }
+          >
+            下载 SOP 附件
+          </button>
+        ) : (
+          <span className="small muted">无附件</span>
+        )
+      }
+      flush
+    >
+      <div className="panel-body small">
+        {snapshot.title}
+        {snapshot.linked_version ? (
+          <span className="warn-text">
+            {' '}· 流程关联的是 {snapshot.linked_version}，开批时它已被取代，本批次按 {snapshot.version} 执行
+          </span>
+        ) : null}
+        <div className="tiny muted">
+          开批时固化 {snapshot.frozen_at ? clock(snapshot.frozen_at) : ''}
+          {snapshot.file_checksum ? ` · 附件摘要 ${snapshot.file_checksum.slice(0, 12)}…` : ''}
+          {snapshot.sample_types?.length ? ` · 适用样本 ${snapshot.sample_types.join('、')}` : ''}
+          {snapshot.requires_training_ack ? ' · 执行人须有本版本的阅读确认' : ''}
+        </div>
+      </div>
+      {steps.length ? (
+        <table>
+          <tbody>
+            {steps.map((step, index) => (
+              <tr key={index}>
+                <td className="mono small">{index + 1}</td>
+                <td>
+                  <b>{step.title}</b> <span className="tag">{SOP_KIND_LABEL[step.kind] ?? step.kind}</span>
+                  {step.instructions ? <div className="tiny muted">{step.instructions}</div> : null}
+                  {step.checks.length ? <div className="tiny">核对：{step.checks.join('；')}</div> : null}
+                </td>
+                <td className="small">{step.duration_min ? `${step.duration_min} min` : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="panel-body small muted">这版 SOP 没有结构化步骤，请下载附件查看。</div>
+      )}
+    </Panel>
+  );
+}
+
+const SOP_KIND_LABEL: Record<string, string> = { device: '设备', manual: '人工', wait: '等待', review: '审核' };
