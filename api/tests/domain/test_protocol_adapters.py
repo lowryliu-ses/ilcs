@@ -34,7 +34,7 @@ def credential_root(tmp_path, monkeypatch):
 # ---------- Modbus TCP ----------
 
 def _modbus(port: int, **config):
-    from app.adapters.modbus_tcp import ModbusTcpAdapter
+    from app.adapters.drivers.modbus_tcp import ModbusTcpAdapter
 
     return ModbusTcpAdapter(record("Modbus TCP", modbus_config(port, **config)))
 
@@ -168,7 +168,7 @@ def test_modbus_offline_then_recovers_and_stalled_heartbeat_is_lost():
 # ---------- OPC UA ----------
 
 def _opcua(port: int, cert_dir=None, **config):
-    from app.adapters.opcua import OpcUaAdapter
+    from app.adapters.drivers.opcua import OpcUaAdapter
 
     settings, credential = opcua_config(port, cert_dir, **config)
     return OpcUaAdapter(record("OPC UA", settings, credential))
@@ -196,7 +196,7 @@ def test_opcua_refuses_unpinned_or_untrusted_peers(credential_root, tmp_path_fac
     from simulators.common.certs import ensure_certificate, self_signed_certificate
 
     with opcua_sim(credential_root) as (_, _, port):
-        from app.adapters.opcua import OpcUaAdapter
+        from app.adapters.drivers.opcua import OpcUaAdapter
 
         config, credential = opcua_config(port, credential_root)
         with pytest.raises(AdapterError, match="server_certificate"):
@@ -256,7 +256,7 @@ def test_opcua_rejections_unknown_results_and_recovery():
 # ---------- HTTPS JSON 网关 ----------
 
 def _gateway(port: int, cert_dir, credential=None, **config):
-    from app.adapters.http_json import HttpJsonAdapter
+    from app.adapters.drivers.http_json import HttpJsonAdapter
 
     settings, token = gateway_config(port, cert_dir, **config)
     return HttpJsonAdapter(record("HTTPS JSON", settings, token if credential is None else credential))
@@ -267,7 +267,7 @@ def test_gateway_tls_token_submit_query_and_dedup(credential_root):
         adapter = _gateway(port, credential_root)
         health = adapter.healthcheck()
         assert (health["device_id"], health["simulator"], health["interlock"]) == ("SIM-GW-T", True, False)
-        assert adapter.submit(request("CMD-G1")).state == "accepted"
+        assert adapter.submit(request("CMD-G1")).state == "running", "网关（SDK）在设备确认开始后回 running"
         adapter.submit(request("CMD-G1"))
         assert device.executions["CMD-G1"] == 1
         assert _wait_done(adapter, "CMD-G1", device).state == "done"

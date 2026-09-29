@@ -15,7 +15,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def _station(oven_port: int, balance_port: int, **routes):
-    from app.adapters.composite import CompositeAdapter
+    from app.adapters.drivers.composite import CompositeAdapter
 
     config = {"routes": [
         {"name": "oven", "capabilities": ["cap.vacuum_dry"], "driver": "line_command_v1",
@@ -55,7 +55,7 @@ def test_capabilities_route_to_their_instruments_and_survive_restart(isolated):
 
 def test_misconfigured_routes_are_rejected():
     from app.adapters import AdapterError
-    from app.adapters.composite import CompositeAdapter
+    from app.adapters.drivers.composite import CompositeAdapter
 
     same = [{"name": "a", "capabilities": ["cap.weigh"], "driver": "mt_sics_v1", "config": balance_config(1)},
             {"name": "b", "capabilities": ["cap.weigh"], "driver": "mt_sics_v1", "config": balance_config(2)}]

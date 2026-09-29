@@ -23,18 +23,18 @@ from __future__ import annotations
 from ..core.config import settings
 from ..models import Adapter
 from .base import AdapterContract, AdapterError, DeviceAdapter
-from .composite import DRIVER as COMPOSITE_DRIVER, CompositeAdapter
-from .http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
-from .line_command import DRIVER as LINE_COMMAND_DRIVER, LineCommandAdapter
-from .modbus_map import DRIVER as MODBUS_MAP_DRIVER, ModbusMapAdapter
-from .modbus_tcp import DRIVER as MODBUS_TCP_DRIVER, ModbusTcpAdapter
-from .mt_sics import DRIVER as MT_SICS_DRIVER, MtSicsAdapter
-from .opcua import DRIVER as OPCUA_DRIVER, OpcUaAdapter
-from .opcua_map import DRIVER as OPCUA_MAP_DRIVER, OpcUaMapAdapter
-from .rest_map import DRIVER as REST_MAP_DRIVER, RestMapAdapter
-from .sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
-from .sql_table import DRIVER as SQL_TABLE_DRIVER, SqlTableAdapter
-from .simulation import SimulationAdapter
+from .drivers.composite import DRIVER as COMPOSITE_DRIVER, CompositeAdapter
+from .drivers.http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
+from .drivers.line_command import DRIVER as LINE_COMMAND_DRIVER, LineCommandAdapter
+from .drivers.modbus_map import DRIVER as MODBUS_MAP_DRIVER, ModbusMapAdapter
+from .drivers.modbus_tcp import DRIVER as MODBUS_TCP_DRIVER, ModbusTcpAdapter
+from .drivers.mt_sics import DRIVER as MT_SICS_DRIVER, MtSicsAdapter
+from .drivers.opcua import DRIVER as OPCUA_DRIVER, OpcUaAdapter
+from .drivers.opcua_map import DRIVER as OPCUA_MAP_DRIVER, OpcUaMapAdapter
+from .drivers.rest_map import DRIVER as REST_MAP_DRIVER, RestMapAdapter
+from .drivers.sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
+from .drivers.sql_table import DRIVER as SQL_TABLE_DRIVER, SqlTableAdapter
+from .drivers.simulation import SimulationAdapter
 
 _CACHE: dict[str, DeviceAdapter] = {}
 REAL_IMPLEMENTATIONS: dict[str, type] = {

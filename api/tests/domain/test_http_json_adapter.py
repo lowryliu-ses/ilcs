@@ -117,7 +117,7 @@ def request(command_id: str = "CMD-HTTP-1"):
 
 
 def test_http_json_driver_health_dedup_query_and_controls(device_gateway):
-    from app.adapters.http_json import HttpJsonAdapter, record_for_test
+    from app.adapters.drivers.http_json import HttpJsonAdapter, record_for_test
 
     base_url, state = device_gateway
     adapter = HttpJsonAdapter(record_for_test(
@@ -159,7 +159,7 @@ def test_http_json_driver_health_dedup_query_and_controls(device_gateway):
 
 def test_http_json_driver_timeout_is_result_unknown(device_gateway):
     from app.adapters import AdapterUnreachable
-    from app.adapters.http_json import HttpJsonAdapter, record_for_test
+    from app.adapters.drivers.http_json import HttpJsonAdapter, record_for_test
 
     base_url, _ = device_gateway
     adapter = HttpJsonAdapter(record_for_test(config={
@@ -175,7 +175,7 @@ def test_http_json_driver_timeout_is_result_unknown(device_gateway):
 
 def test_http_json_driver_rejects_identity_mismatch_and_inline_http_by_default(device_gateway):
     from app.adapters import AdapterError
-    from app.adapters.http_json import HttpJsonAdapter, record_for_test
+    from app.adapters.drivers.http_json import HttpJsonAdapter, record_for_test
 
     base_url, _ = device_gateway
     with pytest.raises(AdapterError, match="必须使用 HTTPS"):
@@ -191,7 +191,7 @@ def test_http_json_driver_rejects_identity_mismatch_and_inline_http_by_default(d
 
 
 def _adapter(base_url: str, **config):
-    from app.adapters.http_json import HttpJsonAdapter, record_for_test
+    from app.adapters.drivers.http_json import HttpJsonAdapter, record_for_test
 
     return HttpJsonAdapter(record_for_test(config={
         "base_url": base_url, "allow_insecure_http": True, **config,

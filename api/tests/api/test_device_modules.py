@@ -1,6 +1,6 @@
 """设备模块进 ILCS 的整条路：模块自测 → 导入 profile.json → 另一个人发布 → 工位套用 → 执行器跑接入验收。
 
-模块的网关（sdk/ilcs_gateway + 样板的驱动与假厂家 SDK）在本进程里起，走真实的 HTTPS 与令牌；ILCS 侧不打桩。
+模块的网关（devices/sdk/ilcs_gateway + 样板的驱动与假厂家 SDK）在本进程里起，走真实的 HTTPS 与令牌；ILCS 侧不打桩。
 """
 import json
 import os
@@ -11,7 +11,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-MODULE = ROOT / "device-modules" / "sample-cycler"
+MODULE = ROOT / "devices" / "modules" / "sample-cycler"
 LIMITS = {"cap.test": {"rate": [0.01, 10], "vmax": [2.0, 5.0]}}
 
 
@@ -46,7 +46,7 @@ def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
 def module_gateway(tmp_path, monkeypatch):
     from app.core.config import settings
 
-    for path in (MODULE, ROOT / "sdk"):
+    for path in (MODULE, ROOT / "devices" / "sdk"):
         monkeypatch.syspath_prepend(str(path))
     from ilcs_gateway import serve
     from driver.device import Instrument
@@ -144,7 +144,7 @@ def test_module_profile_goes_live_through_template_and_acceptance(admin, qa, mod
 
 @pytest.fixture()
 def sdk(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "sdk"))
+    monkeypatch.syspath_prepend(str(ROOT / "devices" / "sdk"))
     import ilcs_gateway
 
     return ilcs_gateway

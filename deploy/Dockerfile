@@ -16,11 +16,13 @@ COPY --chown=ilcs:ilcs api /opt/ilcs/api
 COPY --chown=ilcs:ilcs executor /opt/ilcs/executor
 # 迁移脚本必须进镜像：迁移是部署的独立步骤，在容器里执行
 COPY --chown=ilcs:ilcs scripts /opt/ilcs/scripts
-# 设备契约（SiLA 2 特性、Modbus 寄存器表、OPC UA 节点）与外部模拟设备：驱动与模拟器读同一份定义
-COPY --chown=ilcs:ilcs contracts /opt/ilcs/contracts
-COPY --chown=ilcs:ilcs simulators /opt/ilcs/simulators
+# 设备契约（SiLA 2 特性、Modbus 寄存器表、OPC UA 节点）与外部模拟设备：驱动与模拟器读同一份定义；
+# HTTPS 网关模拟设备基于网关 SDK。设备模块（devices/modules）各自出镜像，不进这里
+COPY --chown=ilcs:ilcs devices/contracts /opt/ilcs/devices/contracts
+COPY --chown=ilcs:ilcs devices/simulators /opt/ilcs/devices/simulators
+COPY --chown=ilcs:ilcs devices/sdk /opt/ilcs/devices/sdk
 # 设备侧连接器（结果文件接收器等）：随镜像分发，按需以独立容器运行
-COPY --chown=ilcs:ilcs connectors /opt/ilcs/connectors
+COPY --chown=ilcs:ilcs devices/connectors /opt/ilcs/devices/connectors
 
 WORKDIR /opt/ilcs/api
 USER ilcs

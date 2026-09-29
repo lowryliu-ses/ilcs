@@ -13,7 +13,7 @@ from app.main import app  # noqa: E402
 
 
 def main() -> int:
-    target = ROOT / "contracts" / "openapi.json"
+    target = ROOT / "api" / "openapi.json"
     target.write_text(
         json.dumps(app.openapi(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

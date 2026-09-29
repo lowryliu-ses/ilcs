@@ -25,7 +25,7 @@ def exchange(tmp_path):
 
 
 def _adapter(url: str, **config):
-    from app.adapters.sql_table import SqlTableAdapter
+    from app.adapters.drivers.sql_table import SqlTableAdapter
 
     return SqlTableAdapter(record("数据库中间表", {"url": url, "device_id": "SIM-SQL-T", "request_timeout_sec": 2,
                                                   "heartbeat_stale_sec": 2, **config}))
@@ -130,7 +130,7 @@ def test_postgresql_exchange_with_password_from_credential_file(tmp_path, monkey
     """在测试用的 PostgreSQL 上跑一遍：口令从凭据文件读，连接串里不带口令。"""
     from sqlalchemy.engine import make_url
 
-    from app.adapters.sql_table import SqlTableAdapter
+    from app.adapters.drivers.sql_table import SqlTableAdapter
     from app.core.config import settings
     from simulators.sql_device.worker import SqlDeviceWorker
     from tests.conftest import TEST_DATABASE_URL

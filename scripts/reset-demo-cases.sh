@@ -3,7 +3,7 @@
 #
 # 做法与 reset-demo.sh 相同（备份 → 空库 → 迁移 → 播种），之后：
 # - 删掉种子里的全部演示流程、方案与报警：案例只保留主数据，流程与方案由案例自己建；
-# - 按 simulators/pilot-devices.json 把全部示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
+# - 按 devices/simulators/pilot-devices.json 把全部示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
 #   串口命令、MT-SICS、HTTPS 网关、车队 REST），等执行器探测在线；机械臂 ARM-01 由导入脚本登记时接好；
 # - 用 load-demo-cases.py 走和界面相同的 HTTP 接口把四个案例真实跑一遍：
 #     案例 A 注液（ST-05 → ST-06），案例 B 循环测试（ST-07），
@@ -82,14 +82,14 @@ PY
     sleep 2
   done
 
-  echo "==> 全部示例工位按预设接到外部模拟设备（simulators/pilot-devices.json）"
+  echo "==> 全部示例工位按预设接到外部模拟设备（devices/simulators/pilot-devices.json）"
   docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply --preset --skip-missing
 fi
 
 echo "==> 等执行器探测到外部模拟设备在线"
 docker compose exec -T api python - <<'PY'
 import json, time, urllib.request
-stations = set(json.load(open("/opt/ilcs/simulators/pilot-devices.json", encoding="utf-8"))["stations"]) - {"ARM-01"}
+stations = set(json.load(open("/opt/ilcs/devices/simulators/pilot-devices.json", encoding="utf-8"))["stations"]) - {"ARM-01"}
 for _ in range(60):
     gate = json.load(urllib.request.urlopen("http://127.0.0.1:8000/api/gate"))
     blocked = {k for k in gate.get("blocked_stations") or {} if k in stations}

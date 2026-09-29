@@ -53,7 +53,7 @@ def _run(rec, factory, template=None, **options):
 
 
 def test_gateway_simulator_passes_the_full_checklist(credential_root):
-    from app.adapters.http_json import HttpJsonAdapter
+    from app.adapters.drivers.http_json import HttpJsonAdapter
 
     with gateway_sim(credential_root, task_seconds=1.0) as (device, runner, port):
         config, token = gateway_config(port, credential_root)
@@ -73,7 +73,7 @@ def test_gateway_simulator_passes_the_full_checklist(credential_root):
 
 
 def test_read_only_run_never_moves_the_device(credential_root):
-    from app.adapters.http_json import HttpJsonAdapter
+    from app.adapters.drivers.http_json import HttpJsonAdapter
 
     with gateway_sim(credential_root) as (device, _, port):
         config, token = gateway_config(port, credential_root)
@@ -103,7 +103,7 @@ def test_script_gateway_injector_uses_the_simulator_control_api(credential_root)
 
 def test_job_ledger_driver_without_device_counts(credential_root):
     """天平不认 ILCS 指令号：去重靠作业台账。读不到设备侧动作次数时「重复提交」只能判跳过，不硬判通过。"""
-    from app.adapters.mt_sics import MtSicsAdapter
+    from app.adapters.drivers.mt_sics import MtSicsAdapter
 
     with balance_sim() as (_, _, port):
         rec = record("MT-SICS", balance_config(port), driver="mt_sics_v1", kind="real", supports_hold=False,
@@ -135,7 +135,7 @@ def test_script_runs_read_only_acceptance_against_a_registered_station(monkeypat
 def test_control_port_counts_motions_for_devices_without_command_ids(credential_root):
     """串口命令干燥箱不认 ILCS 指令号：统一控制口报设备的总动作次数，「重复提交只动作一次」照样能判。"""
     from app.adapters.acceptance import SimulatorControlInjector
-    from app.adapters.line_command import LineCommandAdapter
+    from app.adapters.drivers.line_command import LineCommandAdapter
     from sim_harness import control_port, line_config, line_sim
 
     with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target()) as control:
@@ -153,7 +153,7 @@ def test_control_port_counts_motions_for_devices_without_command_ids(credential_
 
 def test_control_port_for_the_balance_counts_weighings(credential_root):
     from app.adapters.acceptance import SimulatorControlInjector
-    from app.adapters.mt_sics import MtSicsAdapter
+    from app.adapters.drivers.mt_sics import MtSicsAdapter
     from sim_harness import control_port
 
     with balance_sim() as (balance, runner, port), control_port(runner.control_target()) as control:
@@ -297,8 +297,8 @@ def _pilot_simulator(kind: str, root: Path):
     )
 
     if kind.startswith("plc_"):
-        from app.adapters.modbus_map import ModbusMapAdapter
-        from app.adapters.opcua_map import OpcUaMapAdapter
+        from app.adapters.drivers.modbus_map import ModbusMapAdapter
+        from app.adapters.drivers.opcua_map import OpcUaMapAdapter
 
         protocol = kind.split("_", 1)[1]
         with plc_sim(protocol, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
@@ -309,7 +309,7 @@ def _pilot_simulator(kind: str, root: Path):
                                                               capability="cap.coat"), \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
     elif kind == "opcua_task":
-        from app.adapters.opcua import OpcUaAdapter
+        from app.adapters.drivers.opcua import OpcUaAdapter
 
         with opcua_sim(task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
             config, credential = opcua_config(port)
@@ -317,7 +317,7 @@ def _pilot_simulator(kind: str, root: Path):
             yield rec, (lambda: OpcUaAdapter(rec)), request(""), \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
     elif kind == "fleet":
-        from app.adapters.rest_map import RestMapAdapter
+        from app.adapters.drivers.rest_map import RestMapAdapter
 
         with fleet_sim(root, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
             config, credential = fleet_config(port, root)
@@ -328,7 +328,7 @@ def _pilot_simulator(kind: str, root: Path):
             yield rec, (lambda: RestMapAdapter(rec)), template, \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
     else:
-        from app.adapters.sql_table import SqlTableAdapter
+        from app.adapters.drivers.sql_table import SqlTableAdapter
         from simulators.sql_device.worker import SqlDeviceWorker
         from sim_harness import _device
 

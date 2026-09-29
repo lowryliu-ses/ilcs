@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+if str(DEVICES) not in sys.path:
+    sys.path.insert(0, str(DEVICES))
 
 
 def _free_port() -> int:
@@ -41,7 +42,7 @@ def simulator():
 
 
 def _adapter(port: int, **config):
-    from app.adapters.sila2 import Sila2Adapter
+    from app.adapters.drivers.sila2 import Sila2Adapter
 
     record = SimpleNamespace(
         station_id="ST-SIM", protocol="SiLA 2", version="1.0", note="",
@@ -170,7 +171,7 @@ def test_production_refuses_simulated_sila_device(simulator, monkeypatch):
 def test_tls_with_generated_certificate_and_ca_file(tmp_path, monkeypatch):
     """模拟设备生成自签证书；驱动用 ca_file 加密连接，缺 CA 则连不上。"""
     from app.adapters import AdapterUnreachable
-    from app.adapters.sila2 import Sila2Adapter
+    from app.adapters.drivers.sila2 import Sila2Adapter
     from app.core.config import settings
     from simulators.common.device import SimulatedDevice
     from simulators.sila_device.server import SimulatorRunner, parse

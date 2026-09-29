@@ -18,7 +18,7 @@ BINDING = {
 @pytest.fixture()
 def readings(monkeypatch):
     """按步骤注入设备回执：{step_id: {"delivered": {...}, "quality": "good"}}。"""
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
 
     plan: dict[str, dict] = {}
     original = SimulationAdapter.submit

@@ -59,9 +59,9 @@ def test_checked_in_openapi_contract_matches_the_application():
     """接口增删改必须同步交付契约，不能让集成方读到上一版路由。"""
     from app.main import app
 
-    stored = json.loads((Path(__file__).parents[3] / "contracts" / "openapi.json").read_text())
+    stored = json.loads((Path(__file__).parents[2] / "openapi.json").read_text())
     assert stored == app.openapi(), (
-        "contracts/openapi.json 已漂移；运行 scripts/export-openapi.py 后提交生成结果"
+        "api/openapi.json 已漂移；运行 scripts/export-openapi.py 后提交生成结果"
     )
 
 

@@ -5,7 +5,7 @@
 每个工位写一条系统来源的审计（含前后配置），不绕过留痕。切换后适配器先标为离线，
 在线与否由执行器探测决定——不沿用切换前的「在线」结论。
 
-按预设切换（每个示例工位接哪种驱动、连哪台模拟设备，见 simulators/pilot-devices.json）：
+按预设切换（每个示例工位接哪种驱动、连哪台模拟设备，见 devices/simulators/pilot-devices.json）：
 
     python scripts/configure-pilot-adapters.py apply --preset                 # 预设里的全部工位
     python scripts/configure-pilot-adapters.py apply --preset --only ST-05 --only AGV-01
@@ -254,8 +254,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("action", choices=["apply", "revert"])
     parser.add_argument("--station", action="append", help="apply：工位=[驱动@]主机:端口:设备ID；revert：工位")
-    parser.add_argument("--preset", nargs="?", const=str(ROOT / "simulators" / "pilot-devices.json"),
-                        help="按预设文件切换（缺省 simulators/pilot-devices.json）")
+    parser.add_argument("--preset", nargs="?", const=str(ROOT / "devices" / "simulators" / "pilot-devices.json"),
+                        help="按预设文件切换（缺省 devices/simulators/pilot-devices.json）")
     parser.add_argument("--only", action="append", help="只切换预设里的这些工位")
     parser.add_argument("--skip-missing", action="store_true", help="预设里的工位库里还没有就跳过（如演示用的 ARM-01）")
     parser.add_argument("--channels", action="append", help="工位=并行通道数")

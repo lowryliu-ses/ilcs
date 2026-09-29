@@ -131,7 +131,7 @@ services:
       - backend
 
   # ---------- 试点：外部模拟设备（可选，--profile pilot 才启动） ----------
-  # 每个示例工位一台，与真设备一样走网络接入；系统侧的驱动与连接配置见 simulators/pilot-devices.json，
+  # 每个示例工位一台，与真设备一样走网络接入；系统侧的驱动与连接配置见 devices/simulators/pilot-devices.json，
   # 用 `docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset` 一次切换。
   # 首次启动把证书 / 令牌写到 ../secrets/<sila|opcua|gateway|fleet>/，适配器配置里引用的就是这些文件。
   # 每台还开一个统一控制口（9900，只在后端网络可见；令牌首次启动写到 ../secrets/simctl/）：
@@ -166,7 +166,7 @@ services:
     volumes:
       - ../secrets/sila:/run/secrets/ilcs/sila
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/sila_device/server.py"]
+    command: ["python", "devices/simulators/sila_device/server.py"]
 
   # ST-01-B 的中间库：试点用的 PostgreSQL（只在后端网络、信任认证、数据不落盘），
   # 设备侧轮询进程 sql-sim-slurry-b 扮演厂家调度软件。正式中间库要有口令，口令放 credential_ref 指向的文件。
@@ -203,7 +203,7 @@ services:
       SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-SLR-B.token
     volumes:
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/sql_device/worker.py"]
+    command: ["python", "devices/simulators/sql_device/worker.py"]
     depends_on:
       sql-sim-exchange:
         condition: service_healthy
@@ -223,7 +223,7 @@ services:
       SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-MIX-01.token
     volumes:
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/plc_device/server.py"]
+    command: ["python", "devices/simulators/plc_device/server.py"]
 
   plc-sim-coater:
     <<: *pilot-sim
@@ -243,7 +243,7 @@ services:
     volumes:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/plc_device/server.py"]
+    command: ["python", "devices/simulators/plc_device/server.py"]
 
   opcua-sim-calender:
     <<: *pilot-sim
@@ -261,7 +261,7 @@ services:
     volumes:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/opcua_device/server.py"]
+    command: ["python", "devices/simulators/opcua_device/server.py"]
 
   line-sim-oven:
     <<: *pilot-sim
@@ -277,7 +277,7 @@ services:
       SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-OVEN-01.token
     volumes:
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/line_device/server.py"]
+    command: ["python", "devices/simulators/line_device/server.py"]
 
   mtsics-sim-balance:
     <<: *pilot-sim
@@ -291,7 +291,7 @@ services:
       SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-BAL-01.token
     volumes:
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/mt_sics/server.py"]
+    command: ["python", "devices/simulators/mt_sics/server.py"]
 
   sila-sim-lh:
     <<: *pilot-sim
@@ -309,7 +309,7 @@ services:
     volumes:
       - ../secrets/sila:/run/secrets/ilcs/sila
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/sila_device/server.py"]
+    command: ["python", "devices/simulators/sila_device/server.py"]
 
   gateway-sim-cycler:
     <<: *pilot-sim
@@ -328,7 +328,7 @@ services:
     volumes:
       - ../secrets/gateway:/run/secrets/ilcs/gateway
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/http_gateway/server.py"]
+    command: ["python", "devices/simulators/http_gateway/server.py"]
 
   fleet-sim:
     <<: *pilot-sim
@@ -343,7 +343,7 @@ services:
     volumes:
       - ../secrets/fleet:/run/secrets/ilcs/fleet
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/fleet/server.py"]
+    command: ["python", "devices/simulators/fleet/server.py"]
 
   line-sim-arm:
     <<: *pilot-sim
@@ -359,11 +359,11 @@ services:
       SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-ARM-01.token
     volumes:
       - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "simulators/line_device/server.py"]
+    command: ["python", "devices/simulators/line_device/server.py"]
 
   # 结果文件接收器（可选，--profile results）：检测软件导出目录 → 关联检测任务 → 结果回传。
   # 先在「系统治理」创建服务身份并授权检测任务，口令写到 ../secrets/result-files/secret，
-  # 规则写到 ../secrets/result-files/result-files.json（示例见 connectors/result_files/README.md）。
+  # 规则写到 ../secrets/result-files/result-files.json（示例见 devices/connectors/result_files/README.md）。
   result-files:
     image: ilcs-api:latest
     container_name: ilcs-result-files
@@ -383,7 +383,7 @@ services:
     cap_drop:
       - ALL
     working_dir: /opt/ilcs
-    command: ["python", "connectors/result_files/receiver.py"]
+    command: ["python", "devices/connectors/result_files/receiver.py"]
     depends_on:
       api:
         condition: service_healthy

@@ -27,7 +27,7 @@ from ..adapters.acceptance import (
 )
 from ..adapters.base import AdapterError
 from ..adapters.registry import REAL_IMPLEMENTATIONS, contract_of, describe
-from ..adapters.simulation import SimulationAdapter
+from ..adapters.drivers.simulation import SimulationAdapter
 from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context

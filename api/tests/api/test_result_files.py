@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+if str(DEVICES) not in sys.path:
+    sys.path.insert(0, str(DEVICES))
 
 CAPACITY = "METRIC-discharge_capacity-v1"
 DENSITY = "METRIC-areal_density-v1"

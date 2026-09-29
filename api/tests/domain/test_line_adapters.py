@@ -19,13 +19,13 @@ def journal_dir(tmp_path, monkeypatch):
 
 
 def _line(port: int, dialect: str = "oven", **config):
-    from app.adapters.line_command import LineCommandAdapter
+    from app.adapters.drivers.line_command import LineCommandAdapter
 
     return LineCommandAdapter(record("串口 / TCP 命令", line_config(port, dialect, **config)))
 
 
 def _balance(port: int, **config):
-    from app.adapters.mt_sics import MtSicsAdapter
+    from app.adapters.drivers.mt_sics import MtSicsAdapter
 
     return MtSicsAdapter(record("MT-SICS", balance_config(port, **config)))
 
@@ -194,7 +194,7 @@ def test_corrupt_journal_refuses_to_guess(journal_dir):
 
 def test_serial_transport_rejects_unlisted_paths_and_hosts():
     from app.adapters import AdapterError
-    from app.adapters.line_command import LineCommandAdapter
+    from app.adapters.drivers.line_command import LineCommandAdapter
 
     for port in ("/etc/passwd", "rfc2217://evil.example:4001", "telnet://127.0.0.1:23"):
         with pytest.raises(AdapterError):
@@ -279,7 +279,7 @@ def test_barcode_reader_returns_the_code_as_an_immediate_result():
     import threading
 
     from app.adapters import AdapterError
-    from app.adapters.line_command import LineCommandAdapter
+    from app.adapters.drivers.line_command import LineCommandAdapter
 
     codes = iter(["TRAY-C02", "ERROR"])
     server = socket.socket()

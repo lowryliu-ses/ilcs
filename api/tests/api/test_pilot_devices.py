@@ -1,4 +1,4 @@
-"""试点设备预设（simulators/pilot-devices.json）：每个示例工位的驱动与连接配置。
+"""试点设备预设（devices/simulators/pilot-devices.json）：每个示例工位的驱动与连接配置。
 
 - 每条预设都能构造出驱动（主机、证书、凭据位置都校验），声明的能力与参数和种子里的工位极限对得上；
 - 一个绑定托盘的批次按预设全程走真实驱动：AGV 转运走车队 REST（rest_map_v1），ST-05 干燥箱走串口命令、
@@ -15,9 +15,10 @@ import pytest
 from tests.api.test_labware_transfer import _batch_with_labware, _dispatch, clean_labware  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-PRESETS = json.loads((ROOT / "simulators" / "pilot-devices.json").read_text(encoding="utf-8"))["stations"]
+DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+if str(DEVICES) not in sys.path:
+    sys.path.insert(0, str(DEVICES))
+PRESETS = json.loads((ROOT / "devices" / "simulators" / "pilot-devices.json").read_text(encoding="utf-8"))["stations"]
 SECRETS = "/run/secrets/ilcs"
 CONTRACT_DRIVERS = {"sila2_v1", "opcua_v1", "http_json_v1", "modbus_tcp_v1"}
 
@@ -218,7 +219,7 @@ def test_preset_switch_is_audited_and_reverts(tmp_path, monkeypatch, reset_runti
     for preset in PRESETS.values():
         hosts |= script.hosts_of(preset["config"])
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "127.0.0.1")
-    blocked = Namespace(station=None, preset=str(ROOT / "simulators" / "pilot-devices.json"), only=None,
+    blocked = Namespace(station=None, preset=str(ROOT / "devices" / "simulators" / "pilot-devices.json"), only=None,
                         skip_missing=True, channels=None, backup_dir=str(tmp_path))
     assert script.apply(blocked) == 2, "白名单缺主机：一个工位都不改"
 

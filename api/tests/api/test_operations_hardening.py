@@ -211,7 +211,7 @@ def test_device_callback_settles_command_and_advances(
 def _fault_first_command(operator, batch_id: str, executor) -> dict:
     """首条指令投递时网络超时：结果未知、可能已送达。"""
     from app.adapters import AdapterUnreachable
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
 
     original = SimulationAdapter.submit
 

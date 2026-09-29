@@ -24,9 +24,9 @@ def isolated(tmp_path, monkeypatch):
 
 def _adapter(protocol: str, port: int, cert_dir=None, **config):
     if protocol == "opcua":
-        from app.adapters.opcua_map import OpcUaMapAdapter as Adapter
+        from app.adapters.drivers.opcua_map import OpcUaMapAdapter as Adapter
     else:
-        from app.adapters.modbus_map import ModbusMapAdapter as Adapter
+        from app.adapters.drivers.modbus_map import ModbusMapAdapter as Adapter
     settings_, credential = plc_config(protocol, port, cert_dir, **config)
     return Adapter(record("PLC 点表", settings_, credential))
 

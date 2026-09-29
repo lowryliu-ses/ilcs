@@ -11,8 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+if str(DEVICES) not in sys.path:
+    sys.path.insert(0, str(DEVICES))
 
 # 模拟 PLC 不认参数名：能力码与参数槽位由适配器配置给出（与试点切换脚本按工位限值编号的方式一致）
 MODBUS_MAP = {
@@ -51,7 +52,7 @@ def request(command_id: str, type_: str = "dispatch", target: str = "", params=N
 
 @contextmanager
 def control_port(target, token: str = ""):
-    """模拟设备统一控制口（simulators/common/control.py），接入验收的故障注入与动作计数走它。"""
+    """模拟设备统一控制口（devices/simulators/common/control.py），接入验收的故障注入与动作计数走它。"""
     from simulators.common.control import ControlServer
 
     server = ControlServer(target, "127.0.0.1", 0, token).start()
@@ -135,7 +136,7 @@ def gateway_config(port: int, cert_dir: Path, device_id: str = "SIM-GW-T", **ext
 
 # ---------- 没有 ILCS 任务契约的设备：串口 / TCP 命令、MT-SICS ----------
 
-# 真空干燥箱温控仪表（simulators/line_device --dialect oven）的命令映射
+# 真空干燥箱温控仪表（devices/simulators/line_device --dialect oven）的命令映射
 OVEN_MAP = {
     "identity": {"send": "*IDN?", "pattern": "^(?P<vendor>[^,]*),(?P<model>[^,]*),(?P<device_id>[^,]*),(?P<firmware>.*)$"},
     "ready": {"send": "REM?", "pattern": "^(?P<value>\\w+)$", "ok": ["REMOTE"]},
@@ -157,7 +158,7 @@ OVEN_MAP = {
     "acknowledge": [{"send": "ACK", "expect": "^OK$"}],
 }
 
-# UR 仪表盘服务（simulators/line_device --dialect ur）
+# UR 仪表盘服务（devices/simulators/line_device --dialect ur）
 UR_MAP = {
     "write_terminator": "\n", "read_terminator": "\n",
     "greeting": "^Connected: Universal Robots Dashboard Server",
@@ -226,7 +227,7 @@ def balance_config(port: int, **extra) -> dict:
             "connect_timeout_sec": 1, "probe_interval_sec": 0.5, **BALANCE_MAP, **extra}
 
 
-# ---------- PLC 点表（simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
+# ---------- PLC 点表（devices/simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
 
 PLC_STATES = {"0": "idle", "1": "running", "2": "held", "3": "done", "4": "failed"}
 PLC_ERRORS = {"17": "过程报警", "23": "执行中断", "31": "程序号不存在", "90": "安全回路未闭合", "91": "不在远程模式",
@@ -329,7 +330,7 @@ def plc_config(protocol: str, port: int, cert_dir: Path | None = None, device_id
     return {**config, **extra}, ""
 
 
-# ---------- REST 接口映射（simulators/fleet：MiR 风格的 AGV 车队接口） ----------
+# ---------- REST 接口映射（devices/simulators/fleet：MiR 风格的 AGV 车队接口） ----------
 
 def fleet_mapping(positions: dict | None = None) -> dict:
     return {

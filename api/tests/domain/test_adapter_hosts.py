@@ -101,7 +101,7 @@ def test_drivers_accept_new_devices_inside_the_allowed_network(monkeypatch):
     """新设备落在已放行的网段里：驱动直接接受，不用改白名单、不用重启。"""
     from app.adapters.base import AdapterError
     from app.adapters.http_client import HttpTransport
-    from app.adapters.line_command import LineTransport
+    from app.adapters.drivers.line_command import LineTransport
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "10.20.1.0/24,.lab.internal")

@@ -7,7 +7,7 @@ from test_failure_paths import running_batch  # noqa: F401  （复用 fixture）
 @pytest.fixture()
 def measured(monkeypatch):
     """模拟设备回执里的测量值：按投递顺序依次取值，取完沿用最后一个。"""
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
 
     values: dict[str, list] = {}
     original = SimulationAdapter.submit

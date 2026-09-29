@@ -3,7 +3,7 @@ from .base import (
     CommandResult, DeviceAdapter,
 )
 from .registry import adapter_for
-from .simulation import SimulationAdapter
+from .drivers.simulation import SimulationAdapter
 
 __all__ = [
     "AdapterContract", "AdapterError", "AdapterIndeterminate", "AdapterUnreachable",

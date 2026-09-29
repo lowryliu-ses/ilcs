@@ -214,12 +214,18 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 ```
 api/         FastAPI 服务：core / models / domain / repositories / services / adapters / api
 api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单 → 0011 并行通道 / 设计空间 / 闭环提案 → 0012 角色权限 → 0013 队列索引 → 0014 执行器明细 → 0015 载具与位置 → 0016 流程控制 → 0017 任务树 → 0018 异常引擎 → 0019 重排建议 → 0020 出向事件
+api/openapi.json  OpenAPI 快照（scripts/export-openapi.py 生成，测试核对不漂移）
+api/app/adapters/ 设备驱动：框架层（契约、回执解读、作业台账、注册表、驱动目录、接入验收）+ drivers/（每种协议一个驱动）
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
-simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，同一套设备行为与故障注入，见 simulators/README.md
-connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
+devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.md
+  contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）、sql/（中间库）
+  simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
+  sdk/         设备网关 SDK ilcs_gateway：厂家 SDK / 私有协议包成 http_json_v1 网关
+  modules/     设备模块（一台设备一个交付目录），样板 sample-cycler
+  connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
-contracts/   OpenAPI 快照；设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
+secrets/     运行时证书与令牌（不进仓库）：compose 挂进容器的 sila/ opcua/ gateway/ fleet/ simctl/，本机直接跑模拟器用 local/
 docs/        需求文档与迁移报告
 ```
 
@@ -318,7 +324,7 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 ### 试点：外部模拟设备（每个示例工位一台）
 
 真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：每个示例工位一台，走各自的真实协议，
-只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [simulators/README.md](simulators/README.md)：
+只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
 
 | 工位 | 模拟设备 | 驱动 |
 |---|---|---|
@@ -340,7 +346,7 @@ sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,
 #   sila-sim-slurry-a,sql-sim-exchange,sql-sim-slurry-b,sila-sim-lh,plc-sim-mixer,plc-sim-coater,
 #   opcua-sim-calender,line-sim-oven,mtsics-sim-balance,gateway-sim-cycler,fleet-sim,line-sim-arm
 cd /opt/ilcs/deploy && docker compose --profile pilot up -d
-docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 simulators/pilot-devices.json 全部切换
+docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 devices/simulators/pilot-devices.json 全部切换
 ```
 
 切换写审计、可 `revert`；在线状态由执行器探测，切换后执行器自动跑一次只读级接入验收，通过了工位才接指令。
@@ -350,12 +356,12 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 ### 设备接入：模板与设备模块
 
 同一类设备有好几台时，把映射配置存成**设备接入模板**（「工位配置 → 设备接入模板」，发布要另一个人签名），工位套用模板、只填自己的连接参数。
-厂家只给 SDK / DLL 的设备按 [device-modules/README.md](device-modules/README.md) 写一个设备模块（基于 `sdk/ilcs_gateway` 的独立网关，
+厂家只给 SDK / DLL 的设备按 [devices/modules/README.md](devices/modules/README.md) 写一个设备模块（基于 `devices/sdk/ilcs_gateway` 的独立网关，
 自带模拟接口与测试，交付 `profile.json`），ILCS 侧用 `http_json_v1` 接入，不改代码、不重启。
 `python scripts/new-device-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。
 以前版本的 `sila-sim-cycler`、`modbus-sim-mixer`、`gateway-sim-coater` 已不在 compose 里：升级后
 `docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
-检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [connectors/result_files/README.md](connectors/result_files/README.md)）。
+检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [devices/connectors/result_files/README.md](devices/connectors/result_files/README.md)）。
 
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。
 

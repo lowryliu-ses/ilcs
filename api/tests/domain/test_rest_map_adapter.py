@@ -22,7 +22,7 @@ def isolated(tmp_path, monkeypatch):
 
 
 def _adapter(port: int, cert_dir, robot: str = "AGV-01", credential: str | None = None, **config):
-    from app.adapters.rest_map import RestMapAdapter
+    from app.adapters.drivers.rest_map import RestMapAdapter
 
     settings_, reference = fleet_config(port, cert_dir, robot, **config)
     return RestMapAdapter(record("REST 接口映射", settings_, reference if credential is None else credential))

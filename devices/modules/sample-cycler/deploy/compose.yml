@@ -1,0 +1,32 @@
+# 设备模块的 compose 片段：和 ILCS 放在同一台机器时，把它并进 deploy/docker-compose.yml 的 backend 网络；
+# 放在设备旁的工控机上时单独运行，ILCS 侧的白名单放行这台机器的地址或网段。
+#
+#   docker compose -f devices/modules/sample-cycler/deploy/compose.yml up -d
+#
+# ILCS 侧：导入 profile.json 成设备接入模板并发布；工位套用模板，连接参数填
+#   base_url = https://module-sample-cycler:8443/api/v1
+#   ca_file  = /run/secrets/ilcs/gateway/SIM-CYC-M1.crt   （把本服务生成的证书放进 ILCS 的凭据目录）
+#   credential_ref = file:///run/secrets/ilcs/gateway/SIM-CYC-M1.token
+services:
+  module-sample-cycler:
+    build:
+      context: ../../../..
+      dockerfile: devices/modules/sample-cycler/deploy/Dockerfile
+    image: ilcs-module-sample-cycler:latest
+    container_name: ilcs-module-sample-cycler
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      GATEWAY_DEVICE_ID: SIM-CYC-M1
+      GATEWAY_HOST_NAME: module-sample-cycler
+      # 接真机：去掉这行，设 VENDOR_SDK_MODULE 指向厂家 SDK 的包装模块
+      GATEWAY_SIMULATE: "1"
+    volumes:
+      - ./state:/var/lib/ilcs-gateway
+      - ./secrets:/run/secrets/gateway

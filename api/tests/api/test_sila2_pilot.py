@@ -8,8 +8,9 @@ import pytest
 from test_failure_paths import running_batch  # noqa: F401  （复用 fixture）
 
 ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+if str(DEVICES) not in sys.path:
+    sys.path.insert(0, str(DEVICES))
 
 STATIONS = ("ST-05", "ST-06", "ST-07")
 

@@ -108,7 +108,7 @@ def test_unknown_transfer_withdraws_action_and_recovers_after_verification(
     operator, clean_labware, executor,
 ):
     from app.adapters import AdapterUnreachable
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
 
     batch_id, labware = _batch_with_labware(operator)
     assert _dispatch(operator, batch_id).status_code == 200
@@ -161,7 +161,7 @@ def test_unknown_transfer_withdraws_action_and_recovers_after_verification(
 
 def test_partial_transfer_marks_labware_lost_until_rescanned(operator, clean_labware, executor):
     from app.adapters import AdapterUnreachable
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
 
     batch_id, labware = _batch_with_labware(operator)
     assert _dispatch(operator, batch_id).status_code == 200
@@ -224,7 +224,7 @@ def test_transfer_in_flight_cannot_be_held_and_abort_targets_the_carrier(
     operator, clean_labware, executor, monkeypatch,
 ):
     from app.adapters.base import CommandResult
-    from app.adapters.simulation import SimulationAdapter
+    from app.adapters.drivers.simulation import SimulationAdapter
     from app.core.clock import now
 
     original = SimulationAdapter.submit
