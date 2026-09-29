@@ -304,7 +304,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 - 迁移由 `scripts/migrate.py` 独立执行。`upgrade --stamp-baseline` 对**有老表但没有版本记录**的库打基线标记；空库直接从头建，不打标记（打了就再也不会建基线里的表）。
 - 结构可逆不等于业务动作可逆：`0003` 的 `downgrade()` 直接抛错。它把历史结果标成"未复核"，回退无法恢复"当初到底审过没有"——那个答案从来就不在库里。
 - 迁移不替业务做决定：在途批次、结果未知的指令、按步骤比例推算过的消耗量，都留在 `migrate.py verify` 的待确认清单里，由责任人处理（DEC-05）。
-- 迁移报告落在 `docs/migration-report.md` 与部署卷的 `/data/migration-report.md`。
+- 迁移报告落在部署卷的 `/data/migration-report.md`；首次迁移的那份存档在 `docs/archive/migration-report.md`。
 
 ## 六、验证
 

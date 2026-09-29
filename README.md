@@ -226,7 +226,7 @@ devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.m
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
 secrets/     运行时证书与令牌（不进仓库）：compose 挂进容器的 sila/ opcua/ gateway/ fleet/ simctl/，本机直接跑模拟器用 local/
-docs/        需求文档与迁移报告
+docs/        现行文档（设备适配器配置模板、操作案例、验收记录、SOP 模板、上线清单）；archive/ 是历史需求、评审与证据，见 docs/README.md
 ```
 
 ## 部署（10.10.106.51:8090）

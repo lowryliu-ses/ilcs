@@ -1,7 +1,7 @@
 """核心链路三次评审（2026-09-28）回归：评审 T01–T08 与补充复核 A01–A24。
 
 每条用例写的是目标行为。对应工作包修复之前标为 xfail(strict=True)：修好后用例转为通过，strict 模式
-会提醒去掉标记。场景来自评审附件与补充复核的复现脚本（output/reviews/2026-09-28）。
+会提醒去掉标记。场景来自评审附件与补充复核的复现脚本（报告归档在 docs/archive/reviews/，脚本未保留）。
 排程类的服务层用例在 test_third_review_scheduling.py，纯领域用例在 tests/domain/test_schedule_consistency.py。
 """
 import os

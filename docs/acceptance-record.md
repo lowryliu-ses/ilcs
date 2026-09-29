@@ -10,8 +10,8 @@
 
 | AC | 需求 | 证据 | 结论 |
 |---|---|---|---|
-| AC-01 | 用已有库副本迁移并核对 | 手工：先对 dev 库副本、再对 dev 库本体跑 `scripts/migrate.py upgrade --stamp-baseline`，产出 [migration-report.md](migration-report.md)；`tests/api/test_schema_guard.py::test_migration_reconciliation_report_passes_on_the_seeded_database` | 通过。历史 ID、快照、文件引用保留；差异逐项列出，历史结果标 `legacy_unreviewed` 而非伪造审核结论 |
-| AC-02 | 恢复备份后启动兼容版本 | `tests/api/test_schema_guard.py::test_startup_does_not_create_tables_or_seed`、`::test_expected_revision_matches_the_latest_migration`；`scripts/backup-and-recovery-drill.sh`；[本地 PG16 隔离恢复记录](recovery-drill-local-2026-09-22.md) | 通过。本地已验证真实 PG 备份恢复、全量数据哈希一致及当前应用启动兼容；脚本会校验数据库、文件摘要且不改变原有服务启停状态。目标机仍需按 AC-40 留存演练报告 |
+| AC-01 | 用已有库副本迁移并核对 | 手工：先对 dev 库副本、再对 dev 库本体跑 `scripts/migrate.py upgrade --stamp-baseline`，产出 [migration-report.md](archive/migration-report.md)；`tests/api/test_schema_guard.py::test_migration_reconciliation_report_passes_on_the_seeded_database` | 通过。历史 ID、快照、文件引用保留；差异逐项列出，历史结果标 `legacy_unreviewed` 而非伪造审核结论 |
+| AC-02 | 恢复备份后启动兼容版本 | `tests/api/test_schema_guard.py::test_startup_does_not_create_tables_or_seed`、`::test_expected_revision_matches_the_latest_migration`；`scripts/backup-and-recovery-drill.sh`；[本地 PG16 隔离恢复记录](archive/recovery-drill-local-2026-09-22.md) | 通过。本地已验证真实 PG 备份恢复、全量数据哈希一致及当前应用启动兼容；脚本会校验数据库、文件摘要且不改变原有服务启停状态。目标机仍需按 AC-40 留存演练报告 |
 | AC-03 | 跨组织读写 | `tests/api/test_access_scope.py::test_cross_organization_objects_are_invisible_everywhere`、`tests/api/test_resources_people.py::test_cross_organization_file_is_not_downloadable` | 通过。列表 / 主键 / 统计 / 附件一律 404，聚合计数不含他组织 |
 | AC-04 | 撤销成员、越权账号、后台任务组织 | `test_access_scope.py::test_revoked_membership_blocks_new_requests`、`::test_cannot_switch_to_an_organization_you_are_not_a_member_of`、`::test_disabled_account_cannot_act` | 通过。作用域只由成员关系决定，请求体里的 `organization_id` 被忽略 |
 | AC-05 | 未认证 / 停用凭据 / 授权外设备 | `test_access_scope.py::test_device_entries_require_service_credentials`、`::test_service_identity_is_limited_to_authorized_stations`、`::test_disabled_service_identity_is_rejected_immediately` | 通过。无匿名兼容路径 |
@@ -49,7 +49,7 @@
 | AC-37 | 真实设备完成实验 | `test_crud_flows.py::test_adapter_configuration_is_versioned_secret_safe_and_testable`、`tests/domain/test_http_json_adapter.py`、`test_failure_paths.py::test_real_async_adapter_is_polled_without_faking_telemetry` | **现场实机未验证。** 已内置 `http_json_v1` HTTPS 网关驱动，并用本地假设备覆盖身份核对、外置凭据、设备端去重、查询、异步完成、保持/终止及超时分类；真实设备断联、物理副作用与恢复仍待 DEC-02 |
 | AC-38 | 前端走通首期全流程 | 手工浏览器验收；`scripts/validate-compose-stack.sh` 在隔离 PG16 栈调用 `scripts/smoke.py`，完整完成方案审批 → 任务分配接单 → 批次排程下发 → 人工记录（签名）→ 设备步骤 → 3 秒等待由独立执行器唤醒 → 审核节点（操作员自审被拒、QA 通过）→ 检测任务 → LIMS 服务认证回传 → 8 条数据复核（1 条判无效）→ 报告草稿 / 提交 / 批准 / 发布 PDF、摘要核对与审计链 | 通过。全程只走 HTTP，不改库、不手工补步骤；等待与审核节点未跳过，余额、状态和发布快照联动正确 |
 | AC-39 | 原有流程回归 | `tests/api/test_master_data.py`、`test_failure_paths.py`、`test_editor_flows.py`、`test_crud_flows.py`、`tests/domain/test_scheduling.py`、`tests/domain/test_rules.py`、`tests/domain/test_lifecycle.py`、`tests/domain/test_recipe_rules.py` 全部通过；`web` 侧 `npm run build` 通过 | 通过。变更语义（样本→物理样本 + 运行分配、固定指标→版本化指标）有 `0003` 数据迁移 |
-| AC-40 | 服务重启、文件恢复、不兼容版本、首次部署 | `test_schema_guard.py`（不兼容库拒绝启动、空库迁移不造业务数据）、`scripts/migrate.py seed` 对正式库默认拒绝、`scripts/check-production-readiness.py`（不执行 env 内容的离线门禁）、`scripts/validate-compose-stack.sh`、[本地 Compose 完整部署记录](compose-validation-local-2026-09-22.md)、`scripts/backup-and-recovery-drill.sh`、[目标机只读探测记录](target-host-probe-2026-09-22.md) | 部分通过。已在隔离环境跑通 PG16、迁移、正式初始化、API/执行器/nginx、登录、非 root 只读容器及完整 HTTP 业务闭环，并覆盖配置占位符/密钥复用/PG 一致性/构建制品检查、停写备份、摘要、隔离恢复与业务核对；目标机 `10.10.106.51:22` 当前连接超时，未进入认证且未产生远端修改，**首次部署与整套恢复演练尚未执行** |
+| AC-40 | 服务重启、文件恢复、不兼容版本、首次部署 | `test_schema_guard.py`（不兼容库拒绝启动、空库迁移不造业务数据）、`scripts/migrate.py seed` 对正式库默认拒绝、`scripts/check-production-readiness.py`（不执行 env 内容的离线门禁）、`scripts/validate-compose-stack.sh`、[本地 Compose 完整部署记录](archive/compose-validation-local-2026-09-22.md)、`scripts/backup-and-recovery-drill.sh`、[目标机只读探测记录](archive/target-host-probe-2026-09-22.md) | 部分通过。已在隔离环境跑通 PG16、迁移、正式初始化、API/执行器/nginx、登录、非 root 只读容器及完整 HTTP 业务闭环，并覆盖配置占位符/密钥复用/PG 一致性/构建制品检查、停写备份、摘要、隔离恢复与业务核对；目标机 `10.10.106.51:22` 当前连接超时，未进入认证且未产生远端修改，**首次部署与整套恢复演练尚未执行** |
 
 ## 界面可达性（2026-09-22 补）
 
@@ -85,7 +85,7 @@
 
 ## 核心链路评审整改（2026-09-26 评审，2026-09-27 完成）
 
-评审报告：`output/reviews/2026-09-26/核心链路设计评审.md`。每项先写成在未修复代码上失败的用例，修复后通过；
+评审报告：[docs/archive/reviews/2026-09-26-核心链路设计评审.md](archive/reviews/2026-09-26-核心链路设计评审.md)。每项先写成在未修复代码上失败的用例，修复后通过；
 `CR` 为回归用例 `tests/api/test_core_chain_review.py`，`EXT` 为 `tests/api/test_automation_extensions.py`，`SCH` 为 `tests/domain/test_scheduling.py`。
 
 | 条目 | 场景 | 证据 | 结论 |
