@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import threading
+import time
 import urllib.request
 from typing import Callable
 
@@ -74,6 +75,19 @@ def serve_forever(device: SimulatedDevice, tick_seconds: float, stop_server: Cal
         if on_tick is not None:
             on_tick()
     stop_server()
+
+
+def restart(start: Callable[[], None], log: logging.Logger, attempts: int = 10, delay: float = 1.0) -> None:
+    """模拟离线结束后重新开始监听：失败就隔一会儿再试。重启失败不能让模拟设备从此停在离线——
+    验收清单的失联项目之后还要按指令号收尾，执行器也要能重新探测到它。"""
+    for attempt in range(1, attempts + 1):
+        try:
+            start()
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("模拟设备恢复监听失败（第 %d 次），%.0f 秒后重试", attempt, delay)
+            time.sleep(delay)
+    log.error("模拟设备恢复监听失败 %d 次，保持离线：请重启这个模拟设备", attempts)
 
 
 def configure_logging() -> None:

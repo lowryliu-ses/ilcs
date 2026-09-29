@@ -477,3 +477,30 @@ def test_interrupted_readonly_run_is_queued_again(admin, credential_root, reset_
         assert listed["runs"][1]["id"] == queued["id"] and listed["runs"][1]["state"] == "error"
         assert listed["runs"][0]["state"] == "queued" and listed["runs"][0]["trigger"] == "restart"
         assert listed["gate"]["required"] == "physical", "第一次接成真实设备欠的动作级照旧"
+
+
+def test_acceptance_defaults_come_from_the_template_or_the_adapter_config(admin, credential_root, reset_runtime, station):
+    """转运这类参数（起止位置）极限里没有：申请验收时缺省取设备接入模板或适配器配置里的验收缺省，照样按极限核对。"""
+    station_id = station
+    with gateway_sim(credential_root, task_seconds=0.3) as (_, _, port):
+        config, token = gateway_config(port, credential_root)
+        switched = _patch(admin, station_id, kind="real", driver="http_json_v1", protocol="HTTPS JSON",
+                          config={**config, "acceptance": {"capability": "cap.vacuum_dry",
+                                                           "params": {"temp": 100, "vacuum": 1, "program": "VD-100"}}},
+                          credential_ref=token)
+        assert switched.status_code == 200, switched.text
+        _station_pass(station_id)
+        defaults = _runs(admin, station_id)["defaults"]
+        assert defaults == {"capability": "cap.vacuum_dry", "params": {"temp": 100, "vacuum": 1, "program": "VD-100"},
+                            "source": "config"}
+        requested = _physical(admin, station_id)
+        assert requested.status_code == 201, requested.text
+        assert requested.json()["params"] == {"temp": 100, "vacuum": 1, "program": "VD-100"}
+        assert admin.post(f"/api/acceptance-runs/{requested.json()['id']}/cancel").status_code == 200
+
+        # 缺省参数落在极限外：申请时就拒绝，不拿它去动设备（验收缺省是自由字段，设备在动也能改）
+        outside = _patch(admin, station_id, config={**config, "acceptance": {"params": {"temp": 500, "vacuum": 1}}})
+        assert outside.status_code == 200, outside.text
+        _station_pass(station_id)
+        refused = _physical(admin, station_id)
+        assert refused.status_code == 422 and "超出" in refused.json()["detail"]["message"], refused.text

@@ -229,7 +229,8 @@ def balance_config(port: int, **extra) -> dict:
 # ---------- PLC 点表（simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
 
 PLC_STATES = {"0": "idle", "1": "running", "2": "held", "3": "done", "4": "failed"}
-PLC_ERRORS = {"17": "过程报警", "23": "执行中断", "31": "程序号不存在"}
+PLC_ERRORS = {"17": "过程报警", "23": "执行中断", "31": "程序号不存在", "90": "安全回路未闭合", "91": "不在远程模式",
+              "92": "上一作业未复位"}
 
 
 def _plc_mapping(points: dict, setpoints: tuple, capability: str, recipes: dict | None) -> dict:
@@ -250,6 +251,7 @@ def _plc_mapping(points: dict, setpoints: tuple, capability: str, recipes: dict 
         "capabilities": {capability: spec},
         "status": {"point": "state", "states": PLC_STATES},
         "error": {"point": "error", "codes": PLC_ERRORS},
+        "start_refused": {"codes": ["90", "91", "92"]},
         "hold": {"point": "cmd_hold", **pulse}, "resume": {"point": "cmd_resume", **pulse},
         "abort": {"point": "cmd_abort", **pulse}, "acknowledge": {"point": "cmd_ack", **pulse},
     }

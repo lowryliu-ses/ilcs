@@ -11,7 +11,7 @@ import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
-import type { AcceptanceListing, AcceptanceRun, AdapterRow, StationRow } from '../../shared/types';
+import type { AcceptanceDefaults, AcceptanceListing, AcceptanceRun, AdapterRow, StationRow } from '../../shared/types';
 import { Field, Modal, NumberInput, Pill, useToast } from '../../shared/ui';
 
 const RUN_PILL: Record<string, string> = {
@@ -21,6 +21,20 @@ const CHECK_PILL: Record<string, string> = { pass: 'running', fail: 'fault', ski
 
 function midpoints(window: Record<string, [number, number]> | undefined): Record<string, number> {
   return Object.fromEntries(Object.entries(window ?? {}).map(([name, [low, high]]) => [name, Number(((low + high) / 2).toFixed(6))]));
+}
+
+const SOURCE_LABEL: Record<string, string> = { template: '设备接入模板的验收缺省', config: '适配器配置的验收缺省', limits: '工位极限中点' };
+
+/* 某项能力的初始参数：缺省（模板 / 配置）里给了就用它，数值参数进表单，其余（起止位置等）进 JSON；否则取极限中点 */
+function initialParams(capability: string, window: Record<string, [number, number]>, defaults?: AcceptanceDefaults) {
+  const given = defaults && defaults.capability === capability ? defaults.params : {};
+  const numeric: Record<string, number | ''> = { ...midpoints(window) };
+  const extra: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(given)) {
+    if (name in window && typeof value === 'number') numeric[name] = value;
+    else if (!(name in window)) extra[name] = value;
+  }
+  return { numeric, extra: Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '' };
 }
 
 export function AcceptancePanel({ station, adapter }: { station: StationRow; adapter: AdapterRow }) {
@@ -168,6 +182,7 @@ export function AcceptancePanel({ station, adapter }: { station: StationRow; ada
         <PhysicalRequest
           station={station}
           adapter={adapter}
+          defaults={listing.data?.defaults}
           pending={request.pending}
           onClose={() => setPhysical(false)}
           onSubmit={async (payload) => {
@@ -242,17 +257,22 @@ function WaiveRequest({
 }
 
 function PhysicalRequest({
-  station, adapter, pending, onClose, onSubmit,
+  station, adapter, defaults, pending, onClose, onSubmit,
 }: {
   station: StationRow;
   adapter: AdapterRow;
+  defaults?: AcceptanceDefaults;
   pending: boolean;
   onClose: () => void;
   onSubmit: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const capabilities = Object.keys(station.limits ?? {}).sort();
-  const [capability, setCapability] = useState(capabilities[0] ?? '');
-  const [params, setParams] = useState<Record<string, number | ''>>(() => midpoints(station.limits?.[capabilities[0] ?? '']));
+  const first = defaults && capabilities.includes(defaults.capability) ? defaults.capability : capabilities[0] ?? '';
+  const [capability, setCapability] = useState(first);
+  const [params, setParams] = useState<Record<string, number | ''>>(
+    () => initialParams(first, station.limits?.[first] ?? {}, defaults).numeric,
+  );
+  const [extra, setExtra] = useState(() => initialParams(first, station.limits?.[first] ?? {}, defaults).extra);
   const [approval, setApproval] = useState('');
   const [faults, setFaults] = useState(false);
   const [error, setError] = useState('');
@@ -267,8 +287,22 @@ function PhysicalRequest({
       setError('每个参数都要填，且落在工位能力极限里');
       return;
     }
+    let structured: Record<string, unknown> = {};
+    if (extra.trim()) {
+      try {
+        structured = JSON.parse(extra);
+      } catch {
+        setError('其他参数要是 JSON 对象，例如 {"from": {"location_id": "HOTEL-01/S01"}}');
+        return;
+      }
+      if (!structured || typeof structured !== 'object' || Array.isArray(structured)) {
+        setError('其他参数要是 JSON 对象');
+        return;
+      }
+    }
     setError('');
-    onSubmit({ capability, params, approval: approval.trim(), faults }).catch((caught) => setError(caught.message));
+    onSubmit({ capability, params: { ...structured, ...params }, approval: approval.trim(), faults })
+      .catch((caught) => setError(caught.message));
   };
 
   return (
@@ -291,8 +325,10 @@ function PhysicalRequest({
           <select
             value={capability}
             onChange={(event) => {
+              const next = initialParams(event.target.value, station.limits?.[event.target.value] ?? {}, defaults);
               setCapability(event.target.value);
-              setParams(midpoints(station.limits?.[event.target.value]));
+              setParams(next.numeric);
+              setExtra(next.extra);
             }}
           >
             {capabilities.map((id) => <option key={id} value={id}>{id}</option>)}
@@ -309,6 +345,12 @@ function PhysicalRequest({
           </Field>
         ))}
       </div>
+      <Field
+        label="其他参数（JSON，可空）"
+        hint={`没有极限可核对的结构化参数，例如转运的起止位置；缺省取自${SOURCE_LABEL[defaults?.source ?? 'limits'] ?? '工位极限中点'}`}
+      >
+        <textarea rows={extra ? 5 : 2} className="mono" value={extra} onChange={(event) => setExtra(event.target.value)} />
+      </Field>
       <Field label="现场批准" hint="谁批准、依据是什么，例如「现场负责人 张工，已确认设备空载、周边无人」">
         <textarea rows={2} value={approval} onChange={(event) => setApproval(event.target.value)} />
       </Field>

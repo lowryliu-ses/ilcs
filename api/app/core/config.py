@@ -70,8 +70,9 @@ class Settings(BaseSettings):
     # 可写主机名、IP、网段（10.20.1.0/24）与域名后缀（.lab.internal），规则见 core/hosts.py
     adapter_allowed_hosts: str = "127.0.0.1,localhost"
     adapter_credential_root: str = "/run/secrets/ilcs"
-    # 接入验收里等一个动作做完的最长秒数（正常完成、丢回执后按指令号查回都按它等）
-    acceptance_poll_timeout_sec: float = 60.0
+    # 接入验收里等一个动作做完的最长秒数（正常完成、保持后续跑、丢回执后按指令号查回都按它等）。
+    # 要比验收用的那个动作长：模拟充放电柜一个循环 60 秒
+    acceptance_poll_timeout_sec: float = 180.0
     # 驱动自记的作业台账（串口命令、PLC 点表、REST 映射这类设备不认识 ILCS 指令号）。
     # 必须放持久卷：执行器重启后要靠它按原指令号回答「设备上怎样了」。留空 = file_root 的上一级 /adapter-state
     adapter_state_root: str = ""

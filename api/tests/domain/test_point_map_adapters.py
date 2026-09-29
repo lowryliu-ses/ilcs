@@ -148,6 +148,23 @@ def test_hold_resume_abort_and_failure_codes(protocol):
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_plc_that_refuses_the_start_is_a_clear_failure(protocol):
+    """PLC 不接这次启动（报 start_refused 里登记的故障码、停在空闲）：设备明确没动，判失败，不等启动超时转人工。"""
+    with plc_sim(protocol, task_seconds=0.3) as (program, _, port):
+        adapter = _adapter(protocol, port)
+        program.device.set_fault("busy")
+        assert adapter.submit(_coat("CMD-R")).state == "accepted", "启动沿写下去就是交接，拒不拒要看 PLC 的反应"
+        refused = _wait(adapter, "CMD-R", seconds=4)
+        assert refused.state == "failed" and "拒绝启动" in refused.error and "91" in refused.error, refused
+        assert sum(program.device.executions.values()) == 0
+        # 故障点上还留着 91：PLC 接了下一次启动就进入运行，不会被旧代码误判成拒绝
+        program.device.set_fault("none")
+        time.sleep(0.5)  # 等 PLC 扫描一轮：远程模式随故障清除恢复
+        adapter.submit(_coat("CMD-OK"))
+        assert _wait(adapter, "CMD-OK").state == "done"
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_stalled_plc_heartbeat_reads_as_lost(protocol):
     from app.adapters import AdapterUnreachable
 

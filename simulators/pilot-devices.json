@@ -254,6 +254,13 @@
             "92": "上一作业未复位"
           }
         },
+        "start_refused": {
+          "codes": [
+            "90",
+            "91",
+            "92"
+          ]
+        },
         "hold": {
           "point": "cmd_hold",
           "value": true,
@@ -446,6 +453,13 @@
             "91": "不在远程模式",
             "92": "上一作业未复位"
           }
+        },
+        "start_refused": {
+          "codes": [
+            "90",
+            "91",
+            "92"
+          ]
         },
         "hold": {
           "point": "cmd_hold",
@@ -804,6 +818,22 @@
           "url": "http://fleet-sim:9900",
           "token_ref": "file:///run/secrets/ilcs/simctl/fleet.token",
           "unit": "AGV-01"
+        },
+        "acceptance": {
+          "capability": "cap.transfer",
+          "params": {
+            "labware_id": "ACCEPTANCE",
+            "barcode": "ACCEPTANCE",
+            "from": {
+              "location_id": "HOTEL-01/S01",
+              "kind": "hotel"
+            },
+            "to": {
+              "location_id": "ST-05/N1",
+              "station_id": "ST-05",
+              "kind": "nest"
+            }
+          }
         }
       }
     },
@@ -907,6 +937,22 @@
           "url": "http://fleet-sim:9900",
           "token_ref": "file:///run/secrets/ilcs/simctl/fleet.token",
           "unit": "AGV-02"
+        },
+        "acceptance": {
+          "capability": "cap.transfer",
+          "params": {
+            "labware_id": "ACCEPTANCE",
+            "barcode": "ACCEPTANCE",
+            "from": {
+              "location_id": "HOTEL-01/S01",
+              "kind": "hotel"
+            },
+            "to": {
+              "location_id": "ST-06/N1",
+              "station_id": "ST-06",
+              "kind": "nest"
+            }
+          }
         }
       }
     },

@@ -41,12 +41,18 @@ class ControlTarget(Protocol):
 
 
 class DeviceTarget:
-    """用 `SimulatedDevice` 建模的模拟器：离线由协议层真的断开监听，其余故障交给设备模型。"""
+    """用 `SimulatedDevice` 建模的模拟器：离线由协议层真的断开监听，其余故障交给设备模型。
 
-    def __init__(self, device, go_offline: Callable[[float], None], *, knows_command_ids: bool = True):
+    `unsupported`：这台模拟设备在协议层注入不了的故障与原因（点表设备没有回执可丢）。控制口照样接受这些模式，
+    只是如实告诉验收清单，让它判跳过、不硬判不通过。
+    """
+
+    def __init__(self, device, go_offline: Callable[[float], None], *, knows_command_ids: bool = True,
+                 unsupported: dict[str, str] | None = None):
         self.device = device
         self.go_offline = go_offline
         self.knows_command_ids = knows_command_ids
+        self.unsupported = dict(unsupported or {})
 
     def set_fault(self, mode: str, parameter: float, unit: str = "") -> dict:
         if mode == "offline":
@@ -61,7 +67,7 @@ class DeviceTarget:
         row = {
             "device_id": raw.get("device_id"), "fault": raw.get("fault"), "fault_parameter": raw.get("fault_parameter"),
             "motions": sum(int(count) for count in executions.values()), "knows_command_ids": self.knows_command_ids,
-            "tasks": raw.get("tasks") or {},
+            "tasks": raw.get("tasks") or {}, "unsupported": dict(self.unsupported),
         }
         if self.knows_command_ids:
             row["executions"] = executions

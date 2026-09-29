@@ -84,6 +84,8 @@ COMMON = (
     ConfigField("material_map", "实测值折算物料", "object", hint="{实测参数: {material, unit, factor}}"),
     ConfigField("simulator_control", "模拟设备控制口", "object", connection=True,
                 hint="只对自报为模拟器的设备生效：{url, token_ref, unit}；接真机时删掉"),
+    ConfigField("acceptance", "验收缺省", "object",
+                hint="{capability, params}：申请接入验收时缺省用的能力与参数（转运给起止位置 from / to）"),
 )
 JOBS = (
     ConfigField("start_timeout_sec", "启动确认超时（秒）", "number", hint="发了启动却一直没见到运行，超过它判结果未知"),
@@ -220,6 +222,8 @@ POINT_MAP = (
     ConfigField("capabilities", "能力映射", "object", required=True, hint="每项能力的常量、程序号、设定值、启动、实测"),
     ConfigField("status", "状态点与状态映射", "object", required=True),
     ConfigField("error", "故障点与故障码", "object"),
+    ConfigField("start_refused", "拒绝启动的故障码", "object",
+                hint='{"codes": ["90", "91"], "after_sec": 1}：写下启动沿后 PLC 停在空闲并报这些码 = 明确拒绝、没有动作'),
     ConfigField("hold", "保持", "object"), ConfigField("resume", "恢复", "object"),
     ConfigField("abort", "终止", "object"), ConfigField("acknowledge", "复位", "object"),
 )

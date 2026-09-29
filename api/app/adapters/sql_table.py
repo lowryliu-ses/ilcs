@@ -49,6 +49,9 @@ def _now() -> str:
 
 
 class SqlTableAdapter:
+    # 插入作业行就是交接：设备侧轮询到才判断，拒绝（忙、联锁）异步回写成 rejected（接入验收据此等回写）
+    handoff = "async"
+
     def __init__(self, record):
         from sqlalchemy.engine import make_url
 
@@ -179,6 +182,11 @@ class SqlTableAdapter:
         if isinstance(methods, list):
             identity["methods"] = methods
         return identity
+
+    @property
+    def offline_after_sec(self) -> float:
+        """设备侧软件停了多久才判得出失联：心跳超时（接入验收的失联项目据此断开足够久）。"""
+        return self.stale
 
     def healthcheck(self) -> dict:
         identity = self.identity()

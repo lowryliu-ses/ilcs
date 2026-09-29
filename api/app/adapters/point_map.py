@@ -42,6 +42,8 @@ STATE_NAMES = {"idle", "running", "held", "done", "failed"}
 
 class PointMapAdapter(MappedJobAdapter):
     NOTE = "PLC 点表映射"
+    # 写下设定值与启动沿就是交接：PLC 扫描到才判断，拒绝（忙、联锁）要之后读状态点才看得到（接入验收据此等它）
+    handoff = "async"
 
     def __init__(self, record, journal_key: str = ""):
         super().__init__(record, journal_key)
@@ -229,6 +231,23 @@ class PointMapAdapter(MappedJobAdapter):
 
     def device_state(self) -> str:
         return self.read_status({})[0]
+
+    def start_refused(self, job: dict, elapsed: float) -> str:
+        """启动沿写下去、PLC 停在空闲并在故障点报了 `start_refused.codes` 里的代码：设备明确拒绝了这次启动，没有动作。
+
+        `after_sec`（缺省 1 秒）之后才认：故障点上可能还留着上一次拒绝的代码，给 PLC 一个扫描周期先做出反应——
+        它接了这次启动就会进入运行，不会走到这里。
+        """
+        spec = self.config.get("start_refused") or {}
+        codes = {str(code) for code in spec.get("codes") or []}
+        error = self.config.get("error") or {}
+        if not codes or not error.get("point") or elapsed < float(spec.get("after_sec", 1.0)):
+            return ""
+        code = self._read(error["point"])
+        code = str(int(code)) if isinstance(code, float) and code.is_integer() else str(code)
+        if code not in codes:
+            return ""
+        return f"设备拒绝启动：{(error.get('codes') or {}).get(code, '故障码 ' + code)}（故障码 {code}），设备没有动作"
 
     def read_actuals(self, job: dict, spec: dict) -> dict:
         actuals = {}

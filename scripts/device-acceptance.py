@@ -117,7 +117,8 @@ def main() -> int:
     parser.add_argument("--physical", action="store_true", help="加上会让设备动作的项目")
     parser.add_argument("--confirm", default="", help="真实设备跑动作项目时填工位编号，表示现场负责人已批准")
     parser.add_argument("--faults", action="store_true", help="模拟设备的故障项目（需要登记模拟设备控制口）")
-    parser.add_argument("--timeout", type=float, default=60.0, help="等动作完成的秒数")
+    parser.add_argument("--timeout", type=float, default=None,
+                        help="每个动作项目等完成的秒数（缺省取 ILCS_ACCEPTANCE_POLL_TIMEOUT_SEC）")
     parser.add_argument("--output", help="报告另存为 Markdown 文件")
     parser.add_argument("--json", dest="json_path", help="报告另存为 JSON 文件")
     args = parser.parse_args()
@@ -166,7 +167,7 @@ def main() -> int:
     report = run_acceptance(
         record, factory, template, contract=contract_of(record, capabilities).as_dict(),
         describe=lambda instance: describe(instance, record), physical=args.physical,
-        injector=injector, poll_timeout=args.timeout, fault_note=note,
+        injector=injector, poll_timeout=args.timeout or settings.acceptance_poll_timeout_sec, fault_note=note,
     )
     text = report.markdown()
     print(text)

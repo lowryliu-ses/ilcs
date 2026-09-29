@@ -34,7 +34,9 @@ from asyncua import Server, ua  # noqa: E402
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
 from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.opcua import CLIENT_NAME, CLIENT_URI, ServerSecurity  # noqa: E402,F401
-from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
+from simulators.common.runtime import (  # noqa: E402
+    build_device, configure_logging, device_arguments, restart, serve_forever,
+)
 
 CONTRACT = json.loads((ROOT / "contracts" / "opcua" / "TaskExecution.json").read_text(encoding="utf-8"))
 REJECTION_CODES = {
@@ -171,11 +173,14 @@ class SimulatorRunner:
         self.refresh()
         log.info("OPC UA 模拟设备 %s 已启动：%s", self.args.device_id, self.endpoint)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 30) -> None:
         with self.lock:
             server, self.server, self.variables = self.server, None, {}
-            if server is not None:
-                self._call(server.stop())
+        if server is not None:
+            try:
+                self._call(server.stop(), timeout=timeout)
+            except Exception:  # noqa: BLE001  asyncua 等客户端会话收尾可能一直不返回：监听已经关了，旧服务对象放弃
+                log.warning("OPC UA 服务停止超时：监听已关闭，放弃旧的服务对象")
 
     def control_target(self) -> DeviceTarget:
         """统一控制口（simulators/common/control.py）：OPC UA TaskExecution 设备认 ILCS 指令号。"""
@@ -184,10 +189,12 @@ class SimulatorRunner:
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)  # 先把 SetFault 的应答送回去
-            self.stop()
-            log.info("模拟离线 %.0f s", seconds)
-            time.sleep(seconds)
-            self.start()
+            try:
+                self.stop(timeout=5)
+                log.info("模拟离线 %.0f s", seconds)
+                time.sleep(seconds)
+            finally:
+                restart(self.start, log)
 
         threading.Thread(target=cycle, daemon=True).start()
 

@@ -184,7 +184,9 @@ class SqlDeviceWorker:
 
     def control_target(self) -> DeviceTarget:
         """统一控制口（simulators/common/control.py）：中间库作业表的主键就是 ILCS 指令号。"""
-        return DeviceTarget(self.device, self.go_offline)
+        return DeviceTarget(self.device, self.go_offline, unsupported={
+            "lost_receipt": "中间表：插入作业行就是交接，设备侧回写迟到由按指令号查询覆盖；回执丢失在交接层注入不了",
+        })
 
     def stop(self) -> None:
         self.stop_event.set()

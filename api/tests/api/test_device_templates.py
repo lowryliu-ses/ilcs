@@ -136,6 +136,8 @@ def test_template_lifecycle_apply_and_upgrade(admin, qa, station, reset_runtime)
         _station_pass(station)
         runs = admin.get(f"/api/stations/{station}/adapter/acceptance").json()
         assert runs["gate"]["required"] == "" and runs["runs"][0]["template"]["revision"] == 1, runs
+        assert runs["defaults"] == {"capability": "cap.vacuum_dry", "params": {"temp": 120, "vacuum": 1},
+                                    "source": "template"}, "申请验收的缺省取模板的验收缺省"
         report = admin.get(f"/api/acceptance-runs/{runs['runs'][0]['id']}").json()["report_md"]
         assert "设备接入模板 TPL-OVEN-VD r1" in report
 

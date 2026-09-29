@@ -35,7 +35,7 @@ from ..core.errors import NotFound, StateConflict, ValidationFailed
 from ..domain.adapter_rules import (
     LEVEL_LABELS, PHYSICAL, READONLY, acceptance_reason, acceptance_requirement, acceptance_satisfies,
 )
-from ..models import AcceptanceRun, Adapter, Station, User
+from ..models import AcceptanceRun, Adapter, DeviceTemplate, Station, User
 from ..repositories.execution import CommandRepository
 from ..repositories.resources import StationRepository
 from .audit_service import AuditService
@@ -84,6 +84,32 @@ def gate_out(adapter: Adapter) -> dict[str, Any]:
         "reason": acceptance_reason(adapter.station_id, required, adapter.config_version) if required else "",
         "accepted_config_version": adapter.accepted_config_version, "accepted_run_id": adapter.accepted_run_id,
     }
+
+
+def acceptance_defaults(db: Session, adapter: Adapter, limits: dict[str, Any]) -> dict[str, Any]:
+    """申请验收时缺省用哪项能力、什么参数。
+
+    依次取：套用的设备接入模板的验收缺省 → 适配器配置里的 `acceptance` → 工位第一项能力、参数取极限中点。
+    转运这类参数（起止位置）极限里没有，只能从前两处来。能力要是这台工位登记了的，否则跳过这一处。
+    """
+    sources: list[tuple[str, dict]] = []
+    if adapter.template_id:
+        template = db.get(DeviceTemplate, adapter.template_id)
+        if template is not None and isinstance(template.acceptance, dict):
+            sources.append(("template", template.acceptance))
+    configured = (adapter.config or {}).get("acceptance")
+    if isinstance(configured, dict):
+        sources.append(("config", configured))
+    first = next(iter(sorted(limits or {})), "")
+    for source, spec in sources:
+        capability = str(spec.get("capability") or first)
+        if limits and capability not in limits:
+            continue
+        params = spec.get("params")
+        if isinstance(params, dict) and params:
+            return {"capability": capability, "params": dict(params), "source": source}
+        return {"capability": capability, "params": default_template("", limits, capability).params, "source": source}
+    return {"capability": first, "params": default_template("", limits, first).params, "source": "limits"}
 
 
 def _active_runs(db: Session, station_id: str) -> list[AcceptanceRun]:
@@ -208,15 +234,17 @@ class AcceptanceService:
         if _active_runs(self.db, station_id):
             raise StateConflict(f"{station_id} 已有排队或进行中的接入验收，等它出结论后再申请", code="acceptance_busy")
         limits = station.limits or {}
-        capability = str(payload.get("capability") or next(iter(sorted(limits)), ""))
+        defaults = acceptance_defaults(self.db, adapter, limits)
+        capability = str(payload.get("capability") or defaults["capability"])
         if limits and capability not in limits:
             raise ValidationFailed(f"{station_id} 没有能力 {capability}（工位能力：{'、'.join(sorted(limits))}）",
                                    code="acceptance_capability_invalid")
         params = payload.get("params")
-        if params is not None:
-            params = self._checked_params(station_id, limits.get(capability) or {}, params)
-        else:
-            params = default_template(station_id, limits, capability).params
+        if params is None:
+            # 缺省参数同样按工位极限核对：模板里的验收缺省不一定落在这台工位的极限里
+            params = defaults["params"] if capability == defaults["capability"] else \
+                default_template(station_id, limits, capability).params
+        params = self._checked_params(station_id, limits.get(capability) or {}, params)
         approval, signature_id = str(payload.get("approval") or "").strip(), ""
         if level == PHYSICAL:
             if not approval:
@@ -309,7 +337,9 @@ class AcceptanceService:
             self.db.query(AcceptanceRun).filter(AcceptanceRun.station_id == station_id)
             .order_by(AcceptanceRun.created_at.desc()).limit(max(1, min(limit, 100))).all()
         )
-        return {"station_id": station_id, "gate": gate_out(adapter), "runs": [run_out(run) for run in runs]}
+        station = self.stations.get(station_id)
+        return {"station_id": station_id, "gate": gate_out(adapter), "runs": [run_out(run) for run in runs],
+                "defaults": acceptance_defaults(self.db, adapter, (station.limits if station else None) or {})}
 
     def get(self, run_id: str) -> AcceptanceRun:
         run = self.db.get(AcceptanceRun, run_id)

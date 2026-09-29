@@ -809,7 +809,15 @@ export type AcceptanceRun = {
   report_md?: string;
 };
 
-export type AcceptanceListing = { station_id: string; gate: AcceptanceGate; runs: AcceptanceRun[] };
+/** 申请验收时的缺省能力与参数：设备接入模板的验收缺省 → 适配器配置里的 acceptance → 工位极限中点 */
+export type AcceptanceDefaults = { capability: string; params: Record<string, unknown>; source: 'template' | 'config' | 'limits' };
+
+export type AcceptanceListing = {
+  station_id: string;
+  gate: AcceptanceGate;
+  runs: AcceptanceRun[];
+  defaults?: AcceptanceDefaults;
+};
 
 /** 驱动目录：驱动自己声明的配置项，界面据此出表单、保存前据此校验 */
 export type DriverField = {

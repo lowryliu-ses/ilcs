@@ -8,6 +8,7 @@
 - 同一时刻只有一个在途作业。设备在运行或保持中就明确拒绝（DeviceBusy），不排队、不覆盖；
   设备停在上一个作业的完成 / 故障状态时先复位，复位不了也拒绝。
 - 结论看设备状态：见到运行后回到空闲或报完成 → 完成；报故障 → 失败（带实测值与故障说明）。
+  设备停在空闲、报了登记为「拒绝启动」的故障码（`start_refused`，子类实现）→ 设备明确没动，明确失败；
   发了启动命令却一直没见到运行、也没有完成信号，超过 `start_timeout_sec` 就是**结果未知**，转人工核查，不猜。
 - 启动命令发出之前的失败（参数写不进、回复报错）设备没有动作 → 明确失败；启动命令发出之后
   没拿到确认 → 台账记「未确认」，回执是结果未知，之后见到设备在运行才按运行处理，质量标 uncertain。
@@ -419,6 +420,8 @@ class MappedJobAdapter:
             job["seen_running"] = True
             job["state"] = "running"
             job["phase"] = "held" if state == "held" else ""
+        elif state == "idle" and not job.get("seen_running") and (refused := self.start_refused(job, elapsed)):
+            self._finish(job, "failed", refused)
         elif state == "failed" and not (job.get("pre_state") == "failed" and not job.get("seen_running")):
             if unconfirmed:
                 job["quality"] = "uncertain"
@@ -444,6 +447,10 @@ class MappedJobAdapter:
                 self.journal.save()
             except AdapterError as exc:
                 raise AdapterIndeterminate(str(exc)) from exc
+
+    def start_refused(self, job: dict, elapsed: float) -> str:
+        """启动命令发出后设备停在空闲、明确表示拒绝了这次启动时，返回原因；缺省不判（等启动超时）。"""
+        return ""
 
     # ---------- 契约 ----------
 

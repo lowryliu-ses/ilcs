@@ -1,4 +1,5 @@
 """设备接入验收清单：对进程内的外部模拟设备跑一遍。模拟设备走真实协议，驱动不打桩。"""
+from contextlib import contextmanager
 import importlib.util
 from pathlib import Path
 
@@ -282,3 +283,85 @@ def test_cleanup_stops_what_acceptance_left_running_or_reports_it():
     assert _cleanup(blind, ["ACC-T-run"], supports_query=False).leftovers == []
     # 连驱动实例都建不起来：发过的全算残留
     assert _cleanup(None, ["ACC-T-lost"]).leftovers == ["ACC-T-lost"]
+
+
+PILOT_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet", "sql_table")
+
+
+@contextmanager
+def _pilot_simulator(kind: str, root: Path):
+    """一种试点模拟设备 + 它的统一控制口：返回 (适配器登记, 驱动工厂, 验收指令模板, 注入器)。"""
+    from app.adapters.acceptance import SimulatorControlInjector
+    from sim_harness import (
+        control_port, fleet_config, fleet_sim, opcua_config, opcua_sim, plc_config, plc_sim, transfer,
+    )
+
+    if kind.startswith("plc_"):
+        from app.adapters.modbus_map import ModbusMapAdapter
+        from app.adapters.opcua_map import OpcUaMapAdapter
+
+        protocol = kind.split("_", 1)[1]
+        with plc_sim(protocol, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
+            config, credential = plc_config(protocol, port)
+            rec = record("PLC 点表", config, credential, driver=f"{protocol}_map_v1", kind="real")
+            implementation = OpcUaMapAdapter if protocol == "opcua" else ModbusMapAdapter
+            yield rec, (lambda: implementation(rec)), request("", params={"thickness": 180, "temp": 110},
+                                                              capability="cap.coat"), \
+                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+    elif kind == "opcua_task":
+        from app.adapters.opcua import OpcUaAdapter
+
+        with opcua_sim(task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
+            config, credential = opcua_config(port)
+            rec = record("OPC UA TaskExecution", config, credential, driver="opcua_v1", kind="real")
+            yield rec, (lambda: OpcUaAdapter(rec)), request(""), \
+                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+    elif kind == "fleet":
+        from app.adapters.rest_map import RestMapAdapter
+
+        with fleet_sim(root, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
+            config, credential = fleet_config(port, root)
+            rec = record("REST 接口映射", config, credential, driver="rest_map_v1", kind="real")
+            yield rec, (lambda: RestMapAdapter(rec)), transfer(""), \
+                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
+    else:
+        from app.adapters.sql_table import SqlTableAdapter
+        from simulators.sql_device.worker import SqlDeviceWorker
+        from sim_harness import _device
+
+        url = f"sqlite:///{root / 'exchange.db'}"
+        worker = SqlDeviceWorker(url, _device("SIM-SQL-T", task_seconds=0.4), poll_seconds=0.05)
+        worker.start()
+        try:
+            with control_port(worker.control_target()) as control:
+                rec = record("数据库中间表", {"url": url, "device_id": "SIM-SQL-T", "request_timeout_sec": 3,
+                                            "heartbeat_stale_sec": 1.5}, driver="sql_table_v1", kind="real")
+                yield rec, (lambda: SqlTableAdapter(rec)), request(""), \
+                    SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+        finally:
+            worker.stop()
+
+
+@pytest.mark.parametrize("kind", PILOT_SIMULATORS)
+def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, tmp_path, monkeypatch):
+    """试点的每一类模拟设备都跑完整清单（动作 + 故障）：没有误判的不通过，也不留下没结束的验收指令。
+
+    模拟设备注入不了的故障（点表设备没有回执可丢、中间表插入作业行就是交接）由控制口说明，清单判跳过；
+    中间表的拒绝是设备侧轮询到作业行后异步回写的，失联要等心跳超时才看得出来。
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "adapter_state_root", str(tmp_path / "adapter-state"))
+    with _pilot_simulator(kind, credential_root) as (rec, factory, template, injector):
+        report = _run(rec, factory, template, physical=True, injector=injector)
+    states = {check.key: check.state for check in report.checks}
+    assert report.ok and not report.leftovers, report.markdown()
+    assert states["complete"] == "pass" and states["abort"] == "pass", states
+    if kind in {"plc_opcua", "plc_modbus", "sql_table"}:
+        assert states["lost_receipt"] == "skip", states
+    else:
+        assert states["lost_receipt"] == "pass", states
+    assert states["busy"] == states["interlock"] == states["offline"] == "pass", report.markdown()
+    for key in ("busy", "interlock"):
+        detail = next(check.detail for check in report.checks if check.key == key)
+        assert "ACC-" not in detail, f"{key} 要测到注入的故障，不能被前一条探针挡住：{detail}"

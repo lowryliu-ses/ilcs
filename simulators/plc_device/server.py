@@ -37,7 +37,9 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
 from simulators.common.control import DeviceTarget, start_control  # noqa: E402
-from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
+from simulators.common.runtime import (  # noqa: E402
+    build_device, configure_logging, device_arguments, restart, serve_forever,
+)
 
 MARK = "ILCS-SIMULATOR"
 NAMESPACE = "urn:ilcs:sim:plc"
@@ -269,10 +271,13 @@ class OpcUaPlc:
         self.server = self._call(self._build())
         log.info("PLC 模拟设备（OPC UA）%s 已启动：%s", self.args.device_id, self.endpoint)
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 30) -> None:
         server, self.server = self.server, None
         if server is not None:
-            self._call(server.stop())
+            try:
+                self._call(server.stop(), timeout=timeout)
+            except Exception:  # noqa: BLE001  asyncua 等客户端会话收尾可能一直不返回：监听已经关了，旧服务对象放弃
+                log.warning("OPC UA 服务停止超时：监听已关闭，放弃旧的服务对象")
 
 
 # ---------- Modbus ----------
@@ -392,15 +397,19 @@ class SimulatorRunner:
 
     def control_target(self) -> DeviceTarget:
         """统一控制口（simulators/common/control.py）：PLC 自有点表不认 ILCS 指令号，只报总动作次数。"""
-        return DeviceTarget(self.program.device, self.go_offline, knows_command_ids=False)
+        return DeviceTarget(self.program.device, self.go_offline, knows_command_ids=False, unsupported={
+            "lost_receipt": "点表设备没有回执：启动沿写下去 PLC 就开始动作，协议层没有可以丢的应答",
+        })
 
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)
-            self.io.stop()
-            log.info("模拟离线 %.0f s", seconds)
-            time.sleep(seconds)
-            self.io.start()
+            try:
+                self.io.stop(**({"timeout": 5} if isinstance(self.io, OpcUaPlc) else {}))
+                log.info("模拟离线 %.0f s", seconds)
+                time.sleep(seconds)
+            finally:
+                restart(self.io.start, log)
 
         threading.Thread(target=cycle, daemon=True).start()
 
