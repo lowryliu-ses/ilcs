@@ -272,10 +272,12 @@ class OpcUaPlc:
         log.info("PLC 模拟设备（OPC UA）%s 已启动：%s", self.args.device_id, self.endpoint)
 
     def stop(self, timeout: float = 30) -> None:
+        from simulators.common.opcua import stop_hard
+
         server, self.server = self.server, None
         if server is not None:
             try:
-                self._call(server.stop(), timeout=timeout)
+                self._call(stop_hard(server), timeout=timeout)
             except Exception:  # noqa: BLE001  asyncua 等客户端会话收尾可能一直不返回：监听已经关了，旧服务对象放弃
                 log.warning("OPC UA 服务停止超时：监听已关闭，放弃旧的服务对象")
 

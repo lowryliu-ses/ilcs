@@ -33,7 +33,7 @@ from asyncua import Server, ua  # noqa: E402
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
 from simulators.common.control import DeviceTarget, start_control  # noqa: E402
-from simulators.common.opcua import CLIENT_NAME, CLIENT_URI, ServerSecurity  # noqa: E402,F401
+from simulators.common.opcua import CLIENT_NAME, CLIENT_URI, ServerSecurity, stop_hard  # noqa: E402,F401
 from simulators.common.runtime import (  # noqa: E402
     build_device, configure_logging, device_arguments, restart, serve_forever,
 )
@@ -178,7 +178,7 @@ class SimulatorRunner:
             server, self.server, self.variables = self.server, None, {}
         if server is not None:
             try:
-                self._call(server.stop(), timeout=timeout)
+                self._call(stop_hard(server), timeout=timeout)
             except Exception:  # noqa: BLE001  asyncua 等客户端会话收尾可能一直不返回：监听已经关了，旧服务对象放弃
                 log.warning("OPC UA 服务停止超时：监听已关闭，放弃旧的服务对象")
 

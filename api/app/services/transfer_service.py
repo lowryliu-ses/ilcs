@@ -19,6 +19,7 @@ from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
+from ..adapters.base import TRANSFER_CAPABILITY
 from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext
@@ -34,7 +35,6 @@ from ..repositories.base import ScopedRepository
 from .audit_service import AuditService
 
 TRANSFER = "transfer"
-TRANSFER_CAPABILITY = "cap.transfer"
 OPEN_COMMAND_STATES = ("sent", "accepted", "running", "unknown", "manual")
 ENDED_BATCH_STATES = ("done", "aborted")
 

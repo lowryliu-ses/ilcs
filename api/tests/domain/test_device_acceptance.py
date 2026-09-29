@@ -291,7 +291,7 @@ PILOT_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet", "sql_table
 @contextmanager
 def _pilot_simulator(kind: str, root: Path):
     """一种试点模拟设备 + 它的统一控制口：返回 (适配器登记, 驱动工厂, 验收指令模板, 注入器)。"""
-    from app.adapters.acceptance import SimulatorControlInjector
+    from app.adapters.acceptance import SimulatorControlInjector, default_template
     from sim_harness import (
         control_port, fleet_config, fleet_sim, opcua_config, opcua_sim, plc_config, plc_sim, transfer,
     )
@@ -322,7 +322,10 @@ def _pilot_simulator(kind: str, root: Path):
         with fleet_sim(root, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
             config, credential = fleet_config(port, root)
             rec = record("REST 接口映射", config, credential, driver="rest_map_v1", kind="real")
-            yield rec, (lambda: RestMapAdapter(rec)), transfer(""), \
+            # 和执行器一样按缺省模板造验收指令：转运能力发 type = transfer，参数取验收缺省里的起止位置
+            template = default_template("ST-SIM", {"cap.transfer": {}}, "cap.transfer", dict(transfer("").params))
+            assert template.type == "transfer"
+            yield rec, (lambda: RestMapAdapter(rec)), template, \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
     else:
         from app.adapters.sql_table import SqlTableAdapter
@@ -352,10 +355,36 @@ def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, 
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "adapter_state_root", str(tmp_path / "adapter-state"))
+    count = {"live": 0, "peak": 0}
+
+    def counted(factory):
+        """数同时开着的驱动实例：每个实例占中间库一条连接、OPC UA 一个会话，轮询时不关会把设备占满。"""
+        def build():
+            instance = factory()
+            original = getattr(instance, "close", None)
+            count["live"] += 1
+            count["peak"] = max(count["peak"], count["live"])
+
+            def close():
+                if not getattr(instance, "_closed_once", False):
+                    instance._closed_once = True
+                    count["live"] -= 1
+                if original is not None:
+                    original()
+
+            instance.close = close
+            return instance
+
+        return build
+
     with _pilot_simulator(kind, credential_root) as (rec, factory, template, injector):
-        report = _run(rec, factory, template, physical=True, injector=injector)
+        report = _run(rec, counted(factory), template, physical=True, injector=injector)
     states = {check.key: check.state for check in report.checks}
     assert report.ok and not report.leftovers, report.markdown()
+    assert count["live"] == 0, "验收建的驱动实例结束时都要关掉"
+    assert count["peak"] <= 12, f"同时开着 {count['peak']} 个驱动实例：轮询时用完就关"
+    offline = next(check.detail for check in report.checks if check.key == "offline")
+    assert "OperationalError" not in offline and "too many" not in offline, offline
     assert states["complete"] == "pass" and states["abort"] == "pass", states
     if kind in {"plc_opcua", "plc_modbus", "sql_table"}:
         assert states["lost_receipt"] == "skip", states

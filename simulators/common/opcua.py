@@ -55,3 +55,17 @@ class ServerSecurity:
         await server.load_certificate(str(self.cert), format="pem")
         await server.load_private_key(str(self.key), format="pem")
         server.set_certificate_validator(self.validate)
+
+
+async def stop_hard(server) -> None:
+    """模拟断网：先关监听（新连接立刻被拒）、断开已有连接，再走 asyncua 的收尾。
+
+    asyncua 的 `Server.stop()` 先等客户端处理任务收完才关监听：客户端一直在重连时它就一直关不掉，
+    模拟设备也就「离线」不了。真设备断网时新连接是马上被拒的。
+    """
+    listener = getattr(getattr(server, "bserver", None), "_server", None)
+    if listener is not None:
+        listener.close()
+    for transport in list(getattr(getattr(server, "iserver", None), "asyncio_transports", []) or []):
+        transport.close()
+    await server.stop()

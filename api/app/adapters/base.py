@@ -58,6 +58,10 @@ class AdapterContract:
         }
 
 
+# 转运能力：生产上的转运指令 capability 是它、type 是 transfer（services/transfer_service）
+TRANSFER_CAPABILITY = "cap.transfer"
+
+
 @dataclass(frozen=True)
 class CommandRequest:
     command_id: str

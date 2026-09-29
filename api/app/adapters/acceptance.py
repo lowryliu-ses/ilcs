@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 from urllib.parse import quote
 
-from .base import AdapterError, AdapterUnreachable, CommandRequest, CommandResult, DeviceAdapter
+from .base import TRANSFER_CAPABILITY, AdapterError, AdapterUnreachable, CommandRequest, CommandResult, DeviceAdapter
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 STATE_LABELS = {PASS: "通过", FAIL: "不通过", SKIP: "跳过"}
@@ -183,13 +183,17 @@ class AcceptanceRecord:
 def default_template(station_id: str, limits: dict[str, Any], capability: str = "",
                      params: dict[str, Any] | None = None) -> CommandRequest:
     """一条正常的动作指令：缺省用工位第一个能力、参数取工位极限的中点——落在承接范围内，
-    不会因为参数越界被拒而测不到后面的项目。指令号由 `run_acceptance` 生成。"""
+    不会因为参数越界被拒而测不到后面的项目。指令号由 `run_acceptance` 生成。
+
+    转运能力按生产上的转运指令发（type = transfer，参数带载具与起止位置），驱动才认这些参数。
+    """
     capability = capability or next(iter(sorted(limits or {})), "")
     window = (limits or {}).get(capability)
     if params is None:
         params = {name: round((span[0] + span[1]) / 2, 6) for name, span in (window or {}).items() if span}
     return CommandRequest(
-        command_id="", station_id=station_id, capability=capability, params=dict(params), type="dispatch",
+        command_id="", station_id=station_id, capability=capability, params=dict(params),
+        type="transfer" if capability == TRANSFER_CAPABILITY else "dispatch",
         batch_id="ACCEPTANCE", step_index=0, step_id="acceptance",
     )
 
@@ -312,12 +316,7 @@ def run_acceptance(
                           pause=pause, fault_note=fault_note)
     finally:
         for built in created:
-            close = getattr(built, "close", None)
-            if close is not None:
-                try:
-                    close()
-                except Exception:  # noqa: BLE001  关不掉的连接不影响报告
-                    pass
+            _close(built)
 
 
 def _checklist(
@@ -772,6 +771,25 @@ def _rejection_check(report, instance, probe, injector, mode, key, label, motion
         injector.set("none")
 
 
+def _probe(factory: Callable[[], DeviceAdapter]) -> None:
+    """新建一个驱动实例做一次健康检查，用完就关：每次新建是为了不沿用旧连接的结论；不关的话轮询几十秒，
+    中间库的连接、OPC UA 的会话会被占满，判出来的「失联」就成了连接数耗尽。"""
+    instance = factory()
+    try:
+        instance.healthcheck()
+    finally:
+        _close(instance)
+
+
+def _close(instance: Any) -> None:
+    close = getattr(instance, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:  # noqa: BLE001  关不掉的连接不影响结论
+            pass
+
+
 def _offline_check(report, instance, factory, injector, timeout, interval, pause) -> None:
     # 心跳类的判定要等心跳超时才看得出失联：断开得比判定时延久，也等得比它久
     latency = float(getattr(instance, "offline_after_sec", 0) or 0)
@@ -783,7 +801,7 @@ def _offline_check(report, instance, factory, injector, timeout, interval, pause
     deadline = injected + latency + 5
     while time.monotonic() < deadline:
         try:
-            factory().healthcheck()
+            _probe(factory)
         except (AdapterUnreachable, AdapterError) as exc:
             offline_error = exc
             break
@@ -798,7 +816,7 @@ def _offline_check(report, instance, factory, injector, timeout, interval, pause
     back, answered = time.monotonic() + max(timeout, 10), 0
     while time.monotonic() < back and answered < 2:
         try:
-            factory().healthcheck()
+            _probe(factory)
             answered += 1
         except (AdapterUnreachable, AdapterError):
             answered = 0
