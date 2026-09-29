@@ -4,7 +4,7 @@
 
 1. 装 Python 3.11（64 位，与厂家 DLL 位数一致），`pip install cryptography`（自签证书用；用现场签发的证书可不装）；
    经 pythonnet 调 .NET DLL 的再装 `pythonnet`。
-2. 把仓库里的 `devices/sdk/` 与本模块目录拷到 `C:\ilcs-gateway\`，写一个厂家 SDK 的包装模块（提供 `connect()`，
+2. 把仓库里的 `devices/gateway/ilcs_gateway/` 拷到 `C:\ilcs-gateway\sdk\ilcs_gateway\`、本模块目录拷到 `C:\ilcs-gateway\module\`，写一个厂家 SDK 的包装模块（提供 `connect()`，
    返回 `driver/vendor_sdk.py` 里 `VendorSdk` 那组方法），设环境变量 `VENDOR_SDK_MODULE=<包装模块名>`。
 3. 先对着模拟接口跑一遍自测：`python -m pytest tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
 4. 用 NSSM 注册成服务（开机自启、崩溃自动拉起）：
@@ -21,4 +21,4 @@
 6. 首次启动在 `secrets` 目录生成 `<设备编号>.crt` 与 `<设备编号>.token`：证书放进 ILCS 的凭据目录（适配器 `ca_file`），
    令牌同样放进凭据目录，适配器的 `credential_ref` 指向它。
 
-网关不改业务判断，只把 SDK 调用包成 ILCS 契约：去重、台账、查询、回执丢失的处理都在 `devices/sdk/ilcs_gateway` 里。
+网关不改业务判断，只把 SDK 调用包成 ILCS 契约：去重、台账、查询、回执丢失的处理都在 `devices/gateway/ilcs_gateway` 里。

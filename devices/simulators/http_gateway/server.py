@@ -1,7 +1,7 @@
 """ILCS HTTPS JSON 网关模拟设备。
 
 模拟「厂商 SDK / 私有协议 → 现场网关 → HTTPS JSON」这一类接入。网关本身就是设备模块用的网关 SDK
-（`devices/sdk/ilcs_gateway`）：按指令号去重与回放、先落盘的作业台账、按指令号查询、回执丢了宁可不回、令牌与 TLS、
+（`devices/gateway/ilcs_gateway`）：按指令号去重与回放、先落盘的作业台账、按指令号查询、回执丢了宁可不回、令牌与 TLS、
 `/simulator/*` 控制接口，和交付给现场的网关是同一份代码；这里只把设备行为模型（`devices/simulators/common/device.py`）
 当成「厂家 SDK」接上去。系统侧用 `http_json_v1` 驱动接入，和接一台真网关走同一条路。
 
@@ -30,7 +30,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-for path in (ROOT, ROOT / "sdk"):  # 直接运行（容器）时也能找到 simulators 包与网关 SDK
+for path in (ROOT, ROOT / "gateway"):  # 直接运行（容器）时也能找到 simulators 包与网关 SDK
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

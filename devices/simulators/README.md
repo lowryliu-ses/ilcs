@@ -15,7 +15,7 @@
 | `sila_device/` | SiLA 2（gRPC） | `sila2_v1` | `devices/contracts/sila2/TaskExecution.sila.xml` | TLS，自签证书 |
 | `opcua_device/` | OPC UA（ILCS TaskExecution 节点） | `opcua_v1` | `devices/contracts/opcua/TaskExecution.json` | Basic256Sha256 + SignAndEncrypt，双向证书 |
 | `modbus_device/` | Modbus TCP（ILCS 任务寄存器） | `modbus_tcp_v1` | `devices/contracts/modbus/TaskRegisters.json` | 无（隔离网段） |
-| `http_gateway/` | HTTPS JSON（厂家 SDK 接口服务的样子；网关就是 `devices/sdk/ilcs_gateway`，去重与台账在网关里） | `http_json_v1` | docs/设备适配器配置模板.md「HTTPS JSON 网关驱动」 | TLS + Bearer 令牌 |
+| `http_gateway/` | HTTPS JSON（厂家 SDK 接口服务的样子；网关就是 `devices/gateway/ilcs_gateway`，去重与台账在网关里） | `http_json_v1` | docs/设备适配器配置模板.md「HTTPS JSON 网关驱动」 | TLS + Bearer 令牌 |
 | `plc_device/` | PLC 自有点表，`--protocol opcua` 或 `modbus` | `opcua_map_v1` / `modbus_map_v1` | 见 `plc_device/server.py` 文件头 | OPC UA 同上；Modbus 无 |
 | `line_device/` | 串口 / TCP 文本命令：`--dialect oven`（真空干燥箱温控仪表）或 `ur`（UR 仪表盘服务） | `line_command_v1` | 见 `line_device/server.py` 文件头 | 无（串口服务器 / 隔离网段） |
 | `fleet/` | AGV 车队 REST（MiR 机器人 API 子集） | `rest_map_v1` | 见 `fleet/server.py` 文件头 | Basic 认证（凭据文件） |

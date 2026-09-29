@@ -1,7 +1,7 @@
 """对一个网关跑 ILCS 的接入验收清单（设备模块自己的测试用）。
 
 走的是 ILCS 真正接入时的那条路：`http_json_v1` 驱动 + `api/app/adapters/acceptance.py` 的检查清单 +
-统一控制口的故障注入。要能找到 ILCS 仓库的 `api/`（设备模块放在仓库的 devices/modules/ 下时自动找到；
+统一控制口的故障注入。要能找到 ILCS 仓库的 `api/`（设备模块放在仓库的 devices/gateway/ 下时自动找到；
 放在别处时设环境变量 ILCS_REPO 指向仓库根目录）。
 """
 from __future__ import annotations

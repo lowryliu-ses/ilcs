@@ -13,7 +13,7 @@
     serve(Oven(), device_id="OVEN-01", state_dir="./state", port=8443, token_file="./secrets/OVEN-01.token",
           cert="./secrets/OVEN-01.crt", key="./secrets/OVEN-01.key", host_name="oven-gw.lab.internal")
 
-模块结构、交付要求与样板见仓库的 devices/modules/README.md。
+模块结构、交付要求与样板见仓库的 devices/gateway/README.md。
 """
 from .device import Device, Job, ReceiptLost, Rejected, Status
 from .gateway import Gateway

@@ -219,8 +219,7 @@ executor/    设备执行器 + 工作流推进器；接真实设备实现 adapte
 devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.md
   contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
   simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
-  sdk/         设备网关 SDK ilcs_gateway：厂家 SDK / 私有协议包成 http_json_v1 网关
-  modules/     设备模块（一台设备一个交付目录），样板 sample-cycler
+  gateway/     设备网关：网关 SDK ilcs_gateway（厂家 SDK / 私有协议包成 http_json_v1 网关）+ 设备模块（样板 sample-cycler）
   connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
@@ -354,7 +353,7 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 ### 设备接入：模板与设备模块
 
 同一类设备有好几台时，把映射配置存成**设备接入模板**（「工位与接入 → 接入模板」，发布要另一个人签名），工位套用模板、只填自己的连接参数。
-厂家只给 SDK / DLL 的设备按 [devices/modules/README.md](devices/modules/README.md) 写一个设备模块（基于 `devices/sdk/ilcs_gateway` 的独立网关，
+厂家只给 SDK / DLL 的设备按 [devices/gateway/README.md](devices/gateway/README.md) 写一个设备模块（基于 `devices/gateway/ilcs_gateway` 的独立网关，
 自带模拟接口与测试，交付 `profile.json`），ILCS 侧用 `http_json_v1` 接入，不改代码、不重启。
 `python scripts/new-device-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。
 以前版本的 `sila-sim-cycler`、`modbus-sim-mixer`、`gateway-sim-coater` 已不在 compose 里：升级后

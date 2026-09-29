@@ -1,6 +1,6 @@
 """设备模块自测：对模拟接口跑 ILCS 的接入验收清单（含故障项目），再测几条驱动自己的判断。CI 里必须全过。
 
-    pytest devices/modules/sample-cycler/tests
+    pytest devices/gateway/sample-cycler/tests
 """
 from __future__ import annotations
 

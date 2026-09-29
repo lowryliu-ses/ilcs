@@ -121,7 +121,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 - *改配置*（地址、点表、命令、状态码、超时）：「工位与接入 → 设备连接」签名保存，`config_version` 加 1；执行器每轮从库里读适配器，驱动实例按 `config_version` 缓存（`adapters/registry.adapter_for`），下一轮就换成新配置，不用重启。设备主机白名单 `ILCS_ADAPTER_ALLOWED_HOSTS` 可以写网段（`10.20.1.0/24`）与域名后缀（`.lab.internal`，`core/hosts.py`），设备网段里新接的设备不用改 `.env`；主机名不做 DNS 解析去比网段（解析结果会变）；正式环境不许 `*`、IPv4 网段不宽于 /16。
 - *一类设备怎么接*：存成**设备接入模板**（`services/template_service.py`）——驱动 + 映射配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理；起草人不能发布本人起草的模板，发布要签名，发布后内容由触发器冻结；工位 = 模板的某一版 + 自己的连接参数（`adapters.template_id / template_connection`，`config` 仍是合并后的完整配置，驱动照旧只读它）。新修订发布时旧版退役，但不自动推给工位：模板页列出还在用旧修订的工位，逐台切换、重新验收。模板的导出文件（`ilcs-device-template/1`，带内容摘要）就是设备模块交付的 `profile.json`，导入一律成草稿，摘要对不上（导出后被改过）拒绝。
-- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——设备模块（`devices/modules/`）基于 `devices/sdk/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
+- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——设备模块（`devices/gateway/<模块>/`）基于 `devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
 
 驱动在 `adapters/catalog.py` 声明自己的配置项（界面按它出表单，`GET /drivers`），保存前按它查缺项与类型、再构造一次驱动实例（不连设备）——驱动自己的校验（正则、点表、白名单）就在构造时，配错了当场拒绝（`adapter_config_invalid`），不用等到测试连接；未登记的顶层键只提醒。只有驱动、配置、凭据真的变了才检查：适配器坏了的时候，停用它、改说明不被挡。
 
@@ -323,7 +323,7 @@ cd ilcs && api/.venv/bin/python scripts/smoke.py   # 端到端闭环（需 api �
 |---|---|---|
 | 数据库指令队列 + LISTEN/NOTIFY 唤醒 | NATS JetStream（多执行器分片、跨站点） | `repositories/execution.py`、`core/events.py` 与执行器循环 |
 | JWT + 本地口令 | Keycloak OIDC | `core/security.py`、`api/deps.py`；服务身份不变 |
-| 模拟适配器 | 厂商专用工位适配器 | 能用映射驱动描述的设备只写设备接入模板（`profile.json`）；厂家 SDK / 私有协议的设备按 `devices/modules/` 的结构写一个基于 `devices/sdk/ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码。确实要进 ILCS 进程的新协议才在 `adapters/drivers/` 下实现 `adapters/base.py` 契约、在 `adapters/registry.py` 注册并在 `adapters/catalog.py` 声明配置项。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
+| 模拟适配器 | 厂商专用工位适配器 | 能用映射驱动描述的设备只写设备接入模板（`profile.json`）；厂家 SDK / 私有协议的设备按 `devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码。确实要进 ILCS 进程的新协议才在 `adapters/drivers/` 下实现 `adapters/base.py` 契约、在 `adapters/registry.py` 注册并在 `adapters/catalog.py` 声明配置项。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
 | 模拟遥测序列与模拟原始曲线 | TimescaleDB 连续聚合 / 对象存储 | `ExecutionService.record_telemetry`、`ResultService.raw_curve_rows`；读接口不变 |
 | 本地文件存储 | 对象存储 | `services/file_service.py` 一处；接口返回的是文件 ID，不是路径 |
 | 自绘 SVG 图表 | uPlot | `web/src/shared/chart.tsx` |

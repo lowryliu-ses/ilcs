@@ -1,5 +1,5 @@
 # 设备模块镜像：只带 SDK 与本模块，不带 ILCS。构建上下文是 ILCS 仓库根目录：
-#   docker build -f devices/modules/sample-cycler/deploy/Dockerfile -t ilcs-module-sample-cycler .
+#   docker build -f devices/gateway/sample-cycler/deploy/Dockerfile -t ilcs-module-sample-cycler .
 # 厂家 SDK 只有 Windows DLL 时不走容器：见 windows-service.md。
 FROM python:3.11-slim
 
@@ -10,8 +10,8 @@ RUN groupadd --gid "$GATEWAY_UID" gateway \
 RUN pip install --no-cache-dir cryptography==50.0.1
 
 WORKDIR /opt/gateway
-COPY --chown=gateway:gateway devices/sdk /opt/gateway/sdk
-COPY --chown=gateway:gateway devices/modules/sample-cycler /opt/gateway/module
+COPY --chown=gateway:gateway devices/gateway/ilcs_gateway /opt/gateway/sdk/ilcs_gateway
+COPY --chown=gateway:gateway devices/gateway/sample-cycler /opt/gateway/module
 
 USER gateway
 WORKDIR /opt/gateway/module

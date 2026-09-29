@@ -41,7 +41,7 @@
       "vmax": 4.2
     }
   },
-  "note": "设备模块 devices/modules/sample-cycler：网关按 ILCS 指令号去重、可按指令号查询；凭据是网关令牌文件（credential_ref）。",
+  "note": "设备模块 devices/gateway/sample-cycler：网关按 ILCS 指令号去重、可按指令号查询；凭据是网关令牌文件（credential_ref）。",
   "state": "released",
   "digest": "sha256:9a1e249e8badd2220a5e1ad899eccf65c6a7b64db3051e30c508a6feb9dedc42"
 }

@@ -21,9 +21,9 @@ import sys
 import threading
 
 HERE = Path(__file__).resolve().parent
-# SDK：模块放在 ILCS 仓库的 devices/modules/ 下时自动找到；别处用 ILCS_REPO 或 PYTHONPATH 指过去
+# SDK：模块放在 ILCS 仓库的 devices/gateway/ 下时自动找到；别处用 ILCS_REPO 或 PYTHONPATH 指过去
 REPO = Path(os.environ["ILCS_REPO"]) if os.environ.get("ILCS_REPO") else HERE.parents[2]
-for path in (HERE, REPO / "devices" / "sdk"):
+for path in (HERE, REPO / "devices" / "gateway"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

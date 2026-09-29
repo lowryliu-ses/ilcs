@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""新建一个设备模块：从样板 devices/modules/sample-cycler 复制，替换名称、型号、能力、参数与程序。生成的测试开箱就能过。
+"""新建一个设备模块：从样板 devices/gateway/sample-cycler 复制，替换名称、型号、能力、参数与程序。生成的测试开箱就能过。
 
     python scripts/new-device-module.py acme-vd80 --title "ACME 真空干燥箱" --model VD-80 --vendor ACME \\
         --capability cap.vacuum_dry --param temp=60:180 --param vacuum=0.1:5 --program VD-120=120℃干燥
 
 生成之后：
-1. `api/.venv/bin/pytest devices/modules/<名称>/tests` 先确认是绿的；
+1. `api/.venv/bin/pytest devices/gateway/<名称>/tests` 先确认是绿的；
 2. 按设备手册改 `driver/vendor_sdk.py`（厂家 SDK 的调用面）与 `driver/device.py`（状态映射、实测值），
    `simulator/fake_sdk.py` 跟着改成同一组方法——测试一直对着它跑；
 3. 核对 `profile.json` 里的连接参数示例与验收参数，交付时连同测试记录一起给 ILCS 侧导入。
-模块结构与交付要求见 devices/modules/README.md。
+模块结构与交付要求见 devices/gateway/README.md。
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE = ROOT / "devices" / "modules" / "sample-cycler"
+SAMPLE = ROOT / "devices" / "gateway" / "sample-cycler"
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "state", "secrets", ".pytest_cache")
 
@@ -63,7 +63,7 @@ def main(argv=None) -> int:
     parser.add_argument("--capability", required=True, help="ILCS 能力，如 cap.vacuum_dry")
     parser.add_argument("--param", action="append", type=_param, required=True, help="参数=下限:上限，可写多个")
     parser.add_argument("--program", action="append", type=_program, help="设备端程序=说明，可写多个；缺省一个 DEFAULT")
-    parser.add_argument("--output", default=str(ROOT / "devices" / "modules"), help="放在哪个目录下（缺省 devices/modules/）")
+    parser.add_argument("--output", default=str(ROOT / "devices" / "gateway"), help="放在哪个目录下（缺省 devices/gateway/）")
     args = parser.parse_args(argv)
     if not NAME.fullmatch(args.name):
         raise SystemExit("模块名只能是小写字母、数字、横线，2–41 位")
@@ -107,18 +107,18 @@ def main(argv=None) -> int:
         connection={**profile["connection"], "base_url": f"https://{args.name}-gw.lab.internal:8443/api/v1"},
         acceptance={"capability": args.capability,
                     "params": {name: round((low + high) / 2, 6) for name, (low, high) in params.items()}},
-        note=f"设备模块 devices/modules/{args.name}：{args.title}（厂家 SDK 接口服务）。",
+        note=f"设备模块 devices/gateway/{args.name}：{args.title}（厂家 SDK 接口服务）。",
     )
     profile["digest"] = template_digest(profile)
     (target / "profile.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (target / "README.md").write_text(f"""# 设备模块：{args.title}
 
 {args.vendor} {args.model}，ILCS 能力 `{args.capability}`，经本模块的网关（`http_json_v1`）接入。
-从样板 `devices/modules/sample-cycler` 生成，结构与交付要求见 [devices/modules/README.md](../README.md)。
+从样板 `devices/gateway/sample-cycler` 生成，结构与交付要求见 [devices/gateway/README.md](../README.md)。
 
 ```bash
-api/.venv/bin/pytest devices/modules/{args.name}/tests                                # 自测（对模拟接口跑 ILCS 验收清单）
-python devices/modules/{args.name}/gateway.py --simulate --insecure --port 8443        # 本机联调
+api/.venv/bin/pytest devices/gateway/{args.name}/tests                                # 自测（对模拟接口跑 ILCS 验收清单）
+python devices/gateway/{args.name}/gateway.py --simulate --insecure --port 8443        # 本机联调
 ```
 
 ## 还要按设备手册改的

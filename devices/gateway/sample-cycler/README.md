@@ -14,8 +14,8 @@
 | `deploy/` | Dockerfile、compose 片段、Windows 服务说明 |
 
 ```bash
-api/.venv/bin/pytest devices/modules/sample-cycler/tests          # 自测
-python devices/modules/sample-cycler/gateway.py --simulate --insecure --port 8443   # 本机联调
+api/.venv/bin/pytest devices/gateway/sample-cycler/tests          # 自测
+python devices/gateway/sample-cycler/gateway.py --simulate --insecure --port 8443   # 本机联调
 ```
 
 `--insecure` 是明文 HTTP，缺省只监听 127.0.0.1；现场一律 HTTPS + 令牌（不带令牌的 HTTPS 网关起不来）。
