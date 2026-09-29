@@ -1,20 +1,34 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 
-import { api } from '../../shared/api';
+import { ApiError, api, pageQuery } from '../../shared/api';
 import { day, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CHANNEL_UNIT_LABEL } from '../../shared/types';
-import type { CapabilityRow, ChannelUnit, StationAsset, StationRow } from '../../shared/types';
-import { Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+import type { AssetRow, CapabilityRow, ChannelUnit, Paged, StationAsset, StationRow } from '../../shared/types';
+import { Blocked, ConfirmDialog, ConnectionPill, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import { AdapterEditor } from './AdapterEditor';
+import { DeviceTemplatesTab } from './DeviceTemplatesTab';
 
-/* 工位配置：系统里的执行位置能接什么活（能力极限）、同时接几份（通道）、怎么连设备（适配器）。
+/* 工位与接入：系统里的执行位置（工位）和它怎么连设备（设备连接），加上同一类设备共用的接入模板。三个页签各有地址：
 
-   以静态配置为主。实物属性——型号、序列号、校准、资产状态与总容量——归「仪器设备」，这里只读显示关联资产的结论；
+   - 工位：能接什么活（能力极限）、同时接几份（通道）。实物属性——型号、序列号、校准、资产状态与总容量——归「仪器设备」，
+     这里只读显示关联资产的结论；
+   - 设备连接：每个工位的适配器（驱动、连接参数、凭据引用、接入验收），还没接设备的工位也列在这里；
+   - 接入模板：一类设备怎么接，按修订号发布；工位的设备连接套用它，只填自己的连接参数。
+
+   登记新工位只登记台账与关联的仪器设备，之后分两步接设备、填能力极限，各走各的签名与检查。
    清洗确认、结果未知指令转人工核查、适配器重连是现场操作，在「现场监控」做；能力本身的定义在「能力字典」。 */
+
+export type StationsTab = 'ledger' | 'connections' | 'templates';
+
+const TABS: { key: StationsTab; path: string; label: string; perm?: string[] }[] = [
+  { key: 'ledger', path: '/stations', label: '工位' },
+  { key: 'connections', path: '/stations/connections', label: '设备连接' },
+  { key: 'templates', path: '/stations/templates', label: '接入模板', perm: ['station.edit', 'template.release'] },
+];
 
 const CHANNELS_HINT =
   '按批次计：同一时刻能同时跑几个批次的设备步骤，一个批次的一个设备步骤占 1 个，与样本数无关。' +
@@ -33,23 +47,123 @@ function ChannelUnitSelect({ value, onChange }: { value: ChannelUnit; onChange: 
   );
 }
 
-const ADAPTER_STATUS: Record<string, [string, string]> = {
-  online: ['running', '在线'], degraded: ['paused', '降级'], stale: ['fault', '心跳超时'],
-  offline: ['fault', '失联'], disabled: ['retired', '已停用'], acceptance: ['paused', '待接入验收'],
-};
-
 const ASSET_STATE: Record<string, string> = { active: '正常', maintenance: '维护中', retired: '已退役' };
 
-export function StationsPage() {
+export function StationsPage({ tab = 'ledger' }: { tab?: StationsTab }) {
   const { can } = useSession();
-  const toast = useToast();
+  const [search, setSearch] = useSearchParams();
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'), 15000);
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
   const [editing, setEditing] = useState<StationRow | null>(null);
-  const [addingStation, setAddingStation] = useState(false);
+  const [adding, setAdding] = useState<{ assetId: string } | null>(null);
+  const [created, setCreated] = useState<string | null>(null);
   const [editingStation, setEditingStation] = useState<StationRow | null>(null);
   const [editingAdapter, setEditingAdapter] = useState<StationRow | null>(null);
+  const [deleting, setDeleting] = useState<StationRow | null>(null);
+  const editable = can('station.edit');
 
+  // 从「仪器设备 → 接入系统」过来：/stations?new=1&asset=<资产 ID>，直接打开登记表单并选好这台资产
+  useEffect(() => {
+    if (search.get('new') === null) return;
+    if (editable) setAdding({ assetId: search.get('asset') ?? '' });
+    setSearch({}, { replace: true });
+  }, [search, setSearch, editable]);
+
+  const tabs = TABS.filter((item) => !item.perm || item.perm.some((perm) => can(perm)));
+  const current = tabs.some((item) => item.key === tab) ? tab : 'ledger';
+  const rows = stations.data ?? [];
+  const unconnected = rows.filter((station) => !station.adapter && !station.retired).length;
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1>工位与接入</h1>
+          <div className="small muted">
+            {current === 'ledger' ? (
+              <>
+                能力极限是流程校验与排程匹配的唯一数据源，修改需要电子签名并触发流程重校验。型号、校准、资产状态从关联的
+                <Link to="/assets">仪器设备</Link>带出；清洗确认、指令核查、重连在<Link to="/floor">现场监控</Link>；能力定义在
+                <Link to="/capabilities">能力字典</Link>。
+              </>
+            ) : current === 'connections' ? (
+              '每个工位怎么连设备：驱动、连接参数、凭据引用与接入验收。同型号的几台设备套用同一份接入模板，只填各自的连接参数。'
+            ) : (
+              '一类设备怎么接，存成有版本、要发布的模板；工位在「设备连接」里套用模板、只填自己的连接参数。设备模块交付的 profile.json 在这里导入。'
+            )}
+          </div>
+        </div>
+      </div>
+
+      <nav className="seg page-tabs" aria-label="工位与接入">
+        {tabs.map((item) => (
+          <Link key={item.key} to={item.path} className={item.key === current ? 'on' : ''}>
+            {item.label}
+            {item.key === 'connections' && unconnected ? <span className="tiny warn-text">（{unconnected} 台未接入）</span> : null}
+          </Link>
+        ))}
+      </nav>
+
+      {current === 'ledger' ? (
+        <LedgerPanel
+          stations={rows}
+          capabilities={capabilities.data ?? []}
+          onAdd={editable ? () => setAdding({ assetId: '' }) : undefined}
+          onEditLedger={setEditingStation}
+          onEditLimits={setEditing}
+          onConnect={setEditingAdapter}
+          onDelete={setDeleting}
+        />
+      ) : null}
+      {current === 'connections' ? <ConnectionsPanel stations={rows} onConfigure={setEditingAdapter} /> : null}
+      {current === 'templates' ? <DeviceTemplatesTab /> : null}
+
+      {editing ? (
+        <LimitsEditor station={editing} capabilities={capabilities.data ?? []} onClose={() => setEditing(null)} />
+      ) : null}
+      {adding ? (
+        <StationForm
+          initialAssetId={adding.assetId}
+          onCreated={(id) => {
+            setAdding(null);
+            setCreated(id);
+          }}
+          onClose={() => setAdding(null)}
+        />
+      ) : null}
+      {created && !editing && !editingAdapter ? (
+        <NextSteps
+          stationId={created}
+          station={rows.find((row) => row.id === created)}
+          onConnect={setEditingAdapter}
+          onLimits={setEditing}
+          onClose={() => setCreated(null)}
+        />
+      ) : null}
+      {editingStation ? (
+        <StationLedgerForm station={editingStation} onClose={() => setEditingStation(null)} />
+      ) : null}
+      {editingAdapter ? (
+        <AdapterEditor station={editingAdapter} onClose={() => setEditingAdapter(null)} />
+      ) : null}
+      {deleting ? <DeleteStationDialog station={deleting} onClose={() => setDeleting(null)} /> : null}
+    </div>
+  );
+}
+
+function LedgerPanel({
+  stations, capabilities, onAdd, onEditLedger, onEditLimits, onConnect, onDelete,
+}: {
+  stations: StationRow[];
+  capabilities: CapabilityRow[];
+  onAdd?: () => void;
+  onEditLedger: (station: StationRow) => void;
+  onEditLimits: (station: StationRow) => void;
+  onConnect: (station: StationRow) => void;
+  onDelete: (station: StationRow) => void;
+}) {
+  const { can } = useSession();
+  const toast = useToast();
   const retireStation = useMutation(
     (payload: { id: string; retired: boolean }) =>
       api.post<{ broken_recipes: string[] }>(`/stations/${payload.id}/retire`, { retired: payload.retired }),
@@ -79,44 +193,31 @@ export function StationsPage() {
     },
   );
 
-  const capabilityName = (id: string) => capabilities.data?.find((row) => row.id === id)?.name ?? id.replace('cap.', '');
+  const capabilityName = (id: string) => capabilities.find((row) => row.id === id)?.name ?? id.replace('cap.', '');
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <div>
-          <h1>工位配置</h1>
-          <div className="small muted">
-            能力极限是流程校验与排程匹配的唯一数据源，修改需要电子签名并触发流程重校验。型号、校准、资产状态从关联的
-            <Link to="/assets">仪器设备</Link>带出；清洗确认、指令核查、重连在<Link to="/floor">现场监控</Link>；能力定义在
-            <Link to="/capabilities">能力字典</Link>。
-          </div>
-        </div>
-        <div className="row">
-          {can('station.edit') ? (
-            <button className="btn primary" onClick={() => setAddingStation(true)}>
-              登记新工位
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      <Panel title="工位台账" flush>
-        <table>
-          <thead>
-            <tr>
-              <th>工位</th>
-              <th>状态</th>
-              <th>关联资产</th>
-              <th title="设备方法按这个型号匹配工位">型号</th>
-              <th>校准（按资产）</th>
-              <th className="num" title="同一时刻能同时承接几个批次的设备步骤">通道</th>
-              <th>实现能力</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {(stations.data ?? []).map((station) => (
+    <Panel
+      title="工位台账"
+      aside={onAdd ? <button className="btn primary sm" onClick={onAdd}>登记新工位</button> : null}
+      flush
+    >
+      <table>
+        <thead>
+          <tr>
+            <th>工位</th>
+            <th>状态</th>
+            <th>关联资产</th>
+            <th title="设备方法按这个型号匹配工位">型号</th>
+            <th>校准（按资产）</th>
+            <th className="num" title="同一时刻能同时承接几个批次的设备步骤">通道</th>
+            <th>实现能力</th>
+            <th>设备连接</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {stations.map((station) => {
+            return (
               <tr key={station.id} className={station.retired ? 'retired-row' : undefined}>
                 <td>
                   <b className="mono">{station.id}</b>
@@ -182,15 +283,30 @@ export function StationsPage() {
                       {capabilityName(capability)}
                     </span>
                   ))}
+                  {Object.keys(station.limits).length ? null : <span className="warn-text">未登记，排程匹配不到</span>}
+                </td>
+                <td className="small">
+                  {station.adapter ? (
+                    <Link to="/stations/connections" title="到「设备连接」查看或修改">
+                      <ConnectionPill status={station.adapter.status} />
+                    </Link>
+                  ) : station.retired ? (
+                    <span className="muted">未接入</span>
+                  ) : can('station.edit') ? (
+                    <button className="btn sm" onClick={() => onConnect(station)}>接入设备</button>
+                  ) : (
+                    <ConnectionPill status={null} />
+                  )}
+                  {station.adapter?.acceptance?.required ? <div className="tiny warn-text">待接入验收</div> : null}
                 </td>
                 <td className="row-end">
                   {can('station.edit') ? (
-                    <button className="btn sm" onClick={() => setEditingStation(station)}>
+                    <button className="btn sm" onClick={() => onEditLedger(station)}>
                       编辑台账
                     </button>
                   ) : null}
                   {can('station.edit') ? (
-                    <button className="btn sm" onClick={() => setEditing(station)}>
+                    <button className="btn sm" onClick={() => onEditLimits(station)}>
                       编辑极限
                     </button>
                   ) : null}
@@ -208,111 +324,229 @@ export function StationsPage() {
                       {station.retired ? '启用' : '停用'}
                     </button>
                   ) : null}
+                  {can('station.edit') && station.retired ? (
+                    <button className="btn sm" title="登记错了、从没用过的工位可以删除" onClick={() => onDelete(station)}>
+                      删除
+                    </button>
+                  ) : null}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="panel-body small muted">
+        通道按「一个批次的一个设备步骤占 1 个」计，与批次里有几个样本无关：设备若一颗电芯占一个物理通道，
+        一批 8 颗的 8 通道柜只能同时跑 1 批，这里就填 1。工位通道数不能超过所属资产容量；资产容量由映射到它的所有工位共用。
+      </div>
+    </Panel>
+  );
+}
+
+function ConnectionsPanel({ stations, onConfigure }: { stations: StationRow[]; onConfigure: (station: StationRow) => void }) {
+  const { can } = useSession();
+  return (
+    <Panel title="设备连接" flush>
+      <table>
+        <thead>
+          <tr>
+            <th>工位</th>
+            <th>模式</th>
+            <th>协议</th>
+            <th>连接</th>
+            <th>心跳</th>
+            <th className="num">去重次数</th>
+            <th>当前指令</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {stations
+            .filter((station) => station.adapter)
+            .map((station) => {
+              const adapter = station.adapter!;
+              return (
+                <tr key={station.id}>
+                  <td className="mono">{station.id}</td>
+                  <td>
+                    <Pill
+                      state={adapter.kind === 'real' ? 'running' : 'neutral'}
+                      label={adapter.kind === 'real' ? '真实设备' : '模拟器'}
+                    />
+                  </td>
+                  <td className="small">
+                    {adapter.protocol}
+                    <div className="tiny muted">v{adapter.version} · 配置 v{adapter.config_version}</div>
+                    {adapter.template ? (
+                      <div className={`tiny ${adapter.template.outdated ? 'warn-text' : 'muted'}`}>
+                        模板 {adapter.template.code} r{adapter.template.revision}
+                        {adapter.template.outdated ? `（已发布 r${adapter.template.latest_revision}）` : ''}
+                      </div>
+                    ) : null}
+                    {adapter.catalog?.described_at ? (
+                      <div className="tiny muted">
+                        {adapter.catalog.vendor || '—'} · 固件 {adapter.catalog.firmware || '—'} · 程序 {adapter.catalog.methods.length} 个
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>
+                    <ConnectionPill status={adapter.status} />
+                    {adapter.acceptance?.required ? (
+                      <div className="tiny warn-text" title={adapter.acceptance.reason}>待接入验收（{adapter.acceptance.required_label}）</div>
+                    ) : null}
+                    {adapter.site_interlock ? <div className="tiny bad-text">公共保护联锁</div> : null}
+                    {!adapter.accepts_commands ? <div className="tiny warn-text">拒绝动作指令</div> : null}
+                    {adapter.unsupported_note ? (
+                      <div className="tiny muted">不支持：{adapter.unsupported_note}</div>
+                    ) : null}
+                  </td>
+                  <td className="small mono">
+                    {time(adapter.last_heartbeat)}
+                    <div className="tiny muted">{adapter.heartbeat_age_sec.toFixed(0)} s 前</div>
+                  </td>
+                  <td className="num">{adapter.dedup_count}</td>
+                  <td className="small mono">{adapter.current_command_id.slice(0, 8) || '—'}</td>
+                  <td className="row-end">
+                    {can('station.edit') ? (
+                      <button className="btn sm" onClick={() => onConfigure(station)}>
+                        连接配置
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          {stations
+            .filter((station) => !station.adapter && !station.retired)
+            .map((station) => (
+              <tr key={station.id}>
+                <td className="mono">{station.id}</td>
+                <td colSpan={6} className="small">
+                  <Pill state="neutral" label="未接入" />
+                  <span className="muted"> {station.name}：登记时没有接设备，接入前不接设备指令</span>
+                </td>
+                <td className="row-end">
+                  {can('station.edit') ? (
+                    <button className="btn sm primary" onClick={() => onConfigure(station)}>
+                      接入设备
+                    </button>
+                  ) : null}
                 </td>
               </tr>
             ))}
-          </tbody>
-        </table>
-        <div className="panel-body small muted">
-          通道按「一个批次的一个设备步骤占 1 个」计，与批次里有几个样本无关：设备若一颗电芯占一个物理通道，
-          一批 8 颗的 8 通道柜只能同时跑 1 批，这里就填 1。工位通道数不能超过所属资产容量；资产容量由映射到它的所有工位共用。
-        </div>
-      </Panel>
+        </tbody>
+      </table>
+      <div className="panel-body small muted">
+        “模拟器”只验证系统流程，不代表对应协议已经接入真实设备。心跳超过 5 s 标记降级，超过 5 min
+        判为心跳超时、挡住用到这台设备的批次。连接配置里可以套用<Link to="/stations/templates">接入模板</Link>、测试连接、
+        读取设备自报信息、跑接入验收；改了配置的真实设备先「待接入验收」，执行器自动跑只读级，通过了才重新接指令。
+        失联后的重连在「现场监控」该工位卡片上做——重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
+      </div>
+    </Panel>
+  );
+}
 
-      <Panel title="设备适配器" flush>
-        <table>
-          <thead>
-            <tr>
-              <th>工位</th>
-              <th>模式</th>
-              <th>协议</th>
-              <th>连接</th>
-              <th>心跳</th>
-              <th className="num">去重次数</th>
-              <th>当前指令</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {(stations.data ?? [])
-              .filter((station) => station.adapter)
-              .map((station) => {
-                const adapter = station.adapter!;
-                const [pill, label] = ADAPTER_STATUS[adapter.status] ?? ['fault', adapter.status];
-                return (
-                  <tr key={station.id}>
-                    <td className="mono">{station.id}</td>
-                    <td>
-                      <Pill
-                        state={adapter.kind === 'real' ? 'running' : 'neutral'}
-                        label={adapter.kind === 'real' ? '真实设备' : '模拟器'}
-                      />
-                    </td>
-                    <td className="small">
-                      {adapter.protocol}
-                      <div className="tiny muted">v{adapter.version} · 配置 v{adapter.config_version}</div>
-                      {adapter.template ? (
-                        <div className={`tiny ${adapter.template.outdated ? 'warn-text' : 'muted'}`}>
-                          模板 {adapter.template.code} r{adapter.template.revision}
-                          {adapter.template.outdated ? `（已发布 r${adapter.template.latest_revision}）` : ''}
-                        </div>
-                      ) : null}
-                      {adapter.catalog?.described_at ? (
-                        <div className="tiny muted">
-                          {adapter.catalog.vendor || '—'} · 固件 {adapter.catalog.firmware || '—'} · 程序 {adapter.catalog.methods.length} 个
-                        </div>
-                      ) : null}
-                    </td>
-                    <td>
-                      <Pill state={pill} label={label} />
-                      {adapter.acceptance?.required ? (
-                        <div className="tiny warn-text" title={adapter.acceptance.reason}>待接入验收（{adapter.acceptance.required_label}）</div>
-                      ) : null}
-                      {adapter.site_interlock ? <div className="tiny bad-text">公共保护联锁</div> : null}
-                      {!adapter.accepts_commands ? <div className="tiny warn-text">拒绝动作指令</div> : null}
-                      {adapter.unsupported_note ? (
-                        <div className="tiny muted">不支持：{adapter.unsupported_note}</div>
-                      ) : null}
-                    </td>
-                    <td className="small mono">
-                      {time(adapter.last_heartbeat)}
-                      <div className="tiny muted">{adapter.heartbeat_age_sec.toFixed(0)} s 前</div>
-                    </td>
-                    <td className="num">{adapter.dedup_count}</td>
-                    <td className="small mono">{adapter.current_command_id.slice(0, 8) || '—'}</td>
-                    <td className="row-end">
-                      {can('station.edit') ? (
-                        <button className="btn sm" onClick={() => setEditingAdapter(station)}>
-                          配置
-                        </button>
-                      ) : null}
-                    </td>
-                  </tr>
-                );
-              })}
-          </tbody>
-        </table>
-        <div className="panel-body small muted">
-          “模拟器”只验证系统流程，不代表对应协议已经接入真实设备。心跳超过 5 s 标记降级，超过 5 min
-          判为心跳超时、挡住用到这台设备的批次。配置里可以套用<Link to="/device-templates">设备接入模板</Link>、测试连接、读取设备方法目录、
-          跑接入验收；改了配置的真实设备先「待接入验收」，执行器自动跑只读级，通过了才重新接指令。
-          失联后的重连在「现场监控」该工位卡片上做——重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
+/* 登记完一个工位，还差两步才能接活：接设备（设备连接）、填能力极限。每一步做完回到这里打勾，也可以稍后在列表里补。 */
+function NextSteps({
+  stationId, station, onConnect, onLimits, onClose,
+}: {
+  stationId: string;
+  station?: StationRow;
+  onConnect: (station: StationRow) => void;
+  onLimits: (station: StationRow) => void;
+  onClose: () => void;
+}) {
+  const connected = Boolean(station?.adapter);
+  const capabilityCount = Object.keys(station?.limits ?? {}).length;
+  const done = connected && capabilityCount > 0;
+  return (
+    <Modal
+      title={`已登记 ${stationId}`}
+      onClose={onClose}
+      footer={<button className={`btn${done ? ' primary' : ''}`} onClick={onClose}>{done ? '完成' : '稍后再说'}</button>}
+    >
+      {!station ? <div className="muted">正在刷新工位列表…</div> : null}
+      <div className="note">工位登记好了。还差下面两步才能接活，也可以稍后在工位列表里补：</div>
+      <table className="compact">
+        <tbody>
+          <tr>
+            <td className="small"><b>1. 接入设备</b>：套接入模板或手工配置驱动；保存后执行器握手，真实设备先过接入验收</td>
+            <td className="row-end">
+              {connected ? (
+                <span className="small">已接入：{station?.adapter?.protocol}{station?.adapter?.acceptance?.required ? '（待接入验收）' : ''}</span>
+              ) : (
+                <button className="btn sm primary" disabled={!station} onClick={() => station && onConnect(station)}>接入设备</button>
+              )}
+            </td>
+          </tr>
+          <tr>
+            <td className="small"><b>2. 能力极限</b>：这台工位能做哪些能力、参数范围多少；没登记能力的工位排程匹配不到</td>
+            <td className="row-end">
+              {capabilityCount ? (
+                <span className="small">已登记 {capabilityCount} 项能力</span>
+              ) : (
+                <button className="btn sm primary" disabled={!station} onClick={() => station && onLimits(station)}>填能力极限</button>
+              )}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      {station && !station.asset ? (
+        <div className="small muted">
+          没有关联仪器设备：型号、校准与容量按资产计，有资产档案的设备到<Link to="/assets">仪器设备</Link>详情里关联本工位。
         </div>
-      </Panel>
+      ) : null}
+    </Modal>
+  );
+}
 
-      {editing ? (
-        <LimitsEditor station={editing} capabilities={capabilities.data ?? []} onClose={() => setEditing(null)} />
-      ) : null}
-      {addingStation ? (
-        <StationForm capabilities={capabilities.data ?? []} onClose={() => setAddingStation(false)} />
-      ) : null}
-      {editingStation ? (
-        <StationLedgerForm station={editingStation} onClose={() => setEditingStation(null)} />
-      ) : null}
-      {editingAdapter ? (
-        <AdapterEditor station={editingAdapter} onClose={() => setEditingAdapter(null)} />
-      ) : null}
-    </div>
+/* 删掉登记错了、从没用过的工位（连同它的设备连接）。只对已停用的开放；排过工步、发过指令、做过接入验收的
+   只能保持停用——为什么不能删由服务端逐条列出。 */
+function DeleteStationDialog({ station, onClose }: { station: StationRow; onClose: () => void }) {
+  const toast = useToast();
+  const check = useQuery<{ blockers: string[] }>(
+    `stations:delete-blockers:${station.id}`, () => api.get<{ blockers: string[] }>(`/stations/${station.id}/delete-blockers`),
+  );
+  const remove = useMutation(() => api.remove<{ broken_recipes: string[] }>(`/stations/${station.id}`), {
+    invalidates: ['stations', 'assets', 'recipes', 'schedule', 'dashboard', 'audit'],
+    onSuccess: (result) => {
+      toast.push(result.broken_recipes.length
+        ? `已删除 ${station.id}；${result.broken_recipes.join('、')} 重校验不再通过`
+        : `已删除 ${station.id}`);
+      onClose();
+    },
+  });
+  const blockers = check.data?.blockers ?? [];
+  if (!check.data) {
+    return (
+      <Modal title={`删除工位 · ${station.id}`} onClose={onClose}>
+        <div className={check.error ? 'note bad' : 'muted'}>{check.error?.message ?? '正在检查有没有记录引用它…'}</div>
+      </Modal>
+    );
+  }
+  if (blockers.length) {
+    return (
+      <Modal title={`删除工位 · ${station.id}`} onClose={onClose} footer={<button className="btn" onClick={onClose}>关闭</button>}>
+        <div className="note warn">
+          {station.id} 进过历史记录，不能删除，保持停用即可：
+          <Blocked reasons={blockers} />
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <ConfirmDialog
+      title={`删除工位 · ${station.id}`}
+      danger
+      confirmLabel="删除"
+      pending={remove.pending}
+      error={remove.error?.message}
+      onConfirm={() => remove.run().catch(() => undefined)}
+      onClose={onClose}
+    >
+      {station.id}（{station.name}）没有排过工步、发过指令，也没有接入验收记录，可以删除
+      {station.adapter ? '，连同它的设备连接' : ''}。删除后这个标识可以重新登记。
+    </ConfirmDialog>
   );
 }
 
@@ -334,11 +568,9 @@ function AssetCalibration({ asset }: { asset: StationAsset | null }) {
   );
 }
 
-// 驱动与各自的配置项、起步模板来自后端驱动目录（GET /drivers），不写死在页面里；登记新工位后在「适配器配置」里套用模板或手工配置
-const DRIVER_HINT = '填已登记的驱动键（如 http_json_v1、line_command_v1）；各驱动的配置项说明与起步模板在「适配器配置」里，保存前按驱动检查配置';
-
 /* 结构化极限编辑。一行一个参数，只填上下限两个数；未列出的参数视为该工位不能承接。
-   区间是流程校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的流程列出来。 */
+   区间是流程校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的流程列出来。
+   这台工位不再承接的能力整项移除；排好程、还要在这台工位上用它的批次没结束时，服务端会拒绝并列出批次。 */
 function LimitsEditor({
   station,
   capabilities,
@@ -354,10 +586,11 @@ function LimitsEditor({
     () => JSON.parse(JSON.stringify(station.limits ?? {})),
   );
   const [adding, setAdding] = useState('');
+  const [removed, setRemoved] = useState<string[]>([]);
   const [error, setError] = useState('');
 
   const save = useMutation(
-    (payload: { limits: unknown; signature_id: string }) =>
+    (payload: { limits: unknown; remove: string[]; signature_id: string }) =>
       api.patch<{ broken_recipes: string[] }>(`/stations/${station.id}/limits`, {
         ...payload, row_version: station.row_version,
       }),
@@ -388,7 +621,14 @@ function LimitsEditor({
       ...current,
       [capabilityId]: Object.fromEntries(Object.keys(definition.params).map((key) => [key, [0, 100]])),
     }));
+    setRemoved((current) => current.filter((id) => id !== capabilityId));
     setAdding('');
+  };
+
+  const removeCapability = (capabilityId: string) => {
+    setLimits((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== capabilityId)));
+    // 原来就登记在工位上的才要让服务端移除；刚在这里加上又删掉的只是撤回
+    if (capabilityId in (station.limits ?? {})) setRemoved((current) => [...current, capabilityId]);
   };
 
   const invalidRows = Object.entries(limits).flatMap(([capability, params]) =>
@@ -405,7 +645,9 @@ function LimitsEditor({
     setError('');
     const signatureId = await sign('修改能力极限', station.id, ['工程变更批准']);
     if (!signatureId) return;
-    await save.run({ limits, signature_id: signatureId }).catch((caught) => setError(caught.message));
+    await save.run({ limits, remove: removed, signature_id: signatureId }).catch((caught) =>
+      setError([caught.message, ...(caught instanceof ApiError ? caught.blocked.map((row) => row.label) : [])].join('；')),
+    );
   };
 
   const missing = capabilities.filter((row) => !limits[row.id]);
@@ -435,8 +677,18 @@ function LimitsEditor({
         const definition = capabilities.find((row) => row.id === capabilityId);
         return (
           <div key={capabilityId}>
-            <div className="small" style={{ marginBottom: 6 }}>
-              <b>{definition?.name ?? capabilityId}</b> <span className="tiny muted mono">{capabilityId}</span>
+            <div className="subsection-head small" style={{ marginBottom: 6 }}>
+              <span>
+                <b>{definition?.name ?? capabilityId}</b> <span className="tiny muted mono">{capabilityId}</span>
+              </span>
+              <button
+                type="button"
+                className="btn sm"
+                title="这台工位不再承接这项能力：保存后引用它的流程重校验"
+                onClick={() => removeCapability(capabilityId)}
+              >
+                移除
+              </button>
             </div>
             <table>
               <thead>
@@ -487,6 +739,13 @@ function LimitsEditor({
         );
       })}
 
+      {removed.length ? (
+        <div className="note warn">
+          将移除 {removed.map((id) => capabilities.find((row) => row.id === id)?.name ?? id).join('、')}：保存后这台工位不再承接它们，
+          引用它们的流程随之重校验——没有别的工位能做的会进入「需修订」。
+        </div>
+      ) : null}
+
       {missing.length ? (
         <Field label="为本工位增加一项能力">
           <div className="row">
@@ -510,91 +769,64 @@ function LimitsEditor({
   );
 }
 
-/* 登记新工位。能力极限一并写入并立刻重校验受影响的流程，所以要签名。 */
-function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[]; onClose: () => void }) {
+/* 登记新工位：只登记台账（标识、名称、功能岛、通道）和关联的仪器设备。怎么连设备、能接什么活在登记之后分两步做
+   （设备连接、能力极限），各走各的签名与检查——不在这里另嵌一份不能套模板的简化版连接配置。
+   关联了资产的工位型号以资产为准；AGV、机械臂这类没有资产档案的，才在这里填型号。 */
+function StationForm({
+  initialAssetId, onCreated, onClose,
+}: {
+  initialAssetId: string;
+  onCreated: (stationId: string) => void;
+  onClose: () => void;
+}) {
   const toast = useToast();
   const { sign } = useSignature();
+  const [keyword, setKeyword] = useState('');
+  const query = pageQuery({ page: 1, page_size: 100, keyword });
+  const assets = useQuery<Paged<AssetRow>>(`assets:picker:${query}`, () => api.get<Paged<AssetRow>>(`/assets${query}`));
+  const preset = useQuery<AssetRow>(initialAssetId ? `assets:${initialAssetId}` : null, () => api.get<AssetRow>(`/assets/${initialAssetId}`));
   const [form, setForm] = useState<{
-    id: string; name: string; island: number; model: string; channels: number; channel_unit: ChannelUnit;
-  }>({ id: 'ST-', name: '', island: 1, model: '', channels: 1, channel_unit: 'batch' });
-  const [protocol, setProtocol] = useState('');
-  const [adapterVersion, setAdapterVersion] = useState('');
-  const [adapterKind, setAdapterKind] = useState<'simulation' | 'real'>('simulation');
-  const [adapterDriver, setAdapterDriver] = useState('simulation');
-  const [adapterConfig, setAdapterConfig] = useState('{}');
-  const [credentialRef, setCredentialRef] = useState('');
-  const [features, setFeatures] = useState({ hold: true, abort: true, query: true, dedup: true });
-  const [picked, setPicked] = useState<string[]>([]);
+    id: string; name: string; island: number; model: string; channels: number; channel_unit: ChannelUnit; asset_id: string;
+  }>({ id: 'ST-', name: '', island: 1, model: '', channels: 1, channel_unit: 'batch', asset_id: initialAssetId });
   const [error, setError] = useState('');
 
-  const create = useMutation((payload: Record<string, unknown>) => api.post('/stations', payload), {
-    invalidates: ['stations', 'capabilities', 'recipes', 'schedule', 'dashboard', 'audit'],
-    onSuccess: () => {
-      toast.push('工位已登记；能力极限先给默认区间，请按实际标定修改');
-      onClose();
+  const options = [
+    ...(preset.data && !(assets.data?.items ?? []).some((row) => row.id === preset.data!.id) ? [preset.data] : []),
+    ...(assets.data?.items ?? []),
+  ].filter((row) => row.state !== 'retired' || row.id === form.asset_id);
+  const asset = options.find((row) => row.id === form.asset_id);
+
+  // 从资产过来（「接入系统」）：名称缺省用资产名，免得再敲一遍
+  useEffect(() => {
+    if (preset.data) setForm((current) => (current.name ? current : { ...current, name: preset.data!.name }));
+  }, [preset.data]);
+
+  const create = useMutation((payload: Record<string, unknown>) => api.post<{ id: string }>('/stations', payload), {
+    invalidates: ['stations', 'assets', 'recipes', 'schedule', 'dashboard', 'audit'],
+    onSuccess: (result) => {
+      toast.push(`工位 ${result.id} 已登记`);
+      onCreated(result.id);
     },
   });
 
   const ready = /^[A-Za-z0-9-]{3,}$/.test(form.id) && form.name.trim().length > 0;
-
-  const applyHttpGatewayTemplate = () => {
-    setProtocol('HTTPS JSON');
-    setAdapterKind('real');
-    setAdapterDriver('http_json_v1');
-    setAdapterVersion('1.0');
-    setFeatures({ hold: true, abort: true, query: true, dedup: true });
-    setAdapterConfig(JSON.stringify({
-      base_url: 'https://instrument-gateway.lab.internal/api/v1',
-      verify_tls: true,
-      connect_timeout_sec: 3,
-      request_timeout_sec: 10,
-      expected_device_id: form.id,
-      paths: {
-        health: '/health', submit: '/commands', query: '/commands/{command_id}',
-        hold: '/commands/{command_id}/hold', abort: '/commands/{command_id}/abort',
-      },
-      idempotency_header: 'Idempotency-Key',
-    }, null, 2));
-  };
+  const overCapacity = asset ? form.channels > asset.capacity : false;
 
   const submit = async () => {
     if (!ready) {
       setError('标识至少 3 位（字母、数字、连字符），名称不能为空');
       return;
     }
-    setError('');
-    let parsedAdapterConfig: Record<string, unknown> = {};
-    if (protocol) {
-      try {
-        const parsed = JSON.parse(adapterConfig || '{}');
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('必须是 JSON 对象');
-        parsedAdapterConfig = parsed as Record<string, unknown>;
-      } catch (caught) {
-        setError(caught instanceof Error ? `适配器配置 JSON 无效：${caught.message}` : '适配器配置 JSON 无效');
-        return;
-      }
-      if (adapterKind === 'real' && (!adapterDriver.trim() || adapterDriver === 'simulation')) {
-        setError('真实设备必须填写已在后端注册的驱动键');
-        return;
-      }
+    if (overCapacity) {
+      setError(`并行通道数不能超过资产 ${asset!.asset_no} 的容量 ${asset!.capacity}：先到仪器设备调大容量，或减少通道数`);
+      return;
     }
+    setError('');
     const signatureId = await sign('登记新工位', form.id, ['工程变更批准']);
     if (!signatureId) return;
-    const limits = Object.fromEntries(
-      picked.map((capabilityId) => [
-        capabilityId,
-        Object.fromEntries(Object.keys(capabilities.find((c) => c.id === capabilityId)?.params ?? {}).map((k) => [k, [0, 100]])),
-      ]),
-    );
+    const { model, ...rest } = form;
     await create
-      .run({
-        ...form, limits, protocol, adapter_version: adapterVersion, adapter_kind: adapterKind,
-        adapter_driver: adapterKind === 'simulation' ? 'simulation' : adapterDriver.trim(),
-        adapter_config: parsedAdapterConfig, credential_ref: credentialRef.trim(),
-        supports_hold: features.hold, supports_abort: features.abort,
-        supports_query: features.query, supports_dedup: features.dedup,
-        signature_id: signatureId,
-      })
+      .run({ ...rest, name: form.name.trim(), model: form.asset_id ? '' : model.trim(), limits: {}, signature_id: signatureId })
       .catch((caught) => setError(caught.message));
   };
 
@@ -611,9 +843,8 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
       }
     >
       <div className="note">
-        工位是排程匹配的落点。勾选的能力先按 [0, 100] 写入极限占位，登记后请到「编辑极限」按实际标定改。
-        有资产档案的设备，型号、序列号、校准在「仪器设备」登记，登记完到资产详情里关联本工位。
-        <div><button type="button" className="btn small" onClick={applyHttpGatewayTemplate}>使用 HTTPS JSON 真实设备模板</button></div>
+        工位是排程匹配的落点。这里只登记台账；登记之后接着做两步：接入设备（设备连接）、填能力极限。
+        有资产档案的设备先在<Link to="/assets">仪器设备</Link>登记实物（型号、序列号、校准），在这里选上它。
       </div>
       <div className="grid cols-2">
         <Field label="标识" hint="例如 ST-08，登记后不可更改">
@@ -623,102 +854,48 @@ function StationForm({ capabilities, onClose }: { capabilities: CapabilityRow[];
           <input value={form.name} placeholder="例如：超声分散站" onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
       </div>
+      <Field
+        label="关联仪器设备"
+        hint={asset
+          ? `型号 ${asset.model || '（资产未登记）'} · 容量 ${asset.capacity}；容量、校准许可与型号随资产共享`
+          : '不关联：AGV、机械臂这类没有资产档案的工位；设备步骤要落在关联了资产的工位上，开跑检查才能核对校准'}
+      >
+        <div className="row">
+          <input placeholder="资产号、名称或序列号" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+          <select value={form.asset_id} onChange={(e) => setForm({ ...form, asset_id: e.target.value })}>
+            <option value="">不关联</option>
+            {options.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.asset_no} · {row.name}
+                {row.model ? ` · ${row.model}` : ''}
+                {row.station_ids.length ? `（已映射 ${row.station_ids.join('、')}）` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      </Field>
       <div className="grid cols-2">
         <Field label="功能岛">
           <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
+        {asset ? (
+          <Field label="型号" hint={`以资产 ${asset.asset_no} 登记的为准，设备方法按它匹配；要改请到「仪器设备」`}>
+            <input value={asset.model || '（资产未登记型号）'} readOnly />
+          </Field>
+        ) : (
+          <Field label="型号" hint="只给没有资产档案的工位填（如 AGV、机械臂）；设备方法按型号匹配工位">
+            <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+          </Field>
+        )}
+      </div>
+      <div className="grid cols-2">
         <Field label="并行通道数" hint={CHANNELS_HINT}>
-          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1)} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
+          <NumberInput value={form.channels} ariaLabel="并行通道数" invalid={!(form.channels >= 1) || overCapacity} onChange={(v) => setForm({ ...form, channels: Number(v) || 1 })} />
         </Field>
         <Field label="通道计法" hint={CHANNEL_UNIT_HINT}>
           <ChannelUnitSelect value={form.channel_unit} onChange={(value) => setForm({ ...form, channel_unit: value })} />
         </Field>
       </div>
-      <div className="grid cols-2">
-        <Field label="型号" hint="只给没有资产档案的工位填（如 AGV、机械臂）；关联资产后以资产登记的型号为准">
-          <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
-        </Field>
-        <Field label="适配器协议" hint="留空表示暂不登记适配器；登记后等首次心跳才算在线">
-          <input value={protocol} placeholder="SiLA 2" onChange={(e) => setProtocol(e.target.value)} />
-        </Field>
-      </div>
-      {protocol ? (
-        <>
-          <div className="grid cols-3">
-            <Field label="适配器模式" hint="模拟器不能作为真实设备验收证据">
-              <select
-                value={adapterKind}
-                onChange={(e) => {
-                  const kind = e.target.value as 'simulation' | 'real';
-                  setAdapterKind(kind);
-                  if (kind === 'simulation') setAdapterDriver('simulation');
-                  else if (adapterDriver === 'simulation') setAdapterDriver('http_json_v1');
-                }}
-              >
-                <option value="simulation">模拟器</option>
-                <option value="real">真实设备</option>
-              </select>
-            </Field>
-            <Field label="驱动键" hint={DRIVER_HINT}>
-              <input
-                className="mono"
-                value={adapterKind === 'simulation' ? 'simulation' : adapterDriver}
-                disabled={adapterKind === 'simulation'}
-                placeholder="http_json_v1"
-                onChange={(e) => setAdapterDriver(e.target.value)}
-              />
-            </Field>
-            <Field label="协议/驱动版本">
-              <input value={adapterVersion} placeholder="1.0" onChange={(e) => setAdapterVersion(e.target.value)} />
-            </Field>
-          </div>
-          <Field label="连接配置 JSON" hint='只填非秘密参数，例如 {"host":"10.0.0.20","port":502,"unit_id":1}'>
-            <textarea className="mono" rows={5} value={adapterConfig} onChange={(e) => setAdapterConfig(e.target.value)} />
-          </Field>
-          <Field label="凭据引用" hint="可选，只接受 vault://、env://、file://；禁止保存密码原文">
-            <input className="mono" value={credentialRef} placeholder="vault://ilcs/devices/ST-08" onChange={(e) => setCredentialRef(e.target.value)} />
-          </Field>
-          <Field label="设备能力声明" hint="设备不支持的动作会在执行界面禁用">
-            <div className="row">
-              {([
-                ['hold', '保持'], ['abort', '终止'], ['query', '按指令查询'], ['dedup', '设备端去重'],
-              ] as const).map(([key, label]) => (
-                <label className="check" key={key}>
-                  <input
-                    type="checkbox"
-                    checked={features[key]}
-                    onChange={(e) => setFeatures((current) => ({ ...current, [key]: e.target.checked }))}
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
-          </Field>
-          {adapterKind === 'real' ? (
-            <div className="note warn">
-              真实模式只表示要调用已登记驱动；没有对应驱动实现时执行器会拒绝启动该设备命令，不会回落到模拟器。
-            </div>
-          ) : null}
-        </>
-      ) : null}
-      <Field label="实现哪些能力">
-        <div className="row">
-          {capabilities.filter((c) => !c.retired).map((capability) => (
-            <label key={capability.id} className="check">
-              <input
-                type="checkbox"
-                checked={picked.includes(capability.id)}
-                onChange={(e) =>
-                  setPicked((current) =>
-                    e.target.checked ? [...current, capability.id] : current.filter((x) => x !== capability.id),
-                  )
-                }
-              />
-              {capability.name}
-            </label>
-          ))}
-        </div>
-      </Field>
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
   );

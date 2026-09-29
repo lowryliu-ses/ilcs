@@ -193,6 +193,8 @@ class CalibrationIn(BaseModel):
 
 class StationLinkIn(BaseModel):
     station_id: str
+    # 工位已关联别的资产时要明确说「移过来」：容量、校准许可与型号都改按新资产计
+    move: bool = False
 
 
 class MaintenanceOrderIn(BaseModel):
@@ -1133,7 +1135,10 @@ class PublishIn(Signed):
 # ---------- 资源 ----------
 
 class LimitsIn(Signed):
-    limits: dict[str, dict[str, list[float]]]
+    # 只列要改的能力：没列出的保持原样（合并写入）
+    limits: dict[str, dict[str, list[float]]] = {}
+    # 这台工位不再承接的能力：整项移除，引用它的流程随之重校验
+    remove: list[str] = []
     row_version: int | None = None
 
 
@@ -1209,6 +1214,30 @@ class AdapterPatchIn(Signed):
     template_id: str | None = None
     template_connection: dict[str, Any] | None = None
     row_version: int
+
+
+class AdapterCreateIn(Signed):
+    """给还没接设备的工位登记适配器：手工给驱动与配置，或套一份已发布的设备接入模板。
+
+    套模板时驱动、协议、支持标志与完整配置都由「模板 + 连接参数」算出来，这里只填这台设备自己的连接参数与凭据引用。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol: str = ""
+    driver: str = "simulation"
+    version: str = ""
+    kind: Literal["simulation", "real"] = "simulation"
+    config: dict[str, Any] = {}
+    credential_ref: str = ""
+    enabled: bool = True
+    supports_hold: bool = True
+    supports_abort: bool = True
+    supports_query: bool = True
+    supports_dedup: bool = True
+    note: str = ""
+    template_id: str = ""
+    template_connection: dict[str, Any] = {}
 
 
 class DeviceTemplateIn(BaseModel):

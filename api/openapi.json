@@ -293,6 +293,95 @@
         "title": "AdapterConfigCheckIn",
         "type": "object"
       },
+      "AdapterCreateIn": {
+        "additionalProperties": false,
+        "description": "给还没接设备的工位登记适配器：手工给驱动与配置，或套一份已发布的设备接入模板。\n\n套模板时驱动、协议、支持标志与完整配置都由「模板 + 连接参数」算出来，这里只填这台设备自己的连接参数与凭据引用。",
+        "properties": {
+          "config": {
+            "default": {},
+            "title": "Config",
+            "type": "object"
+          },
+          "credential_ref": {
+            "default": "",
+            "title": "Credential Ref",
+            "type": "string"
+          },
+          "driver": {
+            "default": "simulation",
+            "title": "Driver",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "kind": {
+            "default": "simulation",
+            "enum": [
+              "simulation",
+              "real"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "",
+            "title": "Protocol",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          },
+          "supports_abort": {
+            "default": true,
+            "title": "Supports Abort",
+            "type": "boolean"
+          },
+          "supports_dedup": {
+            "default": true,
+            "title": "Supports Dedup",
+            "type": "boolean"
+          },
+          "supports_hold": {
+            "default": true,
+            "title": "Supports Hold",
+            "type": "boolean"
+          },
+          "supports_query": {
+            "default": true,
+            "title": "Supports Query",
+            "type": "boolean"
+          },
+          "template_connection": {
+            "default": {},
+            "title": "Template Connection",
+            "type": "object"
+          },
+          "template_id": {
+            "default": "",
+            "title": "Template Id",
+            "type": "string"
+          },
+          "version": {
+            "default": "",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id"
+        ],
+        "title": "AdapterCreateIn",
+        "type": "object"
+      },
       "AdapterPatchIn": {
         "additionalProperties": false,
         "properties": {
@@ -2708,8 +2797,17 @@
               },
               "type": "object"
             },
+            "default": {},
             "title": "Limits",
             "type": "object"
+          },
+          "remove": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Remove",
+            "type": "array"
           },
           "row_version": {
             "anyOf": [
@@ -2728,8 +2826,7 @@
           }
         },
         "required": [
-          "signature_id",
-          "limits"
+          "signature_id"
         ],
         "title": "LimitsIn",
         "type": "object"
@@ -6442,6 +6539,11 @@
       },
       "StationLinkIn": {
         "properties": {
+          "move": {
+            "default": false,
+            "title": "Move",
+            "type": "boolean"
+          },
           "station_id": {
             "title": "Station Id",
             "type": "string"
@@ -9216,6 +9318,66 @@
       }
     },
     "/api/assets/{asset_id}": {
+      "delete": {
+        "description": "删掉登记错了、从没用过的资产。先改为「已退役」；用过的（关联过工位、校准、占用）只能退役。",
+        "operationId": "delete_asset_api_assets__asset_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Asset",
+        "tags": [
+          "asset"
+        ]
+      },
       "get": {
         "operationId": "get_asset_api_assets__asset_id__get",
         "parameters": [
@@ -9475,9 +9637,71 @@
         ]
       }
     },
+    "/api/assets/{asset_id}/delete-blockers": {
+      "get": {
+        "description": "删之前先看为什么不能删：没退役、关联过工位、有校准或占用记录的都列出来。",
+        "operationId": "asset_delete_blockers_api_assets__asset_id__delete_blockers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Asset Delete Blockers",
+        "tags": [
+          "asset"
+        ]
+      }
+    },
     "/api/assets/{asset_id}/stations": {
       "post": {
-        "description": "把工位挂到资产上。多个工位共享同一资产的容量与校准许可。",
+        "description": "把工位挂到资产上。多个工位共享同一资产的容量与校准许可；工位已关联别的资产时要带 move 才移过来。",
         "operationId": "link_station_api_assets__asset_id__stations_post",
         "parameters": [
           {
@@ -9542,6 +9766,77 @@
           }
         ],
         "summary": "Link Station",
+        "tags": [
+          "asset"
+        ]
+      }
+    },
+    "/api/assets/{asset_id}/stations/{station_id}": {
+      "delete": {
+        "description": "取消工位与资产的关联。工位上还有未结束批次的时间窗时拒绝：容量与校准按关联的资产计。",
+        "operationId": "unlink_station_api_assets__asset_id__stations__station_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unlink Station",
         "tags": [
           "asset"
         ]
@@ -26904,6 +27199,66 @@
       }
     },
     "/api/stations/{station_id}": {
+      "delete": {
+        "description": "删掉登记错了、从没用过的工位（连同适配器）。先停用；用过的只能停用。",
+        "operationId": "delete_station_api_stations__station_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Station",
+        "tags": [
+          "resource"
+        ]
+      },
       "patch": {
         "description": "改台账信息。能力极限不走这里——那条路要签名。",
         "operationId": "update_station_api_stations__station_id__patch",
@@ -27101,6 +27456,76 @@
           }
         ],
         "summary": "Update Adapter",
+        "tags": [
+          "resource"
+        ]
+      },
+      "post": {
+        "description": "给还没接设备的工位登记适配器（登记工位时没填协议的，之后在这里接入）。已接入的走 PATCH。",
+        "operationId": "create_adapter_api_stations__station_id__adapter_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdapterCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Adapter",
         "tags": [
           "resource"
         ]
@@ -27638,6 +28063,68 @@
         ]
       }
     },
+    "/api/stations/{station_id}/delete-blockers": {
+      "get": {
+        "description": "删之前先看为什么不能删：没停用、排过工步、发过指令、做过接入验收的都列出来。",
+        "operationId": "station_delete_blockers_api_stations__station_id__delete_blockers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Station Delete Blockers",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
     "/api/stations/{station_id}/limits": {
       "patch": {
         "operationId": "update_limits_api_stations__station_id__limits_patch",
@@ -27782,7 +28269,7 @@
     },
     "/api/stations/{station_id}/retire": {
       "post": {
-        "description": "停用 / 启用工位。工位一律不删：历史工步分配与检查点都指向它。",
+        "description": "停用 / 启用工位。用过的工位不删：历史工步分配、指令与检查点都指向它。",
         "operationId": "retire_station_api_stations__station_id__retire_post",
         "parameters": [
           {

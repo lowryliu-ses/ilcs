@@ -23,7 +23,7 @@ function midpoints(window: Record<string, [number, number]> | undefined): Record
   return Object.fromEntries(Object.entries(window ?? {}).map(([name, [low, high]]) => [name, Number(((low + high) / 2).toFixed(6))]));
 }
 
-const SOURCE_LABEL: Record<string, string> = { template: '设备接入模板的验收缺省', config: '适配器配置的验收缺省', limits: '工位极限中点' };
+const SOURCE_LABEL: Record<string, string> = { template: '设备接入模板的验收缺省', config: '连接配置的验收缺省', limits: '工位极限中点' };
 
 /* 某项能力的初始参数：缺省（模板 / 配置）里给了就用它，数值参数进表单，其余（起止位置等）进 JSON；否则取极限中点 */
 function initialParams(capability: string, window: Record<string, [number, number]>, defaults?: AcceptanceDefaults) {

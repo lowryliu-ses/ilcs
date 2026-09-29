@@ -75,7 +75,7 @@ def adapter_for(record: Adapter, capabilities: tuple[str, ...] = ()) -> DeviceAd
             # 正式环境里「漏配成模拟」的工位不能在没有硬件的情况下报告执行完成
             raise AdapterError(
                 f"工位 {record.station_id} 仍是模拟适配器；正式环境禁止模拟执行，"
-                f"请在工位与能力页配置真实驱动并通过健康检查"
+                f"请在「工位与接入 → 设备连接」配置真实驱动并通过健康检查"
             )
         instance = SimulationAdapter(record.station_id, record.protocol, capabilities)
     # 同一工位的旧版本实例（配置已变更）不会再被用到：关掉它持有的连接

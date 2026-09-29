@@ -2,8 +2,8 @@ from fastapi import APIRouter
 from fastapi.responses import Response
 
 from ...schemas import (
-    AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterPatchIn, CapabilityIn, CapabilityPatchIn, CommandVerifyIn, LimitsIn, ManualReviewIn,
-    ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
+    AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterCreateIn, AdapterPatchIn, CapabilityIn,
+    CapabilityPatchIn, CommandVerifyIn, LimitsIn, ManualReviewIn, ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
 )
 from ...services.acceptance_service import AcceptanceService, run_out
 from ...services.batch_service import BatchService
@@ -36,7 +36,7 @@ def command_ledger(db: DbSession, ctx: Ctx, limit: int = 50):
 @router.patch("/stations/{station_id}/limits")
 def update_limits(station_id: str, payload: LimitsIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
     return StationService(db, ctx).update_limits(
-        station_id, payload.limits, payload.signature_id, user, payload.row_version,
+        station_id, payload.limits, payload.signature_id, user, payload.row_version, remove=payload.remove,
     )
 
 
@@ -65,8 +65,20 @@ def update_station(station_id: str, payload: StationPatchIn, db: DbSession, user
 
 @router.post("/stations/{station_id}/retire")
 def retire_station(station_id: str, payload: RetireIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
-    """停用 / 启用工位。工位一律不删：历史工步分配与检查点都指向它。"""
+    """停用 / 启用工位。用过的工位不删：历史工步分配、指令与检查点都指向它。"""
     return StationService(db, ctx).set_station_retired(station_id, payload.retired, user)
+
+
+@router.get("/stations/{station_id}/delete-blockers")
+def station_delete_blockers(station_id: str, db: DbSession, ctx=require("station.edit")):
+    """删之前先看为什么不能删：没停用、排过工步、发过指令、做过接入验收的都列出来。"""
+    return StationService(db, ctx).delete_blockers(station_id)
+
+
+@router.delete("/stations/{station_id}")
+def delete_station(station_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
+    """删掉登记错了、从没用过的工位（连同适配器）。先停用；用过的只能停用。"""
+    return StationService(db, ctx).delete_station(station_id, user)
 
 
 @router.patch("/capabilities/{capability_id}")
@@ -122,6 +134,16 @@ def reconnect_adapter(station_id: str, db: DbSession, user: CurrentUser, ctx=req
 def adapter_detail(station_id: str, db: DbSession, ctx=require("station.edit")):
     """连接配置与凭据引用属于管理信息，不随普通工位列表下发。"""
     return StationService(db, ctx).adapter_detail(station_id)
+
+
+@router.post("/stations/{station_id}/adapter", status_code=201)
+def create_adapter(
+    station_id: str, payload: AdapterCreateIn, db: DbSession, user: CurrentUser, ctx=require("station.edit"),
+):
+    """给还没接设备的工位登记适配器（登记工位时没填协议的，之后在这里接入）。已接入的走 PATCH。"""
+    return StationService(db, ctx).create_adapter(
+        station_id, payload.model_dump(exclude={"signature_id"}, exclude_unset=True), payload.signature_id, user,
+    )
 
 
 @router.patch("/stations/{station_id}/adapter")

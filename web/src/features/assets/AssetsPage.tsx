@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
 import { clock, day, stamp } from '../../shared/format';
@@ -9,8 +10,13 @@ import type {
   AssetRow, BookingRow, CapabilityRow, MaintenanceOrderRow, Paged, StationRow,
 } from '../../shared/types';
 import {
-  Blocked, ConfirmDialog, Empty, Field, FileUpload, ListState, Modal, Pager, Panel, Pill, useToast,
+  Blocked, ConfirmDialog, ConnectionPill, Empty, Field, FileUpload, ListState, Modal, Pager, Panel, Pill, useToast,
 } from '../../shared/ui';
+
+/* 资产状态的配色与说法。「active」在报警里是「未处理」（红），在资产上是「正常」，不能共用通用词表 */
+const ASSET_STATE: Record<string, [string, string]> = {
+  active: ['valid', '正常'], maintenance: ['maintenance', '维护中'], retired: ['retired', '已退役'],
+};
 
 export function AssetsPage() {
   const { can } = useSession();
@@ -22,9 +28,13 @@ export function AssetsPage() {
   const [editing, setEditing] = useState<AssetRow | null>(null);
   const [booking, setBooking] = useState(false);
   const [cancelling, setCancelling] = useState<BookingRow | null>(null);
+  const [deleting, setDeleting] = useState<AssetRow | null>(null);
 
   const query = pageQuery({ page, page_size: 20, keyword });
   const assets = useQuery<Paged<AssetRow>>(`assets:${query}`, () => api.get<Paged<AssetRow>>(`/assets${query}`));
+  // 「接入」一列：资产映射到哪些工位、这些工位的设备连接状态
+  const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'), 30000);
+  const stationOf = (id: string) => stations.data?.find((row) => row.id === id);
   const bookings = useQuery<BookingRow[]>(
     'assets:bookings', () => api.get<BookingRow[]>('/resource-bookings'), 30000,
   );
@@ -48,7 +58,7 @@ export function AssetsPage() {
       <div className="page-head">
         <h1>仪器设备</h1>
         <span className="small muted">
-          实物档案只在这里登记一份：型号、序列号、校准与总容量归资产，工位配置页只读显示。一台资产映射多个工位时共享同一份容量、
+          实物档案只在这里登记一份：型号、序列号、校准与总容量归资产，「工位与接入」只读显示。一台资产映射多个工位时共享同一份容量、
           校准许可与型号，不因工位 ID 不同就重复占用。
         </span>
       </div>
@@ -87,7 +97,7 @@ export function AssetsPage() {
                 <tr>
                   <th>资产号</th>
                   <th>名称</th>
-                  <th>工位</th>
+                  <th title="映射到哪些工位、各自的设备连接状态">接入</th>
                   <th>容量</th>
                   <th>校准</th>
                   <th>不可用原因</th>
@@ -104,7 +114,19 @@ export function AssetsPage() {
                         {row.model || '—'} · {row.location || '—'}
                       </div>
                     </td>
-                    <td className="small mono">{row.station_ids.join('、') || '无'}</td>
+                    <td className="small">
+                      {row.station_ids.length ? (
+                        row.station_ids.map((id) => (
+                          <div key={id}>
+                            <span className="mono">{id}</span> <ConnectionPill status={stationOf(id)?.adapter?.status} />
+                          </div>
+                        ))
+                      ) : (
+                        <span className="muted" title="没有关联工位：只做预约与校准的仪器、手工工作台可以这样；要接设备指令就在详情里「接入系统」">
+                          无工位
+                        </span>
+                      )}
+                    </td>
                     <td className="mono small">{row.capacity}</td>
                     <td className="small">
                       {row.calibration_applicable ? (
@@ -136,6 +158,11 @@ export function AssetsPage() {
                       <button className="btn sm" onClick={() => setSelected(row.id)}>
                         详情
                       </button>
+                      {can('asset.edit') && row.state === 'retired' ? (
+                        <button className="btn sm" title="登记错了、从没用过的资产可以删除" onClick={() => setDeleting(row)}>
+                          删除
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -214,23 +241,31 @@ export function AssetsPage() {
         </ConfirmDialog>
       ) : null}
       {selected ? <DetailDialog assetId={selected} onClose={() => setSelected(null)} /> : null}
+      {deleting ? <DeleteAssetDialog asset={deleting} onClose={() => setDeleting(null)} /> : null}
       {booking ? <BookingDialog assets={rows} onClose={() => setBooking(false)} /> : null}
     </div>
   );
 }
 
+/* 关联工位：工位共享这台资产的容量、校准许可与型号。已关联别的资产的工位要确认「移过来」；
+   取消关联后型号抄回工位台账。工位上还有未结束批次的时间窗时，服务端拒绝改关联。 */
 function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => void }) {
   const { can } = useSession();
   const toast = useToast();
+  const navigate = useNavigate();
   const detail = useQuery<AssetRow>(`assets:${assetId}`, () => api.get<AssetRow>(`/assets/${assetId}`));
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'));
   const [calibrating, setCalibrating] = useState(false);
   const [linking, setLinking] = useState('');
+  const [moving, setMoving] = useState<StationRow | null>(null);
+  const [unlinking, setUnlinking] = useState<string | null>(null);
+  const invalidates = ['assets', 'stations', 'recipes', 'schedule', 'audit'];
 
   const link = useMutation(
-    () => api.post<{ warning: string; broken_recipes: string[] }>(`/assets/${assetId}/stations`, { station_id: linking }),
+    (move: boolean) =>
+      api.post<{ warning: string; broken_recipes: string[] }>(`/assets/${assetId}/stations`, { station_id: linking, move }),
     {
-      invalidates: ['assets', 'stations', 'recipes', 'audit'],
+      invalidates,
       onSuccess: (result) => {
         toast.push(
           [
@@ -239,11 +274,36 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
           ].filter(Boolean).join('；'),
         );
         setLinking('');
+        setMoving(null);
+      },
+    },
+  );
+  const unlink = useMutation(
+    (stationId: string) => api.remove<{ broken_recipes: string[] }>(`/assets/${assetId}/stations/${stationId}`),
+    {
+      invalidates,
+      onSuccess: (result) => {
+        toast.push(
+          result.broken_recipes?.length
+            ? `已取消关联；${result.broken_recipes.join('、')} 重校验不再通过`
+            : '已取消关联：工位不再共享这台资产的容量、校准许可与型号',
+        );
+        setUnlinking(null);
       },
     },
   );
 
   const asset = detail.data;
+  const stationOf = (id: string) => stations.data?.find((row) => row.id === id);
+  const startLink = () => {
+    const picked = stationOf(linking);
+    // 已关联别的资产：先说清楚要从哪台移过来，确认后再带 move 提交
+    if (picked?.asset_id && picked.asset_id !== assetId) {
+      setMoving(picked);
+      return;
+    }
+    link.run(false).catch((error) => toast.push(error.message));
+  };
 
   return (
     <Modal title={`资产 · ${asset?.asset_no ?? assetId}`} onClose={onClose} wide>
@@ -253,7 +313,7 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
             <div className="metric">
               <span className="metric-label">状态</span>
               <strong className="metric-value">
-                <Pill state={asset.state} />
+                <Pill state={ASSET_STATE[asset.state]?.[0] ?? asset.state} label={ASSET_STATE[asset.state]?.[1] ?? asset.state} />
               </strong>
               <span className="metric-hint">容量 {asset.capacity}</span>
             </div>
@@ -343,7 +403,21 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
             )}
           </Panel>
 
-          <Panel title="关联工位" flush>
+          <Panel
+            title="关联工位"
+            aside={
+              can('station.edit') && asset.state !== 'retired' ? (
+                <button
+                  className="btn sm primary"
+                  title="新建一个工位并关联这台资产，接着接入设备、填能力极限"
+                  onClick={() => navigate(`/stations?new=1&asset=${encodeURIComponent(asset.id)}`)}
+                >
+                  接入系统
+                </button>
+              ) : null
+            }
+            flush
+          >
             <div className="filters" style={{ padding: '10px 14px' }}>
               <select value={linking} onChange={(event) => setLinking(event.target.value)}>
                 <option value="">选择工位</option>
@@ -352,13 +426,14 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
                   .map((row) => (
                     <option key={row.id} value={row.id}>
                       {row.id} · {row.name}
+                      {row.asset ? `（现关联 ${row.asset.asset_no}）` : ''}
                     </option>
                   ))}
               </select>
               <button
                 className="btn sm"
                 disabled={!linking || link.pending || !can('asset.edit')}
-                onClick={() => link.run().catch((error) => toast.push(error.message))}
+                onClick={startLink}
               >
                 关联
               </button>
@@ -368,14 +443,27 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
                 <tbody>
                   {asset.station_ids.map((id) => (
                     <tr key={id}>
-                      <td className="mono">{id}</td>
-                      <td className="small muted">共享该资产的容量、校准许可与型号</td>
+                      <td>
+                        <span className="mono">{id}</span>
+                        <div className="tiny muted">{stationOf(id)?.name ?? ''}</div>
+                      </td>
+                      <td className="small">
+                        <ConnectionPill status={stationOf(id)?.adapter?.status} />
+                        <div className="tiny muted">共享该资产的容量、校准许可与型号</div>
+                      </td>
+                      <td className="row-end">
+                        {can('asset.edit') ? (
+                          <button className="btn sm" disabled={unlink.pending} onClick={() => setUnlinking(id)}>
+                            取消关联
+                          </button>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
-              <Empty>没有关联工位（无适配器的仪器或手工工作台可以这样）</Empty>
+              <Empty>没有关联工位（只做预约与校准的仪器、手工工作台可以这样）；要接设备指令点「接入系统」</Empty>
             )}
           </Panel>
 
@@ -412,7 +500,81 @@ function DetailDialog({ assetId, onClose }: { assetId: string; onClose: () => vo
       {calibrating && asset ? (
         <CalibrationDialog asset={asset} onClose={() => setCalibrating(false)} />
       ) : null}
+      {moving && asset ? (
+        <ConfirmDialog
+          title={`移过来 · ${moving.id}`}
+          confirmLabel="移到本资产"
+          pending={link.pending}
+          error={link.error?.message}
+          onConfirm={() => link.run(true).catch(() => undefined)}
+          onClose={() => setMoving(null)}
+        >
+          {moving.id} 现在关联 {moving.asset?.asset_no}（{moving.asset?.name}）。移到 {asset.asset_no} 后，它的容量、校准许可与型号都改按
+          {asset.asset_no} 计；工位上还有未结束批次的时间窗时不能移。
+        </ConfirmDialog>
+      ) : null}
+      {unlinking && asset ? (
+        <ConfirmDialog
+          title={`取消关联 · ${unlinking}`}
+          danger
+          confirmLabel="取消关联"
+          pending={unlink.pending}
+          error={unlink.error?.message}
+          onConfirm={() => unlink.run(unlinking).catch(() => undefined)}
+          onClose={() => setUnlinking(null)}
+        >
+          取消后 {unlinking} 不再共享 {asset.asset_no} 的容量、校准许可与型号，型号抄回工位台账；设备步骤要落在关联了资产的工位上，
+          开跑检查才能核对校准。工位上还有未结束批次的时间窗时不能取消。
+        </ConfirmDialog>
+      ) : null}
     </Modal>
+  );
+}
+
+/* 删掉登记错了、从没用过的资产（资产号录错了可以重登）。只对已退役的开放；关联过工位、有校准或占用记录的
+   只能保持退役——为什么不能删由服务端逐条列出。 */
+function DeleteAssetDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }) {
+  const toast = useToast();
+  const check = useQuery<{ blockers: string[] }>(
+    `assets:delete-blockers:${asset.id}`, () => api.get<{ blockers: string[] }>(`/assets/${asset.id}/delete-blockers`),
+  );
+  const remove = useMutation(() => api.remove(`/assets/${asset.id}`), {
+    invalidates: ['assets', 'stations', 'audit'],
+    onSuccess: () => {
+      toast.push(`已删除资产 ${asset.asset_no}`);
+      onClose();
+    },
+  });
+  const blockers = check.data?.blockers ?? [];
+  if (!check.data) {
+    return (
+      <Modal title={`删除资产 · ${asset.asset_no}`} onClose={onClose}>
+        <div className={check.error ? 'note bad' : 'muted'}>{check.error?.message ?? '正在检查有没有记录引用它…'}</div>
+      </Modal>
+    );
+  }
+  if (blockers.length) {
+    return (
+      <Modal title={`删除资产 · ${asset.asset_no}`} onClose={onClose} footer={<button className="btn" onClick={onClose}>关闭</button>}>
+        <div className="note warn">
+          {asset.asset_no} 进过历史记录，不能删除，保持退役即可：
+          <Blocked reasons={blockers} />
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <ConfirmDialog
+      title={`删除资产 · ${asset.asset_no}`}
+      danger
+      confirmLabel="删除"
+      pending={remove.pending}
+      error={remove.error?.message}
+      onConfirm={() => remove.run().catch(() => undefined)}
+      onClose={onClose}
+    >
+      {asset.asset_no}（{asset.name}）没有关联过工位，也没有校准、占用或维护记录，可以删除；删除后这个资产号可以重新登记。
+    </ConfirmDialog>
   );
 }
 
@@ -676,7 +838,7 @@ function EditDialog({ asset, onClose }: { asset: AssetRow; onClose: () => void }
         <Field label="厂商">
           <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
         </Field>
-        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件显示在「工位配置」的适配器里，二者不一致要核对">
+        <Field label="固件 / 软件版本" hint="读取设备自报信息时设备报的固件显示在「工位与接入 → 设备连接」里，二者不一致要核对">
           <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>
@@ -808,7 +970,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         <Field label="厂商">
           <input value={form.vendor} onChange={(event) => setForm({ ...form, vendor: event.target.value })} />
         </Field>
-        <Field label="固件 / 软件版本" hint="读取设备方法目录时设备自报的固件显示在「工位配置」的适配器里，二者不一致要核对">
+        <Field label="固件 / 软件版本" hint="读取设备自报信息时设备报的固件显示在「工位与接入 → 设备连接」里，二者不一致要核对">
           <input value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} />
         </Field>
       </div>

@@ -3,7 +3,9 @@
    工位 = 模板的某一版 + 自己的连接参数（地址、证书、设备编号）：同型号的几台设备共用一份，不再各抄一份 JSON。
    起草 → 另一个人签名发布（起草人不能发布本人起草的），发布后内容冻结，要改就新建修订；新修订发布时旧版退役，
    但不自动推给工位——下面列出还在用旧修订的工位，逐台切换、重新验收。
-   设备模块交付的 profile.json 就是这里的导出文件：导入一律成草稿，文件摘要对不上（导出后被改过）直接拒绝。 */
+   设备模块交付的 profile.json 就是这里的导出文件：导入一律成草稿，文件摘要对不上（导出后被改过）直接拒绝。
+
+   它是「工位与接入」的一个页签（/stations/templates）：只在工位的设备连接里用得到，不单独占一个菜单。 */
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
@@ -18,7 +20,7 @@ import { Field, ListState, Modal, Panel, Pill, useToast } from '../../shared/ui'
 const STATE_PILL: Record<string, string> = { draft: 'scheduled', released: 'running', retired: 'done' };
 const SUPPORTS = [['hold', '保持'], ['abort', '终止'], ['query', '按指令查询'], ['dedup', '设备端去重']] as const;
 
-export function DeviceTemplatesPage() {
+export function DeviceTemplatesTab() {
   const toast = useToast();
   const { can } = useSession();
   const { sign } = useSignature();
@@ -65,43 +67,38 @@ export function DeviceTemplatesPage() {
     act.run({ row, action }).catch((error) => toast.push(error.message));
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <div>
-          <h1>设备接入模板</h1>
-          <div className="small muted">
-            一类设备怎么接，存成有版本、要发布的模板；工位在<Link to="/stations">工位配置</Link>的适配器配置里套用模板、
-            只填自己的连接参数。设备模块交付的 profile.json 在这里导入。
+    <>
+      <Panel
+        title="接入模板"
+        aside={
+          <div className="filters">
+            <select value={state} onChange={(event) => setState(event.target.value)}>
+              <option value="">全部状态</option>
+              <option value="draft">草稿</option>
+              <option value="released">已发布</option>
+              <option value="retired">已退役</option>
+            </select>
+            {can('station.edit') ? (
+              <>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  accept=".json,application/json"
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = '';
+                    if (file) importFile.run(file).catch((error) => toast.push(error.message));
+                  }}
+                />
+                <button className="btn sm" disabled={importFile.pending} onClick={() => fileInput.current?.click()}>导入模板文件</button>
+                <button className="btn primary sm" onClick={() => setOpened('new')}>起草模板</button>
+              </>
+            ) : null}
           </div>
-        </div>
-        <div className="row">
-          <select value={state} onChange={(event) => setState(event.target.value)}>
-            <option value="">全部状态</option>
-            <option value="draft">草稿</option>
-            <option value="released">已发布</option>
-            <option value="retired">已退役</option>
-          </select>
-          {can('station.edit') ? (
-            <>
-              <input
-                ref={fileInput}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = '';
-                  if (file) importFile.run(file).catch((error) => toast.push(error.message));
-                }}
-              />
-              <button className="btn" disabled={importFile.pending} onClick={() => fileInput.current?.click()}>导入模板文件</button>
-              <button className="btn primary" onClick={() => setOpened('new')}>起草模板</button>
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      <Panel title="模板" flush>
+        }
+        flush
+      >
         <ListState loading={templates.loading && !templates.data} error={templates.error} empty={!templates.data?.length}
           emptyText="还没有设备接入模板：导入设备模块的 profile.json，或从已接好的工位抄一份映射起草" />
         {templates.data?.length ? (
@@ -168,7 +165,7 @@ export function DeviceTemplatesPage() {
 
       <div className="note">
         发布之后内容冻结：改点表、改命令都要新建修订、重新发布。新修订不会自动推给工位，套用旧修订的工位照常运行；
-        在工位的适配器配置里切到新修订要签名，保存后执行器自动跑接入验收。
+        在工位的<Link to="/stations/connections">设备连接</Link>里切到新修订要签名，保存后执行器自动跑接入验收。
       </div>
 
       {opened ? (
@@ -179,7 +176,7 @@ export function DeviceTemplatesPage() {
           onClose={() => setOpened(null)}
         />
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -314,7 +311,7 @@ function TemplateDialog({
       </div>
       {!readOnly && info ? (
         <div className="row">
-          <button type="button" className="btn sm" onClick={startFromDriver}>从 {info.label} 的起步模板开始</button>
+          <button type="button" className="btn sm" onClick={startFromDriver}>从 {info.label} 的示例配置开始</button>
           <span className="small muted">连接参数（{info.connection_keys.join('、') || '无'}）放进「连接参数示例」，其余放进映射配置</span>
         </div>
       ) : null}
@@ -329,7 +326,7 @@ function TemplateDialog({
           <textarea className="mono" rows={5} value={form.acceptance} readOnly={readOnly} onChange={(event) => set('acceptance', event.target.value)} />
         </Field>
       </div>
-      <Field label="设备真支持的动作" hint="只有设备真实支持时才勾选；不支持的动作在执行界面禁用并说明原因">
+      <Field label="支持的控制动作" hint="只有设备真实支持时才勾选；不支持的动作在执行界面禁用并说明原因">
         <div className="row">
           {SUPPORTS.map(([name, label]) => (
             <label className="check" key={name}>
@@ -360,7 +357,7 @@ function TemplateDialog({
                 <tr key={item.station_id}>
                   <td className="small"><span className="mono">{item.station_id}</span> {item.station_name}</td>
                   <td className={`small${item.outdated ? ' warn-text' : ''}`}>
-                    r{item.revision}{item.outdated ? `（已发布 r${item.latest_revision}，到工位配置里切换）` : ''}
+                    r{item.revision}{item.outdated ? `（已发布 r${item.latest_revision}，到「设备连接」里切换）` : ''}
                   </td>
                   <td className="small mono">v{item.config_version}</td>
                   <td className="small">{item.acceptance_required ? `待接入验收（${item.acceptance_required === 'physical' ? '动作级' : '只读级'}）` : '—'}</td>

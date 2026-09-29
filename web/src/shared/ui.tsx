@@ -52,6 +52,23 @@ export function stateClass(state: string): string {
   return STATE_CLASS[state] ?? 'neutral';
 }
 
+/* 设备连接状态（适配器的 status）→ [配色, 说明]。没有适配器的工位是「未接入」。
+   「工位与接入」与「仪器设备」读同一份，两边说法一致。 */
+const CONNECTION_STATE: Record<string, [string, string]> = {
+  online: ['running', '在线'], degraded: ['paused', '降级'], stale: ['fault', '心跳超时'],
+  offline: ['fault', '失联'], disabled: ['retired', '已停用'], acceptance: ['paused', '待接入验收'],
+};
+
+export function connectionState(status: string | null | undefined): [string, string] {
+  if (!status) return ['neutral', '未接入'];
+  return CONNECTION_STATE[status] ?? ['fault', status];
+}
+
+export function ConnectionPill({ status }: { status: string | null | undefined }) {
+  const [state, label] = connectionState(status);
+  return <Pill state={state} label={label} />;
+}
+
 export function Pill({ state, label }: { state: string; label?: string }) {
   return <span className={`pill ${STATE_CLASS[state] ?? 'neutral'}`}>{label ?? state}</span>;
 }

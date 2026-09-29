@@ -38,8 +38,28 @@ def link_station(
     asset_id: str, payload: StationLinkIn, db: DbSession, user: CurrentUser,
     ctx=require("asset.edit"),
 ):
-    """把工位挂到资产上。多个工位共享同一资产的容量与校准许可。"""
-    return AssetService(db, ctx).link_station(asset_id, payload.station_id, user)
+    """把工位挂到资产上。多个工位共享同一资产的容量与校准许可；工位已关联别的资产时要带 move 才移过来。"""
+    return AssetService(db, ctx).link_station(asset_id, payload.station_id, user, move=payload.move)
+
+
+@router.delete("/assets/{asset_id}/stations/{station_id}")
+def unlink_station(
+    asset_id: str, station_id: str, db: DbSession, user: CurrentUser, ctx=require("asset.edit"),
+):
+    """取消工位与资产的关联。工位上还有未结束批次的时间窗时拒绝：容量与校准按关联的资产计。"""
+    return AssetService(db, ctx).unlink_station(asset_id, station_id, user)
+
+
+@router.get("/assets/{asset_id}/delete-blockers")
+def asset_delete_blockers(asset_id: str, db: DbSession, ctx=require("asset.edit")):
+    """删之前先看为什么不能删：没退役、关联过工位、有校准或占用记录的都列出来。"""
+    return AssetService(db, ctx).delete_blockers(asset_id)
+
+
+@router.delete("/assets/{asset_id}")
+def delete_asset(asset_id: str, db: DbSession, user: CurrentUser, ctx=require("asset.edit")):
+    """删掉登记错了、从没用过的资产。先改为「已退役」；用过的（关联过工位、校准、占用）只能退役。"""
+    return AssetService(db, ctx).delete_asset(asset_id, user)
 
 
 @router.get("/assets/{asset_id}/calibrations")

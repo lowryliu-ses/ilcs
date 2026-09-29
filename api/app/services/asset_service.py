@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..core.clock import as_utc, now
 from ..core.context import AccessContext
 from ..core.errors import NotFound, StateConflict, ValidationFailed
+from ..domain.lifecycle import asset_delete_blockers
 from ..domain.resources import (
     AssetSpec, CalibrationSpec, Window, booking_blockers, calibration_blockers, governing_calibration,
 )
@@ -309,13 +310,32 @@ class AssetService:
             return []
         return StationService(self.db, self.ctx).revalidate_recipes(capabilities)
 
-    def link_station(self, asset_id: str, station_id: str, user: User) -> dict:
+    def _require_no_open_windows(self, station_id: str) -> None:
+        """容量、校准许可与型号都按关联的资产计：工位上还有未结束批次的时间窗时换关联，已排下的就和新口径对不上。"""
+        if self.allocations.open_count_for_station(station_id):
+            raise StateConflict(
+                f"工位 {station_id} 上还有未结束批次的时间窗：容量与校准按关联的资产计，"
+                "改关联前请先让这些批次结束，或取消排程后再改",
+                code="station_has_open_allocations",
+            )
+
+    def link_station(self, asset_id: str, station_id: str, user: User, move: bool = False) -> dict:
         asset = self.assets.get(asset_id)
         if not asset:
             raise NotFound("资产不存在")
         station = self.stations.get(station_id)
         if not station:
             raise NotFound("工位不存在")
+        if station.asset_id == asset.id:
+            return {**self.asset_out(asset, detail=True), "warning": f"工位 {station.id} 已关联本资产", "broken_recipes": []}
+        previous = self.assets.get(station.asset_id) if station.asset_id else None
+        if previous is not None and not move:
+            raise StateConflict(
+                f"工位 {station.id} 现在关联资产 {previous.asset_no}：移到 {asset.asset_no} 后容量、校准许可与型号都改按"
+                f" {asset.asset_no} 计，确认要移请再提交一次（move）",
+                {"current_asset_id": previous.id, "current_asset_no": previous.asset_no}, code="station_linked_elsewhere",
+            )
+        self._require_no_open_windows(station.id)
         if (station.channels or 1) > max(1, asset.capacity):
             raise StateConflict(
                 f"工位 {station.id} 有 {station.channels} 个并行通道，超过资产 {asset.asset_no} 的容量 {asset.capacity}："
@@ -323,13 +343,19 @@ class AssetService:
                 code="channels_exceed_asset_capacity",
             )
         before = station.asset_id
+        if previous is not None and not station.model:
+            # 与「先取消关联、再关联」同一口径：先把旧资产登记的型号抄回工位，再按新资产的规则处理
+            station.model = previous.model or ""
         station.asset_id = asset.id
+        self.stations.bump(station)
         # 型号改由资产决定，工位上不再另存一份（迁移 0036 同一口径）
         had_model = bool(asset.model)
         note, warning = adopt_asset_model(station, asset)
         if not had_model and asset.model:
             self.assets.bump(asset)
-        notes = [note] if note else []
+        notes = [f"从资产 {previous.asset_no} 移过来"] if previous is not None else []
+        if note:
+            notes.append(note)
         # 型号改由资产决定，设备方法能不能落到这台工位可能随之变化
         broken = self._revalidate_for_stations([station])
         if broken:
@@ -340,6 +366,75 @@ class AssetService:
         )
         self.db.commit()
         return {**self.asset_out(asset, detail=True), "warning": warning, "broken_recipes": broken}
+
+    def unlink_station(self, asset_id: str, station_id: str, user: User) -> dict:
+        """取消工位与资产的关联：工位不再共享这台资产的容量、校准许可与型号，型号抄回工位台账。"""
+        asset = self.assets.get(asset_id)
+        if not asset:
+            raise NotFound("资产不存在")
+        station = self.stations.get(station_id)
+        if not station:
+            raise NotFound("工位不存在")
+        if station.asset_id != asset.id:
+            raise StateConflict(f"工位 {station.id} 没有关联资产 {asset.asset_no}", code="station_not_linked")
+        self._require_no_open_windows(station.id)
+        station.asset_id = ""
+        # 工位不能因此没了型号：把资产登记的抄回工位（与台账接口取消关联同一口径）
+        if not station.model:
+            station.model = asset.model or ""
+        self.stations.bump(station)
+        broken = self._revalidate_for_stations([station])
+        self.audit.record(
+            user, "解除工位关联", asset.id, before=station.id, after="—",
+            detail="；".join(filter(None, [
+                f"工位 {station.id} 不再共享资产 {asset.asset_no} 的容量、校准许可与型号",
+                f"型号 {station.model} 抄回工位台账" if station.model else "",
+                f"重校验后 {len(broken)} 个流程不再通过" if broken else "",
+            ])),
+        )
+        self.db.commit()
+        return {**self.asset_out(asset, detail=True), "broken_recipes": broken}
+
+    def _asset_references(self, asset_id: str) -> dict[str, int]:
+        """有哪些记录引用了这台资产。有一条就说明它进过某段历史（校准证据、占用、排程），不能删。"""
+        from ..models import Alarm, Allocation, MaintenanceOrder, Station
+
+        def count(model, *conditions) -> int:
+            return self.db.query(model).filter(*conditions).count()
+
+        return {
+            "关联工位": count(Station, Station.asset_id == asset_id),
+            "校准记录": count(CalibrationRecord, CalibrationRecord.asset_id == asset_id),
+            "资源占用": count(ResourceBooking, ResourceBooking.asset_id == asset_id),
+            "维护工单": count(MaintenanceOrder, MaintenanceOrder.asset_id == asset_id),
+            "工步时间窗": count(Allocation, Allocation.asset_id == asset_id),
+            "报警": count(Alarm, Alarm.source_type == "asset", Alarm.source_id == asset_id),
+        }
+
+    def delete_blockers(self, asset_id: str) -> dict:
+        asset = self.assets.get(asset_id)
+        if not asset:
+            raise NotFound("资产不存在")
+        return {"id": asset.id, "blockers": asset_delete_blockers(asset.state, self._asset_references(asset.id))}
+
+    def delete_asset(self, asset_id: str, user: User) -> dict:
+        """删掉登记错了、从没用过的资产（资产号录错了可以重登）。用过的只能退役：校准与占用记录都指向它。"""
+        asset = self.assets.get(asset_id)
+        if not asset:
+            raise NotFound("资产不存在")
+        # 锁住资产行、在锁内重查判据：并发的两次删除只成一次；只删已退役的，它已退出排程与设备动作
+        self.db.query(Asset).filter(Asset.id == asset.id).with_for_update().one()
+        blockers = asset_delete_blockers(asset.state, self._asset_references(asset.id))
+        if blockers:
+            raise StateConflict(
+                f"资产 {asset.asset_no} 不能删除，请改用退役", {"blocked": [{"key": "asset", "label": b} for b in blockers]},
+                code="asset_in_use",
+            )
+        asset_no, name = asset.asset_no, asset.name
+        self.db.delete(asset)
+        self.audit.record(user, "删除资产", asset_id, before="已退役", after="已删除", detail=f"{asset_no} {name}")
+        self.db.commit()
+        return {"id": asset_id, "deleted": True}
 
     def add_calibration(self, asset_id: str, payload: dict, user: User) -> dict:
         asset = self.assets.get(asset_id)

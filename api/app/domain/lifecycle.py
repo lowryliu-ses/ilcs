@@ -83,12 +83,30 @@ def lot_delete_blockers(reservation_count: int, state: str) -> list[str]:
 
 
 def station_retire_blockers(status: str, active_allocations: int) -> list[str]:
-    """工位一律停用不删除：历史工步分配与检查点都指向它。"""
+    """用过的工位停用不删除：历史工步分配与检查点都指向它。"""
     blockers = []
     if status == "running":
         blockers.append("工位正在执行，先等当前步骤结束或终止对应批次")
     if active_allocations:
         blockers.append(f"还有 {active_allocations} 个未完成的工步预约占用它")
+    return blockers
+
+
+def station_delete_blockers(retired: bool, references: dict[str, int]) -> list[str]:
+    """登记错了、从没用过的工位可以删；排过工步、发过指令、做过接入验收的只能停用。
+
+    先停用再删：停用的工位已经退出排程匹配，删的时候不会和正在排的工步撞上。
+    `references` 是「引用它的记录类别 → 条数」，有一条就不能删。
+    """
+    blockers = [] if retired else ["先停用再删除：停用后退出排程匹配"]
+    blockers += [f"{label} {count} 条" for label, count in references.items() if count]
+    return blockers
+
+
+def asset_delete_blockers(state: str, references: dict[str, int]) -> list[str]:
+    """登记错了、从没用过的资产可以删；关联过工位、有校准或占用记录的只能退役。"""
+    blockers = [] if state == "retired" else ["先改为「已退役」再删除：退役后退出排程与预约"]
+    blockers += [f"{label} {count} 条" for label, count in references.items() if count]
     return blockers
 
 

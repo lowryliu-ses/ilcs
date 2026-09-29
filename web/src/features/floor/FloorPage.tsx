@@ -14,7 +14,7 @@ import { Blocked, Empty, Field, Modal, Panel, Pill, useToast } from '../../share
    一眼要能回答三件事：哪台设备在干什么（或为什么不能干）、每块板在哪、有什么在路上。
    数据由服务端变更推送驱动刷新；推送断开时退回 10 s 轮询，顶栏的「实时 / 轮询」标明当前模式。
    现场操作也在这里做（要 batch.control，且只对本组织的工位）：确认已清洗、结果未知的指令转人工核查、
-   失联或心跳超时的适配器重连。工位能接什么活、怎么连设备是静态配置，在「工位配置」。 */
+   失联或心跳超时的适配器重连。工位能接什么活、怎么连设备是静态配置，在「工位与接入」。 */
 
 const COMMAND_LABEL: Record<string, string> = {
   dispatch: '动作', resume: '续跑', retry: '重试', hold: '保持', abort: '终止', transfer: '转运',
@@ -121,7 +121,7 @@ function StationCard({ station }: { station: FloorStation }) {
       {control && adapter?.enabled && adapter.status === 'acceptance' ? (
         <div className="station-alert">
           <span className="small warn-text" title={adapter.acceptance?.reason}>
-            配置变更后待接入验收（{adapter.acceptance?.required_label}）：在「工位配置 → 适配器配置」查看，通过后自动恢复
+            配置变更后待接入验收（{adapter.acceptance?.required_label}）：在「工位与接入 → 设备连接」查看，通过后自动恢复
           </span>
         </div>
       ) : control && adapter?.enabled && adapter.status !== 'online' ? (
@@ -249,7 +249,7 @@ export function FloorPage() {
 
       {data && !data.tracking ? (
         <div className="note">
-          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员可在「工位配置」按现场布局登记位置。
+          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员按现场布局登记放置位后启用。
         </div>
       ) : null}
       {data?.lost.length ? (

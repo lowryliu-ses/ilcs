@@ -165,6 +165,15 @@ class AllocationRepository(Repository[Allocation]):
             .count()
         )
 
+    def open_for_station(self, station_id: str) -> list[tuple[Allocation, Batch]]:
+        """工位上未结束批次的时间窗，连同所属批次（要按批次快照看这一步用的是哪项能力）。"""
+        return list(
+            self.db.query(Allocation, Batch)
+            .join(Batch, Batch.id == Allocation.batch_id)
+            .filter(Allocation.station_id == station_id, Batch.state.notin_(TERMINAL_STATES))
+            .all()
+        )
+
     def busy_timeline(self, exclude_batch_ids: set[str] | None = None) -> dict[str, list[Interval]]:
         query = self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id).filter(
             Batch.state.notin_(TERMINAL_STATES)

@@ -8,7 +8,7 @@ from ..core.errors import DomainError, NotFound, PermissionDenied, StateConflict
 from ..domain.access import service_may_use_station
 from ..domain.adapter_rules import ACTING_LABELS, busy_blocked_changes
 from ..domain.gate import adapter_status
-from ..domain.lifecycle import capability_delete_blockers, station_retire_blockers
+from ..domain.lifecycle import capability_delete_blockers, station_delete_blockers, station_retire_blockers
 from ..domain.params import clean_specs, spec_issues
 from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
@@ -248,18 +248,30 @@ class StationService:
 
     def update_limits(
         self, station_id: str, limits: dict, signature_id: str, user: User,
-        expected_version: int | None = None,
+        expected_version: int | None = None, remove: list[str] | None = None,
     ) -> dict:
+        """改能力极限：`limits` 只列要改的能力（合并写入），`remove` 列这台工位不再承接的能力（整项移除）。"""
         station = self._require_station(station_id)
         self.stations.check_version(station, expected_version, "工位")
         for capability_id, params in limits.items():
             for name, window in params.items():
                 if len(window) != 2 or not window[0] < window[1]:
                     raise DomainError(f"{name} 下限必须小于上限")
+        removed = list(dict.fromkeys(remove or []))
+        both = [capability_id for capability_id in removed if capability_id in limits]
+        if both:
+            raise DomainError(f"同一项能力不能既改范围又移除：{'、'.join(both)}")
+        missing = [capability_id for capability_id in removed if capability_id not in (station.limits or {})]
+        if missing:
+            raise DomainError(f"工位 {station_id} 没有登记能力 {'、'.join(missing)}，无从移除")
+        if removed:
+            self._require_capabilities_idle(station_id, set(removed))
         signature = self.identity.consume_signature(signature_id, user, "修改能力极限")
         self.stations.bump(station)
         merged = dict(station.limits or {})
-        changed: set[str] = set()
+        changed: set[str] = set(removed)
+        for capability_id in removed:
+            merged.pop(capability_id, None)
         for capability_id, params in limits.items():
             slot = dict(merged.get(capability_id) or {})
             slot.update(params)
@@ -269,10 +281,40 @@ class StationService:
         broken = self.revalidate_recipes(changed)
         self.audit.record(
             user, "修改能力极限", station_id, sign=True, meaning=signature.meaning,
-            signature_id=signature.id, detail=str(limits),
+            signature_id=signature.id,
+            detail="；".join(filter(None, [
+                f"移除能力 {'、'.join(removed)}" if removed else "", str(limits) if limits else "",
+            ])),
         )
         self.db.commit()
         return {"station": station_id, "limits": station.limits, "broken_recipes": broken}
+
+    def _require_capabilities_idle(self, station_id: str, capabilities: set[str]) -> None:
+        """工位上还有未结束批次的时间窗在用这些能力时不能移除：已排下的工步会落到一台不再承接它的工位上。"""
+        mine: dict[str, list[str]] = {}
+        others = 0
+        for allocation, batch in self.allocations.open_for_station(station_id):
+            steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
+            step = steps[allocation.step_index] if allocation.step_index < len(steps) else {}
+            capability = step.get("cap")
+            if capability not in capabilities:
+                continue
+            if batch.org_id == self.ctx.org_id:
+                if batch.id not in mine.setdefault(capability, []):
+                    mine[capability].append(batch.id)
+            else:
+                others += 1
+        if not mine and not others:
+            return
+        # 工位是跨组织共享的实物：别的组织的批次只报条数，不报编号
+        rows = [{"key": capability, "label": f"{capability}：{'、'.join(batch_ids)}"} for capability, batch_ids in mine.items()]
+        if others:
+            rows.append({"key": "other_org", "label": f"另有 {others} 段其他组织批次的时间窗"})
+        raise StateConflict(
+            f"工位 {station_id} 上还有未结束批次的时间窗在用 {'、'.join(sorted(set(mine) or capabilities))}："
+            "请先让这些批次结束，或取消排程后再移除",
+            {"blocked": rows}, code="capability_in_use_on_station",
+        )
 
     def revalidate_recipes(self, capability_ids: set[str] | None = None) -> list[str]:
         """极限变更后重校验；已发布流程不通过则进入需修订。"""
@@ -305,6 +347,8 @@ class StationService:
             id=capability_id, name=name, params=params, recovery=recovery,
             param_specs=clean_specs(params, param_specs),
         ))
+        # 界面上的能力极限只在工位上填（编辑极限）；这里给接口调用方留着一次登记到位的写法，
+        # 照样递增工位行版本，别让手里拿着旧版本的极限编辑悄悄盖过去
         for station_id in stations:
             station = self.stations.get(station_id)
             if not station:
@@ -312,6 +356,7 @@ class StationService:
             limits = dict(station.limits or {})
             limits[capability_id] = {key: [0, 100] for key in params}
             station.limits = limits
+            self.stations.bump(station)
         self.audit.record(
             user, "登记新能力", f"{capability_id} {name}", sign=True, meaning=signature.meaning,
             signature_id=signature.id, detail=f"{len(params)} 个参数 · 实现工位 {' '.join(stations) or '无'}",
@@ -430,30 +475,12 @@ class StationService:
                 AssetRepository.bump(asset)
         self.stations.add(station)
         if payload.get("protocol"):
-            self._reject_inline_secrets(payload.get("adapter_config") or {})
-            self._validate_credential_ref(payload.get("credential_ref", ""))
-            kind = payload.get("adapter_kind", "simulation")
-            driver = (payload.get("adapter_driver") or "").strip()
-            if kind == "real" and (not driver or driver == "simulation"):
-                raise ValidationFailed("真实设备必须填写已登记的驱动键", code="adapter_driver_required")
-            if kind == "real":
-                check = validate_config(driver, payload.get("adapter_config") or {}, payload.get("credential_ref", ""),
-                                        protocol=payload["protocol"])
-                if check.problems:
-                    raise ValidationFailed(
-                        f"适配器配置有 {len(check.problems)} 处问题：{'；'.join(check.problems)}",
-                        {"problems": check.problems, "warnings": check.warnings}, code="adapter_config_invalid",
-                    )
-            adapter = self.adapters.add(Adapter(
-                station_id=station.id, protocol=payload["protocol"], version=payload.get("adapter_version", ""),
-                note="新登记，等待首次心跳", connected=False, accepts_commands=False,
-                kind=kind, driver=driver or "simulation", config=payload.get("adapter_config") or {},
-                credential_ref=payload.get("credential_ref", ""),
-                supports_hold=payload.get("supports_hold", True),
-                supports_abort=payload.get("supports_abort", True),
-                supports_query=payload.get("supports_query", True),
-                supports_dedup=payload.get("supports_dedup", True),
-            ))
+            adapter = self.adapters.add(self._new_adapter(station, {
+                "protocol": payload["protocol"], "version": payload.get("adapter_version", ""),
+                "kind": payload.get("adapter_kind", "simulation"), "driver": payload.get("adapter_driver") or "",
+                "config": payload.get("adapter_config") or {}, "credential_ref": payload.get("credential_ref", ""),
+                **{f"supports_{key}": payload.get(f"supports_{key}", True) for key in ("hold", "abort", "query", "dedup")},
+            }))
             # 新登记的真实设备第一次上线：先过接入验收（自动排一次只读级；真实设备还要动作级）
             after_config_change(self.db, adapter, {"kind": "", "driver": ""}, org_id=station.org_id,
                                 requested_by=user.display_name, requested_by_id=user.id)
@@ -467,6 +494,77 @@ class StationService:
         )
         self.db.commit()
         return {"id": station.id, "broken_recipes": broken}
+
+    def _new_adapter(self, station: Station, payload: dict) -> Adapter:
+        """按登记内容造一份适配器（调用方负责入库）：手工给驱动与配置，或套一份已发布的设备接入模板。
+
+        登记新工位时一起建的、给已有工位补接的走同一套检查：真实设备要用登记过的驱动、配置按驱动检查、
+        凭据只收引用。新接入的设备先离线、不接指令，等执行器握手与接入验收。
+        """
+        adapter = Adapter(
+            station_id=station.id, protocol="", driver="simulation", version="", kind="simulation", config={},
+            credential_ref="", enabled=True, note="新登记，等待首次心跳", connected=False, accepts_commands=False,
+            supports_hold=True, supports_abort=True, supports_query=True, supports_dedup=True,
+            template_id="", template_connection={},
+        )
+        changes = {key: value for key, value in payload.items() if value is not None}
+        if not changes.get("template_id"):
+            changes.pop("template_id", None)
+            if changes.pop("template_connection", None):
+                raise ValidationFailed("连接参数要和设备接入模板一起给", code="template_required")
+        changes = self._template_changes(adapter, changes)
+        if "config" in changes:
+            self._reject_inline_secrets(changes["config"])
+        self._validate_credential_ref(changes.get("credential_ref", ""))
+        kind = changes.get("kind", "simulation")
+        driver = (changes.get("driver") or "").strip()
+        if kind == "real" and (not driver or driver == "simulation"):
+            raise ValidationFailed("真实设备必须填写已登记的驱动键", code="adapter_driver_required")
+        protocol = (changes.get("protocol") or "").strip()
+        if not protocol:
+            raise ValidationFailed("请填写协议名称（给人看的，如 Modbus TCP、串口命令）", code="adapter_protocol_required")
+        if kind == "real":
+            check = validate_config(driver, changes.get("config") or {}, changes.get("credential_ref", ""), protocol=protocol)
+            if check.problems:
+                raise ValidationFailed(
+                    f"适配器配置有 {len(check.problems)} 处问题：{'；'.join(check.problems)}",
+                    {"problems": check.problems, "warnings": check.warnings}, code="adapter_config_invalid",
+                )
+        for key, value in changes.items():
+            setattr(adapter, key, value)
+        adapter.driver = driver or "simulation"
+        adapter.protocol = protocol
+        return adapter
+
+    def create_adapter(self, station_id: str, payload: dict, signature_id: str, user: User) -> dict:
+        """给还没接设备的工位登记适配器：登记工位时没填协议的，之后在这里接入。已经接入的改走修改接口。"""
+        station = self._require_station(station_id)
+        # 锁住工位行：两个人同时接入同一台工位，只能成一份
+        self.db.query(Station).filter(Station.id == station.id).with_for_update().one()
+        if self.adapters.get(station.id) is not None:
+            raise StateConflict(f"工位 {station.id} 已经接入设备，要改连接请到连接配置里修改", code="adapter_exists")
+        if station.retired:
+            raise StateConflict(f"工位 {station.id} 已停用：先启用再接入设备", code="station_retired")
+        adapter = self._new_adapter(station, payload)
+        signature = self.identity.consume_signature(signature_id, user, "登记设备适配器", object_ref=station.id)
+        self.adapters.add(adapter)
+        # 与登记新工位时一起建的同一口径：新接入的真实设备先过接入验收
+        required = after_config_change(self.db, adapter, {"kind": "", "driver": ""}, org_id=station.org_id,
+                                       requested_by=user.display_name, requested_by_id=user.id)
+        template = template_brief(self.db, adapter.template_id)
+        self.audit.record(
+            user, "登记设备适配器", station.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
+            before="未接入", after=f"{adapter.kind}/{adapter.driver} 配置 v{adapter.config_version}"
+                                 + (f"，待接入验收（{gate_out(adapter)['required_label']}）" if required else ""),
+            object_version=adapter.row_version,
+            detail="；".join(filter(None, [
+                f"协议 {adapter.protocol}",
+                f"套用模板 {template['code']} r{template['revision']}" if template else "",
+                f"凭据引用 {adapter.credential_ref}" if adapter.credential_ref else "",
+            ])),
+        )
+        self.db.commit()
+        return self._adapter_out(adapter, self.gate.status())
 
     def update_adapter(
         self, station_id: str, changes: dict, expected: int, signature_id: str, user: User,
@@ -749,6 +847,13 @@ class StationService:
                 )
             # 「以资产型号为准」：清掉工位上早先登记的型号，同一件事只留资产上一份
             changes["model"] = ""
+        if (changes.get("asset_id", station.asset_id) or "") != (station.asset_id or "") and self._open_allocation_count(station.id):
+            # 与资产详情里关联、取消关联同一口径：容量与校准按关联的资产计，已排下的时间窗和新口径对不上
+            raise StateConflict(
+                f"工位 {station.id} 上还有未结束批次的时间窗：容量与校准按关联的资产计，"
+                "改关联前请先让这些批次结束，或取消排程后再改",
+                code="station_has_open_allocations",
+            )
         if "channels" in changes or "asset_id" in changes:
             self._require_channels_fit(
                 station.id, int(changes.get("channels", station.channels) or 1), asset_id,
@@ -809,8 +914,74 @@ class StationService:
                 code="channels_exceed_asset_capacity",
             )
 
+    def _station_references(self, station_id: str) -> dict[str, int]:
+        """有哪些记录引用了这个工位（跨组织计数，只报条数）。有一条就说明它进过某段历史，不能删。"""
+        from sqlalchemy import String, cast
+
+        from ..models import (
+            AcceptanceRun, AdapterExecution, Alarm, Allocation, Command, ExceptionEvent, Location, ResourceBooking,
+            ResultValue, Sample, ScheduleProposal, ServiceIdentity, StepRun, Telemetry,
+        )
+
+        def count(model, *conditions) -> int:
+            return self.db.query(model).filter(*conditions).count()
+
+        return {
+            "工步时间窗": count(Allocation, Allocation.station_id == station_id),
+            "设备指令": count(Command, Command.station_id == station_id)
+            + count(Command, cast(Command.assist_station_ids, String).like(f'%"{station_id}"%')),
+            "步骤执行": count(StepRun, StepRun.station_id == station_id),
+            "适配器执行记录": count(AdapterExecution, AdapterExecution.station_id == station_id),
+            "接入验收记录": count(AcceptanceRun, AcceptanceRun.station_id == station_id),
+            "遥测数据": count(Telemetry, Telemetry.station_id == station_id),
+            "结果数据": count(ResultValue, ResultValue.station_id == station_id),
+            "样本位置": count(Sample, Sample.station_id == station_id),
+            "放置位": count(Location, Location.station_id == station_id),
+            "资源占用": count(ResourceBooking, ResourceBooking.station_id == station_id),
+            "排程建议": count(ScheduleProposal, ScheduleProposal.station_id == station_id),
+            "异常事件": count(ExceptionEvent, ExceptionEvent.station_id == station_id),
+            "报警": count(Alarm, Alarm.source_type == "station", Alarm.source_id == station_id),
+            "服务身份授权": sum(
+                1 for row in self.db.query(ServiceIdentity).all() if service_may_use_station(row.scopes or {}, station_id)
+            ),
+        }
+
+    def delete_blockers(self, station_id: str) -> dict:
+        station = self._require_station(station_id)
+        return {"id": station.id, "blockers": station_delete_blockers(station.retired, self._station_references(station.id))}
+
+    def delete_station(self, station_id: str, user: User) -> dict:
+        """删掉登记错了、从没用过的工位（连同它的适配器）。用过的只能停用：历史工步分配、指令与验收记录都指向它。"""
+        station = self._require_station(station_id)
+        # 锁住工位行、在锁内重查判据：与接入设备（同样锁这一行）不交错；只删已停用的，它已退出排程匹配
+        self.db.query(Station).filter(Station.id == station.id).with_for_update().one()
+        blockers = station_delete_blockers(station.retired, self._station_references(station.id))
+        if blockers:
+            raise StateConflict(
+                f"工位 {station.id} 不能删除，请改用停用", {"blocked": [{"key": "station", "label": b} for b in blockers]},
+                code="station_in_use",
+            )
+        adapter = self.adapters.get(station.id)
+        detail = [f"{station.name}；{len(station.limits or {})} 项能力极限"]
+        if station.asset_id:
+            asset = AssetRepository(self.db, self.ctx).get(station.asset_id)
+            detail.append(f"原关联资产 {asset.asset_no if asset else station.asset_id}")
+        if adapter is not None:
+            detail.append(f"连同适配器 {adapter.kind}/{adapter.driver}（{adapter.protocol}）")
+            self.db.delete(adapter)
+            self.db.flush()
+        capabilities = set(station.limits or {})
+        self.db.delete(station)
+        self.db.flush()
+        broken = self.revalidate_recipes(capabilities) if capabilities else []
+        if broken:
+            detail.append(f"重校验后 {len(broken)} 个流程不再通过")
+        self.audit.record(user, "删除工位", station_id, before="已停用", after="已删除", detail="；".join(detail))
+        self.db.commit()
+        return {"id": station_id, "deleted": True, "broken_recipes": broken}
+
     def set_station_retired(self, station_id: str, retired: bool, user: User) -> dict:
-        """停用 / 启用工位。一律不删：历史工步分配与检查点都指向它。"""
+        """停用 / 启用工位。用过的工位不删：历史工步分配与检查点都指向它（从没用过的见 `delete_station`）。"""
         station = self._require_station(station_id)
         if retired:
             blockers = station_retire_blockers(station.status, self._open_allocation_count(station_id))
@@ -966,7 +1137,7 @@ class StationService:
         if not adapter.enabled:
             # 停用的适配器不能靠一条心跳重新上线：必须由人启用并通过健康检查
             raise StateConflict(
-                "适配器已停用，心跳不被接受；请在「工位配置」启用并完成健康检查", code="adapter_disabled",
+                "适配器已停用，心跳不被接受；请在「工位与接入 → 设备连接」启用并完成健康检查", code="adapter_disabled",
             )
         came_back = connected and not adapter.connected
         adapter.connected = connected

@@ -2,7 +2,7 @@
 
    能力的参数定义决定流程、设备方法能填哪些字段，恢复规则（能不能保持、能不能重试、用后要不要清洗）
    由每个引用它的步骤继承；工位能力极限、校准适用范围、人员资质、SOP 适用能力也都按它登记。
-   它不属于某一台工位，所以单独成页；各工位能实现到什么范围在「工位配置」里改。 */
+   它不属于某一台工位，所以单独成页；各工位能实现到什么范围在「工位与接入」里按工位改（能力极限只有那一个入口）。 */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
@@ -10,14 +10,13 @@ import { api } from '../../shared/api';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { CapabilityRow, ParamSpec, Recovery, StationRow } from '../../shared/types';
+import type { CapabilityRow, ParamSpec, Recovery } from '../../shared/types';
 import { withUnit } from '../../shared/units';
 import { ConfirmDialog, Field, ListState, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 
 export function CapabilitiesPage() {
   const { can } = useSession();
   const toast = useToast();
-  const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'));
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
   const [registering, setRegistering] = useState(false);
   const [editing, setEditing] = useState<CapabilityRow | null>(null);
@@ -142,11 +141,11 @@ export function CapabilitiesPage() {
           </table>
         ) : null}
         <div className="panel-body small muted">
-          各工位对每项能力能做到的参数范围（能力极限）在「工位配置」里按工位编辑；「怎么做」（设备端程序、缺省参数、应回报的数据）在「设备方法」里按版本发布。
+          各工位对每项能力能做到的参数范围（能力极限）在<Link to="/stations">工位与接入</Link>里按工位编辑；「怎么做」（设备端程序、缺省参数、应回报的数据）在<Link to="/methods">设备方法</Link>里按版本发布。
         </div>
       </Panel>
 
-      {registering ? <CapabilityForm stations={stations.data ?? []} onClose={() => setRegistering(false)} /> : null}
+      {registering ? <CapabilityForm onClose={() => setRegistering(false)} /> : null}
       {editing ? <CapabilityEditForm capability={editing} onClose={() => setEditing(null)} /> : null}
       {deleting ? (
         <ConfirmDialog
@@ -168,9 +167,10 @@ export function CapabilitiesPage() {
   );
 }
 
-/* 登记新能力：参数定义 + 恢复规则 + 实现工位。恢复规则写在能力上而不是流程上，
-   因为「能不能保持、能不能重试」是设备物理属性，流程无权覆盖。 */
-function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose: () => void }) {
+/* 登记新能力：参数定义 + 恢复规则。恢复规则写在能力上而不是流程上，
+   因为「能不能保持、能不能重试」是设备物理属性，流程无权覆盖。
+   哪些工位能做、参数范围多少不在这里勾：能力极限只在「工位与接入 → 编辑极限」里填，一条签名、一种检查。 */
+function CapabilityForm({ onClose }: { onClose: () => void }) {
   const toast = useToast();
   const { sign } = useSignature();
   const [id, setId] = useState('cap.');
@@ -180,13 +180,12 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
     pausable: true, maxHoldMin: 30, hold: '', retryable: false, sideEffect: '', verify: [],
   });
   const [verifyText, setVerifyText] = useState('');
-  const [picked, setPicked] = useState<string[]>([]);
   const [error, setError] = useState('');
 
   const create = useMutation((payload: Record<string, unknown>) => api.post('/capabilities', payload), {
     invalidates: ['capabilities', 'stations', 'recipes', 'audit'],
     onSuccess: () => {
-      toast.push('能力已登记；实现工位的参数极限先给默认区间，请随后按实际标定修改');
+      toast.push('能力已登记；到「工位与接入 → 编辑极限」给能做它的工位加上参数范围');
       onClose();
     },
   });
@@ -213,7 +212,6 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
           ...recovery,
           verify: verifyText.split(/[、,，\s]+/).map((item) => item.trim()).filter(Boolean),
         },
-        stations: picked,
         signature_id: signatureId,
       })
       .catch((caught) => setError(caught.message));
@@ -316,24 +314,10 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
         <input value={verifyText} onChange={(event) => setVerifyText(event.target.value)} placeholder="累计超声时间、浆料温度" />
       </Field>
 
-      <Field label="实现工位" hint="勾选后按参数默认区间 [0, 100] 写入，请随后按实际标定修改">
-        <div className="row">
-          {stations.map((station) => (
-            <label key={station.id} className="check">
-              <input
-                type="checkbox"
-                checked={picked.includes(station.id)}
-                onChange={(event) =>
-                  setPicked((current) =>
-                    event.target.checked ? [...current, station.id] : current.filter((item) => item !== station.id),
-                  )
-                }
-              />
-              <span className="mono">{station.id}</span>
-            </label>
-          ))}
-        </div>
-      </Field>
+      <div className="small muted">
+        登记之后到<Link to="/stations">工位与接入</Link>，在能做它的工位上「编辑极限」加上这项能力、按实际标定填参数范围；
+        没有工位登记它之前，引用它的流程步骤找不到可承接的工位。
+      </div>
 
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>

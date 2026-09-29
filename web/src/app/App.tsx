@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Link, NavLink, Route, Routes } from 'react-router-dom';
+import { Link, Navigate, NavLink, Route, Routes } from 'react-router-dom';
 
 import { AlarmsPage } from '../features/alarms/AlarmsPage';
 import { AssetsPage } from '../features/assets/AssetsPage';
@@ -28,7 +28,6 @@ import { ResultsPage } from '../features/results/ResultsPage';
 import { SampleDetailPage, SamplesPage } from '../features/samples/SamplesPage';
 import { SchedulePage } from '../features/schedule/SchedulePage';
 import { SopsPage } from '../features/sops/SopsPage';
-import { DeviceTemplatesPage } from '../features/stations/DeviceTemplatesPage';
 import { StationsPage } from '../features/stations/StationsPage';
 import { TasksPage } from '../features/tasks/TasksPage';
 import { LoginPage } from '../features/identity/LoginPage';
@@ -52,6 +51,7 @@ const NAV: [string, NavItem[]][] = [
   ]],
   ['实验设计', [
     { path: '/sops', label: 'SOP 规程' },
+    { path: '/capabilities', label: '能力字典' },
     { path: '/methods', label: '设备方法' },
     { path: '/recipes', label: '实验流程' },
     { path: '/plans', label: '实验方案' },
@@ -72,9 +72,7 @@ const NAV: [string, NavItem[]][] = [
   ]],
   ['资源管理', [
     { path: '/assets', label: '仪器设备' },
-    { path: '/stations', label: '工位配置' },
-    { path: '/device-templates', label: '设备接入模板', perm: ['station.edit', 'template.release'] },
-    { path: '/capabilities', label: '能力字典' },
+    { path: '/stations', label: '工位与接入' },
     { path: '/materials', label: '试剂耗材' },
     { path: '/people', label: '人员与资质' },
     { path: '/environment', label: '环境监测' },
@@ -212,8 +210,11 @@ export function App() {
           <Route path="/results/:batchId" element={<ResultsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/assets" element={<AssetsPage />} />
-          <Route path="/stations" element={<StationsPage />} />
-          <Route path="/device-templates" element={<DeviceTemplatesPage />} />
+          <Route path="/stations" element={<StationsPage tab="ledger" />} />
+          <Route path="/stations/connections" element={<StationsPage tab="connections" />} />
+          <Route path="/stations/templates" element={<StationsPage tab="templates" />} />
+          {/* 设备接入模板原来单独一个菜单，现在是「工位与接入」的页签；旧地址照样能打开 */}
+          <Route path="/device-templates" element={<Navigate to="/stations/templates" replace />} />
           <Route path="/capabilities" element={<CapabilitiesPage />} />
           <Route path="/materials" element={<MaterialsPage />} />
           <Route path="/people" element={<PeoplePage />} />
