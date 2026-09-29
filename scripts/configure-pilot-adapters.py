@@ -16,8 +16,12 @@
         --station ST-06=sila-sim-lh:50052:SIM-LH-01 --channels ST-07=8
     python scripts/configure-pilot-adapters.py revert --station ST-06 --station ST-07
 
+切回系统内置的模拟适配器（工位不再接外部模拟设备，或原来用的驱动已经删掉）：
+
+    python scripts/configure-pilot-adapters.py simulate --station ST-01-B --station ST-05
+
 apply 会把原配置记在 /data/pilot-adapters-<时间>.json；revert 每个工位取包含它的最近一份备份还原。
-预设里引用的主机（含组合工位各路由的主机）必须都在 ILCS_ADAPTER_ALLOWED_HOSTS 里，否则一个都不改。
+预设里引用的主机必须都在 ILCS_ADAPTER_ALLOWED_HOSTS 里，否则一个都不改。
 目标工位上还有可能仍在动作的指令（在途、已保持、结果未知）时同样一个都不改：换驱动后新实例查不回它们。
 """
 from __future__ import annotations
@@ -108,7 +112,7 @@ def _audit(db, station: Station, action: str, before: dict, after: dict) -> None
 
 
 def hosts_of(config) -> set[str]:
-    """配置里引用的全部设备主机：host、endpoint / base_url 的主机名、网络串口地址、组合工位各路由。"""
+    """配置里引用的全部设备主机：host、endpoint / base_url 的主机名、网络串口地址。"""
     hosts: set[str] = set()
     if isinstance(config, dict):
         for key, value in config.items():
@@ -250,10 +254,52 @@ def revert(args) -> int:
     return 0
 
 
+def simulate(args) -> int:
+    """把这些工位切回内置模拟适配器：清掉驱动、连接配置、凭据引用与模板，留审计、写备份（revert 能还原）。"""
+    wanted = list(dict.fromkeys(args.station or []))
+    if not wanted:
+        print("给 --station 指定要切回内置模拟的工位", file=sys.stderr)
+        return 2
+    backup: dict = {}
+    with SessionLocal() as db:
+        _lock(db, wanted)
+        busy = _still_acting(db, wanted)
+        if busy:
+            print(f"这些工位上还有可能仍在动作的指令，切换后查不回它们：{busy}；一个工位都没改", file=sys.stderr)
+            return 2
+        for station_id in wanted:
+            station, adapter = db.get(Station, station_id), db.get(Adapter, station_id)
+            if station is None or adapter is None:
+                print(f"工位或适配器 {station_id} 不存在；一个工位都没改", file=sys.stderr)
+                db.rollback()
+                return 2
+            before = _snapshot(adapter, station)
+            backup[station_id] = before
+            adapter.kind, adapter.driver, adapter.version, adapter.protocol = "simulation", "simulation", "", "内置模拟"
+            adapter.config, adapter.credential_ref = {}, ""
+            adapter.template_id, adapter.template_connection = "", {}
+            adapter.supports_hold = adapter.supports_abort = adapter.supports_query = adapter.supports_dedup = True
+            adapter.note = "试点：内置模拟适配器"
+            adapter.config_version += 1
+            adapter.row_version += 1
+            adapter.current_command_id = ""
+            adapter.connected = True
+            adapter.accepts_commands = True
+            # 模拟适配器不设接入验收闸门：按旧配置排着的验收一并作废
+            after_config_change(db, adapter, before, org_id=station.org_id, requested_by="运维命令")
+            _audit(db, station, "试点切回内置模拟", before, _snapshot(adapter, station))
+        db.commit()
+    path = Path(args.backup_dir) / f"pilot-adapters-{now():%Y%m%d-%H%M%S}.json"
+    path.write_text(json.dumps(backup, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    reset_cache()
+    print(f"已切回内置模拟 {', '.join(wanted)}；原配置 {path}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=["apply", "revert"])
-    parser.add_argument("--station", action="append", help="apply：工位=[驱动@]主机:端口:设备ID；revert：工位")
+    parser.add_argument("action", choices=["apply", "revert", "simulate"])
+    parser.add_argument("--station", action="append", help="apply：工位=[驱动@]主机:端口:设备ID；revert、simulate：工位")
     parser.add_argument("--preset", nargs="?", const=str(ROOT / "devices" / "simulators" / "pilot-devices.json"),
                         help="按预设文件切换（缺省 devices/simulators/pilot-devices.json）")
     parser.add_argument("--only", action="append", help="只切换预设里的这些工位")
@@ -262,7 +308,7 @@ def main() -> int:
     parser.add_argument("--backup-dir", default="/data")
     args = parser.parse_args()
     verify(engine)
-    return apply(args) if args.action == "apply" else revert(args)
+    return {"apply": apply, "revert": revert, "simulate": simulate}[args.action](args)
 
 
 if __name__ == "__main__":

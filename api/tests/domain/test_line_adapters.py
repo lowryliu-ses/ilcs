@@ -1,4 +1,4 @@
-"""`line_command_v1`（串口 / TCP 文本命令）与 `mt_sics_v1`（MT-SICS 天平）× 外部模拟设备：真实走 TCP。
+"""`line_command_v1`（串口 / TCP 文本命令）× 外部模拟设备：真实走 TCP。
 
 这些设备不认识 ILCS 指令号：去重、重启后按原指令号查询全靠驱动的作业台账。
 """
@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from sim_harness import balance_config, balance_sim, line_config, line_sim, record, request
+from sim_harness import line_config, line_sim, record, request
 
 
 @pytest.fixture(autouse=True)
@@ -22,12 +22,6 @@ def _line(port: int, dialect: str = "oven", **config):
     from app.adapters.drivers.line_command import LineCommandAdapter
 
     return LineCommandAdapter(record("串口 / TCP 命令", line_config(port, dialect, **config)))
-
-
-def _balance(port: int, **config):
-    from app.adapters.drivers.mt_sics import MtSicsAdapter
-
-    return MtSicsAdapter(record("MT-SICS", balance_config(port, **config)))
 
 
 def _wait(adapter, command_id: str, device, seconds: float = 5, states=("done", "failed")):
@@ -220,57 +214,6 @@ def test_ur_dashboard_program_runs_and_safety_stop_blocks_start():
         device.set_fault("interlock")
         with pytest.raises(AdapterError, match="联锁"):
             adapter.submit(request("CMD-Y", capability="cap.robot_load", params={}, program="load_glovebox"))
-
-
-# ---------- MT-SICS 天平 ----------
-
-def test_balance_weighs_once_per_command_and_reports_identity():
-    with balance_sim() as (balance, _, port):
-        adapter = _balance(port, expected_device_id="SIM-BAL-T")
-        health = adapter.healthcheck()
-        assert (health["model"], health["simulator"]) == ("XPR226", True)
-
-        done = adapter.submit(request("CMD-W1", capability="cap.weigh", params={"mass": 0.0152}))
-        assert done.state == "done" and done.origin == "real:mt_sics_v1"
-        assert abs(done.delivered["mass"] - 0.0152) < 0.0001 and done.delivered["stable"] is True
-        assert done.telemetry[0][0] == "mass" and done.telemetry[0][2] == 0.0152
-        again = adapter.submit(request("CMD-W1", capability="cap.weigh", params={"mass": 0.0152}))
-        assert again.delivered["mass"] == done.delivered["mass"] and balance.weighings == 1, "重投回放原读数"
-        assert adapter.query("CMD-W1").state == "done"
-        assert adapter.query("CMD-NEVER-SEEN") is None
-
-
-def test_balance_errors_are_explicit_and_lost_reply_is_unknown():
-    from app.adapters import AdapterError, AdapterUnreachable
-
-    with balance_sim() as (balance, _, port):
-        adapter = _balance(port)
-        balance.fault = "busy"
-        with pytest.raises(AdapterError, match="不能执行"):
-            adapter.submit(request("CMD-B", capability="cap.weigh", params={"mass": 0.01}))
-        balance.fault = "fail"
-        with pytest.raises(AdapterError, match="超载"):
-            adapter.submit(request("CMD-O", capability="cap.weigh", params={"mass": 0.01}))
-        balance.fault = "lost_receipt"
-        with pytest.raises(AdapterUnreachable) as lost:
-            adapter.submit(request("CMD-L", capability="cap.weigh", params={"mass": 0.01}))
-        assert not isinstance(lost.value, AdapterError)
-        balance.fault = "none"
-        assert adapter.query("CMD-L").state == "unknown", "称了但没回读数：台账记未确认，不补一个读数"
-        assert adapter.abort(request("CMD-RESET", "abort")).state == "done", "@ 复位"
-        with pytest.raises(AdapterError, match="没有对应的写入点"):
-            adapter.submit(request("CMD-P", capability="cap.weigh", params={"mass": 0.01, "speed": 1}))
-
-
-def test_balance_unit_conversion_and_tare():
-    with balance_sim(sample_mass=0.5) as (_, _, port):
-        adapter = _balance(port, capabilities={
-            "cap.weigh": {"action": "weigh", "result": "mass", "unit": "mg", "stable_timeout_sec": 3},
-            "cap.tare": {"action": "tare"},
-        })
-        assert abs(adapter.submit(request("CMD-MG", capability="cap.weigh", params={})).delivered["mass"] - 500) < 0.1
-        tared = adapter.submit(request("CMD-T", capability="cap.tare", params={}))
-        assert tared.state == "done" and abs(tared.delivered["tare"] - 0.5) < 0.001
 
 
 def test_barcode_reader_returns_the_code_as_an_immediate_result():

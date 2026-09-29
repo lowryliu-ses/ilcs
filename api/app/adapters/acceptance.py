@@ -203,7 +203,7 @@ def default_template(station_id: str, limits: dict[str, Any], capability: str = 
 class SimulatorControlInjector:
     """模拟设备统一控制口（`devices/simulators/common/control.py`）的客户端：故障注入与动作计数。
 
-    `spec` 取自适配器配置里的 `simulator_control`：`{"url": "http://line-sim-oven:9900", "token_ref": "file://…",
+    `spec` 取自适配器配置里的 `simulator_control`：`{"url": "http://line-sim-arm:9900", "token_ref": "file://…",
     "unit": "AGV-01"}`（`unit` 给一个进程模拟多台设备的车队用）。主机同样要在设备白名单里；只对自报为模拟器的设备、
     非正式环境使用（由调用方判断）。HTTPS 网关模拟器的控制接口就在它自己的 API 上，路径与这里相同。
     """
@@ -253,18 +253,10 @@ def injector_for(record: Any, capability: str) -> tuple[FaultInjector | None, st
     """按适配器配置找故障注入器。返回 (注入器, 没有注入器时的原因)。
 
     - 配置里登记了 `simulator_control`：用统一控制口；
-    - 组合工位：用承接这项能力的那条路由的配置；
     - HTTPS 网关（`http_json_v1`）没登记控制口时，用网关自己的 `/simulator/*`（同一套 TLS 与凭据）。
     """
     config, driver, credential_ref = dict(getattr(record, "config", {}) or {}), getattr(record, "driver", ""), \
         getattr(record, "credential_ref", "") or ""
-    if driver == "composite_v1":
-        route = next((item for item in config.get("routes") or []
-                      if isinstance(item, dict) and capability in (item.get("capabilities") or [])), None)
-        if route is None:
-            return None, f"组合工位没有承接 {capability or '（未指定能力）'} 的路由"
-        config, driver = dict(route.get("config") or {}), str(route.get("driver") or "")
-        credential_ref = str(route.get("credential_ref") or "")
     spec = config.get("simulator_control")
     if isinstance(spec, dict) and (spec.get("url") or spec.get("base_url")):
         return SimulatorControlInjector(spec), ""

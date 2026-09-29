@@ -11,10 +11,7 @@
 | `opcua_map_v1` | 设备自有 OPC UA 节点（PLC、视觉系统） | 驱动作业台账 |
 | `modbus_map_v1` | 设备自有 Modbus 寄存器表（PLC、温控仪表） | 驱动作业台账 |
 | `line_command_v1` | 串口 / TCP 文本命令（RS232、RS485、仪表盘服务） | 驱动作业台账 |
-| `mt_sics_v1` | 梅特勒 MT-SICS 天平 | 驱动作业台账 |
 | `rest_map_v1` | 设备或调度系统自有 REST 接口（AGV 车队等） | 驱动作业台账 + 设备任务号 |
-| `sql_table_v1` | 数据库中间表（设备侧软件轮询 ILCS 中间库契约的作业表） | 中间库（作业表主键是指令号） |
-| `composite_v1` | 一个工位多台仪器，按能力分派到上面的驱动 | 各子驱动 |
 
 执行层始终按 Adapter.kind/driver 取实现。
 """
@@ -23,17 +20,14 @@ from __future__ import annotations
 from ..core.config import settings
 from ..models import Adapter
 from .base import AdapterContract, AdapterError, DeviceAdapter
-from .drivers.composite import DRIVER as COMPOSITE_DRIVER, CompositeAdapter
 from .drivers.http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
 from .drivers.line_command import DRIVER as LINE_COMMAND_DRIVER, LineCommandAdapter
 from .drivers.modbus_map import DRIVER as MODBUS_MAP_DRIVER, ModbusMapAdapter
 from .drivers.modbus_tcp import DRIVER as MODBUS_TCP_DRIVER, ModbusTcpAdapter
-from .drivers.mt_sics import DRIVER as MT_SICS_DRIVER, MtSicsAdapter
 from .drivers.opcua import DRIVER as OPCUA_DRIVER, OpcUaAdapter
 from .drivers.opcua_map import DRIVER as OPCUA_MAP_DRIVER, OpcUaMapAdapter
 from .drivers.rest_map import DRIVER as REST_MAP_DRIVER, RestMapAdapter
 from .drivers.sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
-from .drivers.sql_table import DRIVER as SQL_TABLE_DRIVER, SqlTableAdapter
 from .drivers.simulation import SimulationAdapter
 
 _CACHE: dict[str, DeviceAdapter] = {}
@@ -45,15 +39,12 @@ REAL_IMPLEMENTATIONS: dict[str, type] = {
     OPCUA_MAP_DRIVER: OpcUaMapAdapter,
     MODBUS_MAP_DRIVER: ModbusMapAdapter,
     LINE_COMMAND_DRIVER: LineCommandAdapter,
-    MT_SICS_DRIVER: MtSicsAdapter,
     REST_MAP_DRIVER: RestMapAdapter,
-    SQL_TABLE_DRIVER: SqlTableAdapter,
-    COMPOSITE_DRIVER: CompositeAdapter,
 }
 # 这些协议的设备不会往系统推心跳：在线状态由执行器按周期读取设备身份得到
 PROBE_DRIVERS = {
     SILA2_DRIVER, MODBUS_TCP_DRIVER, OPCUA_DRIVER, OPCUA_MAP_DRIVER, MODBUS_MAP_DRIVER, LINE_COMMAND_DRIVER,
-    MT_SICS_DRIVER, REST_MAP_DRIVER, SQL_TABLE_DRIVER, COMPOSITE_DRIVER,
+    REST_MAP_DRIVER,
 }
 
 
@@ -132,7 +123,7 @@ def describe(instance: DeviceAdapter, record: Adapter) -> dict:
     config = record.config or {}
     reported = raw.get("methods")
     if isinstance(reported, list):
-        # 组合工位把各路由的目录汇总上来，并说明来源（设备自报还是按配置登记）
+        # 驱动自报的方法目录；可以用 methods_source 说明来源（设备自报还是按配置登记）
         methods, source = reported, str(raw.get("methods_source") or "device")
     elif isinstance(config.get("methods"), list):
         methods, source = config["methods"], "config"

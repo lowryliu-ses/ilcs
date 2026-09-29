@@ -83,7 +83,7 @@ cd ilcs && api/.venv/bin/python executor/main.py
 | 实验设计 | 实验方案 / 实验流程 / 设备方法 / 能力字典 / SOP 规程 | 条件矩阵、方案审批版本、流程节点（设备 / 人工 / 等待 / 审核 / 质检关卡 / 样本拆分 / 条件分支 / 子流程）与前驱依赖、回环、业务事件等待、步骤级超时与可跳过、设备方法版本与参数范围、SOP 受控版本与校验和 |
 | 执行与监控 | 样本管理 / 批次管理 / 排程 / 现场监控 / 报警处理 / 异常处理 | 物理样本接收与运行分配、批次创建与运行、步骤级排程与多批次优化（优化 / 截止时间 / 优先级 / 先进先出）、重排建议、工位实时状态与载具位置、现场操作（清洗确认、结果未知转人工核查、适配器重连）、扫码放置、依赖图执行、报警确认与搁置、异常事件与处理策略库 |
 | 数据与报告 | 数据审核 / 结果分析 / 报告管理 / 指标与规则 | 逐条数据复核、正式统计与排除说明、报告审签发布、指标版本与前后逻辑规则 |
-| 资源管理 | 仪器设备 / 工位与接入 / 试剂耗材 / 人员与资质 / 环境监测 | 实物档案（型号、序列号、校准、总容量、维护与占用，只登记一份）、工位能力极限 / 通道、设备连接（适配器、接入模板、接入验收；型号与校准从资产只读带出）、库存三量与台账、资质与到期预警、环境读数与人工抄录 |
+| 资源管理 | 仪器设备 / 工位与接入 / 试剂耗材 / 人员与资质 / 环境监测 | 实物档案（型号、序列号、校准、总容量、维护与占用，只登记一份）、工位能力极限 / 通道、设备连接（适配器、接入模板、接入验收；型号与校准从资产只读带出）、放置位与板库登记、库存三量与台账、资质与到期预警、环境读数与人工抄录 |
 | 系统管理 | 用户与权限 / 集成与通知 / 审计日志 | 账号创建、多角色分配、角色权限矩阵、成员状态、首次改密与口令重置；服务身份签发、授权编辑、密钥轮换、停用；拒绝访问日志；Webhook 订阅、签名密钥、企业微信 / 钉钉机器人与邮件通知、投递记录与重投；全量审计日志 |
 
 ## 验证
@@ -172,11 +172,10 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 设备遥测上报 | 同一 `event_id` 只入库一次；设备时钟超前 5 分钟整批拒收；保留 1 年 |
 | 维护工单 | 建单即登记维护占用；开工资产转维护状态；完工写记录签名，不合格资产保持维护状态 |
 | 工位接到 SiLA 2（`sila2_v1`）/ Modbus TCP（`modbus_tcp_v1`）/ OPC UA（`opcua_v1`）设备 | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
-| 设备不认识 ILCS 指令号（PLC 点表、串口命令、MT-SICS 天平、车队 REST） | 驱动作业台账先落盘再动设备：重投同一指令号回放原作业；执行器重启后按原指令号回答；设备在运行就明确拒绝新作业 |
+| 设备不认识 ILCS 指令号（PLC 点表、串口命令、车队 REST） | 驱动作业台账先落盘再动设备：重投同一指令号回放原作业；执行器重启后按原指令号回答；设备在运行就明确拒绝新作业 |
 | 启动命令发出后没拿到确认 | 结果未知不重发；之后见到设备在运行（或按 PLC 回显 / 请求里的指令号找回）才按运行处理，质量标 uncertain |
 | 启动命令回了确认，设备却一直没进入运行也没有完成信号 | 超过启动时限转结果未知，不猜「做完了」 |
 | 映射驱动收到没有写入点 / 命令模板的参数，或孔位矩阵 | 明确拒绝，不静默丢弃设定值 |
-| 一个工位由几台接口不同的仪器组成（`composite_v1`） | 按能力分派到各自驱动；任一台离线即整站离线，任一台联锁即联锁 |
 | 检测软件只导出结果文件 | 结果文件接收器按内容摘要去重回传，原始文件关联到结果；被拒的文件移到 rejected/ 并写明原因 |
 | Modbus 指令带孔位矩阵、未映射的参数或能力 | 驱动直接拒绝，不写触发寄存器 |
 | Modbus 写了触发等不到应答 / 执行器重启 | 结果未知不重写触发；新实例从设备当前的触发与应答序号里较大的一个接着编号 |
@@ -207,7 +206,7 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
-未验证项：**现场真实设备试点（AC-37）**。系统已内置十一个真实驱动——设备实现 ILCS 契约的 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务）、`sila2_v1`、`opcua_v1`、`modbus_tcp_v1`，按设备自有接口映射的 `opcua_map_v1`、`modbus_map_v1`、`line_command_v1`（串口 / TCP 命令）、`mt_sics_v1`（梅特勒天平）、`rest_map_v1`（车队等 REST 接口），按中间库契约交换作业的 `sql_table_v1`（数据库中间表），以及组合工位 `composite_v1`——另有结果文件接收器；覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过。选哪种驱动见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
+未验证项：**现场真实设备试点（AC-37）**。系统已内置八个真实驱动——设备实现 ILCS 契约的 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务）、`sila2_v1`、`opcua_v1`、`modbus_tcp_v1`，按设备自有接口映射的 `opcua_map_v1`、`modbus_map_v1`、`line_command_v1`（串口 / TCP 命令）、`rest_map_v1`（车队等 REST 接口）——另有结果文件接收器；覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过。选哪种驱动见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
 
 ## 目录
 
@@ -218,7 +217,7 @@ api/openapi.json  OpenAPI 快照（scripts/export-openapi.py 生成，测试核�
 api/app/adapters/ 设备驱动：框架层（契约、回执解读、作业台账、注册表、驱动目录、接入验收）+ drivers/（每种协议一个驱动）
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
 devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.md
-  contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）、sql/（中间库）
+  contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
   simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
   sdk/         设备网关 SDK ilcs_gateway：厂家 SDK / 私有协议包成 http_json_v1 网关
   modules/     设备模块（一台设备一个交付目录），样板 sample-cycler
@@ -321,30 +320,29 @@ IPv4 网段不宽于 /16——设备网段里新接的设备就不用改 `.env`�
 
 Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到同机其他 `deploy-*` 容器。
 
-### 试点：外部模拟设备（每个示例工位一台）
+### 试点：外部模拟设备（示例工位各接一台）
 
-真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：每个示例工位一台，走各自的真实协议，
+真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：除 ST-01-B、ST-05 用内置模拟外，示例工位各接一台，走各自的真实协议，
 只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
 
 | 工位 | 模拟设备 | 驱动 |
 |---|---|---|
 | ST-01-A | `sila-sim-slurry-a` | `sila2_v1` |
-| ST-01-B | `sql-sim-slurry-b` + 中间库 `sql-sim-exchange` | `sql_table_v1`（数据库中间表） |
 | ST-02 | `plc-sim-mixer` | `modbus_map_v1`（Modbus 点表） |
 | ST-03 | `plc-sim-coater` | `opcua_map_v1`（OPC UA 节点映射） |
 | ST-04 | `opcua-sim-calender` | `opcua_v1`（OPC UA TaskExecution） |
-| ST-05 | `line-sim-oven` + `mtsics-sim-balance` | `composite_v1` = `line_command_v1` + `mt_sics_v1` |
 | ST-06 | `sila-sim-lh` | `sila2_v1` |
 | ST-07 | `gateway-sim-cycler` | `http_json_v1`（厂家 SDK 接口服务） |
 | AGV-01 / AGV-02 | `fleet-sim` | `rest_map_v1`（MiR 风格车队 REST） |
 | ARM-01（演示导入时登记） | `line-sim-arm` | `line_command_v1`（UR 仪表盘服务） |
+| ST-01-B、ST-05 | —（内置模拟适配器） | `simulation` |
 
 ```bash
 # 证书 / 凭据目录，模拟设备首次启动写入（属主是容器里的 10001）
 sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,fleet,simctl}
 # deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
-#   sila-sim-slurry-a,sql-sim-exchange,sql-sim-slurry-b,sila-sim-lh,plc-sim-mixer,plc-sim-coater,
-#   opcua-sim-calender,line-sim-oven,mtsics-sim-balance,gateway-sim-cycler,fleet-sim,line-sim-arm
+#   sila-sim-slurry-a,sila-sim-lh,plc-sim-mixer,plc-sim-coater,
+#   opcua-sim-calender,gateway-sim-cycler,fleet-sim,line-sim-arm
 cd /opt/ilcs/deploy && docker compose --profile pilot up -d
 docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 devices/simulators/pilot-devices.json 全部切换
 ```

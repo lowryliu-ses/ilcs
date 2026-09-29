@@ -290,4 +290,34 @@ def test_floor_shows_stations_slots_and_hides_other_organizations_barcodes(opera
     assert slots["HOTEL-01/S01"]["labware"]["barcode"] == mine["barcode"]
     assert slots["HOTEL-01/S02"]["labware"]["barcode"] == "已占用"
     assert "FOREIGN-1" not in str(floor)
+    # 位置列表（「工位与接入 → 放置位」读它）同一口径：本组织的报条码，别的组织的只说已占用
+    listed = {row["id"]: row for row in operator.get("/api/locations").json()}
+    assert listed["HOTEL-01/S01"]["occupant"] == mine["barcode"]
+    assert listed["HOTEL-01/S02"]["occupant"] == "已占用"
+    assert "FOREIGN-1" not in operator.get("/api/locations").text
     assert ORG  # 组织上下文来自登录，不来自请求
+
+
+def test_locations_are_registered_and_retired_by_the_layout_owner(admin, operator, clean_labware):
+    """「工位与接入 → 放置位」：登记要 location.edit；工位放置位必须指向工位；编号全站唯一；有载具时不能停用。"""
+    assert operator.post("/api/locations", {"id": "HOTEL-09/S01", "kind": "hotel", "group": "HOTEL-09"}).status_code == 403
+    orphan = admin.post("/api/locations", {"id": "NOPE/N1", "kind": "nest", "station_id": "NOPE"})
+    assert orphan.status_code == 422
+    for index in (1, 2):
+        created = admin.post("/api/locations", {
+            "id": f"HOTEL-09/S0{index}", "name": f"接入测试板库 槽位 {index}", "kind": "hotel", "group": "HOTEL-09",
+            "position": index, "accepts": ["tray"],
+        })
+        assert created.status_code == 201, created.text
+    assert admin.post("/api/locations", {"id": "HOTEL-09/S01", "kind": "hotel"}).status_code == 409
+    nest = admin.post("/api/locations", {"id": "ST-05/N90", "kind": "nest", "station_id": "ST-05", "position": 90})
+    assert nest.status_code == 201, nest.text
+
+    tray = _register(operator, "HOTEL-09/S01")
+    busy = admin.post("/api/locations/HOTEL-09/S01/active", {"active": False})
+    assert busy.status_code == 409 and tray["barcode"] in busy.text
+    listed = {row["id"]: row for row in admin.get("/api/locations").json()}
+    assert listed["HOTEL-09/S01"]["occupant"] == tray["barcode"] and listed["HOTEL-09/S02"]["accepts"] == ["tray"]
+    for ident in ("HOTEL-09/S02", "ST-05/N90"):
+        retired = admin.post(f"/api/locations/{ident}/active", {"active": False})
+        assert retired.status_code == 200 and retired.json()["active"] is False

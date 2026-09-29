@@ -3,8 +3,8 @@
 #
 # 做法与 reset-demo.sh 相同（备份 → 空库 → 迁移 → 播种），之后：
 # - 删掉种子里的全部演示流程、方案与报警：案例只保留主数据，流程与方案由案例自己建；
-# - 按 devices/simulators/pilot-devices.json 把全部示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
-#   串口命令、MT-SICS、HTTPS 网关、车队 REST），等执行器探测在线；机械臂 ARM-01 由导入脚本登记时接好；
+# - 按 devices/simulators/pilot-devices.json 把示例工位接到外部模拟设备（SiLA 2、Modbus / OPC UA 点表、
+#   HTTPS 网关、车队 REST；ST-01-B、ST-05 用内置模拟），等执行器探测在线；机械臂 ARM-01 由导入脚本登记时接好；
 # - 用 load-demo-cases.py 走和界面相同的 HTTP 接口把四个案例真实跑一遍：
 #     案例 A 注液（ST-05 → ST-06），案例 B 循环测试（ST-07），
 #     案例 C 注液 → 循环测试串行（托盘由 AGV 在工位间转运，注液时手套箱机械臂协同上下料），

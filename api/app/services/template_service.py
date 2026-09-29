@@ -82,32 +82,11 @@ def secrets_in(value: Any, path: str) -> list[str]:
 
 
 def connection_problems(driver: str, config: dict, connection: dict) -> list[str]:
-    """工位填的连接参数只能是驱动登记的连接参数：映射（点表、命令、状态码）归模板，改映射要改模板、另一个人发布。
-
-    组合工位按路由名给各路由的连接参数：`routes: [{name, config: {连接参数…}, credential_ref}]`。
-    """
+    """工位填的连接参数只能是驱动登记的连接参数：映射（点表、命令、状态码）归模板，改映射要改模板、另一个人发布。"""
     info = DRIVERS.get(driver)
     if info is None:
         return [f"驱动 {driver} 没有登记"]
-    problems = []
-    for key, value in (connection or {}).items():
-        if driver == "composite_v1" and key == "routes":
-            names = {str(route.get("name")): route for route in config.get("routes") or [] if isinstance(route, dict)}
-            for item in value if isinstance(value, list) else [None]:
-                if not isinstance(item, dict) or str(item.get("name")) not in names:
-                    problems.append("routes 里每一项都要写模板里已有的路由名")
-                    continue
-                route_info = DRIVERS.get(str(names[str(item["name"])].get("driver") or ""))
-                allowed = set(route_info.connection_keys) if route_info else set()
-                for sub in item.get("config") or {}:
-                    if sub not in allowed:
-                        problems.append(f"路由 {item['name']} 的 {sub} 不是连接参数，归模板管")
-                extra = set(item) - {"name", "config", "credential_ref"}
-                if extra:
-                    problems.append(f"路由 {item['name']} 只能填 config 与 credential_ref，不能填 {'、'.join(sorted(extra))}")
-        elif key not in info.connection_keys:
-            problems.append(f"{key} 不是 {info.label} 的连接参数，归模板管")
-    return problems
+    return [f"{key} 不是 {info.label} 的连接参数，归模板管" for key in (connection or {}) if key not in info.connection_keys]
 
 
 def template_check(template: Any) -> dict[str, Any]:

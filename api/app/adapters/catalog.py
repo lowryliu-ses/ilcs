@@ -312,21 +312,6 @@ DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
         "驱动作业台账", (*LINE, *JOBS, *_timeouts(5), *COMMON), _line,
     ),
     DriverInfo(
-        "mt_sics_v1", "MT-SICS 天平", "MT-SICS", "梅特勒天平（串口或以太网）", "驱动作业台账",
-        (ConfigField("transport", "通道", "object", required=True, connection=True),
-         ConfigField("device_id_source", "设备编号取自", "string", hint="serial（I4）或 balance_id（I10）"),
-         ConfigField("capabilities", "能力", "object", required=True, hint="{能力: {action, result, unit, stable_timeout_sec}}"),
-         *JOBS, *_timeouts(3), *COMMON),
-        lambda limits: {
-            "transport": {"kind": "tcp", "host": "balance.lab.internal", "port": 4305}, "request_timeout_sec": 3,
-            "probe_interval_sec": 10, "device_id_source": "serial",
-            "capabilities": {capability: {"action": "weigh", "result": (sorted((limits or {}).get(capability) or {}) or ["mass"])[0],
-                                          "unit": "g", "stable_timeout_sec": 15}
-                             for capability in (sorted(limits or {}) or ["cap.weigh"])},
-        },
-        supports={"hold": False, "abort": False, "query": True, "dedup": True},
-    ),
-    DriverInfo(
         "rest_map_v1", "REST 接口映射", "REST 接口映射", "设备或调度系统自有 REST 接口（AGV 车队等）", "驱动作业台账 + 设备任务号",
         (ConfigField("base_url", "接口地址", "string", required=True, connection=True), *TLS,
          ConfigField("identity", "身份请求", "object", required=True), ConfigField("busy", "忙判断", "object"),
@@ -336,29 +321,6 @@ DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
          *JOBS, *_timeouts(), *COMMON),
         _rest,
         credential="file:///run/secrets/ilcs/<工位>.json",
-    ),
-    DriverInfo(
-        "sql_table_v1", "数据库中间表", "数据库中间表", "厂家调度软件 / MES 经 ILCS 中间库契约的作业表对接", "中间库（作业表主键是指令号）",
-        (ConfigField("url", "中间库连接串", "string", required=True, connection=True, hint="口令不写进来，放 credential_ref"),
-         ConfigField("jobs_table", "作业表", "string"), ConfigField("device_table", "设备表", "string"),
-         ConfigField("device_id", "设备编号", "string", required=True, connection=True),
-         ConfigField("heartbeat_stale_sec", "心跳超时（秒）", "number"), *_timeouts(), *COMMON),
-        lambda limits: {"url": "postgresql+psycopg2://ilcs_exchange@exchange-db.lab.internal:5432/exchange",
-                        "jobs_table": "ilcs_jobs", "device_table": "ilcs_device", "device_id": "<设备编号>",
-                        "heartbeat_stale_sec": 30, "request_timeout_sec": 10, "probe_interval_sec": 10},
-        credential="file:///run/secrets/ilcs/<工位>.dbpass",
-    ),
-    DriverInfo(
-        "composite_v1", "组合工位", "组合工位", "一个工位由几台接口不同的仪器组成，按能力分派到子驱动", "各子驱动",
-        (ConfigField("routes", "路由", "array", required=True,
-                     hint="[{name, capabilities, driver, config, credential_ref}]；每项能力只落在一条路由上；"
-                          "套用模板时各路由的连接参数按路由名合并"),
-         ConfigField("probe_interval_sec", "探测周期（秒）", "number"), *COMMON),
-        lambda limits: {"probe_interval_sec": 10, "routes": [
-            {"name": f"route{index}", "capabilities": [capability], "driver": "line_command_v1",
-             "config": _line({capability: (limits or {}).get(capability) or {}})}
-            for index, capability in enumerate(sorted(limits or {}) or ["cap.example"], start=1)
-        ]},
     ),
 )}
 
@@ -443,7 +405,7 @@ def validate_config(driver: str, config: dict, credential_ref: str = "", *, prot
 
 
 def merge_config(base: dict, overlay: dict) -> dict:
-    """套用模板：模板里的映射 + 工位自己的连接参数。对象逐层合并；组合工位的 routes 按路由名合并；其余覆盖。"""
+    """套用模板：模板里的映射 + 工位自己的连接参数。对象逐层合并，其余覆盖。"""
     import copy
 
     merged = copy.deepcopy(base or {})
@@ -451,13 +413,6 @@ def merge_config(base: dict, overlay: dict) -> dict:
         current = merged.get(key)
         if isinstance(current, dict) and isinstance(value, dict):
             merged[key] = merge_config(current, value)
-        elif key == "routes" and isinstance(current, list) and isinstance(value, list):
-            named = {str(item.get("name")): item for item in value if isinstance(item, dict)}
-            merged[key] = [
-                merge_config(item, named[str(item.get("name"))]) if isinstance(item, dict) and str(item.get("name")) in named
-                else item for item in current
-            ] + [item for name, item in named.items() if name not in {str(row.get("name")) for row in current
-                                                                     if isinstance(row, dict)}]
         else:
             merged[key] = copy.deepcopy(value)
     return merged

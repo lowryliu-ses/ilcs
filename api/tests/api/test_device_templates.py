@@ -81,8 +81,7 @@ def test_driver_catalog_describes_every_registered_driver(admin):
     # 起步模板按工位能力极限生成（以前写死在前端）
     limits = next(row for row in admin.get("/api/stations").json() if row["id"] == "ST-05")["limits"]
     assert set(line["template"]["capabilities"]) == set(limits)
-    balance = next(row for row in drivers if row["key"] == "mt_sics_v1")
-    assert balance["supports"]["hold"] is False
+    assert not {"sql_table_v1", "composite_v1", "mt_sics_v1"} & {row["key"] for row in drivers}, "删掉的驱动不再登记"
 
 
 def test_invalid_config_is_rejected_when_saving(admin, station):
@@ -227,12 +226,12 @@ def test_passwords_written_into_urls_count_as_secrets(admin, station):
     leaked["config"]["report_url"] = "https://svc:hunter2@10.20.1.5/api/report"
     response = admin.post("/api/device-templates", leaked)
     assert response.status_code == 422 and response.json()["detail"]["code"] == "inline_adapter_secret_forbidden"
-    saved = _patch(admin, station, kind="real", driver="sql_table_v1", protocol="数据库中间表",
-                   config={"url": "postgresql+psycopg2://exchange:hunter2@127.0.0.1:5432/exchange"})
+    saved = _patch(admin, station, kind="real", driver="rest_map_v1", protocol="REST 接口映射",
+                   config={"base_url": "https://fleet:hunter2@127.0.0.1:8443/api"})
     assert saved.status_code == 422 and saved.json()["detail"]["code"] == "inline_adapter_secret_forbidden", saved.text
     # 只写用户名、不带口令的地址照常可以（口令放 credential_ref 指向的文件）
     checked = admin.post(f"/api/stations/{station}/adapter/check", {
-        "driver": "sql_table_v1", "config": {"url": "postgresql+psycopg2://exchange@127.0.0.1:5432/exchange"},
+        "driver": "rest_map_v1", "config": {"base_url": "https://fleet@127.0.0.1:8443/api"},
     }).json()
     assert not any("口令" in problem for problem in checked["problems"])
 
@@ -250,21 +249,12 @@ def test_stations_fill_connection_parameters_only(admin, qa, station):
     assert detail["code"] == "template_connection_invalid" and any("status" in item for item in detail["problems"])
 
 
-def test_composite_connection_parameters_go_by_route_name():
+def test_connection_parameters_are_the_drivers_connection_keys():
     from app.services.template_service import connection_problems
 
-    config = {"routes": [{"name": "oven", "driver": "line_command_v1", "capabilities": ["cap.vacuum_dry"],
-                          "config": copy.deepcopy(OVEN_MAP)}]}
-    route = {"name": "oven", "config": {"transport": {"kind": "tcp", "host": "oven-01.lab.internal", "port": 4001}},
-             "credential_ref": "file:///run/secrets/ilcs/oven.token"}
-    assert connection_problems("composite_v1", config, {"routes": [route]}) == []
-    assert connection_problems("composite_v1", config, {"routes": [{**route, "name": "balance"}]})
-    remapped = connection_problems("composite_v1", config, {"routes": [{**route, "config": {"status": {}}}]})
-    assert any("status" in problem for problem in remapped)
-    rerouted = connection_problems("composite_v1", config, {"routes": [{**route, "driver": "mt_sics_v1"}]})
-    assert any("driver" in problem for problem in rerouted)
     plain = connection_problems("line_command_v1", {}, {"transport": {}, "status": {}})
     assert len(plain) == 1 and plain[0].startswith("status 不是"), plain
+    assert connection_problems("composite_v1", {}, {}) == ["驱动 composite_v1 没有登记"]
 
 
 def test_export_and_import_keep_the_digest(admin, qa):

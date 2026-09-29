@@ -81,14 +81,11 @@ def _standalone(args) -> tuple[AcceptanceRecord, dict, tuple[str, ...]]:
         settings.adapter_state_root = tempfile.mkdtemp(prefix="ilcs-acceptance-")
     declared = record.config.get("capabilities")
     names = set(declared) if isinstance(declared, dict) else set()
-    for route in record.config.get("routes") or []:  # 组合工位：各路由承接的能力
-        if isinstance(route, dict):
-            names |= {str(item) for item in route.get("capabilities") or []}
     return record, {}, tuple(sorted(names))
 
 
 def _hosts_of(config) -> set[str]:
-    """配置里引用的主机：host、endpoint / base_url / url 的主机名、网络串口地址、组合工位各路由、控制口。"""
+    """配置里引用的主机：host、endpoint / base_url / url 的主机名、网络串口地址、控制口。"""
     from urllib.parse import urlparse
 
     hosts: set[str] = set()

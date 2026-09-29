@@ -131,7 +131,7 @@ services:
       - backend
 
   # ---------- 试点：外部模拟设备（可选，--profile pilot 才启动） ----------
-  # 每个示例工位一台，与真设备一样走网络接入；系统侧的驱动与连接配置见 devices/simulators/pilot-devices.json，
+  # 示例工位各接一台（ST-01-B、ST-05 除外），与真设备一样走网络接入；系统侧的驱动与连接配置见 devices/simulators/pilot-devices.json，
   # 用 `docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset` 一次切换。
   # 首次启动把证书 / 令牌写到 ../secrets/<sila|opcua|gateway|fleet>/，适配器配置里引用的就是这些文件。
   # 每台还开一个统一控制口（9900，只在后端网络可见；令牌首次启动写到 ../secrets/simctl/）：
@@ -140,16 +140,14 @@ services:
   #
   #   工位       模拟设备               协议 / 驱动
   #   ST-01-A    sila-sim-slurry-a      SiLA 2 / sila2_v1
-  #   ST-01-B    sql-sim-slurry-b       数据库中间表 / sql_table_v1（中间库 sql-sim-exchange）
   #   ST-02      plc-sim-mixer          Modbus TCP 点表 / modbus_map_v1
   #   ST-03      plc-sim-coater         OPC UA 节点映射 / opcua_map_v1
   #   ST-04      opcua-sim-calender     OPC UA TaskExecution / opcua_v1
-  #   ST-05      line-sim-oven          串口 / TCP 命令 / line_command_v1  ┐ composite_v1
-  #              mtsics-sim-balance     MT-SICS / mt_sics_v1              ┘
   #   ST-06      sila-sim-lh            SiLA 2 / sila2_v1
   #   ST-07      gateway-sim-cycler     HTTPS JSON（厂家 SDK 接口服务）/ http_json_v1
   #   AGV-01/02  fleet-sim              REST（MiR 风格车队接口）/ rest_map_v1
   #   ARM-01     line-sim-arm           UR 仪表盘服务（TCP 命令）/ line_command_v1
+  #   ST-01-B、ST-05 用系统内置的模拟适配器，不接外部模拟设备
   sila-sim-slurry-a:
     <<: *pilot-sim
     container_name: ilcs-sila-sim-slurry-a
@@ -167,46 +165,6 @@ services:
       - ../secrets/sila:/run/secrets/ilcs/sila
       - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "devices/simulators/sila_device/server.py"]
-
-  # ST-01-B 的中间库：试点用的 PostgreSQL（只在后端网络、信任认证、数据不落盘），
-  # 设备侧轮询进程 sql-sim-slurry-b 扮演厂家调度软件。正式中间库要有口令，口令放 credential_ref 指向的文件。
-  sql-sim-exchange:
-    image: postgres:16-alpine
-    container_name: ilcs-sql-sim-exchange
-    profiles: ["pilot"]
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      POSTGRES_DB: exchange
-      POSTGRES_USER: exchange
-      POSTGRES_HOST_AUTH_METHOD: trust
-    tmpfs:
-      - /var/lib/postgresql/data:size=256m
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U exchange -d exchange"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - backend
-
-  sql-sim-slurry-b:
-    <<: *pilot-sim
-    container_name: ilcs-sql-sim-slurry-b
-    environment:
-      SIM_DEVICE_ID: SIM-SLR-B
-      SIM_MODEL: EXP-SLURRY-24
-      SIM_PROFILE: generic
-      SIM_TASK_SECONDS: "20"
-      SIM_DATABASE_URL: postgresql+psycopg2://exchange@sql-sim-exchange:5432/exchange
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-SLR-B.token
-    volumes:
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/sql_device/worker.py"]
-    depends_on:
-      sql-sim-exchange:
-        condition: service_healthy
 
   plc-sim-mixer:
     <<: *pilot-sim
@@ -262,36 +220,6 @@ services:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
       - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "devices/simulators/opcua_device/server.py"]
-
-  line-sim-oven:
-    <<: *pilot-sim
-    container_name: ilcs-line-sim-oven
-    environment:
-      SIM_DIALECT: oven
-      SIM_DEVICE_ID: SIM-OVEN-01
-      SIM_MODEL: VAC-OVEN-80
-      SIM_METHODS: VD-120,VD-90
-      SIM_PORT: "4001"
-      SIM_TASK_SECONDS: "15"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-OVEN-01.token
-    volumes:
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/line_device/server.py"]
-
-  mtsics-sim-balance:
-    <<: *pilot-sim
-    container_name: ilcs-mtsics-sim-balance
-    environment:
-      SIM_DEVICE_ID: SIM-BAL-01
-      SIM_MODEL: XPR226
-      SIM_PORT: "4305"
-      SIM_SAMPLE_MASS: "0.0152"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-BAL-01.token
-    volumes:
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/mt_sics/server.py"]
 
   sila-sim-lh:
     <<: *pilot-sim

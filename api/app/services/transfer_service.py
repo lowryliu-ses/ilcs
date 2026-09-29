@@ -68,17 +68,23 @@ class TransferService:
             .all()
         )
 
-    def _occupied(self) -> dict[str, str]:
-        """位置 → 占着它的载具。在途转运的目的位置也算占用（板正在往那里送）。"""
+    def _occupied(self, masked: bool = False) -> dict[str, str]:
+        """位置 → 占着它的载具。在途转运的目的位置也算占用（板正在往那里送）。
+
+        `masked=True` 给界面看：位置是跨组织共享的实物，别的组织的载具只说「已占用」、在途只说「在途」，
+        不报条码与指令号（与现场总览同一口径）。
+        """
         taken: dict[str, str] = {}
         for row in self.db.query(Labware).filter(
             Labware.location_id.isnot(None), Labware.state != "retired"
         ).all():
-            taken[row.location_id] = row.barcode
+            taken[row.location_id] = row.barcode if not masked or row.org_id == self.ctx.org_id else "已占用"
         for command in self._open_transfers():
             destination = ((command.params or {}).get("to") or {}).get("location_id")
             if destination:
-                taken.setdefault(destination, f"在途 {command.id[:8]}")
+                taken.setdefault(
+                    destination, f"在途 {command.id[:8]}" if not masked or command.org_id == self.ctx.org_id else "在途",
+                )
         return taken
 
     def _lock_locations(self) -> None:
@@ -496,7 +502,7 @@ class TransferService:
         if location is None:
             raise NotFound("位置不存在")
         self._lock_locations()
-        occupied = self._occupied()
+        occupied = self._occupied(masked=True)
         if not active and location_id in occupied:
             raise StateConflict(f"{location_id} 上有载具或正有转运送过来（{occupied[location_id]}），不能停用")
         location.active = active
@@ -594,7 +600,7 @@ class TransferService:
         ]
 
     def locations(self) -> list[dict]:
-        occupied = self._occupied()
+        occupied = self._occupied(masked=True)
         return [
             self.location_out(row, occupied)
             for row in self.db.query(Location).order_by(Location.group, Location.station_id, Location.position, Location.id).all()

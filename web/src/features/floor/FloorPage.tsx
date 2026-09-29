@@ -249,7 +249,8 @@ export function FloorPage() {
 
       {data && !data.tracking ? (
         <div className="note">
-          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员按现场布局登记放置位后启用。
+          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员在
+          <Link to="/stations/locations">工位与接入 → 放置位</Link>按现场布局登记后启用。
         </div>
       ) : null}
       {data?.lost.length ? (

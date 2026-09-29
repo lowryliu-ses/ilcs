@@ -11,23 +11,26 @@ import type { AssetRow, CapabilityRow, ChannelUnit, Paged, StationAsset, Station
 import { Blocked, ConfirmDialog, ConnectionPill, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import { AdapterEditor } from './AdapterEditor';
 import { DeviceTemplatesTab } from './DeviceTemplatesTab';
+import { LocationsTab } from './LocationsTab';
 
 /* 工位与接入：系统里的执行位置（工位）和它怎么连设备（设备连接），加上同一类设备共用的接入模板。三个页签各有地址：
 
    - 工位：能接什么活（能力极限）、同时接几份（通道）。实物属性——型号、序列号、校准、资产状态与总容量——归「仪器设备」，
      这里只读显示关联资产的结论；
    - 设备连接：每个工位的适配器（驱动、连接参数、凭据引用、接入验收），还没接设备的工位也列在这里；
-   - 接入模板：一类设备怎么接，按修订号发布；工位的设备连接套用它，只填自己的连接参数。
+   - 接入模板：一类设备怎么接，按修订号发布；工位的设备连接套用它，只填自己的连接参数；
+   - 放置位：载具在现场能放在哪（工位放置位、板库槽位、缓冲位、库房），现场布局的静态登记。
 
    登记新工位只登记台账与关联的仪器设备，之后分两步接设备、填能力极限，各走各的签名与检查。
    清洗确认、结果未知指令转人工核查、适配器重连是现场操作，在「现场监控」做；能力本身的定义在「能力字典」。 */
 
-export type StationsTab = 'ledger' | 'connections' | 'templates';
+export type StationsTab = 'ledger' | 'connections' | 'templates' | 'locations';
 
 const TABS: { key: StationsTab; path: string; label: string; perm?: string[] }[] = [
   { key: 'ledger', path: '/stations', label: '工位' },
   { key: 'connections', path: '/stations/connections', label: '设备连接' },
   { key: 'templates', path: '/stations/templates', label: '接入模板', perm: ['station.edit', 'template.release'] },
+  { key: 'locations', path: '/stations/locations', label: '放置位' },
 ];
 
 const CHANNELS_HINT =
@@ -88,6 +91,8 @@ export function StationsPage({ tab = 'ledger' }: { tab?: StationsTab }) {
               </>
             ) : current === 'connections' ? (
               '每个工位怎么连设备：驱动、连接参数、凭据引用与接入验收。同型号的几台设备套用同一份接入模板，只填各自的连接参数。'
+            ) : current === 'locations' ? (
+              '载具在现场能放在哪：工位放置位、板库槽位、缓冲位、库房。登记了位置才启用载具位置追踪，转运按位置规划。'
             ) : (
               '一类设备怎么接，存成有版本、要发布的模板；工位在「设备连接」里套用模板、只填自己的连接参数。设备模块交付的 profile.json 在这里导入。'
             )}
@@ -117,6 +122,7 @@ export function StationsPage({ tab = 'ledger' }: { tab?: StationsTab }) {
       ) : null}
       {current === 'connections' ? <ConnectionsPanel stations={rows} onConfigure={setEditingAdapter} /> : null}
       {current === 'templates' ? <DeviceTemplatesTab /> : null}
+      {current === 'locations' ? <LocationsTab stations={rows} /> : null}
 
       {editing ? (
         <LimitsEditor station={editing} capabilities={capabilities.data ?? []} onClose={() => setEditing(null)} />

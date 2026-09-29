@@ -20,7 +20,7 @@ devices/modules/<厂家-型号>/
 
 | 设备给的接口 | 模块里有什么 | ILCS 侧驱动 |
 |---|---|---|
-| 串口 / TCP 文本命令、Modbus 点表、OPC UA 节点、REST、中间库、天平 | 只有 `profile.json`（映射配置）+ 模拟设备 + 测试，不写代码 | 现有映射驱动（`line_command_v1` 等） |
+| 串口 / TCP 文本命令、Modbus 点表、OPC UA 节点、REST | 只有 `profile.json`（映射配置）+ 模拟设备 + 测试，不写代码 | 现有映射驱动（`line_command_v1` 等） |
 | 厂家 SDK / DLL、私有协议、逻辑复杂 | `driver/` + `simulator/` + `gateway.py`，基于 `devices/sdk/ilcs_gateway` | `http_json_v1`（本模块起的网关） |
 
 第二种的网关是一个独立服务：挂了只影响这一台（ILCS 判它失联、进待命列表），其他工位照常；升级只重启这个服务，ILCS 不动。

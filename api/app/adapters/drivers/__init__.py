@@ -4,8 +4,8 @@
 （`http_client.py`）、注册表（`registry.py`）、驱动目录（`catalog.py`）与接入验收（`acceptance.py`）。
 新驱动放这里，在 `registry.py` 注册、在 `catalog.py` 声明配置项。
 
-- 认 ILCS 指令号（设备侧去重、按指令号查询）：`http_json`、`sila2`、`opcua`、`modbus_tcp`、`sql_table`；
-- 不认 ILCS 指令号（驱动作业台账补上去重与查询）：`line_command`、`mt_sics`、`opcua_map`、`modbus_map`
+- 认 ILCS 指令号（设备侧去重、按指令号查询）：`http_json`、`sila2`、`opcua`、`modbus_tcp`；
+- 不认 ILCS 指令号（驱动作业台账补上去重与查询）：`line_command`、`opcua_map`、`modbus_map`
   （共用 `point_map`）、`rest_map`；
-- `composite`：一个工位多台仪器，按能力分派到上面的驱动；`simulation`：系统内置的模拟适配器。
+- `simulation`：系统内置的模拟适配器。
 """

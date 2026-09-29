@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sim_harness import balance_config, balance_sim, gateway_config, gateway_sim, record, request
+from sim_harness import gateway_config, gateway_sim, record, request
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -102,17 +102,17 @@ def test_script_gateway_injector_uses_the_simulator_control_api(credential_root)
 
 
 def test_job_ledger_driver_without_device_counts(credential_root):
-    """天平不认 ILCS 指令号：去重靠作业台账。读不到设备侧动作次数时「重复提交」只能判跳过，不硬判通过。"""
-    from app.adapters.drivers.mt_sics import MtSicsAdapter
+    """串口命令干燥箱不认 ILCS 指令号：去重靠作业台账。读不到设备侧动作次数（没登记控制口）时
+    「重复提交」只能判跳过，不硬判通过。"""
+    from app.adapters.drivers.line_command import LineCommandAdapter
+    from sim_harness import line_config, line_sim
 
-    with balance_sim() as (_, _, port):
-        rec = record("MT-SICS", balance_config(port), driver="mt_sics_v1", kind="real", supports_hold=False,
-                     supports_abort=False)
-        weigh = request("", capability="cap.weigh", params={"mass": 0.0152})
-        report = _run(rec, lambda: MtSicsAdapter(rec), weigh, physical=True)
+    with line_sim(task_seconds=0.3) as (_, _, port):
+        rec = record("串口 / TCP 命令", line_config(port), driver="line_command_v1", kind="real")
+        report = _run(rec, lambda: LineCommandAdapter(rec), physical=True)
     states = {check.key: check.state for check in report.checks}
     assert states["complete"] == "pass" and states["restart_query"] == "pass", report.markdown()
-    assert states["duplicate"] == "skip" and states["hold"] == states["abort"] == "skip"
+    assert states["duplicate"] == "skip", report.markdown()
 
 
 def test_script_runs_read_only_acceptance_against_a_registered_station(monkeypatch, capsys, reset_runtime):
@@ -149,24 +149,6 @@ def test_control_port_counts_motions_for_devices_without_command_ids(credential_
     assert duplicate.state == "pass" and "总动作次数" in duplicate.detail, duplicate
     assert all(states[key] == "pass" for key in ("lost_receipt", "busy", "interlock", "offline")), states
     assert report.simulator
-
-
-def test_control_port_for_the_balance_counts_weighings(credential_root):
-    from app.adapters.acceptance import SimulatorControlInjector
-    from app.adapters.drivers.mt_sics import MtSicsAdapter
-    from sim_harness import control_port
-
-    with balance_sim() as (balance, runner, port), control_port(runner.control_target()) as control:
-        rec = record("MT-SICS", balance_config(port), driver="mt_sics_v1", kind="real", supports_hold=False,
-                     supports_abort=False)
-        injector = SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
-        weigh = request("", capability="cap.weigh", params={"mass": 0.0152})
-        report = _run(rec, lambda: MtSicsAdapter(rec), weigh, physical=True, injector=injector)
-        assert balance.weighings >= 2
-    states = {check.key: check.state for check in report.checks}
-    duplicate = next(check for check in report.checks if check.key == "duplicate")
-    assert duplicate.state == "pass" and "总动作次数" in duplicate.detail, report.markdown()
-    assert states["busy"] == states["interlock"] == states["offline"] == "pass", report.markdown()
 
 
 def test_control_port_requires_its_token(credential_root):
@@ -285,7 +267,7 @@ def test_cleanup_stops_what_acceptance_left_running_or_reports_it():
     assert _cleanup(None, ["ACC-T-lost"]).leftovers == ["ACC-T-lost"]
 
 
-PILOT_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet", "sql_table")
+PILOT_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet")
 
 
 @contextmanager
@@ -316,7 +298,7 @@ def _pilot_simulator(kind: str, root: Path):
             rec = record("OPC UA TaskExecution", config, credential, driver="opcua_v1", kind="real")
             yield rec, (lambda: OpcUaAdapter(rec)), request(""), \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
-    elif kind == "fleet":
+    else:
         from app.adapters.drivers.rest_map import RestMapAdapter
 
         with fleet_sim(root, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
@@ -327,30 +309,13 @@ def _pilot_simulator(kind: str, root: Path):
             assert template.type == "transfer"
             yield rec, (lambda: RestMapAdapter(rec)), template, \
                 SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
-    else:
-        from app.adapters.drivers.sql_table import SqlTableAdapter
-        from simulators.sql_device.worker import SqlDeviceWorker
-        from sim_harness import _device
-
-        url = f"sqlite:///{root / 'exchange.db'}"
-        worker = SqlDeviceWorker(url, _device("SIM-SQL-T", task_seconds=0.4), poll_seconds=0.05)
-        worker.start()
-        try:
-            with control_port(worker.control_target()) as control:
-                rec = record("数据库中间表", {"url": url, "device_id": "SIM-SQL-T", "request_timeout_sec": 3,
-                                            "heartbeat_stale_sec": 1.5}, driver="sql_table_v1", kind="real")
-                yield rec, (lambda: SqlTableAdapter(rec)), request(""), \
-                    SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
-        finally:
-            worker.stop()
 
 
 @pytest.mark.parametrize("kind", PILOT_SIMULATORS)
 def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, tmp_path, monkeypatch):
     """试点的每一类模拟设备都跑完整清单（动作 + 故障）：没有误判的不通过，也不留下没结束的验收指令。
 
-    模拟设备注入不了的故障（点表设备没有回执可丢、中间表插入作业行就是交接）由控制口说明，清单判跳过；
-    中间表的拒绝是设备侧轮询到作业行后异步回写的，失联要等心跳超时才看得出来。
+    模拟设备注入不了的故障（点表设备没有回执可丢）由控制口说明，清单判跳过。
     """
     from app.core.config import settings
 
@@ -358,7 +323,7 @@ def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, 
     count = {"live": 0, "peak": 0}
 
     def counted(factory):
-        """数同时开着的驱动实例：每个实例占中间库一条连接、OPC UA 一个会话，轮询时不关会把设备占满。"""
+        """数同时开着的驱动实例：每个实例占 OPC UA 一个会话、车队接口一条连接，轮询时不关会把设备占满。"""
         def build():
             instance = factory()
             original = getattr(instance, "close", None)
@@ -386,7 +351,7 @@ def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, 
     offline = next(check.detail for check in report.checks if check.key == "offline")
     assert "OperationalError" not in offline and "too many" not in offline, offline
     assert states["complete"] == "pass" and states["abort"] == "pass", states
-    if kind in {"plc_opcua", "plc_modbus", "sql_table"}:
+    if kind in {"plc_opcua", "plc_modbus"}:
         assert states["lost_receipt"] == "skip", states
     else:
         assert states["lost_receipt"] == "pass", states

@@ -40,7 +40,7 @@ def create_location(
     return guard.remember(TransferService(db, ctx).create_location(body, user))
 
 
-@router.post("/locations/{location_id}/active")
+@router.post("/locations/{location_id:path}/active")
 def set_location_active(
     location_id: str, payload: LocationActiveIn, db: DbSession, user: CurrentUser,
     ctx=require("location.edit"),

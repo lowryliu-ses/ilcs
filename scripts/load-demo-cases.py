@@ -3,7 +3,7 @@
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署（`POST /signatures`），
 与在界面上签的一样。批次由执行器真实投递到外部模拟设备（reset-demo-cases.sh 已按
-devices/simulators/pilot-devices.json 把示例工位接好）：ST-05 干燥箱走串口命令、天平走 MT-SICS，ST-06 走 SiLA 2，
+devices/simulators/pilot-devices.json 把示例工位接好）：ST-05 用内置模拟适配器，ST-06 走 SiLA 2，
 ST-07 走 HTTPS 网关（厂家 SDK 接口服务），AGV 走车队 REST 接口；机械臂 ARM-01 登记时就接 UR 仪表盘服务。
 
     python3 scripts/load-demo-cases.py http://127.0.0.1:8090

@@ -1,9 +1,11 @@
 """给运行中的文本命令模拟设备注入故障、查看状态。在模拟器容器里执行，沿用容器的 SIM_* 配置：
 
-    docker compose exec line-sim-oven python devices/simulators/line_device/fault.py state
-    docker compose exec line-sim-oven python devices/simulators/line_device/fault.py interlock      # 门开：DOOR? → OPEN
-    docker compose exec line-sim-arm  python devices/simulators/line_device/fault.py lost_receipt   # play 了但不回复
-    docker compose exec line-sim-oven python devices/simulators/line_device/fault.py none
+    docker compose exec line-sim-arm python devices/simulators/line_device/fault.py state
+    docker compose exec line-sim-arm python devices/simulators/line_device/fault.py interlock      # 保护停止
+    docker compose exec line-sim-arm python devices/simulators/line_device/fault.py lost_receipt   # play 了但不回复
+    docker compose exec line-sim-arm python devices/simulators/line_device/fault.py none
+
+本机按 `--dialect oven` 起的真空干燥箱（温控仪表）同样适用：门开时 DOOR? → OPEN。
 
 模式见 devices/simulators/README.md「故障注入」。
 """

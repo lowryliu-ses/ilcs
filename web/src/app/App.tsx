@@ -213,6 +213,7 @@ export function App() {
           <Route path="/stations" element={<StationsPage tab="ledger" />} />
           <Route path="/stations/connections" element={<StationsPage tab="connections" />} />
           <Route path="/stations/templates" element={<StationsPage tab="templates" />} />
+          <Route path="/stations/locations" element={<StationsPage tab="locations" />} />
           {/* 设备接入模板原来单独一个菜单，现在是「工位与接入」的页签；旧地址照样能打开 */}
           <Route path="/device-templates" element={<Navigate to="/stations/templates" replace />} />
           <Route path="/capabilities" element={<CapabilitiesPage />} />

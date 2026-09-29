@@ -134,7 +134,7 @@ def gateway_config(port: int, cert_dir: Path, device_id: str = "SIM-GW-T", **ext
     )
 
 
-# ---------- 没有 ILCS 任务契约的设备：串口 / TCP 命令、MT-SICS ----------
+# ---------- 没有 ILCS 任务契约的设备：串口 / TCP 命令 ----------
 
 # 真空干燥箱温控仪表（devices/simulators/line_device --dialect oven）的命令映射
 OVEN_MAP = {
@@ -181,10 +181,6 @@ UR_MAP = {
     "abort": [{"send": "stop", "expect": "^Stopped"}],
 }
 
-BALANCE_MAP = {
-    "capabilities": {"cap.weigh": {"action": "weigh", "result": "mass", "unit": "g", "stable_timeout_sec": 3}},
-}
-
 
 @contextmanager
 def line_sim(dialect: str = "oven", device_id: str = "SIM-OVEN-T", **device):
@@ -204,27 +200,6 @@ def line_config(port: int, dialect: str = "oven", **extra) -> dict:
     mapping = OVEN_MAP if dialect == "oven" else UR_MAP
     return {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": port}, "request_timeout_sec": 1,
             "connect_timeout_sec": 1, "probe_interval_sec": 0.5, **mapping, **extra}
-
-
-@contextmanager
-def balance_sim(device_id: str = "SIM-BAL-T", sample_mass: float = 0.0152):
-    from simulators.mt_sics.server import Balance, SimulatorRunner, parse
-
-    port = free_port()
-    args = parse(["--device-id", device_id, "--address", "127.0.0.1", "--port", str(port),
-                  "--sample-mass", str(sample_mass)])
-    balance = Balance(args.device_id, args.model, args.sample_mass)
-    runner = SimulatorRunner(args, balance)
-    runner.start()
-    try:
-        yield balance, runner, port
-    finally:
-        runner.stop()
-
-
-def balance_config(port: int, **extra) -> dict:
-    return {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": port}, "request_timeout_sec": 1,
-            "connect_timeout_sec": 1, "probe_interval_sec": 0.5, **BALANCE_MAP, **extra}
 
 
 # ---------- PLC 点表（devices/simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
