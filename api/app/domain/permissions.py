@@ -46,6 +46,8 @@ PERMISSIONS: dict[str, list[str]] = {
     "inventory.reverse": ["qa", "admin"],
     # ---------- 资源 ----------
     "station.edit": ["automation_engineer", "admin"],
+    # 设备接入模板决定设备怎么被驱动：起草归工位维护，发布要另一个人（职责分离）
+    "template.release": ["qa", "automation_engineer", "admin"],
     "location.edit": ["automation_engineer", "admin"],
     "asset.edit": ["automation_engineer", "admin"],
     "booking.edit": ["operator", "automation_engineer", "lab_manager", "admin"],
@@ -135,7 +137,8 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("inventory.post", "库存入账"), ("inventory.reverse", "库存冲销"),
     ]),
     ("资源", [
-        ("station.edit", "维护工位与适配器"), ("location.edit", "维护放置位与板库"),
+        ("station.edit", "维护工位与适配器"), ("template.release", "发布与退役设备接入模板"),
+        ("location.edit", "维护放置位与板库"),
         ("asset.edit", "维护仪器设备与校准"),
         ("booking.edit", "资源预约"), ("maintenance.edit", "维护工单"), ("environment.record", "录入环境读数"),
     ]),
@@ -162,7 +165,7 @@ ADMIN_ONLY = frozenset({"org.admin", "service.manage"})
 
 
 # 引入「已知权限键」记录之前就有的新增权限键：老矩阵没记 known_permissions 时，这些键算作「保存时还不存在」
-ADDED_AFTER_LEGACY = frozenset({"method.edit", "method.release", "environment.record", "audit.read"})
+ADDED_AFTER_LEGACY = frozenset({"method.edit", "method.release", "environment.record", "audit.read", "template.release"})
 
 
 def merge_saved_matrix(saved: dict[str, list[str]], known: list[str] | None) -> dict[str, list[str]]:

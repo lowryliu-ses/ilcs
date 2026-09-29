@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
 
 from simulators.common.certs import ensure_certificate, self_signed_certificate  # noqa: E402
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
 REJECTION_STATUS = {"InvalidParameters": 422, "NotSupported": 422, "Interlocked": 423, "DeviceBusy": 423}
@@ -192,6 +193,10 @@ class SimulatorRunner:
             server.shutdown()
             server.server_close()
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）。网关自己的 API 上也有同样的 /simulator/*，带网关令牌。"""
+        return DeviceTarget(self.device, self.go_offline)
+
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)  # 先把 fault 请求的应答送回去
@@ -219,7 +224,10 @@ def main(argv=None) -> int:
     device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(device, args.tick_seconds, runner.stop)
+    if control is not None:
+        control.stop()
     return 0
 
 

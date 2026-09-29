@@ -220,6 +220,25 @@ class CommandRepository(ScopedRepository[Command]):
             )
         ]
 
+    def acting_on_station(self, station_id: str) -> list[Command]:
+        """发给这台设备、设备侧可能仍在动作的指令（不分类型）：在途、已保持，或结果未知且可能已送达。
+
+        和 `occupying` 的区别：这里只看指令发给了谁，不看协同占用——要回答的是「这台设备的驱动还欠着谁一个结论」。
+        在途的保持 / 终止同样算：它们也要靠这台设备的驱动按指令号查回。批次已结束的在途 / 已保持指令不算
+        （结束前逐台确认过停止或完成）；结果未知的不看批次状态，现场核查给出结论前一直算。跨组织：设备是共享的实物。
+        """
+        rows = (
+            self.db.query(Command, Batch.state)
+            .outerjoin(Batch, Batch.id == Command.batch_id)
+            .filter(Command.station_id == station_id, Command.state.in_([*ENGAGED_STATES, *UNSETTLED_STATES]))
+            .order_by(Command.created_at)
+            .all()
+        )
+        return [
+            command for command, batch_state in rows
+            if (command.state in ENGAGED_STATES and batch_state not in _BATCH_ENDED) or outcome_unknown(command)
+        ]
+
     def ever_delivered_for_run(self, step_run_id: str) -> bool:
         if not step_run_id:
             return False

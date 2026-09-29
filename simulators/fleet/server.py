@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulators 包
     sys.path.insert(0, str(ROOT))
 
+from simulators.common.control import start_control  # noqa: E402
 from simulators.common.runtime import configure_logging  # noqa: E402
 
 MARK = "ILCS-SIMULATOR"
@@ -114,6 +115,45 @@ class Fleet:
                        "queue": [{"id": m["id"], "state": m["state"], "message": m["message"]} for m in robot.queue],
                        "executions": dict(robot.executions)}
                 for name, robot in self.robots.items()}
+
+
+class FleetTarget:
+    """统一控制口（simulators/common/control.py）：一个进程模拟整个车队，`unit` 指定哪台车。
+
+    车队不认 ILCS 指令号（任务号是车队自己编的），只报总动作次数；联锁对应急停。离线是整个车队接口断开。
+    """
+
+    knows_command_ids = False
+    SUPPORTED = {"none", "interlock", "busy", "fail", "stuck", "slow_submit", "lost_receipt"}
+
+    def __init__(self, fleet: "Fleet", go_offline):
+        self.fleet = fleet
+        self.go_offline = go_offline
+
+    def _robot(self, unit: str) -> "Robot":
+        robot = self.fleet.robots.get(unit)
+        if robot is None:
+            raise KeyError(f"车队里没有 {unit or '（未指定车辆）'}；可选 {', '.join(self.fleet.robots)}")
+        return robot
+
+    def set_fault(self, mode: str, parameter: float, unit: str = "") -> dict:
+        if mode == "offline":
+            self.go_offline(parameter or 5)
+            return {"fault": "offline", "seconds": parameter or 5, "knows_command_ids": False}
+        if mode not in self.SUPPORTED:
+            raise ValueError(f"车队模拟设备不支持故障 {mode}")
+        robot = self._robot(unit)
+        mode = "estop" if mode == "interlock" else mode
+        with robot.lock:
+            robot.fault, robot.parameter = mode, parameter
+            robot.state_id = {"estop": 10, "busy": 12}.get(mode, 3 if robot.state_id in {10, 12} else robot.state_id)
+        return self.state(unit)
+
+    def state(self, unit: str = "") -> dict:
+        robot = self._robot(unit)
+        with robot.lock:
+            return {"device_id": robot.name, "fault": robot.fault, "fault_parameter": robot.parameter,
+                    "state_id": robot.state_id, "motions": sum(robot.executions.values()), "knows_command_ids": False}
 
 
 class _Drop(Exception):
@@ -321,6 +361,9 @@ class SimulatorRunner:
 
         threading.Thread(target=cycle, daemon=True).start()
 
+    def control_target(self) -> FleetTarget:
+        return FleetTarget(self.fleet, self.go_offline)
+
 
 def parse(argv=None) -> argparse.Namespace:
     env = os.environ.get
@@ -338,6 +381,7 @@ def main(argv=None) -> int:
     args = parse(argv)
     runner = SimulatorRunner(args)
     runner.start()
+    control = start_control(runner.control_target())
     stop = threading.Event()
     import signal
 
@@ -345,6 +389,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     stop.wait()
     runner.close()
+    if control is not None:
+        control.stop()
     return 0
 
 

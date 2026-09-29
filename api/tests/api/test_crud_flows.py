@@ -202,19 +202,19 @@ def test_adapter_configuration_is_versioned_secret_safe_and_testable(
     assert bad_ref.status_code == 422
     assert bad_ref.json()["detail"]["code"] == "credential_ref_invalid"
 
+    # 保存前按驱动检查配置：驱动键没登记，当场拒绝（不用等到「测试连接」才发现）
     real = admin.patch("/api/stations/ST-98/adapter", {
         "kind": "real", "driver": "modbus_tcp", "row_version": current,
         "signature_id": admin.sign(
             "设备集成配置变更批准", target="ST-98", object_version=current,
         ),
     })
-    assert real.status_code == 200, real.text
-    unavailable = admin.post("/api/stations/ST-98/adapter/test")
-    assert unavailable.status_code == 409
-    assert unavailable.json()["detail"]["code"] == "adapter_driver_unavailable"
+    assert real.status_code == 422, real.text
+    assert real.json()["detail"]["code"] == "adapter_config_invalid"
+    assert "没有登记" in real.json()["detail"]["message"]
 
     # 复原为模拟器并走健康检查重连，不给后续用例留下一个关闭全局执行门的适配器。
-    real_version = real.json()["row_version"]
+    real_version = current
     restored = admin.patch("/api/stations/ST-98/adapter", {
         "kind": "simulation", "driver": "simulation", "row_version": real_version,
         "signature_id": admin.sign(

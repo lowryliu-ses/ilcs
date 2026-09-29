@@ -6,6 +6,7 @@ from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.errors import DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain.access import service_may_use_station
+from ..domain.adapter_rules import ACTING_LABELS, busy_blocked_changes
 from ..domain.gate import adapter_status
 from ..domain.lifecycle import capability_delete_blockers, station_retire_blockers
 from ..domain.params import clean_specs, spec_issues
@@ -20,6 +21,11 @@ from ..repositories.recipes import RecipeRepository
 from ..repositories.resources import (
     AdapterRepository, AssetRepository, CapabilityRepository, IslandRepository, StationRepository,
     adopt_asset_model, station_model,
+)
+from ..adapters.catalog import DRIVERS, validate_config
+from .acceptance_service import after_config_change, gate_out, requeue_if_needed, running_stations
+from .template_service import (
+    TemplateService, connection_problems, station_template_options, template_brief, template_changes,
 )
 from .audit_service import AuditService
 from .gate_service import GateService
@@ -132,6 +138,11 @@ class StationService:
             ),
             # 驱动自报的设备身份与方法目录
             "catalog": catalog_of(adapter),
+            # 配置变更后的接入验收闸门：还欠什么级别、最近一次满足要求的验收
+            "acceptance": gate_out(adapter),
+            # 套用的设备接入模板（哪一版、有没有更新的发布版）与这台设备自己的连接参数
+            "template": template_brief(self.db, adapter.template_id),
+            "template_connection": (adapter.template_connection or {}) if include_config else {},
         }
 
     def adapter_detail(self, station_id: str) -> dict:
@@ -143,7 +154,14 @@ class StationService:
 
     @staticmethod
     def _reject_inline_secrets(value, path: str = "config") -> None:
-        """适配器配置可审计可导出，任何秘密原文都不能混在 JSON 里。"""
+        """适配器配置可审计可导出，任何秘密原文都不能混在 JSON 里：按键名，也看 URL 里有没有带口令。"""
+        from .template_service import URL_PASSWORD
+
+        if isinstance(value, str) and URL_PASSWORD.search(value):
+            raise ValidationFailed(
+                f"{path} 的地址里带了口令（user:password@）：请去掉口令、改填 credential_ref",
+                code="inline_adapter_secret_forbidden",
+            )
         forbidden = {
             "password", "passwd", "secret", "token", "api_key", "apikey", "private_key",
             "authorization", "cookie", "client_secret",
@@ -348,6 +366,7 @@ class StationService:
             raise NotFound("适配器未登记")
         if not adapter.enabled:
             raise StateConflict("适配器已停用，不能重连", code="adapter_disabled")
+        self._require_no_acceptance_running(station_id, "重连")
         before = "在线" if adapter.connected else "离线"
         try:
             implementation = adapter_for(adapter)
@@ -368,6 +387,8 @@ class StationService:
         adapter.last_heartbeat = now()
         adapter.note = "已重新加入车队，等待任务" if station_id.startswith("AGV") else "重连后已对账最近检查点"
         station = self.stations.get(station_id)
+        # 还欠验收、上次自动验收因为连不上没通过：设备回来了，再排一次
+        requeue_if_needed(self.db, adapter, station.org_id if station else self.ctx.org_id)
         if station and station.status == "offline":
             station.status = "idle"
         from .monitoring_service import DeviceMonitor
@@ -415,7 +436,15 @@ class StationService:
             driver = (payload.get("adapter_driver") or "").strip()
             if kind == "real" and (not driver or driver == "simulation"):
                 raise ValidationFailed("真实设备必须填写已登记的驱动键", code="adapter_driver_required")
-            self.adapters.add(Adapter(
+            if kind == "real":
+                check = validate_config(driver, payload.get("adapter_config") or {}, payload.get("credential_ref", ""),
+                                        protocol=payload["protocol"])
+                if check.problems:
+                    raise ValidationFailed(
+                        f"适配器配置有 {len(check.problems)} 处问题：{'；'.join(check.problems)}",
+                        {"problems": check.problems, "warnings": check.warnings}, code="adapter_config_invalid",
+                    )
+            adapter = self.adapters.add(Adapter(
                 station_id=station.id, protocol=payload["protocol"], version=payload.get("adapter_version", ""),
                 note="新登记，等待首次心跳", connected=False, accepts_commands=False,
                 kind=kind, driver=driver or "simulation", config=payload.get("adapter_config") or {},
@@ -425,6 +454,9 @@ class StationService:
                 supports_query=payload.get("supports_query", True),
                 supports_dedup=payload.get("supports_dedup", True),
             ))
+            # 新登记的真实设备第一次上线：先过接入验收（自动排一次只读级；真实设备还要动作级）
+            after_config_change(self.db, adapter, {"kind": "", "driver": ""}, org_id=station.org_id,
+                                requested_by=user.display_name, requested_by_id=user.id)
         broken = self.revalidate_recipes(set(station.limits or {}))
         self.audit.record(
             user, "登记新工位", station.id, sign=True, meaning=signature.meaning, signature_id=signature.id,
@@ -440,7 +472,11 @@ class StationService:
         self, station_id: str, changes: dict, expected: int, signature_id: str, user: User,
     ) -> dict:
         self._require_station(station_id)
-        adapter = self.adapters.get(station_id)
+        # 锁住适配器行直到提交：与执行器领取指令互斥（它在领取前锁同一行），也不和验收收尾互相覆盖闸门
+        adapter = (
+            self.db.query(Adapter).filter(Adapter.station_id == station_id)
+            .with_for_update().populate_existing().one_or_none()
+        )
         if not adapter:
             raise NotFound("适配器未登记")
         if adapter.row_version != expected:
@@ -448,6 +484,7 @@ class StationService:
                 "适配器配置已被其他人修改，请刷新后重试",
                 {"current_version": adapter.row_version}, code="version_conflict",
             )
+        changes = self._template_changes(adapter, changes)
         if "config" in changes:
             self._reject_inline_secrets(changes["config"])
         kind = changes.get("kind", adapter.kind)
@@ -456,6 +493,8 @@ class StationService:
             raise ValidationFailed("真实设备必须填写已登记的驱动键", code="adapter_driver_required")
         credential_ref = changes.get("credential_ref", adapter.credential_ref)
         self._validate_credential_ref(credential_ref)
+        self._require_quiet_for(adapter, changes)
+        self._require_valid_config(adapter, changes)
         signature = self.identity.consume_signature(
             signature_id, user, "修改设备适配器", object_ref=station_id,
             object_version=adapter.row_version,
@@ -468,24 +507,130 @@ class StationService:
         # 逐项记前后值：把 base_url 改到别的主机、换一个凭据引用，审计里都要看得出来。
         # config 已拒绝秘密原文、credential_ref 只是引用，二者都可以留痕。
         diff = self._adapter_diff(adapter, changes)
+        # 只改了说明、协议名、版本或超时：不改变连谁、怎么判结论。连接状态照旧（设备可能正在动作，保持 / 终止要能立刻下发），
+        # 也不新欠验收
+        current = {key: getattr(adapter, key) for key in changes if hasattr(adapter, key)}
+        light = not busy_blocked_changes(current, {k: v for k, v in changes.items() if k != "enabled"}) and (
+            "enabled" not in changes or changes["enabled"] == adapter.enabled
+        )
         for key, value in changes.items():
             setattr(adapter, key, value)
         adapter.config_version += 1
         adapter.row_version += 1
         adapter.updated_at = now()
-        # 配置变更后必须重新握手，不能沿用旧连接的“在线”结论。
-        adapter.connected = False
-        adapter.accepts_commands = False
+        if not light:
+            # 配置变更后必须重新握手，不能沿用旧连接的“在线”结论。
+            adapter.connected = False
+            adapter.accepts_commands = False
         reset_cache()
+        station = self.stations.get(station_id)
+        required = after_config_change(
+            self.db, adapter, before, org_id=station.org_id if station else self.ctx.org_id,
+            requested_by=user.display_name, requested_by_id=user.id, light=light,
+        )
         self.audit.record(
             user, "修改设备适配器", station_id, sign=True, meaning=signature.meaning,
             signature_id=signature.id, before=str(before),
-            after=f"{adapter.kind}/{adapter.driver} 配置 v{adapter.config_version}",
+            after=f"{adapter.kind}/{adapter.driver} 配置 v{adapter.config_version}"
+                  + (f"，待接入验收（{gate_out(adapter)['required_label']}）" if required else ""),
             object_version=adapter.row_version,
             detail="；".join(diff) or "无字段变化（仅递增配置版本）",
         )
         self.db.commit()
         return self._adapter_out(adapter, self.gate.status())
+
+    def _template_changes(self, adapter: Adapter, changes: dict) -> dict:
+        """套用 / 换版本 / 脱离设备接入模板。套用时驱动、协议、支持标志与完整配置都由「模板 + 连接参数」算出来。"""
+        changes = dict(changes)
+        template_id = changes.pop("template_id", None)
+        connection = changes.pop("template_connection", None)
+        if template_id is None and connection is not None:
+            if not adapter.template_id:
+                raise ValidationFailed("这台设备没有套用设备接入模板：连接参数要和模板一起给", code="template_required")
+            template_id = adapter.template_id  # 只改连接参数：按当前模板重新合并
+        if template_id:
+            template = TemplateService(self.db, self.ctx).released(template_id)
+            connection = dict(connection if connection is not None else (adapter.template_connection or {}))
+            self._reject_inline_secrets(connection, "template_connection")
+            problems = connection_problems(template.driver, template.config or {}, connection)
+            if problems:
+                # 工位只填连接参数：映射（点表、命令、状态码）归模板，改映射要改模板、另一个人发布
+                raise ValidationFailed(f"模板连接参数有问题：{'；'.join(problems)}", {"problems": problems},
+                                       code="template_connection_invalid")
+            derived = template_changes(template, connection)
+            if "config" in changes and changes["config"] != derived["config"]:
+                raise ValidationFailed(
+                    "套用模板时不能同时改完整配置：这台设备自己的连接参数写在 template_connection 里",
+                    code="template_config_conflict",
+                )
+            changes.update(derived, template_id=template.id, template_connection=connection)
+        elif template_id == "" or changes.get("kind") == "simulation":
+            if adapter.template_id:
+                changes["template_id"] = ""  # 不再按模板管理：配置原样保留
+        elif adapter.template_id and "config" in changes and changes["config"] != (adapter.config or {}):
+            changes["template_id"] = ""  # 手工改了完整配置，和模板对不上了：不再按模板管理
+        return changes
+
+    def _require_valid_config(self, adapter: Adapter, changes: dict) -> None:
+        """真实设备的配置保存前按驱动检查一遍（见 adapters/catalog.validate_config），配错了当场说清楚。
+
+        只在驱动、配置、凭据引用真的变了时检查：适配器已经坏了的时候，停用它、改说明不能被挡住。
+        """
+        kind = changes.get("kind", adapter.kind)
+        relevant = ("kind", "driver", "config", "credential_ref", "protocol")
+        if kind != "real" or not any(key in changes and changes[key] != getattr(adapter, key) for key in relevant):
+            return
+        check = validate_config(
+            (changes.get("driver", adapter.driver) or "").strip(), changes.get("config", adapter.config) or {},
+            changes.get("credential_ref", adapter.credential_ref) or "", protocol=changes.get("protocol", adapter.protocol),
+        )
+        if check.problems:
+            raise ValidationFailed(
+                f"适配器配置有 {len(check.problems)} 处问题：{'；'.join(check.problems)}",
+                {"problems": check.problems, "warnings": check.warnings}, code="adapter_config_invalid",
+            )
+
+    def check_adapter_config(self, station_id: str, payload: dict) -> dict:
+        """保存之前先检查一份配置：不保存、不连设备。"""
+        self._require_station(station_id)
+        return validate_config(
+            payload.get("driver") or "", payload.get("config") or {}, payload.get("credential_ref") or "",
+            protocol=payload.get("protocol") or "",
+        ).as_dict()
+
+    def drivers(self, station_id: str | None = None) -> list[dict]:
+        """已登记的驱动与各自的配置说明、起步模板（按工位能力极限生成）。"""
+        limits = (self._require_station(station_id).limits or {}) if station_id else {}
+        return [info.as_dict(limits) for info in DRIVERS.values()]
+
+    def template_options(self, station_id: str) -> list[dict]:
+        station = self._require_station(station_id)
+        asset = AssetRepository(self.db, self.ctx).get(station.asset_id) if station.asset_id else None
+        return station_template_options(self.db, self.ctx, station, station_model(station, asset))
+
+    def _require_quiet_for(self, adapter: Adapter, changes: dict) -> None:
+        """设备上还有可能在动作的指令时，不放行会让驱动查不回它的修改（见 domain/adapter_rules）。"""
+        acting = self.commands.acting_on_station(adapter.station_id)
+        if not acting:
+            return
+        current = {key: getattr(adapter, key) for key in changes if hasattr(adapter, key)}
+        blocked = busy_blocked_changes(current, changes)
+        if not blocked:
+            return
+        # 工位是跨组织共享的实物：别的组织的指令只报条数，不报编号
+        mine = [command for command in acting if command.org_id == self.ctx.org_id]
+        rows = [
+            {"key": command.id, "label": f"{command.id} · {command.batch_id} · {ACTING_LABELS.get(command.state, command.state)}"}
+            for command in mine
+        ]
+        if len(acting) > len(mine):
+            rows.append({"key": "other_org", "label": f"另有 {len(acting) - len(mine)} 条其他组织的指令"})
+        raise StateConflict(
+            f"工位 {adapter.station_id} 上还有 {len(acting)} 条可能仍在动作的指令，这时不能改{'、'.join(blocked)}："
+            "改完之后新的驱动实例查不回这些指令。请等它们结束，或保持 / 终止并完成现场核查后再改；"
+            "只改说明、停用、超时与探测周期可以照常保存",
+            {"blocked": rows, "fields": blocked}, code="adapter_busy",
+        )
 
     @staticmethod
     def _adapter_diff(adapter: Adapter, changes: dict) -> list[str]:
@@ -501,6 +646,11 @@ class StationService:
                 rows.append(f"{key}: {current if current not in (None, '') else '—'} → {value if value not in (None, '') else '—'}")
         return rows
 
+    def _require_no_acceptance_running(self, station_id: str, doing: str) -> None:
+        """接入验收正在驱动这台设备：界面上的测试、读目录、重连会和它抢同一台设备（同一个串口）。"""
+        if station_id in running_stations(self.db):
+            raise StateConflict(f"{station_id} 的接入验收正在执行，结束后再{doing}", code="acceptance_running")
+
     def test_adapter(self, station_id: str) -> dict:
         self._require_station(station_id)
         adapter = self.adapters.get(station_id)
@@ -508,6 +658,7 @@ class StationService:
             raise NotFound("适配器未登记")
         if not adapter.enabled:
             raise StateConflict("适配器已停用，不能测试连接")
+        self._require_no_acceptance_running(station_id, "测试连接")
         try:
             implementation = adapter_for(adapter)
         except (NotImplementedError, AdapterError) as exc:
@@ -540,6 +691,7 @@ class StationService:
             raise NotFound("适配器未登记")
         if not adapter.enabled:
             raise StateConflict("适配器已停用，不能读取设备目录")
+        self._require_no_acceptance_running(station_id, "读取设备目录")
         try:
             implementation = adapter_for(adapter)
             reported = describe(implementation, adapter)
@@ -816,10 +968,14 @@ class StationService:
             raise StateConflict(
                 "适配器已停用，心跳不被接受；请在「工位配置」启用并完成健康检查", code="adapter_disabled",
             )
+        came_back = connected and not adapter.connected
         adapter.connected = connected
         adapter.site_interlock = site_interlock
         adapter.accepts_commands = accepts_commands
         adapter.last_heartbeat = now()
+        if came_back:
+            # 推心跳的设备恢复在线：还欠验收、上次自动验收因为连不上没通过的，再排一次
+            requeue_if_needed(self.db, adapter, station.org_id)
         from .monitoring_service import DeviceMonitor
 
         # 联锁 / 失联在心跳到达的这一刻就报警或复位，不等执行器下一轮

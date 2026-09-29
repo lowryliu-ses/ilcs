@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
 from asyncua import Server, ua  # noqa: E402
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.opcua import CLIENT_NAME, CLIENT_URI, ServerSecurity  # noqa: E402,F401
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
@@ -176,6 +177,10 @@ class SimulatorRunner:
             if server is not None:
                 self._call(server.stop())
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：OPC UA TaskExecution 设备认 ILCS 指令号。"""
+        return DeviceTarget(self.device, self.go_offline)
+
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)  # 先把 SetFault 的应答送回去
@@ -203,7 +208,10 @@ def main(argv=None) -> int:
     device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(device, args.tick_seconds, runner.stop, on_tick=runner.refresh)
+    if control is not None:
+        control.stop()
     return 0
 
 

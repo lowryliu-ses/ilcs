@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulators 包
     sys.path.insert(0, str(ROOT))
 
+from simulators.common.control import start_control  # noqa: E402
 from simulators.common.device import FAULTS  # noqa: E402
 from simulators.common.linesrv import LineServer  # noqa: E402
 from simulators.common.runtime import configure_logging  # noqa: E402
@@ -123,6 +124,28 @@ class Balance:
         return "ES"
 
 
+class BalanceTarget:
+    """统一控制口（simulators/common/control.py）：天平不认 ILCS 指令号，动作次数就是称重次数。"""
+
+    knows_command_ids = False
+
+    def __init__(self, balance: Balance, go_offline):
+        self.balance = balance
+        self.go_offline = go_offline
+
+    def set_fault(self, mode: str, parameter: float, unit: str = "") -> dict:
+        if mode == "offline":
+            self.go_offline(parameter or 5)
+            return {**self.state(), "fault": "offline", "seconds": parameter or 5}
+        with self.balance.lock:
+            self.balance.fault, self.balance.parameter = mode, parameter
+        return self.state()
+
+    def state(self, unit: str = "") -> dict:
+        raw = self.balance.state()
+        return {**raw, "motions": raw["weighings"], "knows_command_ids": False}
+
+
 class SimulatorRunner:
     def __init__(self, args: argparse.Namespace, balance: Balance):
         self.args = args
@@ -135,6 +158,9 @@ class SimulatorRunner:
 
     def stop(self) -> None:
         self.server.stop()
+
+    def control_target(self) -> BalanceTarget:
+        return BalanceTarget(self.balance, self.server.go_offline)
 
 
 def parse(argv=None) -> argparse.Namespace:
@@ -153,6 +179,7 @@ def main(argv=None) -> int:
     args = parse(argv)
     runner = SimulatorRunner(args, Balance(args.device_id, args.model, args.sample_mass))
     runner.start()
+    control = start_control(runner.control_target())
     stop = threading.Event()
     import signal
 
@@ -160,6 +187,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     stop.wait()
     runner.stop()
+    if control is not None:
+        control.stop()
     return 0
 
 

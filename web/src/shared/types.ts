@@ -26,6 +26,8 @@ export type Gate = {
   open: boolean;
   reasons: string[];
   blocked_stations?: Record<string, string>;
+  /** 配置变更后还欠接入验收的工位（失联时也列着：失联是首要原因，但验收同样还欠着） */
+  acceptance_pending?: Record<string, string>;
   degraded: string[];
   checked_at: string;
 };
@@ -736,6 +738,159 @@ export type AdapterRow = {
   unsupported_note: string;
   /** 驱动自报（或按登记配置）的设备身份与方法目录 */
   catalog?: AdapterCatalog;
+  /** 配置变更后的接入验收闸门 */
+  acceptance?: AcceptanceGate;
+  /** 套用的设备接入模板（哪一版、有没有更新的发布版） */
+  template?: AdapterTemplate | null;
+  /** 这台设备自己的连接参数（只在受 station.edit 保护的详情接口里有） */
+  template_connection?: Record<string, unknown>;
+};
+
+export type AcceptanceGate = {
+  /** '' 不欠 / readonly 只读级 / physical 动作级 */
+  required: '' | 'readonly' | 'physical';
+  required_label: string;
+  reason: string;
+  accepted_config_version: number | null;
+  accepted_run_id: string;
+};
+
+export type AdapterTemplate = {
+  id: string;
+  code?: string;
+  revision?: number;
+  name?: string;
+  state?: string;
+  state_label?: string;
+  latest_id?: string | null;
+  latest_revision?: number | null;
+  outdated?: boolean;
+  missing?: boolean;
+};
+
+export type AcceptanceCheck = {
+  key: string;
+  label: string;
+  state: 'pass' | 'fail' | 'skip';
+  state_label: string;
+  detail: string;
+};
+
+/** 一次设备接入验收：执行器执行，报告入库、只追加 */
+export type AcceptanceRun = {
+  id: string;
+  station_id: string;
+  level: 'readonly' | 'physical';
+  level_label: string;
+  faults: boolean;
+  capability: string;
+  params: Record<string, number>;
+  trigger: string;
+  trigger_label: string;
+  state: 'queued' | 'running' | 'done' | 'error' | 'cancelled';
+  state_label: string;
+  ok: boolean | null;
+  simulator: boolean;
+  driver: string;
+  protocol: string;
+  config_version: number;
+  config_digest: string;
+  identity: { vendor?: string; firmware?: string; reported_model?: string };
+  template: { id: string; code: string; revision: number } | null;
+  counts: { pass: number; fail: number; skip: number };
+  error: string;
+  requested_by: string;
+  approval: string;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  waiting_for?: number;
+  checks?: AcceptanceCheck[];
+  report_md?: string;
+};
+
+export type AcceptanceListing = { station_id: string; gate: AcceptanceGate; runs: AcceptanceRun[] };
+
+/** 驱动目录：驱动自己声明的配置项，界面据此出表单、保存前据此校验 */
+export type DriverField = {
+  name: string;
+  label: string;
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array';
+  type_label: string;
+  required: boolean;
+  /** 每台设备自己的连接参数：设备模板里不写死，套用时由工位填 */
+  connection: boolean;
+  hint: string;
+};
+
+export type DriverInfo = {
+  key: string;
+  label: string;
+  protocol: string;
+  summary: string;
+  ledger: string;
+  fields: DriverField[];
+  connection_keys: string[];
+  credential: string;
+  supports: { hold: boolean; abort: boolean; query: boolean; dedup: boolean };
+  template: Record<string, unknown>;
+};
+
+export type ConfigCheck = { ok: boolean; problems: string[]; warnings: string[] };
+
+/** 设备接入模板：一类设备怎么接，按修订号管理，发布要另一个人签名 */
+export type DeviceTemplateRow = {
+  id: string;
+  code: string;
+  revision: number;
+  name: string;
+  model: string;
+  vendor: string;
+  driver: string;
+  driver_label: string;
+  protocol: string;
+  version: string;
+  state: 'draft' | 'released' | 'retired';
+  state_label: string;
+  digest: string;
+  connection_keys: string[];
+  note: string;
+  created_by_name: string;
+  released_by_name: string;
+  created_at: string | null;
+  released_at: string | null;
+  row_version: number;
+  source: { kind?: string; file?: string; from?: string; revision?: number };
+  usage: { stations: number; outdated: number };
+  config?: Record<string, unknown>;
+  connection?: Record<string, unknown>;
+  supports?: Partial<Record<'hold' | 'abort' | 'query' | 'dedup', boolean>>;
+  acceptance?: { capability?: string; params?: Record<string, number> };
+  check?: ConfigCheck;
+  stations?: {
+    station_id: string;
+    station_name: string;
+    template_id: string;
+    revision: number;
+    latest_revision: number | null;
+    outdated: boolean;
+    acceptance_required: string;
+    config_version: number;
+  }[];
+  revisions?: { id: string; revision: number; state: string; state_label: string; released_at: string | null }[];
+};
+
+/** 工位能套用的模板（已发布的，适用型号一致的排在前面） */
+export type TemplateOption = {
+  id: string;
+  code: string;
+  revision: number;
+  name: string;
+  model: string;
+  driver: string;
+  matches_model: boolean;
+  connection_keys: string[];
+  connection: Record<string, unknown>;
 };
 
 export type AdapterCatalog = {
@@ -2269,10 +2424,12 @@ export type FloorStation = {
     interlock: boolean;
     accepts_commands: boolean;
     kind: string;
-    /** 与执行门同一口径：online / degraded / stale 心跳超时 / offline 失联 / disabled */
+    /** 与执行门同一口径：online / degraded / stale 心跳超时 / acceptance 待接入验收 / offline 失联 / disabled */
     status: string;
     heartbeat_age_sec: number | null;
     current_command_id: string;
+    /** 配置变更后还欠的接入验收 */
+    acceptance?: { required: string; reason: string; required_label: string };
   } | null;
   commands: FloorCommand[];
   nests: FloorSlot[];

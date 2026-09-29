@@ -23,6 +23,7 @@ from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.errors import NotFound, StateConflict, ValidationFailed
+from ..domain.adapter_rules import LEVEL_LABELS
 from ..domain.labware import (
     CarrierSpec, LocationSpec, manual_move_blockers, plan_transfer,
 )
@@ -673,7 +674,11 @@ class TransferService:
                     {"connected": record.connected, "enabled": record.enabled, "interlock": record.site_interlock,
                      "accepts_commands": record.accepts_commands, "kind": record.kind,
                      "status": adapter_status(gate_state, station.id, record.enabled, record.connected),
-                     "heartbeat_age_sec": heartbeat_age, "current_command_id": record.current_command_id}
+                     "heartbeat_age_sec": heartbeat_age, "current_command_id": record.current_command_id,
+                     # 配置变更后还欠的接入验收（工位与适配器是共享实物，原因里只有工位号与配置版本）
+                     "acceptance": {"required": record.acceptance_required if record.kind == "real" else "",
+                                    "reason": (gate_state.get("acceptance_pending") or {}).get(station.id, ""),
+                                    "required_label": LEVEL_LABELS.get(record.acceptance_required, "")}}
                     if record else None
                 ),
                 "commands": [

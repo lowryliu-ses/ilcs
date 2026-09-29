@@ -73,8 +73,8 @@ def _topics_of(obj: Any) -> list[tuple[str, str, str]]:
         return [("batches", org, getattr(obj, "batch_id", "") or "")]
     if name == "Alarm":
         return [("alarms", org, obj.id)]
-    if name in {"Station", "Adapter"}:
-        # 工位与适配器是全站共享的物理资源，执行门也由它们决定
+    if name in {"Station", "Adapter", "AcceptanceRun"}:
+        # 工位与适配器是全站共享的物理资源，执行门也由它们决定；接入验收的结论会解除「待接入验收」
         return [("stations", ALL_ORGS, getattr(obj, "station_id", None) or obj.id)]
     if name == "Allocation":
         return [("schedule", ALL_ORGS, obj.batch_id)]
@@ -104,6 +104,9 @@ def _wakes_executor(obj: Any, is_new: bool) -> bool:
         return state == "sent" or (getattr(obj, "type", "") == "transfer" and state == "done")
     if name == "WorkflowEvent":
         return getattr(obj, "state", "") == "pending"
+    if name == "AcceptanceRun":
+        # 新排队的接入验收：执行器立刻领取，不等满轮询周期
+        return getattr(obj, "state", "") == "queued"
     if name == "WebhookDelivery":
         return is_new
     return False

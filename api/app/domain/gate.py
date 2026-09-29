@@ -13,18 +13,21 @@ class AdapterHealth:
     # 执行器按周期主动探测的设备，心跳天然隔一个探测周期才刷新一次：
     # 降级阈值取「全局阈值」与「探测周期 + 一个执行器轮询」中较大者，免得正常探测也报降级
     heartbeat_interval_sec: float = 0
+    # 配置变更后还欠接入验收时的原因（见 domain/adapter_rules）；空表示不欠
+    acceptance: str = ""
 
 
 def evaluate(adapters: list[AdapterHealth], now: datetime, stale_sec: int, degraded_sec: int) -> dict:
     """执行门分两层。
 
     - 全站（`reasons`）：公共保护联锁。它是现场公共安全事实，任何一台设备报联锁全站都停。
-    - 按工位（`blocked_stations`）：失联、心跳超时。只挡用到这台设备的批次——设备一多，
+    - 按工位（`blocked_stations`）：失联、心跳超时、配置变更后待接入验收。只挡用到这台设备的批次——设备一多，
       任何一台掉线都让全站停摆，等于把单台设备的故障放大成全站事故。
     """
     reasons: list[str] = []
     degraded: list[str] = []
     blocked: dict[str, str] = {}
+    pending: dict[str, str] = {}
     for adapter in adapters:
         # 公共保护联锁是现场事实，不因适配器停用或暂不接受指令而失效；
         # 停用只让它退出「失联 / 心跳超时」的判断。
@@ -32,24 +35,30 @@ def evaluate(adapters: list[AdapterHealth], now: datetime, stale_sec: int, degra
             reasons.append(f"{adapter.station_id} 公共保护联锁未解除")
         if not adapter.enabled:
             continue
+        if adapter.acceptance:
+            # 待接入验收单独列出：设备失联时挡住下发的首要原因是失联，但验收同样还欠着
+            pending[adapter.station_id] = adapter.acceptance
         age = (now - adapter.last_heartbeat).total_seconds()
         if not adapter.connected:
             blocked[adapter.station_id] = f"{adapter.station_id} 适配器失联"
         elif age > stale_sec:
             blocked[adapter.station_id] = f"{adapter.station_id} 遥测数据超时 {age / 60:.0f} min"
+        elif adapter.acceptance:
+            blocked[adapter.station_id] = adapter.acceptance
         elif age > (threshold := max(degraded_sec, adapter.heartbeat_interval_sec)):
             degraded.append(f"{adapter.station_id} 心跳间隔 {age:.0f} s 超过 {threshold:.0f} s 阈值")
     return {
         "open": not reasons,
         "reasons": reasons,
         "blocked_stations": blocked,
+        "acceptance_pending": pending,
         "degraded": degraded,
         "checked_at": now.isoformat(timespec="seconds"),
     }
 
 
 def adapter_status(state: dict, station_id: str, enabled: bool, connected: bool) -> str:
-    """适配器在界面上的状态，和执行门用同一份判断：停用 / 失联 / 心跳超时 / 降级 / 在线。
+    """适配器在界面上的状态，和执行门用同一份判断：停用 / 失联 / 待接入验收 / 心跳超时 / 降级 / 在线。
 
     「降级」按工位标识精确匹配：`degraded` 里每条原因以「<工位> 」开头，按子串找会让 ST-01 命中 ST-01-A。
     """
@@ -57,6 +66,8 @@ def adapter_status(state: dict, station_id: str, enabled: bool, connected: bool)
         return "disabled"
     if not connected:
         return "offline"
+    if station_id in (state.get("acceptance_pending") or {}):
+        return "acceptance"
     if station_id in (state.get("blocked_stations") or {}):
         return "stale"
     if any(row.startswith(f"{station_id} ") for row in state.get("degraded") or []):

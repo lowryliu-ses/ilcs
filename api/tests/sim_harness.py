@@ -49,6 +49,18 @@ def request(command_id: str, type_: str = "dispatch", target: str = "", params=N
     )
 
 
+@contextmanager
+def control_port(target, token: str = ""):
+    """模拟设备统一控制口（simulators/common/control.py），接入验收的故障注入与动作计数走它。"""
+    from simulators.common.control import ControlServer
+
+    server = ControlServer(target, "127.0.0.1", 0, token).start()
+    try:
+        yield server.port
+    finally:
+        server.stop()
+
+
 def _device(device_id: str, profile: str = "generic", task_seconds: float = 0.3, **kwargs):
     from simulators.common.device import SimulatedDevice
 

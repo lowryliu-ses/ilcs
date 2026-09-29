@@ -50,7 +50,7 @@ class Sila2Adapter:
             raise AdapterError("sila2_v1 的 port 必须是整数") from exc
         if not self.host or not (0 < self.port < 65536):
             raise AdapterError("sila2_v1 必须配置 host 与 port")
-        if self.host.lower() not in settings.adapter_allowed_host_set:
+        if not settings.adapter_host_allowed(self.host):
             raise AdapterError(f"SiLA 设备主机 {self.host} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
         self.insecure = bool(self.config.get("insecure", False))
         if self.insecure and settings.environment == "production":

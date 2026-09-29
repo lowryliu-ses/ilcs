@@ -1205,7 +1205,90 @@ class AdapterPatchIn(Signed):
     supports_query: bool | None = None
     supports_dedup: bool | None = None
     note: str | None = None
+    # 套用设备接入模板（已发布的某一版）与这台设备自己的连接参数；空字符串表示不再按模板管理
+    template_id: str | None = None
+    template_connection: dict[str, Any] | None = None
     row_version: int
+
+
+class DeviceTemplateIn(BaseModel):
+    """设备接入模板草稿：驱动 + 映射配置 + 连接参数示例 + 支持标志 + 验收缺省。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    name: str
+    driver: str
+    model: str = ""
+    vendor: str = ""
+    protocol: str = ""
+    version: str = ""
+    config: dict[str, Any] = {}
+    connection: dict[str, Any] = {}
+    supports: dict[str, bool] = {}
+    acceptance: dict[str, Any] = {}
+    note: str = ""
+
+
+class DeviceTemplatePatchIn(Versioned):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    driver: str | None = None
+    model: str | None = None
+    vendor: str | None = None
+    protocol: str | None = None
+    version: str | None = None
+    config: dict[str, Any] | None = None
+    connection: dict[str, Any] | None = None
+    supports: dict[str, bool] | None = None
+    acceptance: dict[str, Any] | None = None
+    note: str | None = None
+
+
+class DeviceTemplateReleaseIn(Signed):
+    row_version: int
+
+
+class DeviceTemplateImportIn(BaseModel):
+    """导入模板文件（ilcs-device-template/1）：界面读出文件内容后原样提交。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(default="", max_length=255)
+    document: dict[str, Any]
+
+
+class AdapterConfigCheckIn(BaseModel):
+    """保存之前先检查一份适配器配置（不保存、不连设备）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    driver: str
+    protocol: str = ""
+    config: dict[str, Any] = {}
+    credential_ref: str = ""
+
+
+class AcceptanceWaiveIn(Signed):
+    """签名放行接入验收：检查清单证明不了的设备，现场核对后由人放行。签名针对工位与当前配置版本。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=4, max_length=2000)
+
+
+class AcceptanceRequestIn(BaseModel):
+    """申请一次设备接入验收。动作级要签名并写明现场批准人（DEC-02）；故障项目只随动作级一起申请。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    level: Literal["readonly", "physical"] = "readonly"
+    faults: bool = False
+    capability: str | None = None
+    params: dict[str, Any] | None = None
+    approval: str = Field(default="", max_length=1000)
+    signature_id: str | None = None
 
 
 class StationPatchIn(BaseModel):

@@ -119,7 +119,8 @@ def reset_runtime():
     from app.core.clock import now
     from app.core.db import SessionLocal
     from app.models import (
-        Adapter, Alarm, Allocation, Batch, Command, Recipe, ResourceBooking, Station, StepRun, WorkflowEvent,
+        AcceptanceRun, Adapter, Alarm, Allocation, Batch, Command, Recipe, ResourceBooking, Station, StepRun,
+        WorkflowEvent,
     )
 
     with SessionLocal() as session:
@@ -155,6 +156,11 @@ def reset_runtime():
             adapter.supports_abort = True
             adapter.supports_query = True
             adapter.supports_dedup = True
+            adapter.acceptance_required = ""
+        # 上一用例排下的接入验收：不清掉，下一用例的执行器一轮会先去跑它（记录只能取消，不能删）
+        session.query(AcceptanceRun).filter(AcceptanceRun.state.in_(["queued", "running"])).update(
+            {"state": "cancelled", "finished_at": now()}, synchronize_session=False
+        )
         for recipe in session.query(Recipe).all():
             recipe.needs_revision = False
         # 上一用例登记的维护 / 人工占用：排程会绕开它们，不清掉就会把后面用例的批次推迟

@@ -77,7 +77,7 @@ class LineTransport:
                 raise AdapterError("transport.port 必须是整数") from exc
             if not self.host or not (0 < self.port < 65536):
                 raise AdapterError("TCP 通道必须配置 transport.host 与 transport.port")
-            if self.host.lower() not in settings.adapter_allowed_host_set:
+            if not settings.adapter_host_allowed(self.host):
                 raise AdapterError(f"设备主机 {self.host} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
             self.label = f"{self.host}:{self.port}"
         elif self.kind == "serial":
@@ -86,7 +86,7 @@ class LineTransport:
                 parsed = urlparse(self.url)
                 if parsed.scheme not in {"rfc2217", "socket"} or not parsed.hostname:
                     raise AdapterError("网络串口只支持 rfc2217://主机:端口 或 socket://主机:端口")
-                if parsed.hostname.lower() not in settings.adapter_allowed_host_set:
+                if not settings.adapter_host_allowed(parsed.hostname):
                     raise AdapterError(f"串口服务器 {parsed.hostname} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
             elif not LOCAL_SERIAL.fullmatch(self.url):
                 raise AdapterError("本机串口只允许 /dev/tty*、/dev/serial/by-id/*、/dev/serial/by-path/* 或 COMn")

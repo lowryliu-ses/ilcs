@@ -19,7 +19,7 @@ from ..core.config import settings
 from ..core.context import AccessContext, system_context
 from ..domain import dataquality, workflow
 from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of
-from ..models import AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
+from ..models import Adapter, AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from .telemetry import context as telemetry_context
 from ..repositories.execution import (
@@ -28,6 +28,8 @@ from ..repositories.execution import (
 from ..repositories.materials import ReservationRepository
 from ..repositories.resources import AdapterRepository, CapabilityRepository
 from ..repositories.workflow import StepRunRepository
+from ..core.db import SessionLocal
+from .acceptance_service import AcceptanceRunner, dispatch_hold, heartbeat_keeper, requeue_if_needed
 from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .file_service import FileService
@@ -83,7 +85,12 @@ class ExecutionService:
             self.db.commit()
             return True
 
-        record = self.adapters.get(command.station_id)
+        # 锁适配器行（批次锁之后、领取之前）：与改配置互斥。改配置先看「设备上有没有可能在动作的指令」，
+        # 不锁的话这里刚按旧配置领走一条、那边同时提交了新地址，下一次轮询就拿新实例去问新地址了
+        record = (
+            self.db.query(Adapter).filter(Adapter.station_id == command.station_id)
+            .with_for_update().populate_existing().one_or_none()
+        )
         if not record:
             self.fault(
                 batch, command,
@@ -96,6 +103,15 @@ class ExecutionService:
         if blocker:
             self._refuse(batch, command, blocker)
             return True
+        if command.type in MOTION:
+            # 配置变更后的接入验收：验收排队或进行中就等它出结论；欠着验收又没有在排的（上次不通过、欠动作级）不投递
+            hold, reason = dispatch_hold(self.db, record, command.type)
+            if hold == "wait":
+                self.db.commit()
+                return False
+            if hold == "refuse":
+                self._refuse(batch, command, reason)
+                return True
         if command.not_before is not None and now() < command.not_before:
             # 按时开工：还没到排程时间窗，留在队列里；此时保持 / 终止仍可撤回它
             self.db.commit()
@@ -1007,6 +1023,9 @@ class ExecutorLoop:
         ExecutorLiveness(self.db).beat()
         if simulate_heartbeat:
             self.heartbeat_simulated()
+        self.db.commit()
+        # 串行模式只跑只读级验收：动作级要几分钟，会拖住别的工位的保持与终止（续写存活记录兜底）
+        accepted = AcceptanceRunner(self.db).run_due(on_progress=heartbeat_keeper(SessionLocal), physical=False)
         self.probe_devices()
         self.db.commit()
         monitor = DeviceMonitor(self.db)
@@ -1038,6 +1057,7 @@ class ExecutorLoop:
             "alarms_cleared": stations["cleared"] + assets["cleared"] + stalls["cleared"],
             "webhooks_sent": webhooks["sent"],
             "aborts_finished": aborts_finished,
+            "accepted": accepted,
             "at": now().isoformat(timespec="seconds"),
         }
 
@@ -1079,6 +1099,8 @@ class ExecutorLoop:
         卡住只拖住它自己的线程，不拖慢其他工位，也不拖慢执行器心跳（心跳在控制回路里写）。
         同一工位同一时刻只有一个线程在处理，工位内的指令仍按原顺序串行。
         """
+        # 接入验收排在最前：配置刚改过的设备先验收，通过了本轮就能照常投递。动作级验收和动作指令守同一道执行门
+        accepted = AcceptanceRunner(self.db).run_due(station_id, dispatch_open=dispatch_open)
         probed = self.probe_devices(station_id=station_id)
         self.db.commit()
         reconciled = self.reconcile(station_id=station_id)
@@ -1087,7 +1109,7 @@ class ExecutorLoop:
         executed = self.execute_pending(limit, station_id=station_id, dispatch_open=dispatch_open)
         return {
             "probed": probed, "reconciled": reconciled, "polled": polled, "executed": executed,
-            "overdue": overdue["overdue"], "timed_out": overdue["timed_out"],
+            "overdue": overdue["overdue"], "timed_out": overdue["timed_out"], "accepted": accepted,
         }
 
     def control_pass(self, *, simulate_heartbeat: bool = True, monitor_assets: bool = False) -> dict:
@@ -1122,7 +1144,7 @@ class ExecutorLoop:
         """本轮要派活的工位：有指令要处理的，加上到了探测周期的主动探测设备。"""
         from ..adapters.registry import probe_interval
 
-        wanted = self.commands.stations_with_open_work()
+        wanted = self.commands.stations_with_open_work() | AcceptanceRunner(self.db).due_stations()
         moment = now()
         for record in self.adapters.list():
             interval = probe_interval(record) if record.enabled else None
@@ -1307,11 +1329,16 @@ class ExecutorLoop:
                 record.accepts_commands = False
                 record.note = f"探测拒绝：{exc}"[:500]
                 continue
+            came_back = not record.connected
             record.connected = True
             record.last_heartbeat = moment
             record.site_interlock = bool(health.get("interlock"))
             record.accepts_commands = bool(health.get("accepts_commands", True))
             record.note = f"探测在线：{health.get('device_id', '')}"
+            if came_back:
+                # 还欠验收、上次自动验收因为连不上没通过：设备回来了，再排一次
+                station = self.db.get(Station, record.station_id)
+                requeue_if_needed(self.db, record, station.org_id if station else "")
         return probed
 
     def heartbeat_simulated(self) -> None:

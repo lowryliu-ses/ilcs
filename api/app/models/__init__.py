@@ -22,8 +22,8 @@ from .recipe import (
 )
 from .report import Report, ReportVersion
 from .resource import (
-    Adapter, Asset, CalibrationRecord, Capability, EnvironmentReading, Island, MaintenanceOrder, PersonBooking,
-    ResourceBooking, Station,
+    AcceptanceRun, Adapter, Asset, CalibrationRecord, Capability, DeviceTemplate, EnvironmentReading, Island,
+    MaintenanceOrder, PersonBooking, ResourceBooking, Station,
 )
 from .sample import PhysicalSample, SampleTransfer, SlotOccupancy
 from .sop import Sop, SopAck, SopVersion
@@ -31,7 +31,7 @@ from .integration import WebhookDelivery, WebhookSubscription
 from .workflow import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 
 __all__ = [
-    "AccessLog", "AdapterExecution", "Adapter", "Alarm", "Allocation", "AnalysisTask", "Asset",
+    "AcceptanceRun", "AccessLog", "AdapterExecution", "Adapter", "Alarm", "Allocation", "AnalysisTask", "Asset",
     "AuditEvent", "Base", "Batch", "CalibrationRecord", "Capability", "Checkpoint", "Command",
     "ExecutorHeartbeat", "MaintenanceOrder", "PlanProposal", "DatasetSnapshot", "AnalysisRun",
     "ESignature", "ExperimentTask", "FileObject", "IdempotencyKey", "IngestEvent", "InventoryEvent",
@@ -42,5 +42,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DataRule", "Comment", "PlanTemplate", "EnvironmentReading", "PersonBooking", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
+    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DeviceTemplate", "DataRule", "Comment", "PlanTemplate", "EnvironmentReading", "PersonBooking", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

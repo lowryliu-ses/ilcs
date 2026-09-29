@@ -47,7 +47,7 @@ class ModbusMapAdapter(PointMapAdapter):
             raise AdapterError("modbus_map_v1 的 port / unit_id 必须是整数") from exc
         if not self.host or not (0 < self.port < 65536) or not (0 <= self.unit_id <= 247):
             raise AdapterError("modbus_map_v1 必须配置 host、port（1–65535）与 unit_id（0–247）")
-        if self.host.lower() not in settings.adapter_allowed_host_set:
+        if not settings.adapter_host_allowed(self.host):
             raise AdapterError(f"Modbus 设备主机 {self.host} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
         self.timeout = self._seconds("request_timeout_sec", 3.0, maximum=60)
         self._client = None

@@ -11,6 +11,10 @@ dist/
 
 # 秘密与部署机配置：只有 .env.example 进仓库
 secrets/
+# 设备模块网关本机联调时的作业台账
+device-modules/**/state/
+# 车队模拟器本机联调时缺省的证书 / 令牌目录（simulators/fleet --cert-dir ./fleet-certs）
+/fleet-certs/
 deploy/.env
 .env
 

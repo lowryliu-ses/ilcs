@@ -67,8 +67,11 @@ class Settings(BaseSettings):
 
     # ---------- 真实设备网关 ----------
     # 防止适配器配置把带凭据的请求发往任意内网地址。正式环境必须显式列出设备网关。
+    # 可写主机名、IP、网段（10.20.1.0/24）与域名后缀（.lab.internal），规则见 core/hosts.py
     adapter_allowed_hosts: str = "127.0.0.1,localhost"
     adapter_credential_root: str = "/run/secrets/ilcs"
+    # 接入验收里等一个动作做完的最长秒数（正常完成、丢回执后按指令号查回都按它等）
+    acceptance_poll_timeout_sec: float = 60.0
     # 驱动自记的作业台账（串口命令、PLC 点表、REST 映射这类设备不认识 ILCS 指令号）。
     # 必须放持久卷：执行器重启后要靠它按原指令号回答「设备上怎样了」。留空 = file_root 的上一级 /adapter-state
     adapter_state_root: str = ""
@@ -185,9 +188,13 @@ class Settings(BaseSettings):
 
         return self.adapter_state_root or str(Path(self.file_root).resolve().parent / "adapter-state")
 
-    @property
-    def adapter_allowed_host_set(self) -> set[str]:
-        return {host.strip().lower() for host in self.adapter_allowed_hosts.split(",") if host.strip()}
+    def adapter_host_allowed(self, host: str) -> bool:
+        """设备主机在不在白名单里。按主机名、IP、网段与域名后缀匹配；`*` 只在非正式环境生效。"""
+        from .hosts import host_check_is_skipped, parse_allowlist
+
+        if host_check_is_skipped():
+            return True  # 只在构造驱动查配置时（设备模板），见 core/hosts.host_check_skipped
+        return parse_allowlist(self.adapter_allowed_hosts).allows(host, wildcard=self.environment != "production")
 
     @property
     def webhook_allowed_host_set(self) -> set[str]:
@@ -210,12 +217,13 @@ class Settings(BaseSettings):
             issues.append("ILCS_FILE_CLEANUP_BATCH_SIZE 必须至少为 1")
         if "*" in self.cors_origin_list:
             issues.append("production 模式不允许 CORS 通配来源")
-        if (
-            not self.adapter_allowed_host_set
-            or "*" in self.adapter_allowed_host_set
-            or self.adapter_allowed_host_set <= {"127.0.0.1", "localhost", "::1"}
-        ):
-            issues.append("ILCS_ADAPTER_ALLOWED_HOSTS 必须显式列出允许连接的设备网关主机")
+        from .hosts import parse_allowlist
+
+        problems = parse_allowlist(self.adapter_allowed_hosts).production_problems()
+        if problems:
+            issues.append(
+                "ILCS_ADAPTER_ALLOWED_HOSTS 必须显式列出允许连接的设备网关主机或网段：" + "；".join(problems)
+            )
         if self.admin_self_approval:
             issues.append("production 模式不允许 ILCS_ADMIN_SELF_APPROVAL=1；职责分离必须对所有人强制")
         if self.executor_simulate_heartbeat:

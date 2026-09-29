@@ -32,6 +32,7 @@ from app.core.config import settings  # noqa: E402
 from app.core.db import ADVISORY_NAMESPACE, SessionLocal, engine  # noqa: E402
 from app.core.events import QUEUE_CHANNEL  # noqa: E402
 from app.core.schema import SchemaMismatch, verify  # noqa: E402
+from app.services.acceptance_service import AcceptanceRunner  # noqa: E402
 from app.services.execution_service import ExecutorLoop  # noqa: E402
 from app.services.executor_runtime import ConcurrentExecutor  # noqa: E402
 
@@ -190,6 +191,11 @@ def main() -> int:
     singleton = acquire_singleton()
     if singleton is False:
         return 0
+    with SessionLocal() as db:
+        # 上一个执行器没做完的接入验收：判出错，写明要现场核对（单活锁保证此刻没有别人在跑它们）
+        interrupted = AcceptanceRunner(db).interrupt_orphans()
+    if interrupted:
+        info("上次中断的接入验收已判为出错", count=interrupted)
     info(
         "执行器已启动", revision=revision, poll_sec=POLL_SEC, simulate_heartbeat=SIMULATE_HEARTBEAT,
         pid=os.getpid(), mode=MODE, workers=settings.executor_workers,
@@ -231,7 +237,7 @@ def main() -> int:
             if assets_due:
                 last_asset_monitor = cycle_started
             failures = 0
-            quiet = {"at", "cycle_ms", "stations_busy", "stations_dispatched"}
+            quiet = {"at", "cycle_ms", "stations_busy", "stations_dispatched", "stations_accepting"}
             counts = {key: value for key, value in report.items() if key not in quiet and value}
             if counts:
                 info("执行器一轮", cycle_ms=report.get("cycle_ms"), **counts)

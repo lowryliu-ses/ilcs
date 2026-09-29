@@ -30,6 +30,7 @@ from pymodbus.datastore import ModbusSequentialDataBlock, ModbusServerContext, M
 from pymodbus.server import ModbusTcpServer  # noqa: E402
 
 from simulators.common.device import FAULT_MODES, DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
 LAYOUT = json.loads((ROOT / "contracts" / "modbus" / "TaskRegisters.json").read_text(encoding="utf-8"))
@@ -297,6 +298,10 @@ class SimulatorRunner:
         self.closed.set()
         self._close_server()
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：按 ILCS 任务寄存器表编程的 PLC 认 ILCS 指令号。"""
+        return DeviceTarget(self.modbus.device, self.go_offline)
+
     def go_offline(self, seconds: float) -> None:
         def cycle():
             self._close_server()
@@ -320,7 +325,10 @@ def main(argv=None) -> int:
     args = parse(argv)
     runner = SimulatorRunner(args, build_device(args))
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(runner.modbus.device, args.tick_seconds, runner.stop)
+    if control is not None:
+        control.stop()
     return 0
 
 

@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.runtime import build_device, configure_logging, device_arguments  # noqa: E402
 
 MARK = "ILCS-SIMULATOR"
@@ -177,6 +178,14 @@ class SqlDeviceWorker:
     def start(self) -> None:
         threading.Thread(target=self.run, daemon=True).start()
 
+    def go_offline(self, seconds: float) -> None:
+        """设备侧软件停 N 秒：不处理作业，也不更新心跳（与设备表 sim_fault 写 offline 一样）。"""
+        self.offline_until = time.monotonic() + (seconds or 5)
+
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：中间库作业表的主键就是 ILCS 指令号。"""
+        return DeviceTarget(self.device, self.go_offline)
+
     def stop(self) -> None:
         self.stop_event.set()
         self.engine.dispose()
@@ -212,7 +221,10 @@ def main(argv=None) -> int:
 
     signal.signal(signal.SIGTERM, lambda *_: worker.stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: worker.stop_event.set())
+    control = start_control(worker.control_target())
     worker.run()
+    if control is not None:
+        control.stop()
     worker.engine.dispose()
     return 0
 

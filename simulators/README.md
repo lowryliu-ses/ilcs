@@ -45,8 +45,11 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 docker compose exec api python ../scripts/configure-pilot-adapters.py revert --station ST-05  # 还原
 ```
 
-`deploy/.env` 的 `ILCS_ADAPTER_ALLOWED_HOSTS` 要列出这些服务名，切换脚本会先核对，缺哪个一个都不改。
-证书与凭据首次启动写到 `secrets/sila`、`secrets/opcua`、`secrets/gateway`、`secrets/fleet`（属主 10001）。
+`deploy/.env` 的 `ILCS_ADAPTER_ALLOWED_HOSTS` 要列出这些服务名（含统一控制口所在的 `sql-sim-slurry-b`：
+中间表工位的 ILCS 侧只连中间库，故障注入走设备侧进程的控制口），切换脚本会先核对，缺哪个一个都不改。
+证书与凭据首次启动写到 `secrets/sila`、`secrets/opcua`、`secrets/gateway`、`secrets/fleet`，统一控制口的令牌写到
+`secrets/simctl`（属主都是 10001；`simctl` 目录没建或属主不对时控制口不开，设备照常模拟，验收的故障项目标跳过）。
+切换后执行器自动跑一次只读级接入验收，通过了工位才接指令（模拟设备自报为模拟器，只读级就够）。
 
 ## 设备类型（`--profile`，SiLA 2 / OPC UA / 任务寄存器 / 网关通用）
 
@@ -105,6 +108,17 @@ docker compose exec <服务>             python simulators/<目录>/fault.py sta
 
 走的都是协议本身的通道或模拟器专用扩展：文本命令设备与天平收 `SIM:FAULT` / `SIM:STATE?`，PLC 写 `SimFault` 点，中间库写设备表的 `sim_fault` 列，
 车队与网关调 `POST /simulator/fault`，SiLA 2 / OPC UA 调 `SimulatorControl`，Modbus 任务寄存器写 `simulator_control` 块。
+
+**统一控制口**（`common/control.py`）：每台模拟设备另外开一个与协议无关的 HTTP 控制口（设 `SIM_CONTROL_PORT` 才开，试点是 9900，
+只在后端网络可见；令牌文件 `SIM_CONTROL_TOKEN_FILE` 首次启动生成）：
+
+```
+GET  /simulator/state[?unit=AGV-01]   故障模式、总动作次数 motions、认指令号时各指令号的动作次数
+POST /simulator/fault {"mode": "lost_receipt", "parameter": 0, "unit": ""}
+```
+
+接入验收的故障项目只认这一个口（适配器配置里的 `simulator_control`），不用为每种协议各写一个注入器；
+不认 ILCS 指令号的设备（文本命令、PLC 点表、天平、车队）报总动作次数，验收据此判断「重投有没有让设备再动一次」。
 
 | 模式 | 效果 | 系统应有的反应 |
 |---|---|---|

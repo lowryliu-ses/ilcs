@@ -1,0 +1,47 @@
+{
+  "format": "ilcs-device-template/1",
+  "code": "TPL-SAMPLE-CYCLER",
+  "revision": 1,
+  "name": "8 通道充放电柜（厂家 SDK 接口服务）",
+  "model": "CYCLER-32",
+  "vendor": "示例厂家",
+  "driver": "http_json_v1",
+  "protocol": "HTTPS JSON（厂家 SDK 接口服务）",
+  "version": "sample-cycler 1.0",
+  "config": {
+    "verify_tls": true,
+    "heartbeat_mode": "probe",
+    "connect_timeout_sec": 3,
+    "request_timeout_sec": 10,
+    "probe_interval_sec": 10,
+    "paths": {
+      "health": "/health",
+      "submit": "/commands",
+      "query": "/commands/{command_id}",
+      "hold": "/commands/{command_id}/hold",
+      "abort": "/commands/{command_id}/abort"
+    },
+    "idempotency_header": "Idempotency-Key"
+  },
+  "connection": {
+    "base_url": "https://cycler-gw.lab.internal:8443/api/v1",
+    "ca_file": "/run/secrets/ilcs/gateway/<设备编号>.crt",
+    "expected_device_id": "<设备编号>"
+  },
+  "supports": {
+    "hold": true,
+    "abort": true,
+    "query": true,
+    "dedup": true
+  },
+  "acceptance": {
+    "capability": "cap.test",
+    "params": {
+      "rate": 0.5,
+      "vmax": 4.2
+    }
+  },
+  "note": "设备模块 device-modules/sample-cycler：网关按 ILCS 指令号去重、可按指令号查询；凭据是网关令牌文件（credential_ref）。",
+  "state": "released",
+  "digest": "sha256:9a1e249e8badd2220a5e1ad899eccf65c6a7b64db3051e30c508a6feb9dedc42"
+}

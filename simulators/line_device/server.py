@@ -38,6 +38,7 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
     sys.path.insert(0, str(ROOT))
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.linesrv import CLOSE, LineServer  # noqa: E402
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
@@ -304,6 +305,10 @@ class SimulatorRunner:
     def stop(self) -> None:
         self.server.stop()
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：文本命令仪器不认 ILCS 指令号，只报总动作次数。"""
+        return DeviceTarget(self.device, self.server.go_offline, knows_command_ids=False)
+
 
 def parse(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -318,7 +323,10 @@ def main(argv=None) -> int:
     device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(device, args.tick_seconds, runner.stop)
+    if control is not None:
+        control.stop()
     return 0
 
 

@@ -57,7 +57,7 @@ class OpcUaSession:
         if parsed.scheme != "opc.tcp" or not parsed.hostname:
             raise AdapterError(f"{driver} 必须配置 opc.tcp:// 开头的 endpoint")
         self.host, self.port = parsed.hostname, parsed.port or 4840
-        if self.host.lower() not in settings.adapter_allowed_host_set:
+        if not settings.adapter_host_allowed(self.host):
             raise AdapterError(f"OPC UA 服务器主机 {self.host} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
         self.policy = str(config.get("security_policy") or "Basic256Sha256")
         if self.policy not in {"Basic256Sha256", "None"}:

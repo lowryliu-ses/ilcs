@@ -293,7 +293,8 @@ Compose 将网络拆成 `frontend` 与 `backend`：nginx 只能访问 API，Post
 
 `ILCS_ENVIRONMENT=production` 时还有配置硬门禁：数据库必须是 PostgreSQL，令牌密钥与
 口令 pepper 都必须是至少 32 位的非占位随机值，CORS 不能是通配来源，真实设备网关
-必须用 `ILCS_ADAPTER_ALLOWED_HOSTS` 明确列白名单（禁止 `*`）。任一不满足时
+必须用 `ILCS_ADAPTER_ALLOWED_HOSTS` 明确列白名单（禁止 `*`；可以写网段与域名后缀，如 `10.20.1.0/24,.lab.internal`，
+IPv4 网段不宽于 /16——设备网段里新接的设备就不用改 `.env`、重启服务）。任一不满足时
 `/api/health` 返回 `configuration_error`，业务接口 503。首次初始化后先用管理员临时口令
 登录并改密，再到“用户与权限”创建或调整账号、签发设备/LIMS 凭据。若管理员无法登录，可在
 停写维护窗口用 `ILCS_RESET_PASSWORD=... docker compose run --rm migrate python scripts/reset-account-password.py admin`
@@ -334,15 +335,24 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 
 ```bash
 # 证书 / 凭据目录，模拟设备首次启动写入（属主是容器里的 10001）
-sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,fleet}
+sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,fleet,simctl}
 # deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
-#   sila-sim-slurry-a,sql-sim-exchange,sila-sim-lh,plc-sim-mixer,plc-sim-coater,opcua-sim-calender,
-#   line-sim-oven,mtsics-sim-balance,gateway-sim-cycler,fleet-sim,line-sim-arm
+#   sila-sim-slurry-a,sql-sim-exchange,sql-sim-slurry-b,sila-sim-lh,plc-sim-mixer,plc-sim-coater,
+#   opcua-sim-calender,line-sim-oven,mtsics-sim-balance,gateway-sim-cycler,fleet-sim,line-sim-arm
 cd /opt/ilcs/deploy && docker compose --profile pilot up -d
 docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 simulators/pilot-devices.json 全部切换
 ```
 
-切换写审计、可 `revert`；在线状态由执行器探测。模拟设备自报为模拟器，`ILCS_ENVIRONMENT=production` 时会被拒绝接入。
+切换写审计、可 `revert`；在线状态由执行器探测，切换后执行器自动跑一次只读级接入验收，通过了工位才接指令。
+每台模拟设备还开了统一控制口（9900，令牌在 `secrets/simctl`），接入验收的故障项目走它。
+模拟设备自报为模拟器，`ILCS_ENVIRONMENT=production` 时会被拒绝接入。
+
+### 设备接入：模板与设备模块
+
+同一类设备有好几台时，把映射配置存成**设备接入模板**（「工位配置 → 设备接入模板」，发布要另一个人签名），工位套用模板、只填自己的连接参数。
+厂家只给 SDK / DLL 的设备按 [device-modules/README.md](device-modules/README.md) 写一个设备模块（基于 `sdk/ilcs_gateway` 的独立网关，
+自带模拟接口与测试，交付 `profile.json`），ILCS 侧用 `http_json_v1` 接入，不改代码、不重启。
+`python scripts/new-device-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。
 以前版本的 `sila-sim-cycler`、`modbus-sim-mixer`、`gateway-sim-coater` 已不在 compose 里：升级后
 `docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
 检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [connectors/result_files/README.md](connectors/result_files/README.md)）。

@@ -28,6 +28,7 @@ import { ResultsPage } from '../features/results/ResultsPage';
 import { SampleDetailPage, SamplesPage } from '../features/samples/SamplesPage';
 import { SchedulePage } from '../features/schedule/SchedulePage';
 import { SopsPage } from '../features/sops/SopsPage';
+import { DeviceTemplatesPage } from '../features/stations/DeviceTemplatesPage';
 import { StationsPage } from '../features/stations/StationsPage';
 import { TasksPage } from '../features/tasks/TasksPage';
 import { LoginPage } from '../features/identity/LoginPage';
@@ -42,7 +43,8 @@ import type { Dashboard, Gate } from '../shared/types';
    点进去看到空页面比没有这一项更糟。
    分组与组内顺序按业务主线：方案 → 流程 → 接样建批 → 排程执行 → 数据审核 → 报告。
    菜单名与页面标题保持一致。 */
-type NavItem = { path: string; label: string; perm?: string };
+/* perm 给数组时有其中任一权限即可 */
+type NavItem = { path: string; label: string; perm?: string | string[] };
 const NAV: [string, NavItem[]][] = [
   ['工作台', [
     { path: '/dashboard', label: '工作台' },
@@ -71,6 +73,7 @@ const NAV: [string, NavItem[]][] = [
   ['资源管理', [
     { path: '/assets', label: '仪器设备' },
     { path: '/stations', label: '工位配置' },
+    { path: '/device-templates', label: '设备接入模板', perm: ['station.edit', 'template.release'] },
     { path: '/capabilities', label: '能力字典' },
     { path: '/materials', label: '试剂耗材' },
     { path: '/people', label: '人员与资质' },
@@ -121,7 +124,9 @@ export function App() {
         </div>
         <nav>
           {NAV.map(([group, items]) => {
-            const visible = items.filter((item) => !item.perm || user.perms.includes(item.perm));
+            const visible = items.filter(
+              (item) => !item.perm || [item.perm].flat().some((perm) => user.perms.includes(perm)),
+            );
             if (!visible.length) return null;
             return (
               <div key={group}>
@@ -208,6 +213,7 @@ export function App() {
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/stations" element={<StationsPage />} />
+          <Route path="/device-templates" element={<DeviceTemplatesPage />} />
           <Route path="/capabilities" element={<CapabilitiesPage />} />
           <Route path="/materials" element={<MaterialsPage />} />
           <Route path="/people" element={<PeoplePage />} />

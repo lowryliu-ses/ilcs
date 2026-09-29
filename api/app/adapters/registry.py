@@ -155,6 +155,15 @@ def describe(instance: DeviceAdapter, record: Adapter) -> dict:
     }
 
 
+def release(station_id: str) -> None:
+    """关掉并丢弃这个工位缓存的驱动实例（接入验收要自己建实例：保持连接的设备不能被两个连接同时占着）。
+
+    下一次投递、轮询时按当前配置重建。
+    """
+    for key in [cached_key for cached_key in _CACHE if cached_key.startswith(f"{station_id}:")]:
+        _close(_CACHE.pop(key))
+
+
 def reset_cache() -> None:
     for instance in _CACHE.values():
         _close(instance)

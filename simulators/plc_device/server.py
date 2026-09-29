@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:  # 直接运行（容器）时也能找到 simulat
     sys.path.insert(0, str(ROOT))
 
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.runtime import build_device, configure_logging, device_arguments, serve_forever  # noqa: E402
 
 MARK = "ILCS-SIMULATOR"
@@ -389,6 +390,10 @@ class SimulatorRunner:
         self.closed.set()
         self.io.stop()
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：PLC 自有点表不认 ILCS 指令号，只报总动作次数。"""
+        return DeviceTarget(self.program.device, self.go_offline, knows_command_ids=False)
+
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)
@@ -421,7 +426,10 @@ def main(argv=None) -> int:
     device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(device, args.tick_seconds, runner.stop)
+    if control is not None:
+        control.stop()
     return 0
 
 

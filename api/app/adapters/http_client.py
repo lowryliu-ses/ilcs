@@ -94,6 +94,15 @@ def _within_credential_root(path: Path, label: str) -> Path:
     return path
 
 
+def _origin(url: str) -> tuple:
+    parsed = urlparse(url)
+    try:
+        port = parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
+    except ValueError:
+        port = None
+    return parsed.scheme, (parsed.hostname or "").lower(), port, parsed.username, parsed.password
+
+
 class HttpTransport:
     def __init__(self, config: dict, credential_ref: str, *, driver: str, label: str = "设备网关"):
         self.config = config
@@ -102,7 +111,7 @@ class HttpTransport:
         parsed = urlparse(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise AdapterError(f"{driver} 必须配置有效的 base_url")
-        if (parsed.hostname or "").lower() not in settings.adapter_allowed_host_set:
+        if not settings.adapter_host_allowed(parsed.hostname or ""):
             raise AdapterError(f"{label}主机 {parsed.hostname or '缺失'} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
         if parsed.scheme != "https" and (
             settings.environment == "production" or not config.get("allow_insecure_http", False)
@@ -186,10 +195,15 @@ class HttpTransport:
         return {"Authorization": f"Bearer {raw}"}
 
     def url(self, path: str, fields: dict | None = None) -> str:
+        """base_url 下的地址。拼出来的地址必须仍是 base_url 那台主机（同协议、同主机、同端口）：
+        映射配置里写成完整网址（`https://别的主机/…`）的路径会把凭据带去白名单之外，一律拒绝。"""
         rendered = path
         for name, value in (fields or {}).items():
             rendered = rendered.replace("{" + name + "}", quote(str(value), safe=""))
-        return urljoin(f"{self.base_url}/", rendered.lstrip("/"))
+        joined = urljoin(f"{self.base_url}/", rendered.lstrip("/"))
+        if _origin(joined) != _origin(self.base_url):
+            raise AdapterError(f"{self.label}请求路径 {path} 指向了 base_url 之外的主机：请求与凭据只发往 base_url")
+        return joined
 
     def request(
         self, method: str, path: str, payload=None, *, fields: dict | None = None, allow_not_found: bool = False,

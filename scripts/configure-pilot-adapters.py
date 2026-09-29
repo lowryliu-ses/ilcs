@@ -18,6 +18,7 @@
 
 apply 会把原配置记在 /data/pilot-adapters-<时间>.json；revert 每个工位取包含它的最近一份备份还原。
 预设里引用的主机（含组合工位各路由的主机）必须都在 ILCS_ADAPTER_ALLOWED_HOSTS 里，否则一个都不改。
+目标工位上还有可能仍在动作的指令（在途、已保持、结果未知）时同样一个都不改：换驱动后新实例查不回它们。
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ from app.core.config import settings  # noqa: E402
 from app.core.db import SessionLocal, engine  # noqa: E402
 from app.core.schema import verify  # noqa: E402
 from app.models import Adapter, AuditEvent, Station  # noqa: E402
+from app.repositories.execution import CommandRepository  # noqa: E402
+from app.services.acceptance_service import after_config_change  # noqa: E402
 
 FIELDS = ("kind", "driver", "protocol", "version", "config", "credential_ref", "supports_hold",
           "supports_abort", "supports_query", "supports_dedup", "note")
@@ -68,6 +71,28 @@ def _connection(driver: str, host: str, port: int, device_id: str, station: Stat
                 "expected_device_id": device_id, "heartbeat_mode": "probe", **COMMON}, \
             f"file://{SECRETS}/gateway/{device_id}.token"
     raise SystemExit(f"不支持的试点驱动 {driver}；可选 {', '.join(PROTOCOLS)}")
+
+
+def _lock(db, station_ids) -> None:
+    """按工位号顺序锁住这些工位的适配器行，直到提交。
+
+    执行器投递前要锁同一行（见 ExecutionService.execute）：锁住之后不会再有新指令发出去，
+    接下来核对「还有没有在动作的指令」才作数；提交后执行器读到的是新配置和验收闸门。
+    """
+    ids = sorted(set(station_ids))
+    if ids:
+        (db.query(Adapter).filter(Adapter.station_id.in_(ids)).order_by(Adapter.station_id)
+         .with_for_update().populate_existing().all())
+
+
+def _still_acting(db, station_ids) -> str:
+    """这些工位上还有可能仍在动作的指令时，说明是哪些；换驱动后新实例查不回它们（见 domain/adapter_rules）。"""
+    rows = []
+    for station_id in sorted(station_ids):
+        acting = CommandRepository(db).acting_on_station(station_id)
+        if acting:
+            rows.append(f"{station_id}（{'、'.join(command.id for command in acting[:5])}{' 等' if len(acting) > 5 else ''}）")
+    return "；".join(rows)
 
 
 def _snapshot(adapter: Adapter, station: Station) -> dict:
@@ -128,12 +153,17 @@ def apply(args) -> int:
     hosts = set()
     for target in targets.values():
         hosts |= {target["host"]} if not target.get("preset") else hosts_of(target["config"])
-    missing_hosts = sorted(hosts - settings.adapter_allowed_host_set)
+    missing_hosts = sorted(host for host in hosts if not settings.adapter_host_allowed(host))
     if missing_hosts:
         print(f"ILCS_ADAPTER_ALLOWED_HOSTS 未包含 {', '.join(missing_hosts)}，驱动会拒绝连接；一个工位都没改", file=sys.stderr)
         return 2
     backup: dict = {}
     with SessionLocal() as db:
+        _lock(db, targets)
+        busy = _still_acting(db, [station_id for station_id in targets if db.get(Adapter, station_id) is not None])
+        if busy:
+            print(f"这些工位上还有可能仍在动作的指令，切换驱动后查不回它们：{busy}；一个工位都没改", file=sys.stderr)
+            return 2
         for station_id, target in targets.items():
             station = db.get(Station, station_id)
             adapter = db.get(Adapter, station_id)
@@ -167,12 +197,14 @@ def apply(args) -> int:
             if station_id in channels:
                 station.channels = int(channels[station_id])
                 station.row_version += 1
+            # 换了驱动：先过接入验收再接指令（自动排一次只读级；自报为模拟器的设备只读级就够）
+            after_config_change(db, adapter, before, org_id=station.org_id, requested_by="运维命令")
             _audit(db, station, "试点切换设备适配器", before, _snapshot(adapter, station))
         db.commit()
     path = Path(args.backup_dir) / f"pilot-adapters-{now():%Y%m%d-%H%M%S}.json"
     path.write_text(json.dumps(backup, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     reset_cache()
-    print(f"已切换 {', '.join(targets)}；原配置 {path}；在线状态等执行器探测")
+    print(f"已切换 {', '.join(targets)}；原配置 {path}；在线状态等执行器探测，接入验收（只读级）已自动排队")
     return 0
 
 
@@ -193,6 +225,11 @@ def revert(args) -> int:
         print(f"没有 {', '.join(missing)} 的切换前备份", file=sys.stderr)
         return 2
     with SessionLocal() as db:
+        _lock(db, wanted)
+        busy = _still_acting(db, wanted)
+        if busy:
+            print(f"这些工位上还有可能仍在动作的指令，还原驱动后查不回它们：{busy}；一个工位都没改", file=sys.stderr)
+            return 2
         for station_id, before in backup.items():
             if station_id not in wanted:
                 continue
@@ -206,6 +243,7 @@ def revert(args) -> int:
             adapter.current_command_id = ""
             adapter.connected = before["kind"] == "simulation"
             adapter.accepts_commands = True
+            after_config_change(db, adapter, current, org_id=station.org_id, requested_by="运维命令")
             _audit(db, station, "试点还原设备适配器", current, before)
         db.commit()
     print("已还原 " + "，".join(f"{station_id}（{sources[station_id]}）" for station_id in sorted(wanted)))

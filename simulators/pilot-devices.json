@@ -1,5 +1,5 @@
 {
-  "_说明": "试点设备预设：每个示例工位接哪种驱动、连哪台模拟设备（deploy/docker-compose.yml 的 pilot profile）。由 scripts/configure-pilot-adapters.py apply --preset 使用（缺省读这个文件）；ARM-01 由 scripts/load-demo-cases.py 登记时读取。接真机时按现场地址、证书与点表改写，不要直接照搬模拟设备的编号与地址。",
+  "_说明": "试点设备预设：每个示例工位接哪种驱动、连哪台模拟设备（deploy/docker-compose.yml 的 pilot profile）。由 scripts/configure-pilot-adapters.py apply --preset 使用（缺省读这个文件）；ARM-01 由 scripts/load-demo-cases.py 登记时读取。接真机时按现场地址、证书与点表改写，不要直接照搬模拟设备的编号与地址。simulator_control 是模拟设备的统一控制口（接入验收的故障项目与动作计数用），接真机时删掉。",
   "stations": {
     "ST-01-A": {
       "driver": "sila2_v1",
@@ -10,7 +10,11 @@
         "ca_file": "/run/secrets/ilcs/sila/SIM-SLR-A.crt",
         "expected_device_id": "SIM-SLR-A",
         "request_timeout_sec": 10,
-        "probe_interval_sec": 10
+        "probe_interval_sec": 10,
+        "simulator_control": {
+          "url": "http://sila-sim-slurry-a:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-SLR-A.token"
+        }
       },
       "note": "高通量匀浆工作站：厂家调度软件的 SiLA 2 服务（ILCS TaskExecution 特性）"
     },
@@ -25,7 +29,11 @@
         "device_table": "ilcs_device",
         "heartbeat_stale_sec": 30,
         "request_timeout_sec": 10,
-        "probe_interval_sec": 10
+        "probe_interval_sec": 10,
+        "simulator_control": {
+          "url": "http://sql-sim-slurry-b:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-SLR-B.token"
+        }
       }
     },
     "ST-02": {
@@ -347,6 +355,10 @@
             "unit": "L",
             "factor": 0.001
           }
+        },
+        "simulator_control": {
+          "url": "http://plc-sim-mixer:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-MIX-01.token"
         }
       }
     },
@@ -471,6 +483,10 @@
               "pulse_ms": 300
             }
           }
+        },
+        "simulator_control": {
+          "url": "http://plc-sim-coater:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-COAT-01.token"
         }
       }
     },
@@ -487,7 +503,11 @@
         "application_uri": "urn:ilcs:client",
         "expected_device_id": "SIM-CAL-01",
         "request_timeout_sec": 10,
-        "probe_interval_sec": 10
+        "probe_interval_sec": 10,
+        "simulator_control": {
+          "url": "http://opcua-sim-calender:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-CAL-01.token"
+        }
       }
     },
     "ST-05": {
@@ -607,7 +627,11 @@
                 "VD-120",
                 "VD-90"
               ],
-              "expected_device_id": "SIM-OVEN-01"
+              "expected_device_id": "SIM-OVEN-01",
+              "simulator_control": {
+                "url": "http://line-sim-oven:9900",
+                "token_ref": "file:///run/secrets/ilcs/simctl/SIM-OVEN-01.token"
+              }
             }
           },
           {
@@ -633,6 +657,10 @@
                   "unit": "g",
                   "stable_timeout_sec": 15
                 }
+              },
+              "simulator_control": {
+                "url": "http://mtsics-sim-balance:9900",
+                "token_ref": "file:///run/secrets/ilcs/simctl/SIM-BAL-01.token"
               }
             }
           }
@@ -648,7 +676,11 @@
         "ca_file": "/run/secrets/ilcs/sila/SIM-LH-01.crt",
         "expected_device_id": "SIM-LH-01",
         "request_timeout_sec": 10,
-        "probe_interval_sec": 10
+        "probe_interval_sec": 10,
+        "simulator_control": {
+          "url": "http://sila-sim-lh:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-LH-01.token"
+        }
       },
       "note": "手套箱注液工作站：SiLA 2 服务（ILCS TaskExecution 特性）"
     },
@@ -665,7 +697,11 @@
         "expected_device_id": "SIM-CYC-01",
         "heartbeat_mode": "probe",
         "request_timeout_sec": 10,
-        "probe_interval_sec": 10
+        "probe_interval_sec": 10,
+        "simulator_control": {
+          "url": "http://gateway-sim-cycler:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-CYC-01.token"
+        }
       }
     },
     "AGV-01": {
@@ -763,6 +799,11 @@
         "abort": {
           "method": "DELETE",
           "path": "/mission_queue/{handle}"
+        },
+        "simulator_control": {
+          "url": "http://fleet-sim:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/fleet.token",
+          "unit": "AGV-01"
         }
       }
     },
@@ -861,6 +902,11 @@
         "abort": {
           "method": "DELETE",
           "path": "/mission_queue/{handle}"
+        },
+        "simulator_control": {
+          "url": "http://fleet-sim:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/fleet.token",
+          "unit": "AGV-02"
         }
       }
     },
@@ -954,7 +1000,11 @@
         "methods": [
           "load_glovebox"
         ],
-        "expected_device_id": "SIM-ARM-01"
+        "expected_device_id": "SIM-ARM-01",
+        "simulator_control": {
+          "url": "http://line-sim-arm:9900",
+          "token_ref": "file:///run/secrets/ilcs/simctl/SIM-ARM-01.token"
+        }
       }
     }
   }

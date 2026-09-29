@@ -67,7 +67,7 @@ class SqlTableAdapter:
         if dialect == "sqlite":
             if settings.environment == "production":
                 raise AdapterError("正式环境不能用 SQLite 做中间库")
-        elif (url.host or "").lower() not in settings.adapter_allowed_host_set:
+        elif not settings.adapter_host_allowed(url.host or ""):
             raise AdapterError(f"中间库主机 {url.host or '缺失'} 不在 ILCS_ADAPTER_ALLOWED_HOSTS 白名单")
         self.url = url
         self.dialect = dialect

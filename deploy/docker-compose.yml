@@ -134,6 +134,8 @@ services:
   # 每个示例工位一台，与真设备一样走网络接入；系统侧的驱动与连接配置见 simulators/pilot-devices.json，
   # 用 `docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset` 一次切换。
   # 首次启动把证书 / 令牌写到 ../secrets/<sila|opcua|gateway|fleet>/，适配器配置里引用的就是这些文件。
+  # 每台还开一个统一控制口（9900，只在后端网络可见；令牌首次启动写到 ../secrets/simctl/）：
+  # 接入验收的故障项目与动作计数走它，适配器配置里的 simulator_control 指向它。
   # 模拟设备自报是模拟器（身份里带 ILCS-SIMULATOR）：正式环境（ILCS_ENVIRONMENT=production）拒绝接入。
   #
   #   工位       模拟设备               协议 / 驱动
@@ -159,8 +161,11 @@ services:
       SIM_HOST_NAME: sila-sim-slurry-a
       SIM_CERT_DIR: /run/secrets/ilcs/sila
       SIM_TASK_SECONDS: "20"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-SLR-A.token
     volumes:
       - ../secrets/sila:/run/secrets/ilcs/sila
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/sila_device/server.py"]
 
   # ST-01-B 的中间库：试点用的 PostgreSQL（只在后端网络、信任认证、数据不落盘），
@@ -194,6 +199,10 @@ services:
       SIM_PROFILE: generic
       SIM_TASK_SECONDS: "20"
       SIM_DATABASE_URL: postgresql+psycopg2://exchange@sql-sim-exchange:5432/exchange
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-SLR-B.token
+    volumes:
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/sql_device/worker.py"]
     depends_on:
       sql-sim-exchange:
@@ -210,6 +219,10 @@ services:
       SIM_SETPOINTS: mass,volume,rate,temp,rpm,vacuum
       SIM_PORT: "5021"
       SIM_TASK_SECONDS: "20"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-MIX-01.token
+    volumes:
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/plc_device/server.py"]
 
   plc-sim-coater:
@@ -225,8 +238,11 @@ services:
       SIM_HOST_NAME: plc-sim-coater
       SIM_CERT_DIR: /run/secrets/ilcs/opcua
       SIM_TASK_SECONDS: "30"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-COAT-01.token
     volumes:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/plc_device/server.py"]
 
   opcua-sim-calender:
@@ -240,8 +256,11 @@ services:
       SIM_HOST_NAME: opcua-sim-calender
       SIM_CERT_DIR: /run/secrets/ilcs/opcua
       SIM_TASK_SECONDS: "20"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-CAL-01.token
     volumes:
       - ../secrets/opcua:/run/secrets/ilcs/opcua
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/opcua_device/server.py"]
 
   line-sim-oven:
@@ -254,6 +273,10 @@ services:
       SIM_METHODS: VD-120,VD-90
       SIM_PORT: "4001"
       SIM_TASK_SECONDS: "15"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-OVEN-01.token
+    volumes:
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/line_device/server.py"]
 
   mtsics-sim-balance:
@@ -264,6 +287,10 @@ services:
       SIM_MODEL: XPR226
       SIM_PORT: "4305"
       SIM_SAMPLE_MASS: "0.0152"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-BAL-01.token
+    volumes:
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/mt_sics/server.py"]
 
   sila-sim-lh:
@@ -277,8 +304,11 @@ services:
       SIM_CERT_DIR: /run/secrets/ilcs/sila
       SIM_TASK_SECONDS: "20"
       SIM_MATERIAL_MAP: '{"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}'
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-LH-01.token
     volumes:
       - ../secrets/sila:/run/secrets/ilcs/sila
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/sila_device/server.py"]
 
   gateway-sim-cycler:
@@ -293,8 +323,11 @@ services:
       SIM_HOST_NAME: gateway-sim-cycler
       SIM_CERT_DIR: /run/secrets/ilcs/gateway
       SIM_TASK_SECONDS: "60"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-CYC-01.token
     volumes:
       - ../secrets/gateway:/run/secrets/ilcs/gateway
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/http_gateway/server.py"]
 
   fleet-sim:
@@ -305,8 +338,11 @@ services:
       SIM_PORT: "8080"
       SIM_TASK_SECONDS: "8"
       SIM_CERT_DIR: /run/secrets/ilcs/fleet
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/fleet.token
     volumes:
       - ../secrets/fleet:/run/secrets/ilcs/fleet
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/fleet/server.py"]
 
   line-sim-arm:
@@ -319,6 +355,10 @@ services:
       SIM_METHODS: load_glovebox
       SIM_PORT: "29999"
       SIM_TASK_SECONDS: "10"
+      SIM_CONTROL_PORT: "9900"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-ARM-01.token
+    volumes:
+      - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "simulators/line_device/server.py"]
 
   # 结果文件接收器（可选，--profile results）：检测软件导出目录 → 关联检测任务 → 结果回传。

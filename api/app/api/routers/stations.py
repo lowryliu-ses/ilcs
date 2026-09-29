@@ -1,9 +1,11 @@
 from fastapi import APIRouter
+from fastapi.responses import Response
 
 from ...schemas import (
-    AdapterPatchIn, CapabilityIn, CapabilityPatchIn, CommandVerifyIn, LimitsIn, ManualReviewIn,
+    AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterPatchIn, CapabilityIn, CapabilityPatchIn, CommandVerifyIn, LimitsIn, ManualReviewIn,
     ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
 )
+from ...services.acceptance_service import AcceptanceService, run_out
 from ...services.batch_service import BatchService
 from ...services.station_service import StationService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
@@ -139,6 +141,66 @@ def update_adapter(
 def describe_adapter(station_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
     """读驱动自报的厂商、固件、方法目录与指令类型。工位匹配据此判断能否按某条设备方法执行。"""
     return StationService(db, ctx).describe_adapter(station_id, user)
+
+
+@router.get("/drivers")
+def list_drivers(db: DbSession, ctx=require("station.edit"), station_id: str | None = None):
+    """已登记的驱动：配置项说明（界面按它出表单）与起步模板（给了工位就按它的能力极限生成）。"""
+    return StationService(db, ctx).drivers(station_id)
+
+
+@router.post("/stations/{station_id}/adapter/check")
+def check_adapter_config(station_id: str, payload: AdapterConfigCheckIn, db: DbSession, ctx=require("station.edit")):
+    """保存之前先检查一份配置：按驱动登记的字段查缺项与类型，再构造一次驱动实例（不保存、不连设备）。"""
+    return StationService(db, ctx).check_adapter_config(station_id, payload.model_dump())
+
+
+@router.get("/stations/{station_id}/adapter/templates")
+def adapter_template_options(station_id: str, db: DbSession, ctx=require("station.edit")):
+    """这台工位能套用的设备接入模板：已发布的，适用型号一致的排在前面。"""
+    return StationService(db, ctx).template_options(station_id)
+
+
+@router.get("/stations/{station_id}/adapter/acceptance")
+def list_acceptance(station_id: str, db: DbSession, ctx=require("station.edit"), limit: int = 20):
+    """这台设备的接入验收记录与验收闸门（还欠什么级别）。"""
+    return AcceptanceService(db, ctx).list_for_station(station_id, limit)
+
+
+@router.post("/stations/{station_id}/adapter/acceptance", status_code=201)
+def request_acceptance(
+    station_id: str, payload: AcceptanceRequestIn, db: DbSession, user: CurrentUser, ctx=require("station.edit"),
+):
+    """申请接入验收：登记一条排队记录，由执行器执行（执行器是唯一驱动设备的进程）。"""
+    return AcceptanceService(db, ctx).request(station_id, payload.model_dump(), user)
+
+
+@router.post("/stations/{station_id}/adapter/acceptance/waive", status_code=201)
+def waive_acceptance(
+    station_id: str, payload: AcceptanceWaiveIn, db: DbSession, user: CurrentUser, ctx=require("station.edit"),
+):
+    """签名放行：检查清单证明不了的设备（不支持状态查询、要现场摆位的动作），现场核对后由人放行，放行记录存档。"""
+    return AcceptanceService(db, ctx).waive(station_id, payload.reason, payload.signature_id, user)
+
+
+@router.get("/acceptance-runs/{run_id}")
+def acceptance_run(run_id: str, db: DbSession, ctx=require("station.edit")):
+    return run_out(AcceptanceService(db, ctx).get(run_id), full=True)
+
+
+@router.get("/acceptance-runs/{run_id}/report.md")
+def acceptance_report(run_id: str, db: DbSession, ctx=require("station.edit")):
+    run = AcceptanceService(db, ctx).get(run_id)
+    return Response(
+        content=run.report_md or f"# 设备接入验收：{run.station_id}\n\n{run.state}：{run.error or '还没有结论'}\n",
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="acceptance-{run.station_id}-{run.id}.md"'},
+    )
+
+
+@router.post("/acceptance-runs/{run_id}/cancel")
+def cancel_acceptance(run_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
+    return AcceptanceService(db, ctx).cancel(run_id, user)
 
 
 @router.post("/stations/{station_id}/adapter/test")

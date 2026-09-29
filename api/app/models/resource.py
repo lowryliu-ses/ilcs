@@ -169,6 +169,107 @@ class Adapter(Base):
     # device：设备自报；config：驱动协议带不了方法目录，按登记配置
     described_from: Mapped[str] = mapped_column(String, default="")
     described_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 配置变更后还欠的接入验收：'' 不欠 / readonly 只读级 / physical 动作级。欠着就按「待接入验收」挡住下发
+    acceptance_required: Mapped[str] = mapped_column(String, default="")
+    # 最近一次满足要求的验收：对应的配置版本与验收记录
+    accepted_config_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    accepted_run_id: Mapped[str] = mapped_column(String, default="")
+    # 套用的设备接入模板（某一版）与工位自己的连接参数；config 仍是合并后的完整配置。空表示没套模板
+    template_id: Mapped[str] = mapped_column(String, default="")
+    template_connection: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DeviceTemplate(Base):
+    """设备接入模板：一类设备怎么接。驱动 + 映射配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理。
+
+    草稿可改；发布要另一个人签名（起草人不能发布本人起草的模板），发布后内容冻结（触发器），要改就新建修订。
+    发布新修订时同编号的旧发布版退役，但不自动推给工位：套用旧版的工位照常运行，由人逐台切换、签名、重新验收。
+    设备模块交付的 profile.json 就是它的导出文件。
+    """
+
+    __tablename__ = "device_templates"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    code: Mapped[str] = mapped_column(String)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    name: Mapped[str] = mapped_column(String)
+    # 适用的资产型号（空表示不限）；登记同型号的工位时排在前面
+    model: Mapped[str] = mapped_column(String, default="")
+    vendor: Mapped[str] = mapped_column(String, default="")
+    driver: Mapped[str] = mapped_column(String)
+    protocol: Mapped[str] = mapped_column(String, default="")
+    version: Mapped[str] = mapped_column(String, default="")
+    # 映射配置：不含每台设备的连接参数（地址、证书、设备编号）
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 连接参数示例：套用时由工位填写，导出文件里带着给接入的人看
+    connection: Mapped[dict] = mapped_column(JSON, default=dict)
+    # {hold, abort, query, dedup}
+    supports: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 接入验收的缺省：{capability, params}
+    acceptance: Mapped[dict] = mapped_column(JSON, default=dict)
+    note: Mapped[str] = mapped_column(Text, default="")
+    # draft | released | retired
+    state: Mapped[str] = mapped_column(String, default="draft")
+    digest: Mapped[str] = mapped_column(String, default="")
+    # 从哪来：{kind: manual | import | revise, file, digest, from}
+    source: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_by_name: Mapped[str] = mapped_column(String, default="")
+    # 起草与改过草稿的人（用户 ID）：他们都不能发布它
+    editors: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    released_by: Mapped[str] = mapped_column(String, default="")
+    released_by_name: Mapped[str] = mapped_column(String, default="")
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    __table_args__ = (UniqueConstraint("org_id", "code", "revision", name="uq_device_template_revision"),)
+
+
+class AcceptanceRun(Base):
+    """一次设备接入验收：申请、执行器执行、报告。出了结论就只读，永不删除（上线证据）。
+
+    验收的对象是执行时刻的驱动与配置（`driver`、`config_version`、`config_digest`），报告与它一起存档：
+    配置之后再变，这份报告说的仍是当时那一版。
+    """
+
+    __tablename__ = "acceptance_runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    station_id: Mapped[str] = mapped_column(String, index=True)
+    # readonly 只读级 | physical 动作级（会让设备动作）
+    level: Mapped[str] = mapped_column(String, default="readonly")
+    # 故障项目（丢回执、忙、联锁、失联）：只对自报为模拟器、登记了控制口的设备生效
+    faults: Mapped[bool] = mapped_column(Boolean, default=False)
+    capability: Mapped[str] = mapped_column(String, default="")
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    # manual 手动 | config_change 配置变更后自动 | device_online 设备恢复在线后自动重跑
+    trigger: Mapped[str] = mapped_column(String, default="manual")
+    approval: Mapped[str] = mapped_column(Text, default="")
+    signature_id: Mapped[str] = mapped_column(String, default="")
+    requested_by: Mapped[str] = mapped_column(String, default="")
+    requested_by_id: Mapped[str] = mapped_column(String, default="")
+    # queued | running | done | error | cancelled
+    state: Mapped[str] = mapped_column(String, default="queued", index=True)
+    kind: Mapped[str] = mapped_column(String, default="")
+    driver: Mapped[str] = mapped_column(String, default="")
+    protocol: Mapped[str] = mapped_column(String, default="")
+    adapter_version: Mapped[str] = mapped_column(String, default="")
+    config_version: Mapped[int] = mapped_column(Integer, default=0)
+    config_digest: Mapped[str] = mapped_column(String, default="")
+    # 验收时工位套用的设备接入模板
+    template_id: Mapped[str] = mapped_column(String, default="")
+    template_code: Mapped[str] = mapped_column(String, default="")
+    template_revision: Mapped[int] = mapped_column(Integer, default=0)
+    ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    simulator: Mapped[bool] = mapped_column(Boolean, default=False)
+    identity: Mapped[dict] = mapped_column(JSON, default=dict)
+    checks: Mapped[list] = mapped_column(JSON, default=list)
+    report_md: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class MaintenanceOrder(Base):

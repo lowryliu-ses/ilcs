@@ -27,12 +27,13 @@ from sqlalchemy.orm import Session
 
 from ..core.clock import now
 from ..core.config import settings
+from .acceptance_service import running_stations
 from .execution_service import ExecutorLoop
 from .gate_service import GateService
 
 log = logging.getLogger("ilcs.executor")
 
-SUMMED = ("probed", "reconciled", "polled", "executed", "overdue", "timed_out")
+SUMMED = ("probed", "reconciled", "polled", "executed", "overdue", "timed_out", "accepted")
 # 出向事件投递在线程池里的任务名；不是工位，不进工位卡住统计
 WEBHOOK_JOB = "__webhooks__"
 
@@ -139,8 +140,12 @@ class ConcurrentExecutor:
         self._reap(report)
 
         moment = time.monotonic()
+        with self.session_factory() as db:
+            # 动作级接入验收本来就要跑几分钟：这些工位在验收，不是网关卡住
+            accepting = running_stations(db)
+        report["stations_accepting"] = sorted(accepting & set(self.running))
         for station_id, running in self.running.items():
-            if station_id == WEBHOOK_JOB:
+            if station_id == WEBHOOK_JOB or station_id in accepting:
                 continue
             age = moment - running.started
             if age >= settings.executor_station_stuck_sec:

@@ -32,6 +32,7 @@ from sila2.server import FeatureImplementationBase, SilaServer  # noqa: E402
 
 from simulators.common.certs import self_signed_certificate  # noqa: E402
 from simulators.common.device import DeviceRejected, ReceiptLost, SimulatedDevice  # noqa: E402
+from simulators.common.control import DeviceTarget, start_control  # noqa: E402
 from simulators.common.runtime import (  # noqa: E402
     build_device, configure_logging, device_arguments, serve_forever,
 )
@@ -159,6 +160,10 @@ class SimulatorRunner:
                 self.server.stop(grace_period=0)
             self.server = None
 
+    def control_target(self) -> DeviceTarget:
+        """统一控制口（simulators/common/control.py）：SiLA 2 设备认 ILCS 指令号。"""
+        return DeviceTarget(self.device, self.go_offline)
+
     def go_offline(self, seconds: float) -> None:
         def cycle():
             time.sleep(0.2)  # 先把 SetFault 的应答送回去
@@ -185,7 +190,10 @@ def main(argv=None) -> int:
     device = build_device(args)
     runner = SimulatorRunner(args, device)
     runner.start()
+    control = start_control(runner.control_target())
     serve_forever(device, args.tick_seconds, runner.stop)
+    if control is not None:
+        control.stop()
     return 0
 
 

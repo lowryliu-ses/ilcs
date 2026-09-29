@@ -129,3 +129,156 @@ def test_script_runs_read_only_acceptance_against_a_registered_station(monkeypat
     monkeypatch.setattr(sys, "argv", ["device-acceptance.py", "ST-99"])
     with pytest.raises(SystemExit, match="不存在"):
         module.main()
+
+
+def test_control_port_counts_motions_for_devices_without_command_ids(credential_root):
+    """串口命令干燥箱不认 ILCS 指令号：统一控制口报设备的总动作次数，「重复提交只动作一次」照样能判。"""
+    from app.adapters.acceptance import SimulatorControlInjector
+    from app.adapters.line_command import LineCommandAdapter
+    from sim_harness import control_port, line_config, line_sim
+
+    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target()) as control:
+        rec = record("串口 / TCP 命令", line_config(port), driver="line_command_v1", kind="real")
+        injector = SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+        assert injector.executions("ACC-x") is None and injector.motions() == 0
+        report = _run(rec, lambda: LineCommandAdapter(rec), physical=True, injector=injector)
+    states = {check.key: check.state for check in report.checks}
+    assert report.ok, report.markdown()
+    duplicate = next(check for check in report.checks if check.key == "duplicate")
+    assert duplicate.state == "pass" and "总动作次数" in duplicate.detail, duplicate
+    assert all(states[key] == "pass" for key in ("lost_receipt", "busy", "interlock", "offline")), states
+    assert report.simulator
+
+
+def test_control_port_for_the_balance_counts_weighings(credential_root):
+    from app.adapters.acceptance import SimulatorControlInjector
+    from app.adapters.mt_sics import MtSicsAdapter
+    from sim_harness import control_port
+
+    with balance_sim() as (balance, runner, port), control_port(runner.control_target()) as control:
+        rec = record("MT-SICS", balance_config(port), driver="mt_sics_v1", kind="real", supports_hold=False,
+                     supports_abort=False)
+        injector = SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+        weigh = request("", capability="cap.weigh", params={"mass": 0.0152})
+        report = _run(rec, lambda: MtSicsAdapter(rec), weigh, physical=True, injector=injector)
+        assert balance.weighings >= 2
+    states = {check.key: check.state for check in report.checks}
+    duplicate = next(check for check in report.checks if check.key == "duplicate")
+    assert duplicate.state == "pass" and "总动作次数" in duplicate.detail, report.markdown()
+    assert states["busy"] == states["interlock"] == states["offline"] == "pass", report.markdown()
+
+
+def test_control_port_requires_its_token(credential_root):
+    from app.adapters.acceptance import SimulatorControlInjector
+    from app.adapters.base import AdapterError
+    from sim_harness import control_port, line_sim
+
+    token = credential_root / "simctl.token"
+    token.write_text("s3cret-token")
+    with line_sim() as (device, runner, _), control_port(runner.control_target(), token="s3cret-token") as control:
+        with pytest.raises(AdapterError, match="401"):
+            SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"}).set("busy")
+        SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "token_ref": f"file://{token}"}).set("busy")
+        assert device.fault == "busy"
+
+
+def test_script_runs_without_the_database_from_an_adapter_file(tmp_path, credential_root, monkeypatch, capsys):
+    """设备开发者在自己电脑上：不连 ILCS 库，给一份适配器登记 JSON 就能跑完整清单（含故障项目）。"""
+    import json
+    import sys
+
+    from sim_harness import control_port, line_config, line_sim
+
+    spec = importlib.util.spec_from_file_location("device_acceptance_standalone", ROOT / "scripts" / "device-acceptance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    token = credential_root / "oven-control.token"
+    token.write_text("oven-token")
+    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target(), token="oven-token") as control:
+        registration = {
+            "kind": "real", "driver": "line_command_v1", "protocol": "串口 / TCP 命令", "version": "vendor-1.2",
+            "config": {**line_config(port),
+                       "simulator_control": {"url": f"http://127.0.0.1:{control}", "token_ref": f"file://{token}"}},
+        }
+        path = tmp_path / "oven.json"
+        path.write_text(json.dumps(registration, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", [
+            "device-acceptance.py", "--adapter", str(path), "--params", '{"temp": 120, "vacuum": 1}',
+            "--physical", "--faults", "--timeout", "10", "--json", str(tmp_path / "report.json"),
+        ])
+        assert module.main() == 0
+    output = capsys.readouterr().out
+    assert "设备接入验收报告：STANDALONE" in output and "| 同一指令号重复提交 | 通过 |" in output
+    assert "| 回执丢失 | 通过 |" in output and "| 失联 | 通过 |" in output
+    saved = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert saved["ok"] and saved["simulator"] and saved["driver"] == "line_command_v1"
+
+
+class StubbornDevice:
+    """内存里的假设备：作业提交后一直在跑；`stops` 决定终止能不能让它停下。"""
+
+    def __init__(self, *, stops: bool):
+        self.stops = stops
+        self.jobs: dict[str, str] = {}
+        self.aborts: dict[str, str] = {}
+
+    def submit(self, command):
+        from app.adapters.base import CommandResult
+
+        self.jobs.setdefault(command.command_id, "running")
+        return CommandResult(command.command_id, self.jobs[command.command_id])
+
+    def query(self, command_id):
+        from app.adapters.base import CommandResult
+
+        state = self.jobs.get(command_id)
+        return CommandResult(command_id, state) if state else None
+
+    def abort(self, command):
+        from app.adapters.base import AdapterError, CommandResult
+
+        if command.command_id in self.aborts:  # 同一终止指令号：按重投回放，不去停别的目标
+            return CommandResult(command.command_id, "done")
+        self.aborts[command.command_id] = command.target_command_id
+        if not self.stops:
+            raise AdapterError("设备拒绝终止")
+        self.jobs[command.target_command_id] = "failed"
+        return CommandResult(command.command_id, "done")
+
+
+def _cleanup(device, submitted, **contract):
+    from dataclasses import replace
+
+    from app.adapters.acceptance import Report, _clean_up
+
+    report = Report(station_id="ST-SIM", driver="stub", protocol="stub", contract={}, identity={}, config_digest="",
+                    physical=True, faults=False, started_at="")
+    template = request("")
+    _clean_up(report, device, submitted, {"supports_query": True, "supports_abort": True, **contract},
+              lambda tag, **changes: replace(template, command_id=f"ACC-T-{tag}", **changes),
+              pause=lambda _: None, settle=0.2)
+    return report
+
+
+def test_cleanup_stops_what_acceptance_left_running_or_reports_it():
+    """验收结束时还在动的 ACC- 指令先逐条终止；停不下来的记成残留，报告不通过（调用方据此把工位改回欠动作级）。"""
+    targets = ["ACC-T-hold-target", "ACC-T-abort-target"]
+    device = StubbornDevice(stops=True)
+    for command_id in targets:
+        device.submit(request(command_id))
+    report = _cleanup(device, targets)
+    assert report.ok and report.leftovers == []
+    assert sorted(device.aborts.values()) == sorted(targets), "每个目标各发一条终止：撞号会被设备当重投回放"
+
+    stuck = StubbornDevice(stops=False)
+    stuck.submit(request("ACC-T-run"))
+    report = _cleanup(stuck, ["ACC-T-run"])
+    assert report.leftovers == ["ACC-T-run"] and not report.ok
+    assert [check.key for check in report.checks] == ["cleanup"]
+
+    # 不支持状态查询：终止回执确认了就算停住（契约：终止确认 = 设备已在安全状态）
+    blind = StubbornDevice(stops=True)
+    blind.submit(request("ACC-T-run"))
+    assert _cleanup(blind, ["ACC-T-run"], supports_query=False).leftovers == []
+    # 连驱动实例都建不起来：发过的全算残留
+    assert _cleanup(None, ["ACC-T-lost"]).leftovers == ["ACC-T-lost"]

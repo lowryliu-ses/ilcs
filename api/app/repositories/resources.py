@@ -204,14 +204,17 @@ class AdapterRepository(Repository[Adapter]):
     def health(self) -> list[AdapterHealth]:
         from ..adapters.registry import probe_interval
         from ..core.config import settings
+        from ..domain.adapter_rules import acceptance_reason
 
         rows = []
         for a in self.list():
             interval = probe_interval(a)
+            pending = a.acceptance_required if a.kind == "real" else ""
             rows.append(AdapterHealth(
                 station_id=a.station_id, connected=a.connected, site_interlock=a.site_interlock,
                 last_heartbeat=a.last_heartbeat, enabled=bool(a.enabled),
                 heartbeat_interval_sec=interval + settings.advance_poll_sec if interval else 0,
+                acceptance=acceptance_reason(a.station_id, pending, a.config_version) if pending else "",
             ))
         return rows
 

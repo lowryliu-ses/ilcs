@@ -115,6 +115,24 @@ def require(permission: str):
     return Depends(guard)
 
 
+def require_any(*permissions: str):
+    """有其中任一权限即可（例如设备接入模板：维护工位的人起草，发布的人要能看到内容才能审）。"""
+
+    def guard(request: Request, db: DbSession, ctx: Ctx) -> AccessContext:
+        if not any(ctx.has(permission) for permission in permissions):
+            _deny(
+                db, request, ctx.org_id, ctx.subject_id, ctx.subject_kind, "permission_denied",
+                f"角色 {ctx.role} 无权限 {' / '.join(permissions)}",
+            )
+            raise PermissionDenied(
+                f"当前角色不能{action_name(permissions[0])}（缺少权限 {' 或 '.join(permissions)}）",
+                {"required_permission": list(permissions)},
+            )
+        return ctx
+
+    return Depends(guard)
+
+
 def service_context(
     request: Request,
     db: DbSession,

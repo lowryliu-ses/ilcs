@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
@@ -7,10 +7,9 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CHANNEL_UNIT_LABEL } from '../../shared/types';
-import type {
-  AdapterCatalog, AdapterRow, AdapterTestResult, CapabilityRow, ChannelUnit, StationAsset, StationRow,
-} from '../../shared/types';
+import type { CapabilityRow, ChannelUnit, StationAsset, StationRow } from '../../shared/types';
 import { Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+import { AdapterEditor } from './AdapterEditor';
 
 /* 工位配置：系统里的执行位置能接什么活（能力极限）、同时接几份（通道）、怎么连设备（适配器）。
 
@@ -36,7 +35,7 @@ function ChannelUnitSelect({ value, onChange }: { value: ChannelUnit; onChange: 
 
 const ADAPTER_STATUS: Record<string, [string, string]> = {
   online: ['running', '在线'], degraded: ['paused', '降级'], stale: ['fault', '心跳超时'],
-  offline: ['fault', '失联'], disabled: ['retired', '已停用'],
+  offline: ['fault', '失联'], disabled: ['retired', '已停用'], acceptance: ['paused', '待接入验收'],
 };
 
 const ASSET_STATE: Record<string, string> = { active: '正常', maintenance: '维护中', retired: '已退役' };
@@ -251,7 +250,13 @@ export function StationsPage() {
                     </td>
                     <td className="small">
                       {adapter.protocol}
-                      <div className="tiny muted">v{adapter.version}</div>
+                      <div className="tiny muted">v{adapter.version} · 配置 v{adapter.config_version}</div>
+                      {adapter.template ? (
+                        <div className={`tiny ${adapter.template.outdated ? 'warn-text' : 'muted'}`}>
+                          模板 {adapter.template.code} r{adapter.template.revision}
+                          {adapter.template.outdated ? `（已发布 r${adapter.template.latest_revision}）` : ''}
+                        </div>
+                      ) : null}
                       {adapter.catalog?.described_at ? (
                         <div className="tiny muted">
                           {adapter.catalog.vendor || '—'} · 固件 {adapter.catalog.firmware || '—'} · 程序 {adapter.catalog.methods.length} 个
@@ -260,6 +265,9 @@ export function StationsPage() {
                     </td>
                     <td>
                       <Pill state={pill} label={label} />
+                      {adapter.acceptance?.required ? (
+                        <div className="tiny warn-text" title={adapter.acceptance.reason}>待接入验收（{adapter.acceptance.required_label}）</div>
+                      ) : null}
                       {adapter.site_interlock ? <div className="tiny bad-text">公共保护联锁</div> : null}
                       {!adapter.accepts_commands ? <div className="tiny warn-text">拒绝动作指令</div> : null}
                       {adapter.unsupported_note ? (
@@ -286,8 +294,9 @@ export function StationsPage() {
         </table>
         <div className="panel-body small muted">
           “模拟器”只验证系统流程，不代表对应协议已经接入真实设备。心跳超过 5 s 标记降级，超过 5 min
-          判为心跳超时、挡住用到这台设备的批次。配置里可以测试连接、读取设备方法目录；失联后的重连在「现场监控」该工位卡片上做——
-          重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
+          判为心跳超时、挡住用到这台设备的批次。配置里可以套用<Link to="/device-templates">设备接入模板</Link>、测试连接、读取设备方法目录、
+          跑接入验收；改了配置的真实设备先「待接入验收」，执行器自动跑只读级，通过了才重新接指令。
+          失联后的重连在「现场监控」该工位卡片上做——重连只是重新握手并对账最近检查点，在途批次要不要续跑仍由恢复评估决定。
         </div>
       </Panel>
 
@@ -325,401 +334,8 @@ function AssetCalibration({ asset }: { asset: StationAsset | null }) {
   );
 }
 
-type DriverTemplate =
-  | 'http_json_v1' | 'sila2_v1' | 'modbus_tcp_v1' | 'opcua_v1'
-  | 'opcua_map_v1' | 'modbus_map_v1' | 'line_command_v1' | 'mt_sics_v1' | 'rest_map_v1' | 'sql_table_v1' | 'composite_v1';
-const DRIVER_TEMPLATES: [DriverTemplate, string][] = [
-  ['http_json_v1', 'HTTPS JSON 网关'], ['sila2_v1', 'SiLA 2'], ['opcua_v1', 'OPC UA TaskExecution'],
-  ['modbus_tcp_v1', 'Modbus 任务寄存器'], ['opcua_map_v1', 'OPC UA 节点映射'], ['modbus_map_v1', 'Modbus 点表'],
-  ['line_command_v1', '串口 / TCP 命令'], ['mt_sics_v1', 'MT-SICS 天平'], ['rest_map_v1', 'REST 接口'],
-  ['sql_table_v1', '数据库中间表'], ['composite_v1', '组合工位'],
-];
-const DRIVER_HINT =
-  '已内置：http_json_v1、sila2_v1、opcua_v1、modbus_tcp_v1（设备实现 ILCS 契约）；opcua_map_v1、modbus_map_v1、'
-  + 'line_command_v1、mt_sics_v1、rest_map_v1（按设备自有接口映射，驱动记作业台账）；sql_table_v1（数据库中间表）；'
-  + 'composite_v1（一个工位多台仪器）';
-const PLC_STATES = { 0: 'idle', 1: 'running', 2: 'held', 3: 'done', 4: 'failed' };
-const PULSE = { value: true, pulse_ms: 300 };
-
-/** PLC 点表模板：每个参数一个设定值点、一个实测点，外加状态 / 故障 / 启停 / 就绪 / 联锁 / 心跳；地址是占位，必须按 PLC 点表改 */
-function plcTemplate(kind: 'opcua' | 'modbus', capabilities: string[], paramsOf: (cap: string) => string[]) {
-  const params = [...new Set(capabilities.flatMap(paramsOf))].sort();
-  let register = 10;
-  const point = (name: string, type: string, table = 'holding') => {
-    if (kind === 'opcua') return `ns=3;s="DB_ILCS"."${name}"`;
-    const address = table === 'coil' ? ['CmdStart', 'CmdHold', 'CmdResume', 'CmdAbort', 'CmdAck'].indexOf(name) : register;
-    if (table !== 'coil') register += type === 'float32' ? 2 : 1;
-    return { table, address, type };
-  };
-  const points: Record<string, unknown> = {
-    state: point('State', 'uint16'), error: point('ErrorCode', 'uint16'), heartbeat: point('Heartbeat', 'uint16'),
-    remote: point('RemoteMode', 'uint16'), safety: point('SafetyOk', 'uint16'),
-    cmd_start: point('CmdStart', 'bool', 'coil'), cmd_hold: point('CmdHold', 'bool', 'coil'),
-    cmd_resume: point('CmdResume', 'bool', 'coil'), cmd_abort: point('CmdAbort', 'bool', 'coil'),
-    cmd_ack: point('CmdAck', 'bool', 'coil'),
-  };
-  for (const name of params) {
-    points[`sp_${name}`] = point(`SP_${name}`, 'float32');
-    points[`pv_${name}`] = point(`PV_${name}`, 'float32');
-  }
-  return {
-    points,
-    ready: { point: 'remote', ok: [true, 1] }, interlock: { point: 'safety', ok: [true, 1] },
-    heartbeat: { point: 'heartbeat', stale_sec: 30 },
-    capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
-      write: Object.fromEntries(paramsOf(cap).map((name) => [name, `sp_${name}`])),
-      actuals: Object.fromEntries(paramsOf(cap).map((name) => [name, `pv_${name}`])),
-      start: { point: 'cmd_start', ...PULSE },
-    }])),
-    status: { point: 'state', states: PLC_STATES }, error: { point: 'error', codes: {} },
-    hold: { point: 'cmd_hold', ...PULSE }, resume: { point: 'cmd_resume', ...PULSE },
-    abort: { point: 'cmd_abort', ...PULSE }, acknowledge: { point: 'cmd_ack', ...PULSE },
-  };
-}
-
-/** 串口 / TCP 命令模板：命令与回复格式是占位，必须按设备的命令手册改 */
-function lineTemplate(capabilities: string[], paramsOf: (cap: string) => string[]) {
-  return {
-    transport: { kind: 'serial', port: 'rfc2217://serial-server.lab.internal:4001', baudrate: 9600, parity: 'N' },
-    write_terminator: '\r\n', read_terminator: '\r\n', request_timeout_sec: 3, probe_interval_sec: 10,
-    identity: { send: '*IDN?', pattern: '^(?P<vendor>[^,]*),(?P<model>[^,]*),(?P<device_id>[^,]*),(?P<firmware>.*)$' },
-    error_pattern: '^ERR',
-    capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
-      start: [
-        ...paramsOf(cap).map((name) => ({ send: `SET ${name.toUpperCase()} {${name}}`, expect: '^OK$' })),
-        { send: 'RUN', expect: '^OK$' },
-      ],
-    }])),
-    status: {
-      send: 'STAT?', pattern: '^(?P<state>[A-Z]+)(,(?P<detail>.*))?$',
-      states: { IDLE: 'idle', RUN: 'running', HOLD: 'held', DONE: 'done', ALARM: 'failed' },
-    },
-    actuals: [],
-    hold: [{ send: 'HOLD', expect: '^OK$' }], resume: [{ send: 'CONT', expect: '^OK$' }],
-    abort: [{ send: 'STOP', expect: '^OK$' }], acknowledge: [{ send: 'ACK', expect: '^OK$' }],
-  };
-}
-
-function AdapterEditor({ station, onClose }: { station: StationRow; onClose: () => void }) {
-  const toast = useToast();
-  const { sign } = useSignature();
-  const detail = useQuery<AdapterRow>(
-    `adapter-detail-${station.id}`,
-    () => api.get<AdapterRow>(`/stations/${station.id}/adapter`),
-  );
-  const [draft, setDraft] = useState<AdapterRow | null>(null);
-  const [configText, setConfigText] = useState('');
-  const [error, setError] = useState('');
-  const [testResult, setTestResult] = useState<AdapterTestResult | null>(null);
-
-  useEffect(() => {
-    if (!detail.data) return;
-    setDraft(detail.data);
-    setConfigText(JSON.stringify(detail.data.config ?? {}, null, 2));
-  }, [detail.data]);
-
-  const save = useMutation(
-    (payload: Record<string, unknown>) => api.patch<AdapterRow>(`/stations/${station.id}/adapter`, payload),
-    {
-      invalidates: ['stations', `adapter-detail-${station.id}`, 'gate', 'audit'],
-      onSuccess: () => {
-        toast.push('适配器配置已保存；连接状态已清除，请测试后再重连');
-        onClose();
-      },
-    },
-  );
-  const describe = useMutation(
-    () => api.post<AdapterCatalog & { warning: string }>(`/stations/${station.id}/adapter/describe`),
-    {
-      invalidates: ['stations', `adapter-detail-${station.id}`, 'audit'],
-      onSuccess: (result) =>
-        toast.push(result.warning || `已读取 ${result.methods.length} 个设备端程序（${result.described_from === 'device' ? '设备自报' : '按登记配置'}）`),
-    },
-  );
-  const test = useMutation(
-    () => api.post<AdapterTestResult>(`/stations/${station.id}/adapter/test`),
-    {
-      onSuccess: (result) => {
-        setTestResult(result);
-        toast.push(result.contract.kind === 'simulation' ? '模拟器健康检查通过（不代表真实设备）' : '真实设备健康检查通过');
-      },
-    },
-  );
-
-  const update = <K extends keyof AdapterRow>(key: K, value: AdapterRow[K]) =>
-    setDraft((current) => current ? { ...current, [key]: value } : current);
-
-  // 各内置驱动的配置模板；Modbus 的能力码与参数槽位按本工位的能力限值依次编号，必须与 PLC 程序核对
-  const applyTemplate = (driver: DriverTemplate) => {
-    const capabilities = Object.keys(station.limits ?? {}).sort();
-    const paramsOf = (cap: string) => Object.keys(station.limits?.[cap] ?? {}).sort();
-    const params = [...new Set(capabilities.flatMap(paramsOf))].sort();
-    const templates: Record<DriverTemplate, { protocol: string; config: Record<string, unknown>; credential?: string }> = {
-      http_json_v1: {
-        protocol: 'HTTPS JSON',
-        credential: `file:///run/secrets/ilcs/${station.id}.token`,
-        config: {
-          base_url: 'https://instrument-gateway.lab.internal/api/v1',
-          verify_tls: true,
-          connect_timeout_sec: 3,
-          request_timeout_sec: 10,
-          expected_device_id: station.id,
-          paths: {
-            health: '/health',
-            submit: '/commands',
-            query: '/commands/{command_id}',
-            hold: '/commands/{command_id}/hold',
-            abort: '/commands/{command_id}/abort',
-          },
-          idempotency_header: 'Idempotency-Key',
-        },
-      },
-      sila2_v1: {
-        protocol: 'SiLA 2',
-        config: {
-          host: 'sila-device.lab.internal', port: 50052, ca_file: `/run/secrets/ilcs/sila/${station.id}.crt`,
-          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
-        },
-      },
-      modbus_tcp_v1: {
-        protocol: 'Modbus TCP',
-        config: {
-          host: 'plc.lab.internal', port: 502, unit_id: 1, base_address: 0,
-          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
-          capabilities: Object.fromEntries(capabilities.map((cap, index) => [cap, index + 1])),
-          params: Object.fromEntries(params.slice(0, 16).map((name, index) => [name, index + 1])),
-        },
-      },
-      opcua_v1: {
-        protocol: 'OPC UA',
-        credential: 'file:///run/secrets/ilcs/opcua/ilcs-client.json',
-        config: {
-          endpoint: 'opc.tcp://opcua-device.lab.internal:4840/ilcs/',
-          security_policy: 'Basic256Sha256', security_mode: 'SignAndEncrypt',
-          server_certificate: `/run/secrets/ilcs/opcua/${station.id}.crt`, application_uri: 'urn:ilcs:client',
-          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
-        },
-      },
-      opcua_map_v1: {
-        protocol: 'OPC UA 节点映射',
-        credential: 'file:///run/secrets/ilcs/opcua/ilcs-client.json',
-        config: {
-          endpoint: 'opc.tcp://plc.lab.internal:4840/', security_policy: 'Basic256Sha256', security_mode: 'SignAndEncrypt',
-          server_certificate: `/run/secrets/ilcs/opcua/${station.id}.crt`, application_uri: 'urn:ilcs:client',
-          expected_device_id: station.id, request_timeout_sec: 10, probe_interval_sec: 10,
-          ...plcTemplate('opcua', capabilities, paramsOf),
-        },
-      },
-      modbus_map_v1: {
-        protocol: 'Modbus TCP 点表',
-        config: {
-          host: 'plc.lab.internal', port: 502, unit_id: 1, request_timeout_sec: 3, probe_interval_sec: 10,
-          ...plcTemplate('modbus', capabilities, paramsOf),
-        },
-      },
-      line_command_v1: {
-        protocol: '串口 / TCP 命令',
-        config: { ...lineTemplate(capabilities, paramsOf), expected_device_id: station.id },
-      },
-      mt_sics_v1: {
-        protocol: 'MT-SICS',
-        config: {
-          transport: { kind: 'tcp', host: 'balance.lab.internal', port: 4305 }, request_timeout_sec: 3, probe_interval_sec: 10,
-          expected_device_id: '', device_id_source: 'serial',
-          capabilities: Object.fromEntries((capabilities.length ? capabilities : ['cap.weigh']).map((cap) => [cap, {
-            action: 'weigh', result: paramsOf(cap)[0] ?? 'mass', unit: 'g', stable_timeout_sec: 15,
-          }])),
-        },
-      },
-      rest_map_v1: {
-        protocol: 'REST 接口映射',
-        credential: `file:///run/secrets/ilcs/${station.id}.json`,
-        config: {
-          base_url: 'https://fleet.lab.internal/api/v2.0.0', verify_tls: true, request_timeout_sec: 10, probe_interval_sec: 10,
-          expected_device_id: station.id,
-          identity: {
-            method: 'GET', path: '/status', fields: { device_id: 'robot_name', model: 'model', firmware: 'software_version' },
-            interlock: { field: 'state_text', values: ['EmergencyStop', 'Error'] },
-          },
-          capabilities: Object.fromEntries(capabilities.map((cap) => [cap, {
-            method: 'POST', path: '/mission_queue', handle: 'id',
-            body: cap === 'cap.transfer'
-              ? { mission_id: '{mission}', message: 'ILCS {command_id}', parameters: [{ id: 'From', value: '{from_position}' }, { id: 'To', value: '{to_position}' }] }
-              : { mission_id: '{mission}', message: 'ILCS {command_id}', ...Object.fromEntries(paramsOf(cap).map((name) => [name, `{${name}}`])) },
-            defaults: { mission: '<任务模板编号>' },
-          }])),
-          positions: {},
-          status: {
-            method: 'GET', path: '/mission_queue/{handle}', field: 'state',
-            states: { Pending: 'accepted', Executing: 'running', Paused: 'held', Done: 'done', Aborted: 'failed' },
-          },
-          lookup: { method: 'GET', path: '/mission_queue', detail_path: '/mission_queue/{id}', id_field: 'id', match_field: 'message', match: 'ILCS {command_id}' },
-          abort: { method: 'DELETE', path: '/mission_queue/{handle}' },
-        },
-      },
-      sql_table_v1: {
-        protocol: '数据库中间表',
-        credential: `file:///run/secrets/ilcs/${station.id}.dbpass`,
-        config: {
-          url: 'postgresql+psycopg2://ilcs_exchange@exchange-db.lab.internal:5432/exchange',
-          jobs_table: 'ilcs_jobs', device_table: 'ilcs_device', device_id: station.id,
-          heartbeat_stale_sec: 30, request_timeout_sec: 10, probe_interval_sec: 10,
-        },
-      },
-      composite_v1: {
-        protocol: '组合工位',
-        config: {
-          probe_interval_sec: 10,
-          routes: capabilities.map((cap, index) => ({
-            name: `route${index + 1}`, capabilities: [cap], driver: 'line_command_v1',
-            config: lineTemplate([cap], paramsOf),
-          })),
-        },
-      },
-    };
-    const template = templates[driver];
-    setDraft((current) => current ? {
-      ...current,
-      kind: 'real',
-      driver,
-      protocol: template.protocol,
-      version: '1.0',
-      credential_ref: template.credential ?? '',
-      capabilities: { ...current.capabilities, query: true, dedup: true },
-    } : current);
-    setConfigText(JSON.stringify(template.config, null, 2));
-  };
-
-  const submit = async () => {
-    if (!draft) return;
-    let config: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(configText || '{}');
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('配置必须是 JSON 对象');
-      config = parsed as Record<string, unknown>;
-    } catch (caught) {
-      setError(caught instanceof Error ? `配置 JSON 无效：${caught.message}` : '配置 JSON 无效');
-      return;
-    }
-    if (draft.kind === 'real' && (!draft.driver.trim() || draft.driver === 'simulation')) {
-      setError('真实设备必须填写已在后端注册的驱动键');
-      return;
-    }
-    setError('');
-    const signatureId = await sign('修改设备适配器', station.id, ['设备集成配置变更批准'], draft.row_version);
-    if (!signatureId) return;
-    await save.run({
-      protocol: draft.protocol,
-      driver: draft.kind === 'simulation' ? 'simulation' : draft.driver.trim(),
-      version: draft.version,
-      kind: draft.kind,
-      config,
-      credential_ref: draft.credential_ref.trim(),
-      enabled: draft.enabled,
-      supports_hold: draft.capabilities.hold,
-      supports_abort: draft.capabilities.abort,
-      supports_query: draft.capabilities.query,
-      supports_dedup: draft.capabilities.dedup,
-      note: draft.note,
-      row_version: draft.row_version,
-      signature_id: signatureId,
-    }).catch((caught) => setError(caught.message));
-  };
-
-  if (detail.loading && !draft) {
-    return <Modal title={`适配器配置 · ${station.id}`} onClose={onClose}><div className="muted">正在读取受控配置…</div></Modal>;
-  }
-  if (detail.error || !draft) {
-    return <Modal title={`适配器配置 · ${station.id}`} onClose={onClose}><div className="note bad">{detail.error?.message ?? '适配器不存在'}</div></Modal>;
-  }
-
-  return (
-    <Modal
-      title={`适配器配置 · ${station.id}`}
-      wide
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn" disabled={test.pending} onClick={() => test.run().catch((caught) => setError(caught.message))}>
-            {test.pending ? '测试中…' : '测试当前已保存配置'}
-          </button>
-          <button className="btn" disabled={describe.pending} onClick={() => describe.run().catch((caught) => setError(caught.message))}>
-            {describe.pending ? '读取中…' : '读取设备方法目录'}
-          </button>
-          <button className="btn primary" disabled={save.pending} onClick={submit}>签名并保存</button>
-        </>
-      }
-    >
-      <div className="note warn">
-        保存会递增配置版本并强制离线，避免旧连接继续被当作有效。密钥原文不得写进 JSON，只能填写密钥管理器引用。
-        <div className="row">
-          填入模板：
-          {DRIVER_TEMPLATES.map(([driver, label]) => (
-            <button key={driver} type="button" className="btn small" onClick={() => applyTemplate(driver)}>{label}</button>
-          ))}
-        </div>
-      </div>
-      <div className="grid cols-3">
-        <Field label="模式">
-          <select value={draft.kind} onChange={(event) => update('kind', event.target.value as AdapterRow['kind'])}>
-            <option value="simulation">模拟器</option>
-            <option value="real">真实设备</option>
-          </select>
-        </Field>
-        <Field label="驱动键" hint={DRIVER_HINT}>
-          <input
-            className="mono"
-            value={draft.kind === 'simulation' ? 'simulation' : draft.driver}
-            disabled={draft.kind === 'simulation'}
-            onChange={(event) => update('driver', event.target.value)}
-          />
-        </Field>
-        <Field label="状态">
-          <label className="check">
-            <input type="checkbox" checked={draft.enabled} onChange={(event) => update('enabled', event.target.checked)} />
-            启用适配器
-          </label>
-        </Field>
-      </div>
-      <div className="grid cols-2">
-        <Field label="协议名称">
-          <input value={draft.protocol} placeholder="SiLA 2 / OPC UA / Modbus TCP" onChange={(event) => update('protocol', event.target.value)} />
-        </Field>
-        <Field label="协议/驱动版本">
-          <input value={draft.version} onChange={(event) => update('version', event.target.value)} />
-        </Field>
-      </div>
-      <Field label="连接配置 JSON" hint="用上方模板按驱动填入；字段说明见 docs/设备适配器配置模板.md">
-        <textarea className="mono" rows={8} value={configText} onChange={(event) => setConfigText(event.target.value)} />
-      </Field>
-      <Field label="凭据引用" hint="只接受 vault://、env://、file://；不要填写密码、token 或私钥原文">
-        <input className="mono" value={draft.credential_ref} placeholder="vault://ilcs/devices/ST-01" onChange={(event) => update('credential_ref', event.target.value)} />
-      </Field>
-      <Field label="设备动作能力">
-        <div className="row">
-          {([['hold', '保持'], ['abort', '终止'], ['query', '按指令查询'], ['dedup', '设备端去重']] as const).map(([key, label]) => (
-            <label className="check" key={key}>
-              <input
-                type="checkbox"
-                checked={draft.capabilities[key]}
-                onChange={(event) => update('capabilities', { ...draft.capabilities, [key]: event.target.checked })}
-              />
-              {label}
-            </label>
-          ))}
-        </div>
-      </Field>
-      <Field label="说明">
-        <textarea rows={2} value={draft.note} onChange={(event) => update('note', event.target.value)} />
-      </Field>
-      <div className="small muted">当前配置 v{draft.config_version} · 行版本 v{draft.row_version} · 凭据{draft.credential_configured ? '已配置' : '未配置'}</div>
-      <CatalogNote catalog={detail.data?.catalog} />
-      {testResult ? <div className="note">健康检查结果：<span className="mono">{JSON.stringify(testResult.health)}</span></div> : null}
-      {error || test.error ? <div className="note bad">{error || test.error?.message}</div> : null}
-    </Modal>
-  );
-}
+// 驱动与各自的配置项、起步模板来自后端驱动目录（GET /drivers），不写死在页面里；登记新工位后在「适配器配置」里套用模板或手工配置
+const DRIVER_HINT = '填已登记的驱动键（如 http_json_v1、line_command_v1）；各驱动的配置项说明与起步模板在「适配器配置」里，保存前按驱动检查配置';
 
 /* 结构化极限编辑。一行一个参数，只填上下限两个数；未列出的参数视为该工位不能承接。
    区间是流程校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的流程列出来。 */
@@ -1195,18 +811,3 @@ function stationLabel(status: string): string {
 }
 
 /** 驱动自报的设备身份与方法目录。空目录不据此筛工位；「*」表示接受任意设备端程序。 */
-function CatalogNote({ catalog }: { catalog?: AdapterCatalog }) {
-  if (!catalog?.described_at) {
-    return <div className="small muted">还没读取过设备方法目录；流程引用设备方法时，这台设备按「未报目录」处理，不据程序排除。</div>;
-  }
-  return (
-    <div className="note">
-      <b>设备目录</b>（{catalog.described_from === 'device' ? '设备自报' : catalog.described_from === 'config' ? '按登记配置' : '无目录'} ·{' '}
-      {time(catalog.described_at)}）：厂商 {catalog.vendor || '—'} · 型号 {catalog.reported_model || '—'} · 固件 {catalog.firmware || '—'}
-      <div className="small">
-        程序：{catalog.methods.map((row) => (row.program === '*' ? '任意程序' : `${row.program}${row.name !== row.program ? `（${row.name}）` : ''}`)).join('、') || '无'}
-      </div>
-      <div className="small muted">指令：{catalog.commands.join(' / ') || '—'}</div>
-    </div>
-  );
-}

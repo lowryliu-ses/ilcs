@@ -118,7 +118,13 @@ function StationCard({ station }: { station: FloorStation }) {
           ) : null}
         </div>
       ) : null}
-      {control && adapter?.enabled && adapter.status !== 'online' ? (
+      {control && adapter?.enabled && adapter.status === 'acceptance' ? (
+        <div className="station-alert">
+          <span className="small warn-text" title={adapter.acceptance?.reason}>
+            配置变更后待接入验收（{adapter.acceptance?.required_label}）：在「工位配置 → 适配器配置」查看，通过后自动恢复
+          </span>
+        </div>
+      ) : control && adapter?.enabled && adapter.status !== 'online' ? (
         <div className="station-alert">
           <span className="small bad-text">
             适配器{adapter.status === 'degraded' ? '心跳降级' : adapter.status === 'stale' ? '心跳超时' : '失联'}

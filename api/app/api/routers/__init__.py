@@ -3,7 +3,7 @@ from . import (
     materials, methods,
     metrics,
     people,
-    plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks,
+    plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks, templates,
 )
 
 ROUTERS = [
@@ -23,6 +23,7 @@ ROUTERS = [
     steps.router,
     schedule.router,
     stations.router,
+    templates.router,
     runtime.router,
     materials.router,
     samples.router,
