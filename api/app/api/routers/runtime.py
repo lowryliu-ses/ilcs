@@ -3,9 +3,11 @@
 全部走服务认证：`X-Service-Source` + `X-Service-Secret`。不保留匿名兼容入口——
 回传与设备控制的身份是安全契约，不是可以「以后再加」的功能。
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
-from ...schemas import BatchSignalIn, CommandEventIn, HeartbeatIn, ProposalIn, TelemetryIn
+from ...schemas import (
+    AnalysisRunIn, BatchSignalIn, CommandEventIn, DatasetSnapshotIn, HeartbeatIn, ProposalIn, TelemetryIn,
+)
 from ...services.proposal_service import ProposalService
 from ...services.station_service import StationService
 from ...services.workflow_service import WorkflowService
@@ -64,6 +66,29 @@ def adapter_contracts(db: DbSession, ctx: ServiceCtx):
 def optimizer_proposal(plan_id: str, payload: ProposalIn, db: DbSession, ctx: ServiceCtx):
     """外部优化器提交下一轮提案。服务身份须在 plan_proposals 范围内授权该方案。"""
     return ProposalService(db, ctx).submit(plan_id, payload.model_dump())
+
+
+@router.post("/plans/{plan_id}/datasets", status_code=201)
+def optimizer_snapshot(plan_id: str, payload: DatasetSnapshotIn, db: DbSession, ctx: ServiceCtx):
+    """外部优化器固化训练数据快照（授权同提案：plan_proposals）。"""
+    return ProposalService(db, ctx).create_snapshot(plan_id, payload.model_dump())
+
+
+@router.get("/plans/{plan_id}/datasets/{snapshot_id}/export.csv")
+def optimizer_snapshot_export(plan_id: str, snapshot_id: str, db: DbSession, ctx: ServiceCtx):
+    """外部优化器按快照取训练数据：内容固化，重复读取完全一致。"""
+    service = ProposalService(db, ctx)
+    service.require_service_grant(plan_id)
+    return Response(
+        content=service.snapshot_csv(plan_id, snapshot_id), media_type="text/csv; charset=utf-8",
+        headers={"X-ILCS-Dataset": snapshot_id},
+    )
+
+
+@router.post("/plans/{plan_id}/analysis-runs", status_code=201)
+def optimizer_analysis_run(plan_id: str, payload: AnalysisRunIn, db: DbSession, ctx: ServiceCtx):
+    """外部优化器登记一次分析运行：输入快照、程序与模型版本、参数、随机种子、输出摘要。"""
+    return ProposalService(db, ctx).record_run(plan_id, payload.model_dump())
 
 
 @router.post("/batches/{batch_id}/signals")

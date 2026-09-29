@@ -412,6 +412,8 @@ class BatchService:
                     # 控制指令针对的动作、续跑接续的动作；转运搬的板；一并占用的协同工位
                     "target_command_id": c.target_command_id, "labware_id": c.labware_id,
                     "assist_station_ids": list(c.assist_station_ids or []),
+                    # 前馈参数的求值记录：每个样本的来源、原始值、系数与下发的计算值
+                    "bindings": list(c.bindings or []),
                     "created_at": c.created_at.isoformat(timespec="seconds"),
                 }
                 for c in self.commands.for_batch(batch.id)
@@ -1275,6 +1277,19 @@ class BatchService:
             # 矩阵条件：一条指令带全部孔位的参数，设备按孔位执行；步骤里的固定参数是未覆盖孔位的缺省值
             params["wells"] = wells
         target_station = station_id if station_id is not None else (allocation.station_id if allocation else "")
+        from ..domain.bindings import bindings_of
+
+        bound = None
+        if step and command_type in DISPATCHING and capability is None and bindings_of(step):
+            # 前馈参数：下发时从上游结果求值，与矩阵逐孔参数写进同一个 params.wells
+            from ..models import Station
+            from .binding_service import BindingResolver
+
+            station_row = self.db.get(Station, target_station) if target_station else None
+            limits = ((station_row.limits or {}).get(step.get("cap") or "") if station_row is not None else None)
+            bound = BindingResolver(self.db, self.ctx).resolve(batch, step, self._step_targets(batch, step), limits)
+            if not bound.problems:
+                params = bound.apply(params)
         from ..domain.steps import assist_capabilities
 
         # 协同资源：排程时与主设备同一时段预约的其他工位，随这条动作一起取得、一起释放
@@ -1308,9 +1323,13 @@ class BatchService:
             target_command_id=target_command_id,
             assist_station_ids=assist_ids,
             units=units,
+            bindings=bound.records if bound is not None else [],
         )
         self.db.add(command)
         self.db.flush()
+        if bound is not None and bound.problems:
+            self._refuse_unsent(batch, command, "前馈参数不能下发：" + "；".join(bound.problems[:5]))
+            return command
         if per_sample_station is not None and units > max(1, int(per_sample_station.channels or 1)):
             self._refuse_unsent(
                 batch, command,
@@ -1346,36 +1365,56 @@ class BatchService:
         板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
         只投影在用样本：已拆分的母样、被剔除的样本仍占着孔位（实物还在），但不再是下游处理对象。
         """
-        from ..domain.labware import container_of
         from ..domain.matrix import step_condition
-        from ..domain.steps import labware_role
 
         step_id = step_id_of(step, step_index)
         frozen = ((batch.plan_snapshot or {}).get("condition_params") or {}).get(step_id)
         if not frozen:
             return None
         factors = (batch.plan_snapshot or {}).get("factors") or []
+        targets, physical = self._step_projection(batch, step)
+        if targets is None:
+            return None
+        if physical:
+            projected = {
+                well: values for well, sample in targets.items()
+                if (values := step_condition(factors, step_id, list(sample.levels or [])))
+            }
+            return projected or None
+        return {well: values for well, values in frozen.items() if well in targets}
+
+    def _step_targets(self, batch: Batch, step: dict) -> dict[str, Sample] | None:
+        """这一步的处理对象：设备孔位 → 在用样本。与矩阵逐孔参数同一口径（见 `_step_projection`）。"""
+        return self._step_projection(batch, step)[0]
+
+    def _step_projection(self, batch: Batch, step: dict) -> tuple[dict[str, Sample] | None, bool]:
+        """按这一步用的那块板上此刻在途的样本投影：返回（设备孔位 → 在用样本，是否来自实体占用）。
+
+        板上有这批样本的在途占用就按实体孔位投影；板上有占用却没有一个在用样本、或这一步用另一块板而
+        板上还没有这批样本，这一步没有处理对象（None），不能退回布局孔位把失效样本也带上；
+        没有任何在途占用的老批次按布局孔位。
+        """
+        from ..domain.labware import container_of
+        from ..domain.steps import labware_role
+
         base, role = container_of(batch.id), labware_role(step)
         containers = [f"{base}:{role}"] if role else [base, f"{base}:main"]
         active = self.samples.active_for_batch(batch.id)
         samples = {sample.id: sample for sample in active}
-        projected: dict[str, dict] = {}
+        projected: dict[str, Sample] = {}
         occupied = False
         for slot in self.db.query(SlotOccupancy).filter(
             SlotOccupancy.container_id.in_(containers), SlotOccupancy.released_at.is_(None),
         ).all():
             occupied = True
             sample = samples.get(slot.assignment_id)
-            values = step_condition(factors, step_id, list(sample.levels or [])) if sample is not None else {}
-            if values:
-                projected[slot.labware_well or slot.well] = values
+            if sample is not None:
+                projected[slot.labware_well or slot.well] = sample
         if projected:
-            return projected
+            return projected, True
         if role or occupied:
-            # 板上有占用却没有一个在用样本：这一步没有处理对象，不能退回布局孔位把失效样本也带上
-            return None
-        wells = {sample.well for sample in active}
-        return {well: values for well, values in frozen.items() if well in wells}
+            return None, True
+        return {sample.well: sample for sample in active}, False
 
     def _refuse_unsent(self, batch: Batch, command: Command, reason: str) -> None:
         """指令没离开系统就判为不能投递：记入幂等台账，批次挂起报警。不提交——由调用方的事务决定。"""

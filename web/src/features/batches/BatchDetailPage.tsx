@@ -8,8 +8,8 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import { useSession } from '../../shared/session';
 import type {
-  AssignmentRow, BatchDetail, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, SopGuide, SopSnapshot, StepRow,
-  StepRunRow, TelemetryFeed,
+  AssignmentRow, BatchDetail, BindingRecord, ExceptionEventRow, LabwareRow, Preflight, RecoveryEvaluation, SopGuide,
+  SopSnapshot, StepRow, StepRunRow, TelemetryFeed,
 } from '../../shared/types';
 import { LineChart } from '../../shared/chart';
 import { FlowGraph, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
@@ -443,6 +443,7 @@ export function BatchDetailPage() {
                         <div className="tiny muted">等前置转运 {command.after_command_id.slice(0, 8)} 完成</div>
                       ) : null}
                       {command.error ? <div className="tiny bad-text">{command.error}</div> : null}
+                      {command.bindings?.length ? <BindingSummary records={command.bindings} /> : null}
                     </td>
                     <td className="mono">{command.station_id}</td>
                     <td>
@@ -570,6 +571,7 @@ export function BatchDetailPage() {
           guide={data.steps.find((step) => step.step_id === submitting.step_id)?.sop_guide ?? null}
           sopLabel={data.sop_snapshot?.code ? `${data.sop_snapshot.code} ${data.sop_snapshot.version}` : ''}
           needsMaterialCheck={data.reservations.length > 0}
+          samples={data.samples.filter((sample) => !INACTIVE_SAMPLES.has(sample.state))}
           onClose={() => setSubmitting(null)}
           invalidates={invalidates}
         />
@@ -577,7 +579,7 @@ export function BatchDetailPage() {
       {reviewing ? (
         <StepReviewDialog run={reviewing} onClose={() => setReviewing(null)} invalidates={invalidates} />
       ) : null}
-      {viewing ? <RecordDialog run={viewing} onClose={() => setViewing(null)} /> : null}
+      {viewing ? <RecordDialog run={viewing} samples={data.samples} onClose={() => setViewing(null)} /> : null}
 
       {gateDeciding ? (
         <GateDecisionDialog run={gateDeciding} onClose={() => setGateDeciding(null)} invalidates={invalidates} />
@@ -1042,11 +1044,57 @@ function stepContent(step: StepRow): string {
 }
 
 /** 人工步骤提交。缺必填项、缺样本或物料核对都不推进，服务端会逐项列出缺什么。 */
+/** 前馈参数的下发记录：参数 ← 来源步骤.字段 × 系数，每个样本的原始值与计算值。明细收起，默认只显示一行摘要。 */
+function BindingSummary({ records }: { records: BindingRecord[] }) {
+  const groups = new Map<string, BindingRecord[]>();
+  records.forEach((row) => groups.set(row.param, [...(groups.get(row.param) ?? []), row]));
+  return (
+    <>
+      {[...groups.values()].map((rows) => {
+        const first = rows[0];
+        const coefficient = first.coefficient_source.startsWith('factor:')
+          ? ` × 因子「${first.coefficient_source.slice(7)}」`
+          : first.coefficient
+            ? ` × ${first.coefficient} ${first.coefficient_unit}`
+            : '';
+        return (
+          <details key={first.param} className="tiny">
+            <summary>
+              {first.label} ← {first.source_name}.{first.field}（{first.unit}）{coefficient}
+              ：{first.sample_id ? `${rows.length} 个样本` : `${first.value} ${first.target_unit}`}
+            </summary>
+            {first.sample_id ? (
+              <table>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.sample_id}>
+                      <td className="mono">{row.well}</td>
+                      <td className="mono">{row.raw} {row.unit}</td>
+                      <td className="mono">→ {row.value} {row.target_unit}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : null}
+            <div className="muted">
+              来源{first.source_kind === 'device' ? '检查点' : '人工记录'} {first.source_ref.slice(0, 8)}（第 {first.source_attempt} 次执行）
+            </div>
+          </details>
+        );
+      })}
+    </>
+  );
+}
+
+/** 在用样本以外的状态：已拆分的母样与判为失败的样本不再是处理对象（与服务端 INACTIVE_SAMPLE_STATES 一致） */
+const INACTIVE_SAMPLES = new Set(['split', 'failed']);
+
 function ManualSubmitDialog({
   run,
   guide,
   sopLabel,
   needsMaterialCheck,
+  samples,
   onClose,
   invalidates,
 }: {
@@ -1054,6 +1102,8 @@ function ManualSubmitDialog({
   guide: SopGuide | null;
   sopLabel: string;
   needsMaterialCheck: boolean;
+  /** 本批次在用样本：按样本录入的字段每个样本各填一个值 */
+  samples: AssignmentRow[];
   onClose: () => void;
   invalidates: string[];
 }) {
@@ -1118,8 +1168,38 @@ function ManualSubmitDialog({
         </div>
       ) : null}
       {run.form.map((field) => (
-        <Field key={field.key} label={`${field.label}${field.required === false ? '' : ' *'}`}>
-          {field.type === 'number' ? (
+        <Field
+          key={field.key}
+          label={`${field.label}${field.unit ? `（${field.unit}）` : ''}${field.required === false ? '' : ' *'}`}
+          hint={field.per_sample ? `按样本录入：${samples.length} 个在用样本各填一个值` : undefined}
+        >
+          {field.per_sample ? (
+            <table>
+              <tbody>
+                {samples.map((sample) => {
+                  const current = (values[field.key] as Record<string, number> | undefined) ?? {};
+                  return (
+                    <tr key={sample.id}>
+                      <td className="mono small">{sample.well}</td>
+                      <td className="tiny muted mono">{sample.id}</td>
+                      <td>
+                        <NumberInput
+                          value={current[sample.id] ?? ''}
+                          ariaLabel={`${field.label} ${sample.well}`}
+                          onChange={(value) => {
+                            const next: Record<string, number> = { ...current };
+                            if (value === '') delete next[sample.id];
+                            else next[sample.id] = value;
+                            setValues({ ...values, [field.key]: next });
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : field.type === 'number' ? (
             <NumberInput
               value={(values[field.key] as number | '') ?? ''}
               ariaLabel={field.label}
@@ -1385,8 +1465,14 @@ function StepReviewDialog({
   );
 }
 
-function RecordDialog({ run, onClose }: { run: StepRunRow; onClose: () => void }) {
+function RecordDialog({ run, samples, onClose }: { run: StepRunRow; samples: AssignmentRow[]; onClose: () => void }) {
   const values = run.form_data?.values ?? {};
+  const wells = Object.fromEntries(samples.map((sample) => [sample.id, sample.well]));
+  // 按样本录入的字段存的是「样本编号 → 数值」，按孔位列出来
+  const show = (value: unknown) =>
+    value && typeof value === 'object'
+      ? Object.entries(value as Record<string, unknown>).map(([id, item]) => `${wells[id] ?? id} ${item}`).join(' · ')
+      : String(value ?? '—');
   const checks = run.form_data?.checks ?? {};
   return (
     <Modal title={`记录 · ${run.step_name}（第 ${run.attempt} 次）`} onClose={onClose}>
@@ -1395,7 +1481,7 @@ function RecordDialog({ run, onClose }: { run: StepRunRow; onClose: () => void }
           {run.form.map((field) => (
             <tr key={field.key}>
               <td className="small muted">{field.label}</td>
-              <td className="mono small">{String(values[field.key] ?? '—')}</td>
+              <td className="mono small">{show(values[field.key])}</td>
             </tr>
           ))}
           <tr>

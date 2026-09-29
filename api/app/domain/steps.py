@@ -51,7 +51,7 @@ MAX_LOOPS = 10
 
 # 每类步骤适用哪些字段。不适用的字段即时校验时不提示缺失，服务端也不据此阻塞。
 APPLICABLE: dict[str, set[str]] = {
-    DEVICE: {"cap", "params", "dur", "hard", "resource", "timeout", "skippable"},
+    DEVICE: {"cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable"},
     MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable"},
     WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
@@ -349,6 +349,8 @@ def manual_issues(step: dict[str, Any]) -> list[str]:
             issues.append(f"表单字段 {key} 的类型 {field.get('type')} 不受支持")
         if field.get("type") == "enum" and not (field.get("options") or []):
             issues.append(f"表单字段 {key} 是枚举但没有可选值")
+        if field.get("per_sample") and field.get("type") != "number":
+            issues.append(f"表单字段 {key} 按样本录入时必须是数值字段")
     return issues
 
 
@@ -505,15 +507,47 @@ def case_label(step: dict[str, Any], key: str) -> str:
     return key
 
 
-def missing_form_values(step: dict[str, Any], values: dict[str, Any]) -> list[str]:
-    """人工提交的必填校验。缺项不推进，返回缺了哪些字段。"""
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _per_sample_missing(label: str, value: Any, required: bool, samples: dict[str, str] | None) -> list[str]:
+    """按样本录入的字段：值是「样本编号 → 数值」，每个在用样本各一个。"""
+    if value in (None, "", {}):
+        return [f"{label} 未填写"] if required else []
+    if not isinstance(value, dict):
+        return [f"{label} 要按样本逐个填写"]
+    problems = [f"{label}：样本 {key} 的值必须是数值" for key, item in value.items() if not _number(item)]
+    if samples is not None:
+        unknown = [key for key in value if key not in samples]
+        if unknown:
+            problems.append(f"{label}：{'、'.join(unknown[:5])} 不是本批次在用的样本")
+        if required:
+            absent = [text for sample_id, text in samples.items() if not _number(value.get(sample_id))]
+            if absent:
+                problems.append(f"{label}：{'、'.join(absent[:8])}{' 等' if len(absent) > 8 else ''} 未填写")
+    return problems
+
+
+def missing_form_values(
+    step: dict[str, Any], values: dict[str, Any], samples: dict[str, str] | None = None,
+) -> list[str]:
+    """人工提交的必填校验。缺项不推进，返回缺了哪些字段。
+
+    `samples` 是本批次在用样本（编号 → 显示名）：按样本录入的字段要每个样本都有值。
+    """
     missing: list[str] = []
     for field in (step or {}).get("form") or []:
-        if not isinstance(field, dict) or not field.get("required", True):
+        if not isinstance(field, dict):
             continue
         key = str(field.get("key") or "")
         label = field.get("label") or key
         value = (values or {}).get(key)
+        if field.get("per_sample"):
+            missing.extend(_per_sample_missing(label, value, field.get("required", True) is not False, samples))
+            continue
+        if not field.get("required", True):
+            continue
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(f"{label} 未填写")
             continue

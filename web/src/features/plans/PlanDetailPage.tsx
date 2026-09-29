@@ -6,7 +6,9 @@ import { num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { CommentsPanel } from '../../shared/comments';
-import type { ApprovalLevel, DesignSpace, DiffRow, Factor, LotRow, MetricRow, PlanDetail, ProposalRow } from '../../shared/types';
+import type {
+  AnalysisRunRow, ApprovalLevel, DatasetSnapshotRow, DesignSpace, DiffRow, Factor, LotRow, MetricRow, PlanDetail, ProposalRow,
+} from '../../shared/types';
 import { useSignature } from '../../shared/signature';
 import {
   Blocked, CheckList, ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast,
@@ -627,6 +629,10 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
   const proposals = useQuery<ProposalRow[]>(`plans:${plan.id}:proposals`, () =>
     api.get<ProposalRow[]>(`/plans/${plan.id}/proposals`),
   );
+  const runs = useQuery<AnalysisRunRow[]>(`plans:${plan.id}:analysis-runs`, () =>
+    api.get<AnalysisRunRow[]>(`/plans/${plan.id}/analysis-runs`),
+  );
+  const runById = Object.fromEntries((runs.data ?? []).map((row) => [row.id, row]));
   const space = plan.design_space ?? {};
   const bounds = Object.entries(space.bounds ?? {});
   const editable = plan.state === 'draft' && plan.approval_state !== 'approved' && can('plan.edit');
@@ -637,11 +643,12 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
         aside={
           <button
             className="btn sm"
+            title="只是看一眼此刻的数据；训练请固化快照，结果以后被更正也不影响按快照导出的内容"
             onClick={() =>
               api.download(`/plans/${plan.id}/dataset.csv`, `${plan.id}-dataset.csv`).catch((e) => toast.push(e.message))
             }
           >
-            导出训练数据
+            预览当前数据
           </button>
         }
       >
@@ -681,10 +688,12 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
           <div className="tiny muted">设计空间随方案审批冻结；已批准的方案才能接收提案</div>
         )}
         <div className="tiny muted" style={{ marginTop: 6 }}>
-          外部优化器用服务身份调用 POST /api/runtime/plans/{plan.id}/proposals（需 plan_proposals 授权）。
+          外部优化器用服务身份先固化数据集快照（POST /api/runtime/plans/{plan.id}/datasets）、登记分析运行
+          （…/analysis-runs），再提交提案（…/proposals，带 analysis_run_id），均需 plan_proposals 授权。
           训练数据只含复核通过、质量有效的当前结果版本。
         </div>
       </Panel>
+      <DatasetPanel plan={plan} />
       <Panel title={`收到的提案（${proposals.data?.length ?? 0}）`} flush>
         {proposals.data?.length ? (
           <table>
@@ -696,6 +705,17 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
                     <div className="tiny muted">
                       {row.source || '—'} · {row.model_version || '—'} · {row.points.length} 点
                     </div>
+                    {row.analysis_run_id ? (
+                      <div className="tiny">
+                        分析运行 {runById[row.analysis_run_id]?.run_id ?? row.analysis_run_id.slice(0, 8)}
+                        {runById[row.analysis_run_id]
+                          ? `（${runById[row.analysis_run_id].program || '—'} ${runById[row.analysis_run_id].program_version}，`
+                            + `随机种子 ${runById[row.analysis_run_id].seed || '—'}，快照 ${runById[row.analysis_run_id].snapshot_id.slice(0, 8)}）`
+                          : ''}
+                      </div>
+                    ) : (
+                      <div className="tiny muted">未登记分析运行：说不清用了哪份数据</div>
+                    )}
                     {row.issues.length ? <div className="tiny bad-text">{row.issues.slice(0, 3).join('；')}</div> : null}
                   </td>
                   <td>
@@ -716,6 +736,82 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
         <DesignSpaceDialog plan={plan} invalidates={invalidates} onClose={() => setEditingSpace(false)} />
       ) : null}
     </div>
+  );
+}
+
+/* 训练数据快照：固化纳入的结果版本清单、排除清单、数据行与原始文件摘要。之后结果被更正、退回或改判，
+   按快照导出的内容都不变；列表里如实标出每份快照有几条后来变了。 */
+function DatasetPanel({ plan }: { plan: PlanDetail }) {
+  const { can } = useSession();
+  const toast = useToast();
+  const [note, setNote] = useState('');
+  const snapshots = useQuery<DatasetSnapshotRow[]>(`plans:${plan.id}:datasets`, () =>
+    api.get<DatasetSnapshotRow[]>(`/plans/${plan.id}/datasets`),
+  );
+  const create = useMutation(
+    () => api.post<DatasetSnapshotRow>(`/plans/${plan.id}/datasets`, { note }),
+    {
+      invalidates: [`plans:${plan.id}:datasets`, 'audit'],
+      onSuccess: (row) => {
+        setNote('');
+        toast.push(`已固化快照：${row.row_count} 条正式结果、${row.excluded_count} 条排除`);
+      },
+    },
+  );
+  return (
+    <Panel
+      title={`训练数据快照（${snapshots.data?.length ?? 0}）`}
+      aside={
+        can('plan.edit') ? (
+          <button className="btn sm primary" disabled={create.pending} onClick={() => create.run().catch((e) => toast.push(e.message))}>
+            固化当前数据
+          </button>
+        ) : null
+      }
+      flush
+    >
+      {can('plan.edit') ? (
+        <div style={{ padding: '6px 12px' }}>
+          <input value={note} placeholder="备注（可选），如：第 2 轮 BO 训练" onChange={(event) => setNote(event.target.value)} />
+        </div>
+      ) : null}
+      {snapshots.data?.length ? (
+        <table>
+          <tbody>
+            {snapshots.data.map((row) => (
+              <tr key={row.id}>
+                <td>
+                  <span className="mono small">{row.id.slice(0, 8)}</span>
+                  <span className="tiny muted"> · 摘要 {row.digest.slice(0, 12)}</span>
+                  <div className="tiny muted">
+                    {row.created_at.replace('T', ' ')} · {row.row_count} 条正式结果 · {row.excluded_count} 条排除
+                    {row.file_count ? ` · ${row.file_count} 个原始文件` : ''}
+                    {row.note ? ` · ${row.note}` : ''}
+                  </div>
+                  {row.changed_count ? (
+                    <div className="tiny warn-text">其中 {row.changed_count} 条结果后来被更正、退回或改判；快照内容不变</div>
+                  ) : null}
+                </td>
+                <td className="row-end">
+                  <button
+                    className="btn sm"
+                    onClick={() =>
+                      api
+                        .download(`/plans/${plan.id}/datasets/${row.id}/export.csv`, `${plan.id}-dataset-${row.id.slice(0, 8)}.csv`)
+                        .catch((e) => toast.push(e.message))
+                    }
+                  >
+                    导出
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <Empty>还没有快照：训练前先固化一份，提案才能追到用了哪批数据</Empty>
+      )}
+    </Panel>
   );
 }
 
@@ -987,12 +1083,18 @@ function FactorEditor({
                 >
                   <option value="">不作用于设备（仅区分样本）</option>
                   {(plan.target_options ?? []).map((option) =>
-                    option.params.map((param) => (
-                      <option key={`${option.step_id}|${param.name}`} value={`${option.step_id}|${param.name}`}>
-                        {option.step_name} · {param.name}
-                        {param.unit ? `（${param.unit}）` : ''}
-                      </option>
-                    )),
+                    option.params.map((param) => {
+                      // 说明文字与登记单位分开给；说明里已写了单位就不重复
+                      const label = param.label && param.label !== param.name ? param.label : '';
+                      const unit = param.unit && !label.includes(param.unit) ? param.unit : '';
+                      const note = [label, unit].filter(Boolean).join('，');
+                      return (
+                        <option key={`${option.step_id}|${param.name}`} value={`${option.step_id}|${param.name}`}>
+                          {option.step_name} · {param.name}
+                          {note ? `（${note}）` : ''}
+                        </option>
+                      );
+                    }),
                   )}
                 </select>
               </Field>

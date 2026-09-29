@@ -7,7 +7,8 @@
    判据按步骤类型分支：设备步骤看能力与参数，人工步骤看记录表单，
    等待步骤看等待方式，审核步骤看审核角色。不适用的字段不提示缺失——
    否则一个纯人工流程会被「没有可承接工位」挡住。 */
-import type { BomItem, BranchCase, CapabilityRow, Check, RecipeStep, StationRow } from '../../shared/types';
+import type { BomItem, BranchCase, CapabilityRow, Check, ParamBinding, RecipeStep, StationRow } from '../../shared/types';
+import { canonicalUnit, convertible, splitRatio } from '../../shared/units';
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
 
@@ -117,12 +118,139 @@ export function stationsForStep(stations: StationRow[] | undefined, step: Recipe
     const implemented = station.limits?.[step.cap];
     if (!implemented) return false;
     if (methodBlocksStation(station, step).length) return false;
-    return Object.entries(step.params ?? {}).every(([key, value]) => {
+    const fixed = Object.entries(step.params ?? {}).every(([key, value]) => {
       const window = implemented[key];
       if (!window) return false;
       return typeof value === 'number' && value >= window[0] && value <= window[1];
     });
+    // 取自上游结果的参数排程时还没有值：工位极限要覆盖整个预期范围（与服务端 bindings.window_holds 同一判据）
+    return fixed && Object.entries(step.bindings ?? {}).every(([key, binding]) => {
+      const window = implemented[key];
+      const expect = expectOf(binding);
+      return Boolean(window && expect && expect[0] >= window[0] && expect[1] <= window[1]);
+    });
   });
+}
+
+/* ---------- 参数规格与前馈（对应后端 domain/params.py 与 domain/bindings.py） ---------- */
+
+/** 参数规格：没登记的按「数值、单位未登记、必填」——有规格之前的行为。 */
+export function specOf(capability: CapabilityRow | undefined, key: string) {
+  const raw = capability?.param_specs?.[key] ?? {};
+  return {
+    label: capability?.params?.[key] || key,
+    type: raw.type === 'integer' ? 'integer' : 'number',
+    unit: canonicalUnit(raw.unit),
+    required: raw.required !== false,
+  };
+}
+
+
+export function expectOf(binding: ParamBinding | undefined): [number, number] | null {
+  const window = binding?.expect;
+  if (!Array.isArray(window) || window.length !== 2) return null;
+  const [low, high] = window;
+  if (typeof low !== 'number' || typeof high !== 'number' || low > high) return null;
+  return [low, high];
+}
+
+/** 前馈可选的来源：依赖图模式按祖先；顺序流程就是它前面的各步。 */
+export function upstreamOf(steps: RecipeStep[], index: number): Set<number> {
+  if (graphMode(steps)) return ancestors(steps, index);
+  return new Set(Array.from({ length: index }, (_, i) => i));
+}
+
+function ratioUnitIssues(label: string, unit: string | undefined, sourceUnit: string, targetUnit: string): string[] {
+  const ratio = splitRatio(unit);
+  if (!ratio) return [`${label} 的系数单位要写成「目标单位/来源单位」，如 ${targetUnit || 'μL'}/${sourceUnit || 'mg'}`];
+  const [numerator, denominator] = ratio;
+  const issues: string[] = [];
+  if (targetUnit && !convertible(numerator, targetUnit)) issues.push(`${label} 的系数单位 ${unit} 换算不到参数单位 ${targetUnit}`);
+  if (sourceUnit && !convertible(sourceUnit, denominator)) issues.push(`${label} 的系数单位 ${unit} 与来源单位 ${sourceUnit} 对不上`);
+  return issues;
+}
+
+/** 前馈配置是否完整、能否核对。与服务端 bindings.binding_issues 一一对应。 */
+export function bindingIssues(step: RecipeStep, steps: RecipeStep[], index: number, capabilities: CapabilityIndex): string[] {
+  const bindings = step.bindings;
+  if (!bindings || !Object.keys(bindings).length) return [];
+  if (kindOf(step) !== 'device') return ['只有设备步骤可以声明前馈参数'];
+  const capability = capabilities[step.cap];
+  const ids = steps.map(stepIdOf);
+  const allowed = upstreamOf(steps, index);
+  const methodRules = step.method?.params ?? {};
+  const issues: string[] = [];
+  Object.entries(bindings).forEach(([param, binding]) => {
+    if (!capability || !(param in (capability.params ?? {}))) {
+      issues.push(`前馈参数 ${param} 不是能力「${capability?.name ?? step.cap}」的参数`);
+      return;
+    }
+    const spec = specOf(capability, param);
+    const label = spec.label;
+    if (param in (step.params ?? {})) issues.push(`${label} 已声明取自上游结果，不能再写固定值`);
+    if (!spec.unit) issues.push(`${label} 没有登记单位：前馈要做单位换算，先在能力字典里给它登记单位`);
+    const field = (binding.field ?? '').trim();
+    const scope = binding.scope ?? 'batch';
+    if (!field) issues.push(`${label} 必须指定来源字段`);
+    const position = ids.indexOf(binding.source_step_id ?? '');
+    if (position < 0) {
+      issues.push(`${label} 的前馈来源步骤 ${binding.source_step_id || '未选择'} 不在流程里`);
+    } else {
+      const origin = steps[position];
+      const name = origin.name || binding.source_step_id;
+      const kind = kindOf(origin);
+      if (!allowed.has(position)) issues.push(`${label} 的前馈来源「${name}」必须是本步的上游步骤`);
+      if (kind !== 'device' && kind !== 'manual') {
+        issues.push(`${label} 的前馈来源「${name}」只能是设备步骤（回执测量值）或人工步骤（记录字段）`);
+      } else if (kind === 'manual' && field) {
+        const entry = (origin.form ?? []).find((row) => row.key === field);
+        if (!entry) issues.push(`${label} 的前馈字段 ${field} 不在来源人工步骤「${name}」的记录表单里`);
+        else {
+          if ((entry.type ?? 'text') !== 'number') issues.push(`${label} 的前馈字段 ${field} 必须是数值字段`);
+          if (scope === 'sample' && !entry.per_sample) issues.push(`逐样本前馈要求来源字段 ${field} 按样本录入`);
+          if (scope === 'batch' && entry.per_sample) issues.push(`来源字段 ${field} 是按样本录入的，前馈范围应选逐样本`);
+        }
+      } else if (kind === 'device' && field) {
+        const rules = origin.method?.outputs ?? [];
+        const rule = rules.find((row) => row.key === field);
+        if (rules.length && !rule) {
+          issues.push(`${label} 的前馈字段 ${field} 不在来源设备方法的输出规则里（可用：${rules.map((row) => row.key).join('、')}）`);
+        }
+        const declared = canonicalUnit(rule?.unit);
+        const written = canonicalUnit(binding.unit);
+        if (declared && written && declared !== written) {
+          issues.push(`${label} 的来源单位 ${written} 与输出规则登记的单位 ${declared} 不同：回报值按 ${declared} 读`);
+        }
+      }
+    }
+    const sourceUnit = canonicalUnit(binding.unit);
+    if (!sourceUnit) issues.push(`${label} 必须写明来源值的单位`);
+    // 与服务端 _coefficient_issues 同一顺序：没写系数 → 纯单位换算；写了就要么是因子、要么是大于 0 的固定值
+    const coefficient = binding.coefficient;
+    if (!coefficient || !Object.keys(coefficient).length) {
+      if (sourceUnit && spec.unit && !convertible(sourceUnit, spec.unit)) {
+        issues.push(`${label}：来源单位 ${sourceUnit} 不能直接换算成 ${spec.unit}，请填写系数（单位写成 ${spec.unit}/${sourceUnit}）`);
+      }
+    } else {
+      const factor = (coefficient.factor ?? '').trim();
+      const hasValue = coefficient.value !== undefined && coefficient.value !== null && coefficient.value !== '';
+      if (factor && hasValue) issues.push(`${label} 的系数只能二选一：写在流程里的固定值，或引用方案因子`);
+      else if ('factor' in coefficient && !hasValue) {
+        if (!factor) issues.push(`${label} 引用方案因子作系数时必须写明因子名`);
+      } else if (typeof coefficient.value !== 'number' || !(coefficient.value > 0)) {
+        issues.push(`${label} 的系数必须是大于 0 的数值`);
+      } else issues.push(...ratioUnitIssues(label, coefficient.unit, sourceUnit, spec.unit));
+    }
+    const expect = expectOf(binding);
+    if (!expect) issues.push(`${label} 必须填写预期范围（下限 ≤ 上限）：排程按它匹配工位极限`);
+    else {
+      const rule = methodRules[param];
+      if (rule && ((rule.min != null && expect[0] < rule.min) || (rule.max != null && expect[1] > rule.max))) {
+        issues.push(`${label} 的预期范围 [${expect[0]}, ${expect[1]}] 超出设备方法允许的 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]`);
+      }
+    }
+  });
+  return issues;
 }
 
 function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[] {
@@ -132,9 +260,16 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
   if (!capability) issues.push(`能力 ${step.cap || '未选择'} 未登记`);
   else if (capability.retired) issues.push(`能力「${capability.name}」已停用，不能用于新步骤`);
 
-  Object.entries(defined).forEach(([key, paramLabel]) => {
+  const bound = new Set(Object.keys(step.bindings ?? {}));
+  Object.keys(defined).forEach((key) => {
+    if (bound.has(key)) return; // 取自上游结果，由 bindingIssues 核对
+    const spec = specOf(capability, key);
     const value = step.params?.[key];
-    if (typeof value !== 'number' || !Number.isFinite(value)) issues.push(`${paramLabel || key} 未填写`);
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      if (spec.required) issues.push(`${spec.label} 未填写`);
+      return;
+    }
+    if (spec.type === 'integer' && !Number.isInteger(value)) issues.push(`${spec.label} 必须是整数`);
   });
   if (capability) {
     Object.keys(step.params ?? {}).forEach((key) => {
@@ -167,6 +302,7 @@ function manualIssues(step: RecipeStep): string[] {
     if (field.type === 'enum' && !(field.options ?? []).length) {
       issues.push(`表单字段 ${key} 是枚举但没有可选值`);
     }
+    if (field.per_sample && field.type !== 'number') issues.push(`表单字段 ${key} 按样本录入时必须是数值字段`);
   });
   return issues;
 }
@@ -593,6 +729,7 @@ export function stepIssues(
   issues.push(...skippableIssues(step));
   issues.push(...environmentIssues(step));
   issues.push(...graphIssues(steps, index));
+  issues.push(...bindingIssues(step, steps, index, capabilities));
   if (kind === 'gate' && graphMode(steps)) {
     const target = steps.map(stepIdOf).indexOf(step.gate?.rework_to ?? '');
     if (target >= 0 && !ancestors(steps, index).has(target)) issues.push('返工目标必须是本关卡的上游步骤（依赖链上的前驱）');

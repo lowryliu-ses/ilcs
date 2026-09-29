@@ -8,6 +8,7 @@ from ..core.errors import DomainError, NotFound, PermissionDenied, StateConflict
 from ..domain.access import service_may_use_station
 from ..domain.gate import adapter_status
 from ..domain.lifecycle import capability_delete_blockers, station_retire_blockers
+from ..domain.params import clean_specs, spec_issues
 from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
 from ..models import Adapter, Capability, Station, User
@@ -180,6 +181,7 @@ class StationService:
                     "id": capability.id,
                     "name": capability.name,
                     "params": capability.params,
+                    "param_specs": capability.param_specs or {},
                     "recovery": capability.recovery,
                     "stations": implemented,
                     "retired": capability.retired,
@@ -273,12 +275,18 @@ class StationService:
 
     def register_capability(
         self, capability_id: str, name: str, params: dict, recovery: dict, stations: list[str],
-        signature_id: str, user: User,
+        signature_id: str, user: User, param_specs: dict | None = None,
     ) -> dict:
         if self.capabilities.get(capability_id):
             raise DomainError(f"标识 {capability_id} 已存在")
+        problems = spec_issues(params, param_specs or {})
+        if problems:
+            raise ValidationFailed("参数规格不正确", {"issues": problems})
         signature = self.identity.consume_signature(signature_id, user, "登记新能力")
-        self.capabilities.add(Capability(id=capability_id, name=name, params=params, recovery=recovery))
+        self.capabilities.add(Capability(
+            id=capability_id, name=name, params=params, recovery=recovery,
+            param_specs=clean_specs(params, param_specs),
+        ))
         for station_id in stations:
             station = self.stations.get(station_id)
             if not station:
@@ -678,12 +686,24 @@ class StationService:
         capability = self.capabilities.get(capability_id)
         if not capability:
             raise NotFound("能力不存在")
+        params_after = changes["params"] if "params" in changes else (capability.params or {})
+        specs_after = changes["param_specs"] if "param_specs" in changes else (capability.param_specs or {})
+        problems = spec_issues(params_after, specs_after) if "param_specs" in changes else []
+        if problems:
+            raise ValidationFailed("参数规格不正确", {"issues": problems})
         signature = self.identity.consume_signature(signature_id, user, "修改能力定义")
         before_params = set(capability.params or {})
+        before_specs = dict(capability.param_specs or {})
         for key in ("name", "params", "recovery"):
             if key in changes:
                 setattr(capability, key, changes[key])
+        # 删掉的参数连同规格一起删；规格只在这里收成规范写法（单位别名、缺省值不存）
+        capability.param_specs = clean_specs(capability.params or {}, specs_after)
         removed = before_params - set(capability.params or {})
+        spec_changed = sorted(
+            key for key in set(before_specs) | set(capability.param_specs)
+            if before_specs.get(key) != capability.param_specs.get(key)
+        )
         if removed:
             # 工位极限里残留已删参数会让匹配永远不通过，顺手清掉
             for station in self.stations.list():
@@ -699,6 +719,7 @@ class StationService:
             signature_id=signature.id,
             detail=f"{'、'.join(changes)} 已更新"
                    + (f"；移除参数 {'、'.join(removed)}" if removed else "")
+                   + (f"；参数规格变更 {'、'.join(spec_changed)}" if spec_changed else "")
                    + (f"；重校验后 {len(broken)} 个流程不再通过" if broken else ""),
         )
         self.db.commit()

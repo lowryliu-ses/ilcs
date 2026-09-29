@@ -56,6 +56,20 @@ CAPABILITIES = [
         "sideEffect": "需先确认托盘实际位置与极片盒编号", "verify": ["托盘当前位置"]}),
 ]
 
+# 能力参数的类型与单位（演示数据按显示名称里写的单位登记；正式环境由负责人在能力字典里逐项登记）
+PARAM_SPECS = {
+    "cap.dose_solid": {"mass": {"unit": "g"}},
+    "cap.dose_liquid": {"volume": {"unit": "mL"}, "rate": {"unit": "mL/min"}},
+    "cap.mix": {"temp": {"unit": "℃"}, "rpm": {"unit": "rpm"}},
+    "cap.degas": {"vacuum": {"unit": "mbar"}},
+    "cap.coat": {"thickness": {"unit": "μm"}, "temp": {"unit": "℃"}},
+    "cap.calender": {"gap": {"unit": "μm"}, "diameter": {"unit": "mm"}},
+    "cap.vacuum_dry": {"temp": {"unit": "℃"}, "vacuum": {"unit": "mbar"}},
+    "cap.weigh": {"mass": {"unit": "g"}},
+    "cap.assemble": {"electrolyte": {"unit": "μL"}},
+    "cap.test": {"rate": {"unit": "C"}, "vmax": {"unit": "V"}},
+}
+
 ISLANDS = [
     (1, "岛 #1 高通量浆料制备"), (2, "岛 #2 中试匀浆"), (3, "岛 #3 涂布烘干"),
     (4, "岛 #4 极片后处理"), (5, "岛 #5 扣电组装"), (6, "岛 #6 电性能测试"),

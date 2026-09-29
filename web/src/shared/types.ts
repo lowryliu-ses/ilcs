@@ -343,6 +343,8 @@ export type CommandRow = {
   target_command_id?: string;
   /** 转运搬的是哪块板 */
   labware_id?: string;
+  /** 前馈参数的求值记录 */
+  bindings?: BindingRecord[];
   /** 这条动作一并占用的协同工位 */
   assist_station_ids?: string[];
 };
@@ -383,7 +385,7 @@ export type FactorTargetOption = {
   step_id: string;
   step_name: string;
   capability: string;
-  params: { name: string; unit: string }[];
+  params: { name: string; label?: string; unit: string }[];
 };
 
 export type RecipeSummary = {
@@ -540,6 +542,8 @@ export type RecipeStep = {
   subflow?: { recipe_id?: string };
   /** 设备步骤引用的设备方法（流程管做什么，方法管怎么做） */
   method?: StepMethodRef;
+  /** 取自上游结果的参数（前馈）：参数键 → 来源、单位、系数与预期范围。与固定参数二选一 */
+  bindings?: Record<string, ParamBinding>;
   /** 消息通知节点：发一条 flow.notify 对外事件 */
   notify?: { message?: string; channel?: string };
   timeout?: StepTimeout;
@@ -791,6 +795,8 @@ export type StepMethodRef = {
   program?: string;
   instrument_models?: string[];
   params?: Record<string, MethodParamRule>;
+  /** 数据输出规则（快照里冻结）：前馈以设备步骤为来源时，字段与单位按它核对 */
+  outputs?: MethodOutputRule[];
 };
 
 export type AdapterTestResult = {
@@ -810,10 +816,14 @@ export type AdapterTestResult = {
   health: Record<string, unknown>;
 };
 
+/** 能力参数的规格：数值 / 整数、单位、是否必填。没登记的按「数值、单位未登记、必填」解释 */
+export type ParamSpec = { type?: 'number' | 'integer'; unit?: string; required?: boolean };
+
 export type CapabilityRow = {
   id: string;
   name: string;
   params: Record<string, string>;
+  param_specs?: Record<string, ParamSpec>;
   recovery: Recovery;
   stations: string[];
   retired: boolean;
@@ -1568,6 +1578,43 @@ export type FormField = {
   required?: boolean;
   options?: (string | number)[];
   unit?: string;
+  /** 按样本录入：每个在用样本各填一个数值（样本编号 → 数值），可作逐样本前馈的来源 */
+  per_sample?: boolean;
+};
+
+/** 前馈参数：设定值 = 上游结果 × 系数（换算到参数单位），落在预期范围内才下发 */
+export type ParamBinding = {
+  source_step_id: string;
+  field: string;
+  scope: 'batch' | 'sample';
+  /** 来源值的单位 */
+  unit: string;
+  /** 写在流程里的固定系数（随流程审批冻结），或引用方案因子（按样本的水平取值）；不写就是纯单位换算 */
+  coefficient?: { value?: number | ''; unit?: string; factor?: string } | null;
+  /** 计算结果的预期范围（参数单位）：排程按它匹配工位极限，下发时超出同样不下发 */
+  expect: [number | '', number | ''];
+};
+
+/** 指令上的前馈求值记录：每个样本一条 */
+export type BindingRecord = {
+  param: string;
+  label: string;
+  scope: 'batch' | 'sample';
+  sample_id: string;
+  well: string;
+  source_step_id: string;
+  source_name: string;
+  source_kind: 'device' | 'manual';
+  source_ref: string;
+  source_attempt: number;
+  field: string;
+  raw: string;
+  unit: string;
+  coefficient: string;
+  coefficient_unit: string;
+  coefficient_source: string;
+  value: string;
+  target_unit: string;
 };
 
 export type StepRunRow = {
@@ -2137,6 +2184,40 @@ export type ProposalRow = {
   state: 'accepted' | 'rejected';
   issues: string[];
   created_plan_id: string;
+  /** 由哪次分析运行生成（运行记着输入快照、程序与模型版本、参数与随机种子） */
+  analysis_run_id?: string;
+  created_at: string;
+};
+
+/** 训练数据快照：固化纳入的结果版本、排除清单与数据行，之后按快照导出不变 */
+export type DatasetSnapshotRow = {
+  id: string;
+  plan_id: string;
+  root_plan_id: string;
+  key: string;
+  digest: string;
+  row_count: number;
+  excluded_count: number;
+  file_count: number;
+  note: string;
+  created_by: string;
+  created_at: string;
+  /** 快照里后来被更正、退回或改判的结果数 */
+  changed_count?: number;
+};
+
+export type AnalysisRunRow = {
+  id: string;
+  plan_id: string;
+  run_id: string;
+  snapshot_id: string;
+  program: string;
+  program_version: string;
+  model_version: string;
+  params: Record<string, unknown>;
+  seed: string;
+  outputs: Record<string, unknown>;
+  created_by: string;
   created_at: string;
 };
 

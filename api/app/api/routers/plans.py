@@ -3,7 +3,10 @@ from fastapi import APIRouter
 from fastapi.responses import Response
 
 from ...core.errors import ValidationFailed
-from ...schemas import CancelIn, DecisionIn, PlanCreateIn, PlanPatchIn, PlanRestoreIn, PlanSubmitIn, PlanTemplateIn, ProposalIn
+from ...schemas import (
+    AnalysisRunIn, CancelIn, DatasetSnapshotIn, DecisionIn, PlanCreateIn, PlanPatchIn, PlanRestoreIn, PlanSubmitIn,
+    PlanTemplateIn, ProposalIn,
+)
 from ...services.plan_service import PlanService
 from ...services.proposal_service import ProposalService
 from ..deps import Ctx, CurrentUser, DbSession, Paging, require
@@ -141,9 +144,62 @@ def submit_proposal(
 
 @router.get("/{plan_id}/dataset.csv")
 def export_dataset(plan_id: str, db: DbSession, ctx: Ctx):
-    """整个实验活动（各轮方案）的训练数据：只含复核通过、质量有效的当前结果版本。"""
+    """整个实验活动（各轮方案）此刻的正式数据：只含复核通过、质量有效的当前结果版本。
+
+    不可复现：结果以后被更正，这里导出的就变了。训练用 `POST /plans/{id}/datasets` 固化快照、按快照导出。
+    """
     content = ProposalService(db, ctx).dataset_csv(plan_id)
     return Response(
         content="\ufeff" + content, media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{plan_id}-dataset.csv"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{plan_id}-dataset.csv"',
+            "X-ILCS-Dataset": "live",
+        },
     )
+
+
+@router.get("/{plan_id}/datasets")
+def list_snapshots(plan_id: str, db: DbSession, ctx: Ctx):
+    """实验活动的训练数据快照，含每份快照里后来被更正、退回或改判的结果数。"""
+    return ProposalService(db, ctx).snapshots(plan_id)
+
+
+@router.post("/{plan_id}/datasets", status_code=201)
+def create_snapshot(
+    plan_id: str, payload: DatasetSnapshotIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit"),
+):
+    """固化一份训练数据快照：纳入的结果版本清单、排除清单、数据行与原始文件摘要。之后按快照导出不变。"""
+    return ProposalService(db, ctx).create_snapshot(plan_id, payload.model_dump(), user)
+
+
+@router.get("/{plan_id}/datasets/{snapshot_id}")
+def snapshot_detail(plan_id: str, snapshot_id: str, db: DbSession, ctx: Ctx):
+    """快照详情：排除清单、原始文件摘要，以及快照里后来变了的结果。"""
+    return ProposalService(db, ctx).snapshot(plan_id, snapshot_id)
+
+
+@router.get("/{plan_id}/datasets/{snapshot_id}/export.csv")
+def export_snapshot(plan_id: str, snapshot_id: str, db: DbSession, ctx: Ctx):
+    """按快照导出：读快照里固化的数据行，结果后来怎么变都不影响。"""
+    content = ProposalService(db, ctx).snapshot_csv(plan_id, snapshot_id)
+    return Response(
+        content="\ufeff" + content, media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{plan_id}-dataset-{snapshot_id[:8]}.csv"',
+            "X-ILCS-Dataset": snapshot_id,
+        },
+    )
+
+
+@router.get("/{plan_id}/analysis-runs")
+def list_analysis_runs(plan_id: str, db: DbSession, ctx: Ctx):
+    """实验活动登记过的分析运行：输入快照、程序与模型版本、参数、随机种子。"""
+    return ProposalService(db, ctx).runs(plan_id)
+
+
+@router.post("/{plan_id}/analysis-runs", status_code=201)
+def record_analysis_run(
+    plan_id: str, payload: AnalysisRunIn, db: DbSession, user: CurrentUser, ctx=require("plan.edit"),
+):
+    """研究员登记一次分析运行（输入必须是本实验活动的快照）。同一运行编号重发回放。"""
+    return ProposalService(db, ctx).record_run(plan_id, payload.model_dump(), user)

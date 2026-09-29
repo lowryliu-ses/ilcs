@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
 
 from ..core.clock import now
@@ -694,13 +696,14 @@ class ReportService:
             )
 
         runs = self.runs.for_batch(batch.id)
+        feed = self._binding_notes(batch.id, runs)
         execution = [
             {
                 "step_index": run.step_index,
                 "kind_label": KIND_NAMES.get(run.kind, run.kind),
                 "step_name": tag + (run.step_snapshot or {}).get("name", ""),
                 "state_label": STEP_STATE_LABEL.get(run.state, run.state),
-                "note": run.reason or "",
+                "note": "；".join(part for part in (run.reason or "", feed.get(run.id, "")) if part),
             }
             for run in runs
         ]
@@ -724,6 +727,55 @@ class ReportService:
             "instruments": instruments, "raw_files": raw_files, "data_flags": data_flags,
             "operation_log": operation_log, "stations": sorted({run.station_id for run in runs if run.station_id}),
         }
+
+    def _binding_notes(self, batch_id: str, runs) -> dict[str, str]:
+        """取自上游结果的参数（前馈）在执行记录里写明来源：参数 ← 来源步骤.字段 × 系数，样本数与计算值范围。
+
+        来源记录后来被重做取代（返工、回环、从指定节点重做）时照样写出，并注明已被取代：
+        已执行的设备动作用的是当时的值，不会因为来源重做而改写。每个样本的明细在批次页的指令记录里。
+        """
+        from ..domain.bindings import decimal_text
+        from ..repositories.execution import CommandRepository
+
+        run_states = {run.id: run.state for run in runs}
+        notes: dict[str, list[str]] = {}
+        for command in CommandRepository(self.db, self.ctx).for_batch(batch_id):
+            records = [row for row in (command.bindings or []) if isinstance(row, dict)]
+            if not records or not command.step_run_id or command.state != "done":
+                continue
+            by_param: dict[str, list[dict]] = {}
+            for row in records:
+                by_param.setdefault(str(row.get("param") or ""), []).append(row)
+            for rows in by_param.values():
+                first = rows[0]
+                values = sorted(Decimal(str(row.get("value") or "0")) for row in rows)
+                low, high = decimal_text(values[0]), decimal_text(values[-1])
+                span = low if low == high else f"{low}–{high}"
+                coefficient = (
+                    f" × 因子「{str(first.get('coefficient_source'))[7:]}」" if str(first.get("coefficient_source") or "").startswith("factor:")
+                    else f" × {first.get('coefficient')} {first.get('coefficient_unit')}" if first.get("coefficient")
+                    else ""
+                )
+                replaced = any(
+                    run_states.get(row.get("source_ref")) == "superseded"
+                    or self._checkpoint_superseded(row.get("source_ref"), run_states)
+                    for row in rows
+                )
+                notes.setdefault(command.step_run_id, []).append(
+                    f"{first.get('label') or first.get('param')} ← {first.get('source_name')}.{first.get('field')}"
+                    f"（{first.get('unit')}）{coefficient}：{len(rows) if first.get('sample_id') else '整批'}"
+                    f"{' 个样本' if first.get('sample_id') else ''}，{span} {first.get('target_unit')}"
+                    + ("；所依据的来源记录后来已被重做取代" if replaced else "")
+                )
+        return {run_id: "；".join(parts) for run_id, parts in notes.items()}
+
+    def _checkpoint_superseded(self, checkpoint_id, run_states: dict[str, str]) -> bool:
+        from ..models import Checkpoint
+
+        if not checkpoint_id:
+            return False
+        checkpoint = self.db.get(Checkpoint, checkpoint_id)
+        return bool(checkpoint and run_states.get(checkpoint.step_run_id) == "superseded")
 
     # ---------- 报告补充章节 ----------
 

@@ -1,5 +1,5 @@
 """DEV-13 / AC-33：SOP 版本取代、新批次按生效版本执行、适用范围校验、执行侧快照与受控元数据。"""
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from tests.api.test_reports import CAPACITY, PDF, approve_plan
@@ -217,7 +217,10 @@ def test_document_meta_owner_category_and_review_due(researcher, qa, operator, a
     assert rejected.status_code == 422 and rejected.json()["detail"]["code"] == "sop_owner_invalid"
 
     code = f"SOP-MET-{uuid4().hex[:4]}"
-    due = (date.today() - timedelta(days=1)).isoformat()
+    # 复审到期按服务端的 UTC 日期判：用本地日期在北京时间 0–8 点会比 UTC 早一天，「昨天」变成「今天」
+    from app.core.clock import now
+
+    due = (now().date() - timedelta(days=1)).isoformat()
     created = researcher.post("/api/sops", {"code": code, "title": "元数据", "file_id": uploaded["id"],
                                             "category": "浆料制备", "owner_id": qa_id, "review_due": due})
     assert created.status_code == 201, created.text

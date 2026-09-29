@@ -489,6 +489,28 @@ class ProposalIn(BaseModel):
     # 每个点是 {因子名: 水平}；因子名必须与方案一致
     points: list[dict[str, Any]] = Field(min_length=1, max_length=96)
     repeats: int | None = Field(default=None, ge=1, le=12)
+    # 这份提案由哪次分析运行生成（先固化数据集快照、登记分析运行，再提交提案）
+    analysis_run_id: str = Field(default="", max_length=64)
+
+
+class DatasetSnapshotIn(BaseModel):
+    """固化一份训练数据快照。key 可选：同一实验活动里同号重发回放原快照，数据已变则拒绝。"""
+
+    key: str = Field(default="", max_length=128)
+    note: str = Field(default="", max_length=500)
+
+
+class AnalysisRunIn(BaseModel):
+    """一次分析 / 模型运行：输入快照、程序与模型版本、参数、随机种子、输出摘要。run_id 同号重发回放。"""
+
+    run_id: str = Field(min_length=1, max_length=128)
+    snapshot_id: str = Field(min_length=1, max_length=64)
+    program: str = Field(default="", max_length=128)
+    program_version: str = Field(default="", max_length=64)
+    model_version: str = Field(default="", max_length=128)
+    params: dict[str, Any] = {}
+    seed: str | int = ""
+    outputs: dict[str, Any] = {}
 
 
 class DecisionIn(BaseModel):
@@ -1115,10 +1137,19 @@ class LimitsIn(Signed):
     row_version: int | None = None
 
 
+class ParamSpecIn(BaseModel):
+    """能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。"""
+
+    type: Literal["number", "integer"] = "number"
+    unit: str = Field(default="", max_length=32)
+    required: bool = True
+
+
 class CapabilityIn(Signed):
     id: str
     name: str
     params: dict[str, str]
+    param_specs: dict[str, ParamSpecIn] = {}
     recovery: dict[str, Any] = {}
     stations: list[str] = []
 
@@ -1194,6 +1225,7 @@ class StationPatchIn(BaseModel):
 class CapabilityPatchIn(Signed):
     name: str | None = None
     params: dict[str, str] | None = None
+    param_specs: dict[str, ParamSpecIn] | None = None
     recovery: dict[str, Any] | None = None
 
 

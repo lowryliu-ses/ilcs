@@ -10,7 +10,8 @@ import { api } from '../../shared/api';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { CapabilityRow, Recovery, StationRow } from '../../shared/types';
+import type { CapabilityRow, ParamSpec, Recovery, StationRow } from '../../shared/types';
+import { withUnit } from '../../shared/units';
 import { ConfirmDialog, Field, ListState, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 
 export function CapabilitiesPage() {
@@ -80,7 +81,11 @@ export function CapabilitiesPage() {
                     {capability.retired ? <Pill state="retired" label="已停用" /> : null}
                     <div className="tiny muted mono">{capability.id}</div>
                   </td>
-                  <td className="small">{Object.values(capability.params).join(' · ') || '无参数'}</td>
+                  <td className="small">
+                    {Object.entries(capability.params)
+                      .map(([key, label]) => withUnit(label, capability.param_specs?.[key]?.unit ?? ''))
+                      .join(' · ') || '无参数'}
+                  </td>
                   <td className="small">
                     {capability.recovery.pausable ? `≤ ${capability.recovery.maxHoldMin} min` : '不可保持'}
                     {capability.recovery.hold ? <div className="tiny muted">{capability.recovery.hold}</div> : null}
@@ -170,7 +175,7 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
   const { sign } = useSignature();
   const [id, setId] = useState('cap.');
   const [name, setName] = useState('');
-  const [params, setParams] = useState<{ key: string; label: string }[]>([{ key: '', label: '' }]);
+  const [params, setParams] = useState<ParamRow[]>([blankParam()]);
   const [recovery, setRecovery] = useState<Recovery>({
     pausable: true, maxHoldMin: 30, hold: '', retryable: false, sideEffect: '', verify: [],
   });
@@ -202,7 +207,8 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
       .run({
         id: id.trim(),
         name: name.trim(),
-        params: Object.fromEntries(validParams.map((row) => [row.key.trim(), row.label.trim() || row.key.trim()])),
+        params: paramLabels(validParams),
+        param_specs: paramSpecs(validParams),
         recovery: {
           ...recovery,
           verify: verifyText.split(/[、,，\s]+/).map((item) => item.trim()).filter(Boolean),
@@ -248,64 +254,9 @@ function CapabilityForm({ stations, onClose }: { stations: StationRow[]; onClose
 
       <div>
         <div className="small muted" style={{ marginBottom: 6 }}>
-          参数定义（键用于流程与指令，标签用于界面显示，建议带单位）
+          参数定义（键用于流程与指令，标签用于界面显示；单位单独登记，前馈换算与因子单位核对按它）
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>键</th>
-              <th>标签</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {params.map((row, index) => (
-              <tr key={index}>
-                <td>
-                  <input
-                    className="mono"
-                    value={row.key}
-                    aria-label={`参数 ${index + 1} 键`}
-                    placeholder="power"
-                    onChange={(event) =>
-                      setParams((current) =>
-                        current.map((item, order) => (order === index ? { ...item, key: event.target.value } : item)),
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    value={row.label}
-                    aria-label={`参数 ${index + 1} 标签`}
-                    placeholder="超声功率 W"
-                    onChange={(event) =>
-                      setParams((current) =>
-                        current.map((item, order) => (order === index ? { ...item, label: event.target.value } : item)),
-                      )
-                    }
-                  />
-                </td>
-                <td className="row-end">
-                  <button
-                    className="btn sm"
-                    aria-label={`删除参数 ${index + 1}`}
-                    onClick={() => setParams((current) => current.filter((_, order) => order !== index))}
-                  >
-                    删
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <button
-          className="btn sm"
-          style={{ marginTop: 8 }}
-          onClick={() => setParams((current) => [...current, { key: '', label: '' }])}
-        >
-          添加参数
-        </button>
+        <ParamRowsEditor rows={params} onChange={setParams} />
       </div>
 
       <div className="grid cols-2">
@@ -394,8 +345,11 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
   const toast = useToast();
   const { sign } = useSignature();
   const [name, setName] = useState(capability.name);
-  const [params, setParams] = useState<{ key: string; label: string }[]>(
-    () => Object.entries(capability.params ?? {}).map(([key, label]) => ({ key, label })),
+  const [params, setParams] = useState<ParamRow[]>(() =>
+    Object.entries(capability.params ?? {}).map(([key, label]) => {
+      const spec = capability.param_specs?.[key] ?? {};
+      return { key, label, unit: spec.unit ?? '', type: spec.type ?? 'number', required: spec.required !== false };
+    }),
   );
   const [recovery, setRecovery] = useState<Recovery>({ ...capability.recovery });
   const [verifyText, setVerifyText] = useState((capability.recovery.verify ?? []).join('、'));
@@ -424,7 +378,8 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
     await save
       .run({
         name,
-        params: Object.fromEntries(params.filter((p) => p.key.trim()).map((p) => [p.key.trim(), p.label.trim() || p.key.trim()])),
+        params: paramLabels(params.filter((p) => p.key.trim())),
+        param_specs: paramSpecs(params.filter((p) => p.key.trim())),
         recovery: { ...recovery, verify: verifyText.split(/[、,，\s]+/).map((x) => x.trim()).filter(Boolean) },
         signature_id: signatureId,
       })
@@ -462,30 +417,7 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
 
       <div>
         <div className="small muted" style={{ marginBottom: 6 }}>参数定义</div>
-        <table>
-          <thead><tr><th>键</th><th>标签</th><th /></tr></thead>
-          <tbody>
-            {params.map((row, index) => (
-              <tr key={index}>
-                <td>
-                  <input className="mono" value={row.key} aria-label={`参数 ${index + 1} 键`}
-                    onChange={(e) => setParams((c) => c.map((x, i) => (i === index ? { ...x, key: e.target.value } : x)))} />
-                </td>
-                <td>
-                  <input value={row.label} aria-label={`参数 ${index + 1} 标签`}
-                    onChange={(e) => setParams((c) => c.map((x, i) => (i === index ? { ...x, label: e.target.value } : x)))} />
-                </td>
-                <td className="row-end">
-                  <button className="btn sm" aria-label={`删除参数 ${index + 1}`}
-                    onClick={() => setParams((c) => c.filter((_, i) => i !== index))}>删</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <button className="btn sm" style={{ marginTop: 8 }} onClick={() => setParams((c) => [...c, { key: '', label: '' }])}>
-          添加参数
-        </button>
+        <ParamRowsEditor rows={params} onChange={setParams} />
       </div>
 
       <div className="grid cols-2">
@@ -523,5 +455,108 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
       </Field>
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
+  );
+}
+
+type ParamRow = { key: string; label: string; unit: string; type: 'number' | 'integer'; required: boolean };
+
+function blankParam(): ParamRow {
+  return { key: '', label: '', unit: '', type: 'number', required: true };
+}
+
+function paramLabels(rows: ParamRow[]): Record<string, string> {
+  return Object.fromEntries(rows.map((row) => [row.key.trim(), row.label.trim() || row.key.trim()]));
+}
+
+/** 只提交与缺省（数值、单位未登记、必填）不同的规格，服务端也按同一规则收成规范写法。 */
+function paramSpecs(rows: ParamRow[]): Record<string, ParamSpec> {
+  return Object.fromEntries(
+    rows.map((row) => [row.key.trim(), { type: row.type, unit: row.unit.trim(), required: row.required }]),
+  );
+}
+
+/** 参数表：键、显示名称、单位、类型、是否必填。单位用于前馈换算与因子单位核对，不从显示名称里猜。 */
+function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows: ParamRow[]) => void }) {
+  const patch = (index: number, changes: Partial<ParamRow>) =>
+    onChange(rows.map((row, order) => (order === index ? { ...row, ...changes } : row)));
+  return (
+    <>
+      <table>
+        <thead>
+          <tr>
+            <th>键</th>
+            <th>标签</th>
+            <th>单位</th>
+            <th>类型</th>
+            <th>必填</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={index}>
+              <td>
+                <input
+                  className="mono"
+                  value={row.key}
+                  aria-label={`参数 ${index + 1} 键`}
+                  placeholder="power"
+                  onChange={(event) => patch(index, { key: event.target.value })}
+                />
+              </td>
+              <td>
+                <input
+                  value={row.label}
+                  aria-label={`参数 ${index + 1} 标签`}
+                  placeholder="超声功率"
+                  onChange={(event) => patch(index, { label: event.target.value })}
+                />
+              </td>
+              <td>
+                <input
+                  className="mono"
+                  value={row.unit}
+                  aria-label={`参数 ${index + 1} 单位`}
+                  placeholder="W"
+                  style={{ width: 72 }}
+                  onChange={(event) => patch(index, { unit: event.target.value })}
+                />
+              </td>
+              <td>
+                <select
+                  value={row.type}
+                  aria-label={`参数 ${index + 1} 类型`}
+                  onChange={(event) => patch(index, { type: event.target.value as ParamRow['type'] })}
+                >
+                  <option value="number">数值</option>
+                  <option value="integer">整数</option>
+                </select>
+              </td>
+              <td>
+                <input
+                  type="checkbox"
+                  checked={row.required}
+                  aria-label={`参数 ${index + 1} 必填`}
+                  title="不勾选：流程步骤可以不写这个参数，设备按自己的缺省值执行"
+                  onChange={(event) => patch(index, { required: event.target.checked })}
+                />
+              </td>
+              <td className="row-end">
+                <button
+                  className="btn sm"
+                  aria-label={`删除参数 ${index + 1}`}
+                  onClick={() => onChange(rows.filter((_, order) => order !== index))}
+                >
+                  删
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="btn sm" style={{ marginTop: 8 }} onClick={() => onChange([...rows, blankParam()])}>
+        添加参数
+      </button>
+    </>
   );
 }

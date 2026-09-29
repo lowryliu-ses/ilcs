@@ -16,7 +16,10 @@ from .organization import (
     Lab, Membership, Organization, Project, ProjectMember, ServiceIdentity,
 )
 from .people import Person, Qualification
-from .recipe import ExperimentTask, Plan, PlanProposal, PlanTemplate, PlanVersion, Recipe, TaskAssignment
+from .recipe import (
+    AnalysisRun, DatasetSnapshot, ExperimentTask, Plan, PlanProposal, PlanTemplate, PlanVersion, Recipe,
+    TaskAssignment,
+)
 from .report import Report, ReportVersion
 from .resource import (
     Adapter, Asset, CalibrationRecord, Capability, EnvironmentReading, Island, MaintenanceOrder, PersonBooking,
@@ -30,7 +33,7 @@ from .workflow import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 __all__ = [
     "AccessLog", "AdapterExecution", "Adapter", "Alarm", "Allocation", "AnalysisTask", "Asset",
     "AuditEvent", "Base", "Batch", "CalibrationRecord", "Capability", "Checkpoint", "Command",
-    "ExecutorHeartbeat", "MaintenanceOrder", "PlanProposal",
+    "ExecutorHeartbeat", "MaintenanceOrder", "PlanProposal", "DatasetSnapshot", "AnalysisRun",
     "ESignature", "ExperimentTask", "FileObject", "IdempotencyKey", "IngestEvent", "InventoryEvent",
     "InventoryLedger", "Island", "Lab", "Lot", "Material", "Membership", "MetricDefinition",
     "Organization", "Person", "PhysicalSample", "Plan", "PlanBatchLink", "PlanVersion", "Project",

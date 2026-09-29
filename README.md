@@ -195,6 +195,15 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 已下发但设备侧没有在途动作时终止 | 撤回队列指令并立即终止，不等待不存在的设备确认 |
 | 资质过期的人员被分配任务 | 拒绝，并说明按预计执行时间判定 |
 | 删除出过批次的方法 / 已锁定方案 / 已下发批次 | 409，列出具体引用与替代动作（退役 / 解锁 / 终止） |
+| 设备参数取自上游结果（如称重质量 × 系数 → 注液量） | 下发时逐样本取上游检查点回执（`delivered.wells`）或按样本录入的人工记录，乘系数、换单位，写进 `params.wells`；每个样本的来源、原始值、系数与计算值记在指令上 |
+| 前馈缺一个样本的值 / 计算值超出预期范围、设备方法范围或工位极限 / 来源检查点质量为 uncertain | 整条指令不下发（没离开系统），批次挂起报警并列出样本与数值；不拿缺省值顶上 |
+| 前馈参数排程 | 按流程声明的预期范围挑工位：工位极限要覆盖整个范围 |
+| 因子作用参数的单位与能力登记的单位不同 | 方案校验不通过：水平原样下发，mL 当 μL 差一千倍 |
+| 能力参数标为非必填 / 整数 | 流程可不写非必填参数；整数参数填小数校验不通过 |
+| 人工步骤按样本录入的字段 | 每个在用样本各一个数值，缺哪个样本列出哪个；不认识的样本编号拒收 |
+| 固化训练数据快照后结果被更正 | 按快照导出不变；快照详情列出后来变了的结果；同号快照数据已变 409；快照与分析运行由数据库触发器拒绝改删 |
+| 提案挂分析运行 | 提案记下由哪次分析运行生成（输入快照、程序与模型版本、参数、随机种子）；运行属于别的实验活动 409 |
+| 设备接入验收 | `scripts/device-acceptance.py`：只读 / 动作（`--physical`，真实设备须 `--confirm`）/ 故障（`--faults`，仅模拟设备）三级；读不到设备动作次数的「不重复执行」判跳过，不硬判通过 |
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
@@ -338,7 +347,16 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 `docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
 检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [connectors/result_files/README.md](connectors/result_files/README.md)）。
 
-部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。完整的手工演练路径
+部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。
+
+切换后对每个工位跑一遍接入验收（报告不含凭据；工位有在途指令时拒绝运行）：
+
+```bash
+docker compose exec api python ../scripts/device-acceptance.py ST-05                      # 只读：不让设备动作
+docker compose exec api python ../scripts/device-acceptance.py ST-07 --physical --faults  # 模拟设备：动作 + 故障
+docker compose exec api python ../scripts/device-acceptance.py ST-07 --physical --confirm ST-07 \
+    --output /data/acceptance-ST-07.md                                                     # 真实设备：现场批准后
+```完整的手工演练路径
 （注液、循环测试、AGV / 机械臂串行、20 个扣电分 3 批，外加故障演练）见 [操作案例](docs/操作案例.md)；`scripts/reset-demo-cases.sh` 可把演示库重置为四个案例跑完的结果。
 
 ### PostgreSQL 与附件备份恢复演练

@@ -178,7 +178,14 @@ class WorkflowService:
 
         step = run.step_snapshot or {}
         values = payload.get("form_data") or {}
-        problems = missing_form_values(step, values)
+        # 按样本录入的字段：每个在用样本各一个值（样本编号 → 数值），缺哪个样本列出哪个
+        samples = None
+        if any(isinstance(f, dict) and f.get("per_sample") for f in step.get("form") or []):
+            samples = {
+                sample.id: f"{sample.well or ''} {sample.id}".strip()
+                for sample in self.samples.active_for_batch(batch.id)
+            }
+        problems = missing_form_values(step, values, samples)
         # 样本与物料核对：声明了就必须勾，不能只在界面上打个对勾
         checks = payload.get("checks") or {}
         if step.get("requires_sample_check", True) and not checks.get("samples"):

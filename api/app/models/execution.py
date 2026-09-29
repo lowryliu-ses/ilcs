@@ -54,6 +54,9 @@ class Command(Base):
     # 这条动作在主工位上占几份通道：按样本计通道的工位是下发时批次在用的样本数，其余为 1。
     # 协同工位各占 1 份
     units: Mapped[int] = mapped_column(Integer, default=1)
+    # 取自上游结果的参数（前馈）：每个样本一条，记来源步骤与检查点 / 记录、原始值与单位、系数及其出处、
+    # 下发的计算值。下发时算一次、随指令冻结；重投同一指令不重新求值
+    bindings: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ExecutorHeartbeat(Base):

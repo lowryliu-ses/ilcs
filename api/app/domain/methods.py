@@ -75,6 +75,15 @@ def definition_issues(
             issues.append(f"参数 {key} 下限 {lo:g} 大于上限 {hi:g}")
         if default is not None and ((lo is not None and default < lo) or (hi is not None and default > hi)):
             issues.append(f"参数 {key} 缺省值 {default:g} 不在 [{rule.get('min')}, {rule.get('max')}] 内")
+        if capability is not None:
+            from .params import canonical_unit, spec_of, value_issues
+
+            spec = spec_of(capability, key)
+            if default is not None:
+                issues.extend(f"参数 {key} 的缺省值：{text}" for text in value_issues(spec, default))
+            unit = canonical_unit(rule.get("unit"))
+            if unit and spec["unit"] and unit != spec["unit"]:
+                issues.append(f"参数 {key} 的单位 {unit} 与能力登记的单位 {spec['unit']} 不同：设定值是原样下发的")
     seen: set[str] = set()
     for row in outputs or []:
         key = str((row or {}).get("key") or "").strip() if isinstance(row, dict) else ""
@@ -169,8 +178,11 @@ def apply(
             continue
         row = copy.deepcopy(step)
         row["cap"] = step.get("cap") or spec.capability_id
+        # 取自上游结果的参数不补缺省值：它在下发时才有值，补一个固定值等于绕过前馈
+        bound = set((step.get("bindings") or {}) if isinstance(step.get("bindings"), dict) else ())
         defaults = {
-            key: _num(rule.get("default")) for key, rule in spec.params.items() if _num(rule.get("default")) is not None
+            key: _num(rule.get("default")) for key, rule in spec.params.items()
+            if _num(rule.get("default")) is not None and key not in bound
         }
         row["params"] = {**defaults, **(step.get("params") or {})}
         if not step.get("dur") and spec.dur_min:

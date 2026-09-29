@@ -1,7 +1,12 @@
-"""能力匹配。工位未定义的参数视为不能承接，这是流程校验与排程的唯一判据。"""
+"""能力匹配。工位未定义的参数视为不能承接，这是流程校验与排程的唯一判据。
+
+取自上游结果的参数（前馈）在排程时还没有值：按流程声明的预期范围匹配，工位极限必须覆盖整个范围，
+下发时再按实际值核一次。
+"""
 from dataclasses import dataclass, field
 from typing import Any
 
+from .bindings import bindings_of, expect_of, window_holds
 from .methods import station_allows
 
 
@@ -45,6 +50,9 @@ def station_fits(station: StationSpec, step: dict[str, Any]) -> bool:
         window = implemented.get(name)
         if not window or value < window[0] or value > window[1]:
             return False
+    for name, binding in bindings_of(step).items():
+        if not window_holds(implemented.get(name), expect_of(binding)):
+            return False
     return True
 
 
@@ -66,4 +74,14 @@ def out_of_range(station: StationSpec, step: dict[str, Any]) -> list[str]:
             reasons.append(f"{station.id} 未定义参数 {name}")
         elif value < window[0] or value > window[1]:
             reasons.append(f"{station.id} {name}={value} 超出 [{window[0]}, {window[1]}]")
+    for name, binding in bindings_of(step).items():
+        window, expect = implemented.get(name), expect_of(binding)
+        if not window:
+            reasons.append(f"{station.id} 未定义参数 {name}")
+        elif expect is None:
+            reasons.append(f"{station.id} {name} 取自上游结果但没有预期范围")
+        elif not window_holds(window, expect):
+            reasons.append(
+                f"{station.id} {name} 预期范围 [{expect[0]:g}, {expect[1]:g}] 超出 [{window[0]}, {window[1]}]"
+            )
     return reasons

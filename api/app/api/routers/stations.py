@@ -149,5 +149,6 @@ def test_adapter(station_id: str, db: DbSession, ctx=require("station.edit")):
 @router.post("/capabilities", status_code=201)
 def register_capability(payload: CapabilityIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
     return StationService(db, ctx).register_capability(
-        payload.id, payload.name, payload.params, payload.recovery, payload.stations, payload.signature_id, user
+        payload.id, payload.name, payload.params, payload.recovery, payload.stations, payload.signature_id, user,
+        param_specs={key: spec.model_dump() for key, spec in payload.param_specs.items()},
     )

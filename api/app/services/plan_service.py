@@ -200,6 +200,7 @@ class PlanService:
             },
             {"key": "control", "label": "对照条件在矩阵内", "detail": control_detail, "ok": control_ok},
             self._targets_check(plan),
+            self._bindings_check(plan),
             self._metrics_check(plan),
         ]
 
@@ -221,6 +222,7 @@ class PlanService:
 
     def _target_options(self, plan: Plan) -> list[dict]:
         """因子可以作用的设备参数：流程里每个设备步骤及其能力声明的参数。"""
+        from ..domain.bindings import bindings_of
         from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
         from ..repositories.resources import CapabilityRepository
 
@@ -231,11 +233,17 @@ class PlanService:
             if kind_of(step) != DEVICE:
                 continue
             declared = (capabilities.get(step.get("cap", "")) or {}).get("params") or {}
-            params = sorted(set(declared) | set(step.get("params") or {}))
+            # 取自上游结果的参数（前馈）不能再让因子作用
+            params = sorted((set(declared) | set(step.get("params") or {})) - set(bindings_of(step)))
             options.append({
                 "step_id": step_id_of(step, index), "step_name": step.get("name") or f"第 {index + 1} 步",
                 "capability": step.get("cap", ""),
-                "params": [{"name": name, "unit": declared.get(name, "")} for name in params],
+                "params": [
+                    {"name": name, "label": declared.get(name, name),
+                     "unit": ((capabilities.get(step.get("cap", "")) or {}).get("param_specs") or {})
+                     .get(name, {}).get("unit", "")}
+                    for name in params
+                ],
             })
         return options
 
@@ -252,14 +260,41 @@ class PlanService:
                 "detail": "未声明作用参数：条件只区分样本，设备按流程里的固定参数执行",
                 "ok": True,
             }
+        from ..repositories.resources import CapabilityRepository
+
         recipe = self.recipes.get(plan.recipe_id)
         issues = matrix.target_issues(
             factors, normalize(recipe.steps if recipe else []), StationRepository(self.db, self.ctx).specs(),
+            CapabilityRepository(self.db).specs(),
         )
         return {
             "key": "targets", "label": "因子作用的设备参数",
             "detail": "；".join(issues) or "、".join(
                 f"{f.get('name')} → {f['target'].get('step_id')}.{f['target'].get('param')}" for f in declared
+            ),
+            "ok": not issues,
+        }
+
+    def _bindings_check(self, plan: Plan) -> dict:
+        """流程里的前馈系数引用方案因子时，方案里要有这个因子，水平为正数，单位写成「目标单位/来源单位」。"""
+        from ..domain.bindings import factor_references, plan_factor_issues
+        from ..domain.steps import normalize
+        from ..repositories.resources import CapabilityRepository
+
+        recipe = self.recipes.get(plan.recipe_id)
+        steps = normalize(recipe.steps if recipe else [])
+        references = factor_references(steps)
+        if not references:
+            return {
+                "key": "bindings", "label": "前馈系数引用的因子",
+                "detail": "流程没有引用方案因子的前馈系数", "ok": True,
+            }
+        issues = plan_factor_issues(steps, plan.factors or [], CapabilityRepository(self.db).specs())
+        return {
+            "key": "bindings", "label": "前馈系数引用的因子",
+            "detail": "；".join(issues) or "、".join(
+                f"{step.get('name')}.{param} × 因子「{binding['coefficient']['factor']}」"
+                for step, param, binding in references
             ),
             "ok": not issues,
         }
@@ -282,6 +317,7 @@ class PlanService:
                 "detail": "已按单条件校验，不强制两个因子水平",
                 "ok": True,
             },
+            self._bindings_check(plan),
             self._metrics_check(plan),
         ]
 
@@ -309,6 +345,7 @@ class PlanService:
                 "ok": True,
             },
             self._capacity_check(plan, recipe.plate if recipe else 0, "每批样本数不超过流程样品位"),
+            self._bindings_check(plan),
             self._metrics_check(plan),
         ]
 

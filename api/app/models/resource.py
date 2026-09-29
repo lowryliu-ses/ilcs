@@ -14,7 +14,10 @@ class Capability(Base):
     __tablename__ = "capabilities"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
+    # 参数键 → 显示名称。界面与历史快照都读它，保持原样
     params: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 参数键 → {type, unit, required}：数值 / 整数、单位、是否必填。没登记的按「数值、单位未登记、必填」
+    param_specs: Mapped[dict] = mapped_column(JSON, default=dict)
     recovery: Mapped[dict] = mapped_column(JSON, default=dict)
     # 停用而不是删除：已有流程快照仍引用它，字典条目必须留着才解释得了历史批次
     retired: Mapped[bool] = mapped_column(Boolean, default=False)

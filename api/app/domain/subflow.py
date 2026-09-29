@@ -85,6 +85,11 @@ def _prefixed(step: dict[str, Any], prefix: str, local: set[str]) -> dict[str, A
         for case in branch.get("cases") or []:
             if isinstance(case, dict) and case.get("loop_to"):
                 case["loop_to"] = _rename(str(case["loop_to"]), prefix, local)
+    bindings = row.get("bindings")
+    if isinstance(bindings, dict):
+        for binding in bindings.values():
+            if isinstance(binding, dict) and binding.get("source_step_id"):
+                binding["source_step_id"] = _rename(str(binding["source_step_id"]), prefix, local)
     return row
 
 

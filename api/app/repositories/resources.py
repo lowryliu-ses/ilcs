@@ -102,7 +102,10 @@ class CapabilityRepository(Repository[Capability]):
         return {c.id: c.name for c in self.list()}
 
     def specs(self) -> dict[str, dict]:
-        return {c.id: {"name": c.name, "params": c.params or {}, "retired": c.retired} for c in self.list()}
+        return {
+            c.id: {"name": c.name, "params": c.params or {}, "param_specs": c.param_specs or {}, "retired": c.retired}
+            for c in self.list()
+        }
 
     def recovery_of(self, capability_id: str) -> dict:
         capability = self.get(capability_id)

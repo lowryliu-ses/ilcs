@@ -17,10 +17,11 @@ import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type F
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type {
-  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, RecipeDetail, RecipeStep, RecipeSummary, SopStep,
-  SopVersionRow, StationRow,
+  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, ParamBinding, RecipeDetail, RecipeStep,
+  RecipeSummary, SopStep, SopVersionRow, StationRow,
 } from '../../shared/types';
 import { CheckList, Field, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+import { canonicalUnit, withUnit } from '../../shared/units';
 import {
   AUTOMATIC_KINDS,
   SKIPPABLE_KINDS,
@@ -44,10 +45,12 @@ import {
   nextStepId,
   paramRange,
   predecessors,
+  specOf,
   stationsForStep,
   stepIdOf,
   stepIssues,
   topoSort,
+  upstreamOf,
   whenOf,
   wouldCycle,
   type SopLink,
@@ -677,9 +680,15 @@ function NodeCard({
   const requiresStation = needsStation(step);
   const meta =
     kind === 'device'
-      ? Object.entries(step.params ?? {})
-          .map(([key, value]) => `${(paramLabels[key] ?? key).split(' ')[0]} ${value === '' ? '?' : value}`)
-          .join(' · ') || '无参数'
+      ? [
+          ...Object.entries(step.params ?? {}).map(
+            ([key, value]) => `${(paramLabels[key] ?? key).split(' ')[0]} ${value === '' ? '?' : value}`,
+          ),
+          // 取自上游结果的参数：画布上标出来源，一眼看出这一步的设定值依赖前面的结果
+          ...Object.entries(step.bindings ?? {}).map(
+            ([key, binding]) => `${(paramLabels[key] ?? key).split(' ')[0]} ← ${binding.source_step_id || '?'}.${binding.field || '?'}`,
+          ),
+        ].join(' · ') || '无参数'
       : kind === 'manual'
       ? `${(step.form ?? []).length} 个记录字段`
       : kind === 'wait'
@@ -1035,29 +1044,20 @@ function StepProperties({
         </Field>
       ) : null}
 
-      {kind !== 'device' ? null : Object.entries(capability?.params ?? {}).map(([key, paramLabel]) => {
-        const range = paramRange(stations, step.cap, key);
-        const value = step.params?.[key];
-        const rule = step.method?.params?.[key];
-        const inMethod =
-          !rule || typeof value !== 'number' || ((rule.min == null || value >= rule.min) && (rule.max == null || value <= rule.max));
-        const ok = !!range && typeof value === 'number' && value >= range[0] && value <= range[1] && inMethod;
-        return (
-          <Field
-            key={key}
-            label={`${paramLabel}　${range ? `[${range[0]}, ${range[1]}]` : '无工位定义该参数'}`}
-            hint={rule ? `设备方法允许 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]${rule.unit ? ` ${rule.unit}` : ''}，缺省 ${rule.default ?? '—'}` : undefined}
-          >
-            <NumberInput
-              value={value ?? ''}
-              invalid={!ok}
-              disabled={readOnly}
-              ariaLabel={paramLabel}
-              onChange={(next) => onSet((current) => void (current.params[key] = next))}
-            />
-          </Field>
-        );
-      })}
+      {kind !== 'device' ? null : Object.keys(capability?.params ?? {}).map((key) => (
+        <DeviceParamField
+          key={key}
+          paramKey={key}
+          step={step}
+          steps={steps}
+          index={index}
+          capability={capability}
+          capabilityIndex={capabilityIndex}
+          stations={stations}
+          readOnly={readOnly}
+          onSet={onSet}
+        />
+      ))}
       {capability && !Object.keys(capability.params ?? {}).length ? (
         <div className="small muted">该能力无参数</div>
       ) : null}
@@ -1182,6 +1182,264 @@ function StepProperties({
   );
 }
 
+/** 设备步骤的一个参数：固定值，或取自上游结果（前馈）。前馈与固定值二选一，切换时另一方清掉。 */
+function DeviceParamField({
+  paramKey,
+  step,
+  steps,
+  index,
+  capability,
+  capabilityIndex,
+  stations,
+  readOnly,
+  onSet,
+}: {
+  paramKey: string;
+  step: RecipeStep;
+  steps: RecipeStep[];
+  index: number;
+  capability: CapabilityRow | undefined;
+  capabilityIndex: Record<string, CapabilityRow>;
+  stations: StationRow[] | undefined;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const spec = specOf(capability, paramKey);
+  const label = withUnit(spec.label, spec.unit);
+  const range = paramRange(stations, step.cap, paramKey);
+  const rule = step.method?.params?.[paramKey];
+  const binding = step.bindings?.[paramKey];
+  const hint = rule
+    ? `设备方法允许 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]${rule.unit ? ` ${rule.unit}` : ''}，缺省 ${rule.default ?? '—'}`
+    : undefined;
+  const toggle = (bound: boolean) =>
+    onSet((current) => {
+      if (bound) {
+        delete current.params[paramKey];
+        current.bindings = {
+          ...(current.bindings ?? {}),
+          [paramKey]: { source_step_id: '', field: '', scope: 'sample', unit: '', coefficient: null, expect: ['', ''] },
+        };
+      } else {
+        const next = { ...(current.bindings ?? {}) };
+        delete next[paramKey];
+        if (Object.keys(next).length) current.bindings = next;
+        else delete current.bindings;
+        current.params[paramKey] = range ? Number(((range[0] + range[1]) / 2).toFixed(2)) : '';
+      }
+    });
+  const header = (
+    <label className="check tiny" title="设定值在下发时按上游结果算出（乘系数、换单位），落在预期范围内才下发">
+      <input type="checkbox" checked={Boolean(binding)} disabled={readOnly} onChange={(event) => toggle(event.target.checked)} />
+      取自上游结果
+    </label>
+  );
+
+  if (!binding) {
+    const value = step.params?.[paramKey];
+    const inMethod =
+      !rule || typeof value !== 'number' || ((rule.min == null || value >= rule.min) && (rule.max == null || value <= rule.max));
+    const filled = typeof value === 'number';
+    const ok = filled ? !!range && value >= range[0] && value <= range[1] && inMethod : !spec.required;
+    return (
+      <Field label={`${label}　${range ? `[${range[0]}, ${range[1]}]` : '无工位定义该参数'}${spec.required ? '' : '（可不填）'}`} hint={hint}>
+        <NumberInput
+          value={value ?? ''}
+          invalid={!ok}
+          disabled={readOnly}
+          ariaLabel={spec.label}
+          onChange={(next) =>
+            onSet((current) => {
+              if (next === '' && !spec.required) delete current.params[paramKey];
+              else current.params[paramKey] = next;
+            })
+          }
+        />
+        {header}
+      </Field>
+    );
+  }
+
+  const ids = steps.map(stepIdOf);
+  const allowed = upstreamOf(steps, index);
+  const sources = steps
+    .map((row, at) => ({ row, at }))
+    .filter(({ row, at }) => allowed.has(at) && (kindOf(row) === 'device' || kindOf(row) === 'manual'));
+  const origin = steps[ids.indexOf(binding.source_step_id)];
+  const originKind = origin ? kindOf(origin) : undefined;
+  const manualFields = originKind === 'manual' ? (origin?.form ?? []).filter((row) => row.type === 'number') : [];
+  const deviceFields =
+    originKind === 'device'
+      ? [...new Set([
+          ...(origin?.method?.outputs ?? []).map((row) => row.key),
+          ...Object.keys(capabilityIndex[origin?.cap ?? '']?.params ?? {}),
+        ])]
+      : [];
+  const coefficient = binding.coefficient ?? null;
+  const coefficientMode = !coefficient ? 'none' : coefficient.factor !== undefined ? 'factor' : 'value';
+  const patch = (changes: Partial<ParamBinding>) =>
+    onSet((current) => {
+      const next = { ...(current.bindings?.[paramKey] ?? binding), ...changes };
+      current.bindings = { ...(current.bindings ?? {}), [paramKey]: next };
+    });
+  const pickSource = (sourceId: string) => {
+    const picked = steps[ids.indexOf(sourceId)];
+    const field = picked && kindOf(picked) === 'manual'
+      ? (picked.form ?? []).find((row) => row.type === 'number')
+      : undefined;
+    patch({
+      source_step_id: sourceId,
+      field: field?.key ?? '',
+      unit: field?.unit ?? '',
+      scope: field ? (field.per_sample ? 'sample' : 'batch') : binding.scope,
+    });
+  };
+  const pickField = (key: string) => {
+    if (originKind === 'manual') {
+      const field = manualFields.find((row) => row.key === key);
+      patch({ field: key, unit: field?.unit ?? binding.unit, scope: field?.per_sample ? 'sample' : 'batch' });
+      return;
+    }
+    const output = (origin?.method?.outputs ?? []).find((row) => row.key === key);
+    const sourceSpec = specOf(capabilityIndex[origin?.cap ?? ''], key);
+    patch({ field: key, unit: output?.unit || sourceSpec.unit || binding.unit });
+  };
+  const [low, high] = binding.expect ?? ['', ''];
+  const windowOk = !range || (typeof low === 'number' && typeof high === 'number' && low >= range[0] && high <= range[1]);
+
+  return (
+    <Field
+      label={`${label}　取自上游结果`}
+      hint={`下发时按上游结果 × 系数算出${spec.unit ? `（换算到 ${spec.unit}）` : ''}；工位极限 ${range ? `[${range[0]}, ${range[1]}]` : '无工位定义'}要覆盖整个预期范围`}
+    >
+      {header}
+      <div className="grid cols-2">
+        <Field label="来源步骤">
+          <select value={binding.source_step_id} disabled={readOnly} onChange={(event) => pickSource(event.target.value)}>
+            <option value="">选择上游设备或人工步骤</option>
+            {sources.map(({ row, at }) => (
+              <option key={stepIdOf(row, at)} value={stepIdOf(row, at)}>
+                第 {at + 1} 步 · {row.name}（{kindOf(row) === 'device' ? '设备回执' : '人工记录'}）
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="来源字段" hint={originKind === 'device' ? '设备回执 delivered 里的键；逐样本时取 delivered.wells 里该孔位的值' : undefined}>
+          {originKind === 'manual' ? (
+            <select value={binding.field} disabled={readOnly} onChange={(event) => pickField(event.target.value)}>
+              <option value="">选择数值字段</option>
+              {manualFields.map((row) => (
+                <option key={row.key} value={row.key}>
+                  {row.label}（{row.key}{row.per_sample ? '，按样本' : ''}）
+                </option>
+              ))}
+            </select>
+          ) : (
+            <>
+              <input
+                className="mono"
+                value={binding.field}
+                readOnly={readOnly}
+                list={`binding-fields-${paramKey}`}
+                placeholder="mass"
+                onChange={(event) => pickField(event.target.value.trim())}
+              />
+              <datalist id={`binding-fields-${paramKey}`}>
+                {deviceFields.map((key) => <option key={key} value={key} />)}
+              </datalist>
+            </>
+          )}
+        </Field>
+        <Field label="取值范围">
+          <select
+            value={binding.scope}
+            disabled={readOnly}
+            onChange={(event) => patch({ scope: event.target.value as ParamBinding['scope'] })}
+          >
+            <option value="sample">逐样本（每个样本各算一个值）</option>
+            <option value="batch">整批一个值</option>
+          </select>
+        </Field>
+        <Field label="来源值单位">
+          <input
+            className="mono"
+            value={binding.unit}
+            readOnly={readOnly}
+            placeholder="g"
+            onChange={(event) => patch({ unit: event.target.value })}
+          />
+        </Field>
+        <Field label="系数" hint="单位写成「参数单位/来源单位」；不乘系数时来源单位要能直接换算成参数单位">
+          <select
+            value={coefficientMode}
+            disabled={readOnly}
+            onChange={(event) => {
+              const mode = event.target.value;
+              patch({
+                coefficient:
+                  mode === 'none' ? null
+                    : mode === 'factor' ? { factor: '' }
+                      : { value: '', unit: spec.unit && binding.unit ? `${spec.unit}/${canonicalUnit(binding.unit)}` : '' },
+              });
+            }}
+          >
+            <option value="none">不乘系数（纯单位换算）</option>
+            <option value="value">固定系数（随流程审批冻结）</option>
+            <option value="factor">引用方案因子（按样本的水平取值）</option>
+          </select>
+        </Field>
+        {coefficientMode === 'value' ? (
+          <Field label="系数值 / 单位">
+            <div className="row">
+              <NumberInput
+                value={coefficient?.value ?? ''}
+                disabled={readOnly}
+                ariaLabel="系数值"
+                onChange={(next) => patch({ coefficient: { ...(coefficient ?? {}), value: next } })}
+              />
+              <input
+                className="mono"
+                value={coefficient?.unit ?? ''}
+                readOnly={readOnly}
+                aria-label="系数单位"
+                placeholder={`${spec.unit || 'μL'}/${canonicalUnit(binding.unit) || 'mg'}`}
+                onChange={(event) => patch({ coefficient: { ...(coefficient ?? {}), unit: event.target.value } })}
+              />
+            </div>
+          </Field>
+        ) : coefficientMode === 'factor' ? (
+          <Field label="方案因子名" hint="方案里要有这个因子：水平为正数，单位写成「参数单位/来源单位」">
+            <input
+              value={coefficient?.factor ?? ''}
+              readOnly={readOnly}
+              placeholder="注液系数"
+              onChange={(event) => patch({ coefficient: { factor: event.target.value } })}
+            />
+          </Field>
+        ) : <div />}
+        <Field label={`预期范围${spec.unit ? `（${spec.unit}）` : ''}`} hint="计算值超出它不下发；排程按它挑工位">
+          <div className="row">
+            <NumberInput
+              value={low}
+              invalid={!windowOk}
+              disabled={readOnly}
+              ariaLabel="预期下限"
+              onChange={(next) => patch({ expect: [next, high] })}
+            />
+            <NumberInput
+              value={high}
+              invalid={!windowOk}
+              disabled={readOnly}
+              ariaLabel="预期上限"
+              onChange={(next) => patch({ expect: [low, next] })}
+            />
+          </div>
+        </Field>
+      </div>
+    </Field>
+  );
+}
+
 function ManualFields({
   step,
   readOnly,
@@ -1230,6 +1488,32 @@ function ManualFields({
                 />
                 必填
               </label>
+              {field.type === 'number' ? (
+                <>
+                  <label className="tiny" title="每个在用样本各填一个值（如逐片称重）；可作为下游设备参数的逐样本前馈来源">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(field.per_sample)}
+                      disabled={readOnly}
+                      onChange={(event) =>
+                        onSet((current) => {
+                          if (event.target.checked) current.form![position].per_sample = true;
+                          else delete current.form![position].per_sample;
+                        })
+                      }
+                    />
+                    按样本录入
+                  </label>
+                  <input
+                    className="mono"
+                    style={{ width: 64 }}
+                    placeholder="单位"
+                    value={field.unit ?? ''}
+                    readOnly={readOnly}
+                    onChange={(event) => onSet((current) => void (current.form![position].unit = event.target.value))}
+                  />
+                </>
+              ) : null}
               <button
                 className="btn sm"
                 disabled={readOnly}

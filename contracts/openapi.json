@@ -353,6 +353,69 @@
         "title": "AlarmClearIn",
         "type": "object"
       },
+      "AnalysisRunIn": {
+        "description": "一次分析 / 模型运行：输入快照、程序与模型版本、参数、随机种子、输出摘要。run_id 同号重发回放。",
+        "properties": {
+          "model_version": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Model Version",
+            "type": "string"
+          },
+          "outputs": {
+            "default": {},
+            "title": "Outputs",
+            "type": "object"
+          },
+          "params": {
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "program": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Program",
+            "type": "string"
+          },
+          "program_version": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Program Version",
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "default": "",
+            "title": "Seed"
+          },
+          "snapshot_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Snapshot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "snapshot_id"
+        ],
+        "title": "AnalysisRunIn",
+        "type": "object"
+      },
       "AnalysisTaskCreateIn": {
         "properties": {
           "external_ref": {
@@ -997,6 +1060,14 @@
             "title": "Name",
             "type": "string"
           },
+          "param_specs": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ParamSpecIn"
+            },
+            "default": {},
+            "title": "Param Specs",
+            "type": "object"
+          },
           "params": {
             "additionalProperties": {
               "type": "string"
@@ -1043,6 +1114,20 @@
               }
             ],
             "title": "Name"
+          },
+          "param_specs": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ParamSpecIn"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param Specs"
           },
           "params": {
             "anyOf": [
@@ -1440,6 +1525,25 @@
           }
         },
         "title": "DataRulePatchIn",
+        "type": "object"
+      },
+      "DatasetSnapshotIn": {
+        "description": "固化一份训练数据快照。key 可选：同一实验活动里同号重发回放原快照，数据已变则拒绝。",
+        "properties": {
+          "key": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Key",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "title": "DatasetSnapshotIn",
         "type": "object"
       },
       "DecisionIn": {
@@ -3191,6 +3295,33 @@
         "title": "OptimizeIn",
         "type": "object"
       },
+      "ParamSpecIn": {
+        "description": "能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。",
+        "properties": {
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "type": {
+            "default": "number",
+            "enum": [
+              "number",
+              "integer"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "unit": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "title": "ParamSpecIn",
+        "type": "object"
+      },
       "PasswordChangeIn": {
         "properties": {
           "current_password": {
@@ -3957,6 +4088,12 @@
       "ProposalIn": {
         "description": "下一轮实验提案。proposal_id 是提案方的稳定编号：同号重发回放原结论。",
         "properties": {
+          "analysis_run_id": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Analysis Run Id",
+            "type": "string"
+          },
           "model_version": {
             "default": "",
             "maxLength": 128,
@@ -18370,9 +18507,141 @@
         ]
       }
     },
+    "/api/plans/{plan_id}/analysis-runs": {
+      "get": {
+        "description": "实验活动登记过的分析运行：输入快照、程序与模型版本、参数、随机种子。",
+        "operationId": "list_analysis_runs_api_plans__plan_id__analysis_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Analysis Runs",
+        "tags": [
+          "plan"
+        ]
+      },
+      "post": {
+        "description": "研究员登记一次分析运行（输入必须是本实验活动的快照）。同一运行编号重发回放。",
+        "operationId": "record_analysis_run_api_plans__plan_id__analysis_runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalysisRunIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Record Analysis Run",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
     "/api/plans/{plan_id}/dataset.csv": {
       "get": {
-        "description": "整个实验活动（各轮方案）的训练数据：只含复核通过、质量有效的当前结果版本。",
+        "description": "整个实验活动（各轮方案）此刻的正式数据：只含复核通过、质量有效的当前结果版本。\n\n不可复现：结果以后被更正，这里导出的就变了。训练用 `POST /plans/{id}/datasets` 固化快照、按快照导出。",
         "operationId": "export_dataset_api_plans__plan_id__dataset_csv_get",
         "parameters": [
           {
@@ -18427,6 +18696,280 @@
           }
         ],
         "summary": "Export Dataset",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/{plan_id}/datasets": {
+      "get": {
+        "description": "实验活动的训练数据快照，含每份快照里后来被更正、退回或改判的结果数。",
+        "operationId": "list_snapshots_api_plans__plan_id__datasets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Snapshots",
+        "tags": [
+          "plan"
+        ]
+      },
+      "post": {
+        "description": "固化一份训练数据快照：纳入的结果版本清单、排除清单、数据行与原始文件摘要。之后按快照导出不变。",
+        "operationId": "create_snapshot_api_plans__plan_id__datasets_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetSnapshotIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Snapshot",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/{plan_id}/datasets/{snapshot_id}": {
+      "get": {
+        "description": "快照详情：排除清单、原始文件摘要，以及快照里后来变了的结果。",
+        "operationId": "snapshot_detail_api_plans__plan_id__datasets__snapshot_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Snapshot Detail",
+        "tags": [
+          "plan"
+        ]
+      }
+    },
+    "/api/plans/{plan_id}/datasets/{snapshot_id}/export.csv": {
+      "get": {
+        "description": "按快照导出：读快照里固化的数据行，结果后来怎么变都不影响。",
+        "operationId": "export_snapshot_api_plans__plan_id__datasets__snapshot_id__export_csv_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Snapshot",
         "tags": [
           "plan"
         ]
@@ -21691,6 +22234,254 @@
         "summary": "Device Readings",
         "tags": [
           "environment"
+        ]
+      }
+    },
+    "/api/runtime/plans/{plan_id}/analysis-runs": {
+      "post": {
+        "description": "外部优化器登记一次分析运行：输入快照、程序与模型版本、参数、随机种子、输出摘要。",
+        "operationId": "optimizer_analysis_run_api_runtime_plans__plan_id__analysis_runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalysisRunIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimizer Analysis Run",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/plans/{plan_id}/datasets": {
+      "post": {
+        "description": "外部优化器固化训练数据快照（授权同提案：plan_proposals）。",
+        "operationId": "optimizer_snapshot_api_runtime_plans__plan_id__datasets_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetSnapshotIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimizer Snapshot",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/plans/{plan_id}/datasets/{snapshot_id}/export.csv": {
+      "get": {
+        "description": "外部优化器按快照取训练数据：内容固化，重复读取完全一致。",
+        "operationId": "optimizer_snapshot_export_api_runtime_plans__plan_id__datasets__snapshot_id__export_csv_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "title": "Plan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Optimizer Snapshot Export",
+        "tags": [
+          "runtime"
         ]
       }
     },

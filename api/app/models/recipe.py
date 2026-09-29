@@ -111,9 +111,65 @@ class PlanProposal(Base):
     state: Mapped[str] = mapped_column(String, default="accepted")
     issues: Mapped[list] = mapped_column(JSON, default=list)
     created_plan_id: Mapped[str] = mapped_column(String, default="")
+    # 这份提案由哪次分析运行生成：运行记着用了哪份数据集快照、什么程序与模型版本、参数与随机种子
+    analysis_run_id: Mapped[str] = mapped_column(String, default="")
     created_by: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     __table_args__ = (UniqueConstraint("org_id", "plan_id", "proposal_key", name="uq_plan_proposal_key"),)
+
+
+class DatasetSnapshot(Base):
+    """实验活动训练数据的快照：固化当时纳入的结果版本清单与数据行，之后按快照导出的内容不变。
+
+    结果以后被更正、复核退回或判为无效，都不改快照；快照详情另外列出其中有几条后来变了。只追加，不改不删。
+    """
+
+    __tablename__ = "dataset_snapshots"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    # 发起快照的方案与它所在实验活动的根方案：同一活动各轮方案共用一个根
+    plan_id: Mapped[str] = mapped_column(String, index=True)
+    root_plan_id: Mapped[str] = mapped_column(String, index=True)
+    snapshot_key: Mapped[str] = mapped_column(String, default="")
+    # 筛选条件：纳入哪些结果（复核通过、质量有效、当前版本），以及覆盖的方案
+    filters: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 纳入的结果版本清单：[{result_value_id, result_version}]
+    result_versions: Mapped[list] = mapped_column(JSON, default=list)
+    # 同一活动里没纳入的结果与原因：[{result_value_id, result_version, reason}]
+    exclusions: Mapped[list] = mapped_column(JSON, default=list)
+    # 导出的数据行（与 CSV 列一一对应），按快照导出就读这里，不回头查结果表
+    rows: Mapped[list] = mapped_column(JSON, default=list)
+    # 纳入结果关联的原始数据文件摘要：[{file_id, checksum}]
+    files: Mapped[list] = mapped_column(JSON, default=list)
+    digest: Mapped[str] = mapped_column(String, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class AnalysisRun(Base):
+    """一次分析 / 模型运行：输入哪份数据集快照、什么程序与模型版本、什么参数与随机种子、输出了什么。
+
+    同一运行编号重复登记回放首次结果；内容不一致拒绝。提案挂在运行上，就能回答「这轮参数为什么这样选」。
+    """
+
+    __tablename__ = "analysis_runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    plan_id: Mapped[str] = mapped_column(String, index=True)
+    root_plan_id: Mapped[str] = mapped_column(String, index=True)
+    run_key: Mapped[str] = mapped_column(String)
+    snapshot_id: Mapped[str] = mapped_column(String, index=True)
+    program: Mapped[str] = mapped_column(String, default="")
+    program_version: Mapped[str] = mapped_column(String, default="")
+    model_version: Mapped[str] = mapped_column(String, default="")
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    seed: Mapped[str] = mapped_column(String, default="")
+    outputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    digest: Mapped[str] = mapped_column(String, default="")
+    created_by: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("org_id", "plan_id", "run_key", name="uq_analysis_run_key"),)
 
 
 class PlanVersion(Base):

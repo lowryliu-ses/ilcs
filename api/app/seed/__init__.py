@@ -122,7 +122,10 @@ def seed(
         data.CAPABILITIES if not master_only else []
     ):
         if not db.get(Capability, capability_id):
-            db.add(Capability(id=capability_id, name=name, params=params, recovery=recovery))
+            db.add(Capability(
+                id=capability_id, name=name, params=params, recovery=recovery,
+                param_specs=data.PARAM_SPECS.get(capability_id, {}),
+            ))
 
     for island_id, name in (data.ISLANDS if not master_only else []):
         if not db.get(Island, island_id):

@@ -8,9 +8,11 @@
 """
 from typing import Any
 
+from .bindings import binding_issues, bindings_of
 from .capability import StationSpec, out_of_range, stations_for_step
 from .environment import requirement_issues
 from .graph import ancestors, critical_path_min, graph_issues, graph_mode
+from .params import spec_of, value_issues
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
     assist_issues, branch_issues, notify_issues,
@@ -34,7 +36,11 @@ def capability_name(capabilities: CapabilitySpecs, capability_id: str) -> str:
 
 
 def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str]:
-    """设备步骤的完整性：能力已登记、参数齐全且属于该能力。"""
+    """设备步骤的完整性：能力已登记、参数齐全且属于该能力、值符合参数规格。
+
+    取自上游结果的参数（前馈）算已提供，它的配置由 `bindings.binding_issues` 另行核对；
+    能力里标了非必填的参数可以不写，设备按自己的缺省值执行。
+    """
     issues: list[str] = []
     capability_id = step.get("cap") or ""
     spec = capabilities.get(capability_id)
@@ -47,10 +53,17 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
         defined = spec.get("params") or {}
 
     params = step.get("params") or {}
-    for key, label in defined.items():
+    bound = set(bindings_of(step))
+    for key in defined:
+        rule = spec_of(spec, key)
+        if key in bound:
+            continue
         value = params.get(key)
         if value is None or value == "" or not isinstance(value, (int, float)) or isinstance(value, bool):
-            issues.append(f"{label or key} 未填写")
+            if rule["required"]:
+                issues.append(f"{rule['label']} 未填写")
+            continue
+        issues.extend(value_issues(rule, value))
     for key in params:
         if defined and key not in defined:
             issues.append(f"参数 {key} 不属于该能力")
@@ -129,6 +142,8 @@ def validate_steps(
                 issues.append("返工目标必须是本关卡的上游步骤（依赖链上的前驱）")
         if kind == BRANCH:
             issues.extend(branch_issues(step, steps, index))
+        # 前馈来源要看上游步骤，同样只能在整条流程上校验
+        issues.extend(binding_issues(step, steps, index, capabilities))
         if kind == SUBFLOW:
             issues.extend((subflow_problems or {}).get(step_id, []))
         issues.extend((method_problems or {}).get(step_id, []))
@@ -152,6 +167,7 @@ def validate_steps(
                 "cap": step.get("cap"),
                 "cap_name": capability_name(capabilities, step.get("cap", "")),
                 "params": step.get("params") or {},
+                "bindings": step.get("bindings") or {},
                 "dur": step.get("dur"),
                 "hard": step.get("hard"),
                 "form": step.get("form") or [],

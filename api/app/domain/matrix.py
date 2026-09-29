@@ -130,14 +130,19 @@ def material_demand(factors: list[dict], repeats: int, points: list | None = Non
     return rows
 
 
-def target_issues(factors: list[dict], steps: list[dict], stations) -> list[str]:
+def target_issues(
+    factors: list[dict], steps: list[dict], stations, capabilities: dict[str, dict] | None = None,
+) -> list[str]:
     """因子声明的「作用参数」能否真的下发到设备。
 
     因子可以写 `target: {"step_id": "s03", "param": "electrolyte"}`：这个因子的水平会按孔位
     覆盖该设备步骤的参数。这里逐项核对步骤存在且是设备步骤、同一参数不被两个因子争用、
     每个水平都在至少一个可承接工位的参数范围内——否则批次开跑后才会被设备拒绝。
+    参数登记了单位时，因子单位必须与它相同：水平是原样下发的，mL 的水平当 μL 用会差一千倍。
     """
+    from .bindings import bindings_of
     from .capability import station_fits
+    from .params import canonical_unit, spec_of
     from .steps import DEVICE, kind_of, step_id_of
 
     by_id = {step_id_of(step, index): step for index, step in enumerate(steps)}
@@ -159,6 +164,17 @@ def target_issues(factors: list[dict], steps: list[dict], stations) -> list[str]
         if not param:
             issues.append(f"因子「{name}」没有选择作用的参数")
             continue
+        if param in bindings_of(step):
+            issues.append(f"「{step.get('name')}」的 {param} 已声明取自上游结果，因子「{name}」不能再作用于它")
+            continue
+        if capabilities is not None:
+            unit = spec_of(capabilities.get(step.get("cap") or ""), param)["unit"]
+            factor_unit = canonical_unit(factor.get("unit"))
+            if unit and factor_unit and factor_unit != unit:
+                issues.append(
+                    f"因子「{name}」的单位 {factor_unit} 与参数 {step.get('name')}.{param} 的单位 {unit} 不同："
+                    f"水平会原样下发，请把因子单位改成 {unit}"
+                )
         key = (step_id, param)
         if key in claimed:
             issues.append(f"因子「{name}」与「{claimed[key]}」作用于同一参数 {step.get('name')}.{param}")
