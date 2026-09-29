@@ -487,13 +487,20 @@ def _moved(injector: FaultInjector | None, command_id: str, before: int | None,
 
 def _wait(instance: DeviceAdapter, command_id: str, timeout: float, interval: float,
           pause: Callable[[float], None]) -> tuple[CommandResult | None, list[str]]:
-    """按指令号轮询到终态（或超时），记下经过的状态。"""
+    """按指令号轮询到终态（或超时），记下经过的状态。
+
+    一时连不上（网络抖动、共用同一个车队接口的另一台设备正在做失联项目）记成「不可达」接着查：
+    超时之前恢复就照常出结论，不能让整次验收因为一次查询没连上就中断。
+    """
     seen: list[str] = []
     deadline = time.monotonic() + timeout
     result = None
     while time.monotonic() < deadline:
-        result = instance.query(command_id)
-        state = result.state if result is not None else "not_found"
+        try:
+            result = instance.query(command_id)
+            state = result.state if result is not None else "not_found"
+        except AdapterUnreachable:
+            result, state = None, "unreachable"
         if not seen or seen[-1] != state:
             seen.append(state)
         if result is not None and result.state in TERMINAL:

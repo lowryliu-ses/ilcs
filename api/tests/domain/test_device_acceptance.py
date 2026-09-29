@@ -394,3 +394,28 @@ def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, 
     for key in ("busy", "interlock"):
         detail = next(check.detail for check in report.checks if check.key == key)
         assert "ACC-" not in detail, f"{key} 要测到注入的故障，不能被前一条探针挡住：{detail}"
+
+
+def test_polling_rides_out_a_brief_loss_of_contact():
+    """查询一时连不上（共用接口的另一台设备在做失联项目）接着查，超时前恢复就照常出结论，不中断整次验收。"""
+    from app.adapters.acceptance import _wait
+    from app.adapters.base import AdapterUnreachable, CommandResult
+
+    class Flaky:
+        calls = 0
+
+        def query(self, command_id):
+            self.calls += 1
+            if self.calls <= 2:
+                raise AdapterUnreachable("设备接口不可达：URLError")
+            return CommandResult(command_id, "done")
+
+    result, seen = _wait(Flaky(), "ACC-T-run", 5, 0.01, lambda _: None)
+    assert result is not None and result.state == "done" and seen == ["unreachable", "done"]
+
+    class Gone:
+        def query(self, command_id):
+            raise AdapterUnreachable("设备接口不可达")
+
+    result, seen = _wait(Gone(), "ACC-T-run", 0.1, 0.01, lambda _: None)
+    assert result is None and seen == ["unreachable"], "一直连不上：超时后照实报，不编结论"
