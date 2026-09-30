@@ -865,12 +865,33 @@ export type AcceptanceListing = {
 export type DriverField = {
   name: string;
   label: string;
-  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array';
+  /** scalar：文本 / 数值 / 是否都行（写入值、常量）；any：任意 JSON（REST 请求体） */
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array' | 'scalar' | 'any';
   type_label: string;
   required: boolean;
   /** 每台设备自己的连接参数：设备模板里不写死，套用时由工位填 */
   connection: boolean;
   hint: string;
+  /** object：固定的几个键 */
+  fields?: DriverField[];
+  /** object：任意键 → 同一种值（点表、能力映射、状态映射） */
+  entries?: DriverField;
+  /** array：每一项 */
+  items?: DriverField;
+  /** 只能取这几个值 */
+  options?: string[];
+  /** 值是别处登记的名字：points（点名）/ capabilities（能力） */
+  ref?: 'points' | 'capabilities';
+  /** 表的键从哪来：points / capabilities / params（当前能力的参数）/ options（当前参数的选项） */
+  key_ref?: 'points' | 'capabilities' | 'params' | 'options';
+  key_options?: string[];
+  key_label?: string;
+  /** 往下走时记住表的键是哪项能力 / 哪个参数，给下层的 key_ref 用 */
+  scope?: 'capability' | 'param';
+  /** 只填这一个键时可以简写成它的值（"sp_temp" 就是 {"point": "sp_temp"}） */
+  shorthand?: string;
+  /** array：只有一项时也可以不写成列表 */
+  single?: boolean;
 };
 
 export type DriverInfo = {
@@ -884,6 +905,8 @@ export type DriverInfo = {
   credential: string;
   supports: { hold: boolean; abort: boolean; query: boolean; dedup: boolean };
   template: Record<string, unknown>;
+  /** 每项能力在这个驱动里的起步写法（按能力字典的参数生成），表单里加一项能力时照它起步 */
+  capability_examples?: Record<string, unknown>;
 };
 
 export type ConfigCheck = { ok: boolean; problems: string[]; warnings: string[] };

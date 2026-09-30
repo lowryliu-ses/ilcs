@@ -757,9 +757,22 @@ class StationService:
         ).as_dict()
 
     def drivers(self, station_id: str | None = None) -> list[dict]:
-        """已登记的驱动与各自的配置说明、起步模板（按工位能力极限生成）。"""
+        """已登记的驱动与各自的配置说明、起步模板（按工位能力极限生成）。
+
+        `capability_examples`：每项能力在这个驱动里的起步写法（点表驱动的设定值 / 实测点 / 启动信号、命令驱动的
+        设定命令……），按能力字典的参数生成——表单里加一项能力时照它起步。给了工位时以工位的能力极限为准。"""
         limits = (self._require_station(station_id).limits or {}) if station_id else {}
-        return [info.as_dict(limits) for info in DRIVERS.values()]
+        dictionary = {
+            key: {param: None for param in (spec.get("params") or {})}
+            for key, spec in self.capabilities.specs().items() if not spec.get("retired")
+        }
+        rows = []
+        for info in DRIVERS.values():
+            row = info.as_dict(limits)
+            examples = info.template({**dictionary, **limits}).get("capabilities")
+            row["capability_examples"] = examples if isinstance(examples, dict) else {}
+            rows.append(row)
+        return rows
 
     def template_options(self, station_id: str) -> list[dict]:
         station = self._require_station(station_id)

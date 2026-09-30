@@ -125,7 +125,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 - *一类设备怎么接*：存成**设备接入模板**（`services/template_service.py`）——驱动 + 映射配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理；起草人不能发布本人起草的模板，发布要签名，发布后内容由触发器冻结；工位 = 模板的某一版 + 自己的连接参数（`adapters.template_id / template_connection`，`config` 仍是合并后的完整配置，驱动照旧只读它）。新修订发布时旧版退役，但不自动推给工位：模板页列出还在用旧修订的工位，逐台切换、重新验收。模板的导出文件（`ilcs-device-template/1`，带内容摘要）就是设备模块交付的 `profile.json`，导入一律成草稿，摘要对不上（导出后被改过）拒绝。
 - *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——设备模块（`devices/gateway/<模块>/`）基于 `devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
 
-驱动在 `adapters/catalog.py` 声明自己的配置项（界面按它出表单，`GET /drivers`），保存前按它查缺项与类型、再构造一次驱动实例（不连设备）——驱动自己的校验（正则、点表、白名单）就在构造时，配错了当场拒绝（`adapter_config_invalid`），不用等到测试连接；未登记的顶层键只提醒。只有驱动、配置、凭据真的变了才检查：适配器坏了的时候，停用它、改说明不被挡。
+驱动在 `adapters/catalog.py` 声明自己的配置项，连同嵌套结构（`fields` 固定键、`entries` 任意键的表、`items` 列表、`options` 可选值、`ref` / `key_ref` 引用点名 / 能力 / 参数、`shorthand` 简写、`single` 单项列表）；界面按它出通用表单（`features/stations/ConfigForm.tsx`，设备连接与接入模板共用，表单编辑不了的写法就地按 JSON 改，完整 JSON 随时可切），`GET /drivers` 另给每项能力的起步写法 `capability_examples`（按能力字典的参数生成）。保存前按它查缺项与类型、再构造一次驱动实例（不连设备）——驱动自己的校验（正则、点表、白名单）就在构造时，配错了当场拒绝（`adapter_config_invalid`），不用等到测试连接；未登记的键（顶层与嵌套结构里的）只提醒。只有驱动、配置、凭据真的变了才检查：适配器坏了的时候，停用它、改说明不被挡。
 
 设备上还有可能在动作的指令（在途、已保持、结果未知且可能已送达，`CommandRepository.acting_on_station`）时，只放行说明、停用、超时与探测周期（`domain/adapter_rules.busy_blocked_changes`）：换了驱动或连接目标，新实例就查不回原指令——设备侧去重的驱动查不到它，批次判故障转人工；走作业台账的映射驱动更糟，台账按工位存，会拿旧作业去读新地址的状态，读到空闲就判完成。试点切换脚本守同一条规矩。
 
