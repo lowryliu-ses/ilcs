@@ -234,9 +234,9 @@ function LedgerPanel({
               <tr key={station.id} className={station.retired ? 'retired-row' : undefined}>
                 <td>
                   <b className="mono">{station.id}</b>
-                  <div className="tiny muted">
-                    {station.name} · {areaLabel(station.island, areaName(station.island))}
-                  </div>
+                  <div className="tiny muted">{station.name}</div>
+                  {/* 台账列窄：只写名称（没起名写编号），完整的「名称（实验区 #N）」在实验区页签与现场监控 */}
+                  <div className="tiny muted">{areaName(station.island) || areaLabel(station.island)}</div>
                 </td>
                 <td>
                   {station.retired ? (
