@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
@@ -565,7 +566,7 @@ class BatchService:
     def create(
         self, plan_id: str, priority: int, note: str, user: User, task_id: str = "",
     ) -> dict:
-        """原子创建：冻结快照 → 预留物料 → 生成运行分配 → 绑定实验任务。任一步失败整体回滚。"""
+        """原子创建：冻结快照 → 生成运行分配 → 预留物料（流程 BOM + 方案给出的量）→ 绑定实验任务。任一步失败整体回滚。"""
         batch = self._create(plan_id, priority, note, user, task_id)
         self.db.commit()
         return self.summary_out(batch)
@@ -702,10 +703,24 @@ class BatchService:
             ),
         )
         self.batches.add(batch)
-        bom = batch.recipe_snapshot.get("bom") or []
+        # 先生成运行分配再预留：方案因子给出的物料（流程 BOM 没列的）按本批实际分到的样本算量，
+        # 追加进快照 BOM 后一并预留。开跑检查、人工投料核对、消耗对账、报告都读快照 BOM，自然生效；
+        # 预留不足照旧整体回滚，运行分配跟着撤掉
+        rows = self._generate_samples(batch, content, task)
+        bom = list(batch.recipe_snapshot.get("bom") or [])
+        capabilities = self.capabilities.specs()
+        self._require_plan_dosing(content, bom, batch.recipe_snapshot.get("steps") or [], capabilities)
+        from_plan = (
+            self.plan_materials(
+                content.factors or [], rows, bom, batch.recipe_snapshot.get("steps") or [], capabilities,
+            )
+            if content.plan_type == "matrix" else []
+        )
+        if from_plan:
+            bom += from_plan
+            batch.recipe_snapshot = {**batch.recipe_snapshot, "bom": bom}
         if bom:
             self.materials.reserve_for_batch(batch.id, bom, user)
-        rows = self._generate_samples(batch, content, task)
         if content.plan_type == "matrix":
             from ..domain.matrix import condition_params
 
@@ -732,6 +747,57 @@ class BatchService:
         )
         self.db.flush()
         return batch
+
+    @staticmethod
+    def plan_materials(
+        factors: list[dict], rows: list[dict], bom: list[dict], steps: list[dict],
+        capabilities: dict[str, dict] | None = None,
+    ) -> list[dict]:
+        """由方案给出用量的物料：流程里有消耗步骤声明投它（`material`）、流程 BOM 又没列的，
+        用量 = 本批每个运行分配的「给出这一步用量的因子」水平 × per 之和。
+
+        认哪个因子与方案锁定检查同一条规则（domain.plan_dosing）：作用在这一步的用量参数上、写了物料单位、per > 0。
+        流程 BOM 已列的物料照旧按 BOM（每批的量）预留，不在这里重复算——两边都算就预留了两份。
+        其余带物料的因子（没有作用参数、作用在别的步骤或参数上）只是计划页的估算，不据此预留。
+        配方表导入的流程 BOM 为空，逐瓶的量全在因子上，这里就是它们的预留来源。
+        按十进制算到 6 位小数（与库存流水同一精度），和为 0 的不列：0 用量没有可预留的东西。
+        """
+        from ..domain.inventory import q
+        from ..domain.params import decimal_of
+        from ..domain.plan_dosing import dosing_factors
+
+        factors = list(factors or [])
+        totals: dict[tuple[str, str], Decimal] = {}
+        for position, dosed in dosing_factors(steps, bom, factors, capabilities).items():
+            material = factors[position].get("material") or {}
+            per = decimal_of(material.get("per")) or Decimal(0)
+            key = (dosed.material, str(material.get("unit") or ""))
+            for row in rows:
+                levels = row.get("levels") or []
+                level = decimal_of(levels[position]) if position < len(levels) else None
+                totals[key] = totals.get(key, Decimal(0)) + (level or Decimal(0)) * per
+        return [
+            {"material": name, "qty": f"{q(total):f}", "unit": unit, "source": "plan"}
+            for (name, unit), total in totals.items() if q(total) > 0
+        ]
+
+    @staticmethod
+    def _require_plan_dosing(content, bom: list[dict], steps: list[dict], capabilities: dict[str, dict]) -> None:
+        """兜底：流程里还有用量既不在 BOM、也没有合格因子给出的投料步骤，就不建批次。
+
+        方案检查（锁定、提交）按同一条规则挡过一次；这里再判是因为按旧版本批准的方案、之后才改的能力登记都可能漏过去。
+        放过去的批次注定对不上账：内置模拟不回报这种料，真实设备的回报被当成「没有预留」拒收。
+        """
+        from ..domain.plan_dosing import plan_dosed_steps
+
+        factors = (content.factors or []) if content.plan_type == "matrix" else []
+        problems = [row.problem for row in plan_dosed_steps(steps, bom, factors, capabilities) if row.factor is None]
+        if problems:
+            raise StateConflict(
+                f"有投料步骤的用量没有来源，不能建批次：{problems[0]}",
+                {"blocked": [{"key": "step_materials", "label": row} for row in problems]},
+                code="plan_material_missing",
+            )
 
     @staticmethod
     def planned_rows(content, task=None) -> int:
@@ -907,13 +973,28 @@ class BatchService:
                 batch.recipe_snapshot.get("plate", 0), plan.layout, plan.seed,
                 plan.design_points or None, repeat_offset=offset, groups=portion.get("groups") or None,
             )
+            # 方案指定了物理样本（如贴好二维码的瓶子）：第 i 个对应「条件序号 × 重复数 + (重复号 − 1)」。
+            # 重复号是全局的（拆分子任务已含偏移），所以子任务不必各带清单；随机布局只换孔位不换这层对应。
+            # 超出方案重复数的重复号（整体重复的第二份、补测）没有对应的瓶子，照旧登记新的
+            listed = list(plan.sample_ids or [])
+            repeats = max(1, int(plan.repeats or 1))
+
+            def physical_of(group: str, repeat: int) -> str:
+                if not listed or not group[1:].isdigit() or not 1 <= repeat <= repeats:
+                    return ""
+                index = (int(group[1:]) - 1) * repeats + (repeat - 1)
+                return listed[index] if 0 <= index < len(listed) else ""
+
             rows = [
                 {
                     "well": a.well, "group": a.group, "label": a.label, "repeat": a.repeat,
-                    "levels": list(a.levels), "is_control": a.is_control, "physical_id": "",
+                    "levels": list(a.levels), "is_control": a.is_control,
+                    "physical_id": physical_of(a.group, a.repeat),
                 }
                 for a in assignments
             ]
+            if listed:
+                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]])
         else:
             listed = list((task.sample_ids if task is not None else None) or plan.sample_ids or [])
             count = len(listed) or int(portion.get("count") or 0) or plan.sample_count
@@ -970,6 +1051,57 @@ class BatchService:
             # 在途孔位占用：唯一约束挡住两个样本占同一个孔
             sample_service.occupy_slot(container_id, row["well"], physical_id, assignment.id)
         return rows
+
+    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str]) -> None:
+        """矩阵方案指定的瓶子：一瓶一配方。
+
+        瓶子已在别的批次里（未终止的——已完成的瓶子装过配方，同样不能再配一次），再建一个批次就是往同一瓶里
+        二次投料、物料也预留两份；已处置、已用尽的瓶子不能再用。先于预留判，不必预留了再回滚。
+        单条件方案按清单重复测已有样本是正当的，不走这里。
+        """
+        from .formulation_service import UNUSABLE_SAMPLE
+
+        for physical_id in dict.fromkeys(physical_ids):
+            physical = self.physical.get(physical_id)
+            if physical is None:
+                continue  # 不存在由分配循环报 NotFound
+            if physical.lifecycle_state in UNUSABLE_SAMPLE:
+                raise StateConflict(
+                    f"方案引用的样本 {physical_id} {UNUSABLE_SAMPLE[physical.lifecycle_state]}，不能再用于执行",
+                    {"blocked": [{"key": "sample", "label": physical_id}]}, code="sample_unusable",
+                )
+            other = self.bottle_used_by(physical_id, exclude=batch.id)
+            if other:
+                raise StateConflict(
+                    f"瓶子 {physical_id} 已分配给批次 {other}，同一瓶不能再次配液：请导入新序列号的配方表",
+                    {"blocked": [{"key": "sample", "label": f"{physical_id} → {other}"}]},
+                    code="sample_in_use",
+                )
+
+    def bottle_used_by(self, physical_id: str, exclude: str = "") -> str:
+        """这个瓶子被哪个批次用过（返回批次号，没有返回空串）。配方表导入与建批次共用这一条口径。
+
+        没终止的批次（含已完成）算用过：装过配方的瓶子不能再配一次。已终止的批次只有真的向设备发出过指令
+        （投递状态是「可能已发出」或「已送达」）才算——瓶里可能已经投了料；从没下发就终止的批次不占瓶子。
+        """
+        from ..models import Command
+
+        for run in self.samples.for_physical(physical_id):
+            if run.batch_id == exclude:
+                continue
+            other = self.batches.get(run.batch_id)
+            if other is None:
+                continue
+            if other.state != "aborted":
+                return other.id
+            sent = (
+                self.db.query(Command.id)
+                .filter(Command.batch_id == other.id, Command.delivery_state.in_(("maybe_sent", "delivered")))
+                .first()
+            )
+            if sent is not None:
+                return other.id
+        return ""
 
     # ---------- 排程 ----------
 
@@ -1109,6 +1241,16 @@ class BatchService:
             executor_id, steps, first_work.starts_at if first_work else now(), until=last_end,
         )
         personnel = StaffingService(self.db, self.ctx).conflicts(batch)
+        # 方案给出用量、本批合计为 0 的物料：建批次时没进快照 BOM（0 用量没有可预留的东西），
+        # 声明投它的步骤不算「要 BOM」，否则只排了对照组的补测批次永远过不了开跑检查
+        from ..domain.plan_dosing import dosing_factors
+
+        zero_plan = list(dosing_factors(
+            steps, snapshot.get("bom") or [],
+            ((batch.plan_snapshot or {}).get("factors") or [])
+            if (batch.plan_snapshot or {}).get("plan_type") == "matrix" else [],
+            self.capabilities.specs(),
+        ).values())
         context = preflight.PreflightContext(
             recipe_state=source.state if source else "",
             recipe_risk=snapshot.get("risk", ""),
@@ -1120,7 +1262,8 @@ class BatchService:
             resource_checks=resource_checks,
             reservations=reservations,
             bom_items=snapshot.get("bom") or [],
-            material_steps=len([s for s in steps if consumes_materials(s)]),
+            material_steps=len([s for s in steps if consumes_materials(s)]) - len(zero_plan),
+            zero_plan_materials=list(dict.fromkeys(row.material for row in zero_plan)),
             bom_satisfied=self.materials.bom_satisfied(batch.id, snapshot.get("bom") or []),
             expired_lots=self.materials.expired_reserved_lots(batch.id),
             first_station=(

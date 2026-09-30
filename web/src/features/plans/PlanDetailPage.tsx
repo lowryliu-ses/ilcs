@@ -240,7 +240,10 @@ export function PlanDetailPage() {
           </table>
           <div className="panel-body small muted">
             重复 {data.repeats} 次 · 布局 {data.layout === 'randomized' ? `随机化（种子 ${data.seed}）` : '顺序'} ·
-            对照 {data.control?.label ?? '未设'}
+            对照 {data.control?.label ?? '未设'} ·{' '}
+            {data.sample_ids.length
+              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）`
+              : '未指定物理样本：每个运行登记新样本'}
           </div>
         </Panel>
         ) : (
@@ -389,6 +392,7 @@ export function PlanDetailPage() {
               <th>条件组</th>
               <th>水平组合</th>
               <th>{data.batch_plan?.split ? `孔位（第 1 批，共 ${data.batch_plan.batches} 批）` : '孔位'}</th>
+              {data.sample_ids.length ? <th>指定样本</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -405,6 +409,9 @@ export function PlanDetailPage() {
                     .map((well) => well.well)
                     .join(' ')}
                 </td>
+                {data.sample_ids.length ? (
+                  <td className="mono small">{bottlesOf(data.sample_ids, data.repeats, condition.group) || '—'}</td>
+                ) : null}
               </tr>
             ))}
           </tbody>
@@ -445,7 +452,8 @@ export function PlanDetailPage() {
           </tbody>
         </table>
         <div className="panel-body small muted">
-          创建批次时按流程 BOM 写入预留；因子换算物料需先入库并放行，否则开跑检查会拦截。
+          创建批次时写入预留：流程 BOM 列出的物料按 BOM；BOM 没列、但有步骤声明投料的物料，按本批分到的样本的因子水平 ×
+          换算量预留。已放行且在有效期内的可用量不足时，批次创建失败并整体回滚。其余因子换算物料只作估算，不预留，也不在开跑时检查。
         </div>
       </Panel>
       ) : (
@@ -485,6 +493,17 @@ export function PlanDetailPage() {
       {comparing !== null ? <DiffDialog planId={data.id} from={comparing} onClose={() => setComparing(null)} /> : null}
     </div>
   );
+}
+
+/** 矩阵方案指定的物理样本里，某个条件组分到哪几瓶。与后端 batch_service._generate_samples 同一规则：
+    第 i 个样本对应「条件序号 × 重复数 + (重复号 − 1)」，条件序号取组名里的数字（C01 → 1），不按行的位置，
+    这样页面上看到的对应关系就是建批次时实际分配的那个。 */
+function bottlesOf(sampleIds: string[], repeats: number, group: string): string {
+  const number = Number(group.slice(1));
+  if (!/^\d+$/.test(group.slice(1)) || number < 1) return '';
+  const per = Math.max(1, Math.trunc(repeats || 1));
+  const bottles = sampleIds.slice((number - 1) * per, number * per);
+  return per === 1 ? bottles.join('') : bottles.map((id, at) => `重复${at + 1} ${id}`).join(' · ');
 }
 
 function ApprovalProgress({ levels }: { levels: ApprovalLevel[] }) {
@@ -931,6 +950,19 @@ function FactorEditor({
   const [repeats, setRepeats] = useState<number | ''>(plan.repeats);
   const [layout, setLayout] = useState(plan.layout);
   const [seed, setSeed] = useState<number | ''>(plan.seed);
+  /* 方案指定了物理样本时，瓶子按「条件顺序 × 重复号」对应；改了重复次数或因子水平，对应关系就变了，
+     条数也可能对不上（锁定校验会拦）。给个清除的出口，免得只能重新导入配方表才能再锁定。 */
+  const [clearSamples, setClearSamples] = useState(false);
+  const structureKey = (list: Factor[]) => JSON.stringify(list.map((factor) => factor.levels));
+  /* 已保存的方案本身就对不上（例如之前改重复次数时没勾清除）：照样给出清除的出口，否则只能改回旧值再改 */
+  const alreadyMismatched = plan.sample_ids.length > 0 && plan.sample_ids.length !== plan.conditions.length * Math.max(1, plan.repeats);
+  /* 有显式设计点（配方表导入的方案）时条件由设计点决定，改因子水平不改变条件，只有重复次数会改变对应 */
+  const levelsMatter = !(plan.design_points ?? []).length;
+  const mappingChanged =
+    plan.sample_ids.length > 0 &&
+    (alreadyMismatched ||
+      (repeats === '' ? 1 : repeats) !== plan.repeats ||
+      (levelsMatter && structureKey(factors) !== structureKey(plan.factors ?? [])));
 
   const materials = [...new Set((lots.data ?? []).map((lot) => lot.material))].sort();
   const unitOf = (material: string) => (lots.data ?? []).find((lot) => lot.material === material)?.unit ?? '';
@@ -975,6 +1007,7 @@ function FactorEditor({
         repeats: repeats === '' ? 1 : repeats,
         layout,
         seed: seed === '' ? 1 : seed,
+        ...(mappingChanged && clearSamples ? { sample_ids: [] } : {}),
       })
       .catch((caught) => toast.push(caught.message));
   };
@@ -997,8 +1030,20 @@ function FactorEditor({
     >
       <div className="note">
         条件矩阵 = 各因子水平的全组合 × 重复次数。矩阵锁定后不可修改因子结构；
-        带物料换算的因子会进入计划页的物料需求预览，对应批号未放行时开跑检查会拦截。
+        带物料换算的因子会进入计划页的物料需求预览；如果流程有步骤声明投这种物料、BOM 又没列，
+        创建批次时按各样本的水平预留，已放行批号不够就建不了批次。
       </div>
+
+      {mappingChanged ? (
+        <div className="note warn">
+          这个方案指定了 {plan.sample_ids.length} 个物理样本，按条件顺序 × 重复号逐瓶对应。改了重复次数或因子水平后，
+          哪瓶对哪个条件会变，数量对不上时锁定校验不通过。
+          <label className="check" style={{ marginTop: 6 }}>
+            <input type="checkbox" checked={clearSamples} onChange={(event) => setClearSamples(event.target.checked)} />
+            清除指定的物理样本（之后每个运行登记新样本）
+          </label>
+        </div>
+      ) : null}
 
       <div className="grid cols-3">
         <Field label="重复次数">

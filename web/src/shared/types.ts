@@ -49,6 +49,14 @@ export const BATCH_STATE_LABEL: Record<string, string> = {
   fault: '故障', aborting: '终止中', aborted: '已终止', done: '已完成',
 };
 
+/** 流程状态的中文名，与服务端 recipe_service.STATE_LABEL 一致；接口带了 state_label 时以接口为准。 */
+export const RECIPE_STATE_LABEL: Record<string, string> = {
+  draft: '草稿', review: '评审中', approved: '已批准', released: '已发布', retired: '已退役',
+};
+
+/** 方案结构状态的中文名，与服务端 plan_service.STATE_LABEL 一致。 */
+export const PLAN_STATE_LABEL: Record<string, string> = { draft: '草稿', locked: '矩阵已锁定' };
+
 export const PLAN_TYPE_LABEL: Record<string, string> = {
   matrix: '矩阵实验', single_condition: '单条件样本实验', commissioned_test: '委托检测',
 };
@@ -374,6 +382,21 @@ export type RecoveryEvaluation = {
 
 export type BomItem = { material: string; qty: number; unit: string };
 
+/** 物料主数据（GET /materials）。批号、BOM、步骤投料物料都按 name 对应 */
+export type MaterialRow = {
+  id: string;
+  code: string;
+  name: string;
+  base_unit: string;
+  category: string;
+  cas: string;
+  conversions: Record<string, unknown>;
+  external_ref: string;
+  ghs: string[];
+  state: string;
+  lot_count: number;
+};
+
 export type Factor = {
   name: string;
   unit: string;
@@ -517,6 +540,10 @@ export type RecipeStep = {
   requires_signature?: boolean;
   requires_sample_check?: boolean;
   consumes_materials?: boolean;
+  /** 这一步投的是哪种物料（与 BOM、批号上的物料名称一致）。BOM 没列时用量由实验方案按样本给出 */
+  material?: string;
+  /** 投料用量取自哪个能力参数（仅设备步骤）；不填时执行器按物料单位推断 */
+  material_param?: string;
   resource?: { station?: string; capability?: string; holds_station?: boolean };
   qualification?: { sop?: string; safety?: string };
   /** 质检关卡：读测量来源步骤回执里的 field，按 min/max 判定 */
@@ -2618,4 +2645,134 @@ export type WebhookDeliveryRow = {
   response_status: number;
   created_at: string | null;
   delivered_at: string | null;
+};
+
+/* ---------- 配方导入（配液模板） ---------- */
+
+/** 模板里的固定步骤：普通流程步骤，另带模板内唯一的 key 与引用其他固定步骤的 after */
+export type FormulationFixedStep = RecipeStep & { key: string; after?: string[] };
+
+export type FormulationStage = {
+  key: string;
+  label: string;
+  /** 本阶段第一个加料步骤还要等哪些固定步骤 */
+  after?: string[];
+  /** 本阶段最后一个加料之后是否紧跟搅拌；缺省是 */
+  stir_after_last?: boolean;
+  then?: FormulationFixedStep[];
+};
+
+/** 物料类别 → 怎么加：进哪个阶段、用量写到哪个参数、加完是否紧跟搅拌、加料步骤长什么样 */
+export type FormulationRoute = {
+  stage: string;
+  param: string;
+  /** 不是阶段最后一个加料时是否紧跟搅拌；缺省是 */
+  stir_after?: boolean;
+  step: RecipeStep;
+};
+
+export type FormulationExperimentParam = {
+  key: string;
+  label: string;
+  /** 作用的固定步骤 key 与其能力参数 */
+  step: string;
+  param: string;
+  unit: string;
+  default: number;
+};
+
+export type FormulationTemplateConfig = {
+  plate: number;
+  risk?: string;
+  design?: string;
+  unit?: string;
+  sample_type?: string;
+  serial_headers?: string[];
+  required_metrics?: string[];
+  prefix?: FormulationFixedStep[];
+  stages?: FormulationStage[];
+  routes?: Record<string, FormulationRoute>;
+  stir?: RecipeStep;
+  suffix?: FormulationFixedStep[];
+  experiment_params?: FormulationExperimentParam[];
+};
+
+export type FormulationTemplate = {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  /** active | retired */
+  state: string;
+  state_label?: string;
+  config?: FormulationTemplateConfig;
+  /** 模板配置按现在的主数据（方法、能力、指标）重核的结果；只在详情里有 */
+  check?: { ok: boolean; problems: string[] };
+  row_version: number;
+  created_by_name?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type FormulationColumn = {
+  header: string;
+  name: string;
+  unit: string;
+  kind: 'serial' | 'reagent' | 'ignored';
+  category?: string;
+  stage?: string;
+};
+
+/** 表格里的一瓶：行号（表格里的第几行）、瓶身序列号、各试剂用量（按试剂名） */
+export type FormulationRow = { row: number; serial: string; amounts: Record<string, number> };
+
+export type FormulationReagent = {
+  name: string;
+  category: string;
+  stage: string;
+  unit?: string;
+  total: number;
+  /** 用量为 0 的瓶数（这些瓶跳过这种料） */
+  zero_rows: number;
+};
+
+export type FormulationPlanDraft = {
+  name: string;
+  plan_type: string;
+  factors: Factor[];
+  design_points: (number | string)[][];
+  repeats: number;
+  sample_ids: string[];
+  required_metrics: string[];
+  goal: string;
+};
+
+/** 解析 / 预览的结果：服务端按模板把表格翻译成流程步骤与方案，issues 非空就不能导入 */
+export type FormulationPreview = {
+  columns: FormulationColumn[];
+  rows: FormulationRow[];
+  reagents: FormulationReagent[];
+  steps: RecipeStep[];
+  bom: BomItem[];
+  plan: FormulationPlanDraft;
+  /** 生成的流程草稿的名称、样品位、风险评估编号与设计说明 */
+  recipe?: { name: string; plate: number; risk: string; design: string };
+  /** 实际用上的实验参数取值 */
+  params?: Record<string, number>;
+  issues: string[];
+  warnings: string[];
+  /** 读文件时的提醒（隐藏行、隐藏工作表）；只在上传解析的结果里有 */
+  sheet_warnings?: string[];
+  template_id?: string;
+  /** 读出来的原始表格：后续预览与导入原样回传 */
+  filename?: string;
+  table?: (string | number | null)[][];
+};
+
+export type FormulationImportResult = {
+  template_id: string;
+  recipe: { id: string; name: string; state: string; state_label?: string; reused: boolean };
+  plan: { id: string; name: string; state: string; state_label?: string };
+  samples: { id: string; created: boolean }[];
+  warnings: string[];
 };

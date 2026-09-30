@@ -27,6 +27,8 @@ class PreflightContext:
     reservations: list[dict] = field(default_factory=list)
     bom_items: list[dict] = field(default_factory=list)
     material_steps: int = 0
+    # 方案给出用量、本批合计为 0 的物料（没进快照 BOM）；声明投它们的步骤已从 material_steps 里扣掉
+    zero_plan_materials: list[str] = field(default_factory=list)
     bom_satisfied: bool = False
     expired_lots: list[str] = field(default_factory=list)
     first_station: dict | None = None
@@ -107,8 +109,10 @@ def evaluate(context: PreflightContext) -> list[Check]:
     # ---------- 2 物料 ----------
     if not context.bom_items:
         detail = "该流程未定义物料需求" + (
-            "，且没有消耗物料的步骤，无需投料许可" if not context.material_steps
-            else "；但存在声明消耗物料的步骤，请补齐 BOM"
+            "；但存在声明消耗物料的步骤，请补齐 BOM" if context.material_steps
+            else f"；{'、'.join(context.zero_plan_materials)} 由方案给出用量，本批合计为 0，无需投料许可"
+            if context.zero_plan_materials
+            else "，且没有消耗物料的步骤，无需投料许可"
         )
         checks.append(
             Check(

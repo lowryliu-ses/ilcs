@@ -8,6 +8,7 @@ import type { RecipeDetail } from '../../shared/types';
 import { CheckList, Empty, Panel, Pill, useToast } from '../../shared/ui';
 import { useSignature } from '../../shared/signature';
 import { SimulationBadge, SimulationPanel } from './SimulationPanel';
+import { kindOf, stepMaterial } from './rules';
 import { CommentsPanel } from '../../shared/comments';
 
 export function RecipeDetailPage() {
@@ -125,6 +126,30 @@ export function RecipeDetailPage() {
                 <tr key={step.index}>
                   <td>
                     {step.index + 1}. {step.name}
+                    {data.steps[step.index] && stepMaterial(data.steps[step.index]) ? (
+                      (() => {
+                        const current = data.steps[step.index];
+                        const inBom = (data.bom ?? []).some((item) => item.material === stepMaterial(current));
+                        /* 方案因子只能作用于设备步骤：人工步骤投的料 BOM 没列，就没有任何地方能给出用量。
+                           只认勾了「消耗物料」的设备 / 人工步骤（stepMaterial 已按这个取），旧流程残留的字段不标 */
+                        const manualOutside = !inBom && kindOf(current) === 'manual';
+                        return (
+                          <span
+                            className={manualOutside ? 'tag bad' : 'tag'}
+                            style={{ marginLeft: 6 }}
+                            title={
+                              inBom
+                                ? '投料物料，用量按流程 BOM'
+                                : manualOutside
+                                ? '人工步骤投的物料不在 BOM 里：人工步骤的用量只能按 BOM 预留，请把它加进 BOM'
+                                : '投料物料，BOM 没列：用量由实验方案按样本给出'
+                            }
+                          >
+                            投 {stepMaterial(current)}
+                          </span>
+                        );
+                      })()
+                    ) : null}
                     {data.steps[step.index]?.hard?.maxGapMin ? (
                       <div className="tiny warn-text">硬时限 {data.steps[step.index].hard?.maxGapMin} min</div>
                     ) : null}

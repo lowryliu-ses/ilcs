@@ -18,7 +18,8 @@ from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
 from ..domain import dataquality, workflow
-from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of
+from ..domain.dosing import dosing_param, param_unit
+from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of, step_material
 from ..models import Adapter, AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from .telemetry import context as telemetry_context
@@ -475,6 +476,7 @@ class ExecutionService:
             step_index=command.step_index,
             step_id=self._step_id(batch, command.step_index),
             target_command_id=target, method=dict(command.method or {}),
+            **self._step_hooks(batch, command),
         )
         if command.type in {"hold", "abort"} and not (
             record.supports_hold if command.type == "hold" else record.supports_abort
@@ -751,6 +753,37 @@ class ExecutionService:
             return self.db.get(__import__("app.models", fromlist=["StepRun"]).StepRun, command.step_run_id)
         return self.runs.latest(batch.id, self._step_id(batch, command.step_index))
 
+    def _step_hooks(self, batch: Batch, command: Command) -> dict:
+        """执行设备动作的指令带给驱动的步骤信息：投哪种料（名称、用量参数及其单位）与方法输出规则。
+
+        从批次快照按步骤序号取（与 complete_device_step 同一取法），不进 params——params 原样下发给设备，
+        真实驱动的线协议不因此改变。用量参数按 `dosing.dosing_param` 取（与消耗对账同一条规则）：没写时
+        该能力里单位等于物料单位的参数恰好一个才用，有歧义就不填，宁可不回报消耗，也不拿错参数去对账。
+        """
+        if command.type not in DISPATCHING:
+            return {}
+        snapshot = batch.recipe_snapshot or {}
+        steps = normalize(snapshot.get("steps") or [])
+        step = steps[command.step_index] if command.step_index < len(steps) else {}
+        hooks: dict = {}
+        outputs = (step.get("method") or {}).get("outputs") or []
+        if outputs:
+            hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
+        name = step_material(step)
+        entry = next((row for row in snapshot.get("bom") or [] if row.get("material") == name), None) if name else None
+        if entry is None:
+            return hooks
+        unit = str(entry.get("unit") or "")
+        row = self.capabilities.get(command.capability or step.get("cap") or "")
+        capability = {"params": row.params or {}, "param_specs": row.param_specs or {}} if row else {}
+        param = dosing_param(step, capability, unit)
+        if param:
+            # 单位报用量参数自己登记的单位：下发的数值就是这个单位的量。显式指定的参数单位可能和 BOM 不同
+            # （μL 对 mL、g 对 mg），贴上 BOM 单位会把数值原样记成错的量级；换算交给消耗入账按物料做，
+            # 换算不了就拒绝并报警，不会错账。参数没登记单位时才退回 BOM 单位。
+            hooks["material"] = {"name": name, "unit": param_unit(capability, param) or unit, "param": param}
+        return hooks
+
     def _step_id(self, batch: Batch, index: int) -> str:
         steps = normalize(batch.recipe_snapshot.get("steps") or [])
         if index < len(steps):
@@ -850,7 +883,7 @@ class ExecutionService:
         from .consumption_service import ConsumptionService
 
         consumption = ConsumptionService(self.db, self.ctx).book(
-            batch, command, result.delivered or {}, step_run_id=command.step_run_id,
+            batch, command, result.delivered or {}, step_run_id=command.step_run_id, origin=result.origin,
         )
         self.audit.record(
             None, "步骤检查点", batch.id,

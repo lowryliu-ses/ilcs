@@ -71,6 +71,31 @@ export function consumesMaterials(step: RecipeStep): boolean {
   return Boolean(step.consumes_materials);
 }
 
+/** 步骤顶层的非 params 字段（投料物料等）。按 unknown 读：保存前的草稿里可能是任何值，校验要能说出来。 */
+function rawField(step: RecipeStep, key: string): unknown {
+  return (step as unknown as Record<string, unknown>)[key];
+}
+
+/** 这一步投的是哪种物料（BOM / 批号上的物料名称，精确匹配）。没勾「消耗物料」或没写就是空串。对应后端 steps.step_material。 */
+export function stepMaterial(step: RecipeStep): string {
+  if (!consumesMaterials(step)) return '';
+  const material = rawField(step, 'material');
+  return typeof material === 'string' && material.trim() ? material : '';
+}
+
+/** 投料物料的字段完整性，对应后端 steps.material_issues；用量参数是否属于能力在 deviceIssues 里判。 */
+function materialIssues(step: RecipeStep): string[] {
+  const issues: string[] = [];
+  if ('material' in step) {
+    const material = rawField(step, 'material');
+    if (typeof material !== 'string' || !material.trim()) issues.push('物料名称必须是非空文字');
+    else if (!consumesMaterials(step)) issues.push('声明了投料物料，但没有勾选「消耗物料」');
+  }
+  const param = rawField(step, 'material_param');
+  if (param != null && param !== '' && kindOf(step) !== 'device') issues.push('只有设备步骤可以指定用量参数');
+  return issues;
+}
+
 export function indexCapabilities(rows: CapabilityRow[] | undefined): CapabilityIndex {
   return Object.fromEntries((rows ?? []).map((row) => [row.id, row]));
 }
@@ -275,6 +300,15 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     Object.keys(step.params ?? {}).forEach((key) => {
       if (!(key in defined)) issues.push(`参数 ${key} 不属于该能力`);
     });
+    // 用量参数：执行器按它从下发参数里取投料量，再按物料单位对账，所以必须是登记了单位的能力参数
+    const materialParam = rawField(step, 'material_param');
+    if (materialParam != null && materialParam !== '') {
+      if (typeof materialParam !== 'string' || !(materialParam in defined)) {
+        issues.push(`用量参数 ${String(materialParam)} 不是该能力的参数`);
+      } else if (!specOf(capability, materialParam).unit) {
+        issues.push(`用量参数 ${materialParam} 没有登记单位，无法与物料单位对账`);
+      }
+    }
   }
   // 引用设备方法：参数必须落在方法允许的范围内（与服务端 `domain/methods.step_problems` 同源）
   const rules = step.method?.params ?? {};
@@ -725,6 +759,7 @@ export function stepIssues(
   else if (kind === 'subflow') issues.push(...subflowIssues(step, subflows, selfId));
   else if (kind === 'notify') issues.push(...notifyIssues(step));
   else issues.push(...reviewIssues(step));
+  issues.push(...materialIssues(step));
   issues.push(...timeoutIssues(step));
   issues.push(...skippableIssues(step));
   issues.push(...environmentIssues(step));
@@ -770,7 +805,7 @@ export function editorChecks(
   const hardSteps = steps.filter((step) => step.hard);
   const hardOk = hardSteps.every((step) => step.hard?.from?.trim());
   const stationSteps = steps.filter(needsStation).length;
-  const materialSteps = steps.filter(consumesMaterials).length;
+  const materialSteps = steps.filter(consumesMaterials);
   const byKind = STEP_KINDS.map(([kind, label]) => [label, steps.filter((step) => kindOf(step) === kind).length] as const)
     .filter(([, count], position) => count > 0 || position < 4)
     .map(([label, count]) => `${label} ${count}`)
@@ -807,20 +842,34 @@ export function editorChecks(
       ok: hardOk,
       detail: hardOk ? `${hardSteps.length} 步定义了硬时限` : '存在硬时限步骤未填写起算事件',
     },
-    {
-      key: 'bom',
-      label: '物料需求（BOM）',
-      // 合法空 BOM：没有声明消耗物料的步骤就不需要 BOM
-      ok: bom.length > 0 || materialSteps === 0,
-      detail: bom.length
-        ? bom.map((item) => `${item.material} ${item.qty}${item.unit}`).join('、')
-        : materialSteps === 0
-        ? '无需物料：本流程没有消耗物料的步骤'
-        : '存在消耗物料的步骤但未定义 BOM，排程前无法预留',
-    },
+    bomCheck(materialSteps, bom),
     { key: 'risk', label: '风险评估编号', ok: true, detail: risk || '缺失：允许保存草稿，发布前必须补齐' },
     sopCheck(steps, sop),
   ];
+}
+
+/** 对应后端 recipe_rules._bom_check。合法空 BOM 有两种：没有消耗物料的步骤；或每个消耗步骤都写明了投哪种料——
+    这时每批的量随样本变，由实验方案的因子给出，建批次时按本批样本预留。
+    例外是人工步骤：方案因子只能作用于设备步骤（参数要下发），人工步骤投的料没有因子能给出用量，只能按 BOM 预留，
+    所以它投的物料不在 BOM 里就不能过——否则流程能发布，但任何方案都锁定不了。 */
+function bomCheck(materialSteps: RecipeStep[], bom: BomItem[]): Check {
+  const declared = [...new Set(materialSteps.map(stepMaterial).filter(Boolean))];
+  const base = { key: 'bom', label: '物料需求（BOM）' };
+  const listed = new Set(bom.map((item) => item.material));
+  const manualOutside = materialSteps
+    .filter((step) => kindOf(step) !== 'device' && stepMaterial(step) && !listed.has(stepMaterial(step)))
+    .map((step) => `人工步骤「${step.name || step.step_id || ''}」投的 ${stepMaterial(step)} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，请把它加进 BOM`);
+  if (manualOutside.length) return { ...base, ok: false, detail: manualOutside.join('；') };
+  if (bom.length) {
+    const outside = declared.filter((name) => !listed.has(name));
+    const detail = bom.map((item) => `${item.material} ${item.qty}${item.unit}`).join('、');
+    return { ...base, ok: true, detail: outside.length ? `${detail}；${outside.join('、')} 不在 BOM 里，用量由实验方案给出` : detail };
+  }
+  if (!materialSteps.length) return { ...base, ok: true, detail: '无需物料：本流程没有消耗物料的步骤' };
+  if (materialSteps.every((step) => stepMaterial(step))) {
+    return { ...base, ok: true, detail: `${declared.join('、')} 的用量由实验方案按样本给出` };
+  }
+  return { ...base, ok: false, detail: '存在消耗物料的步骤但未定义 BOM，排程前无法预留' };
 }
 
 /** 流程关联的 SOP：给人看的名字、新批次实际会用的那一版的适用能力；problem 是后端判定的硬问题（如无生效版本）。 */

@@ -17,8 +17,8 @@ import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type F
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type {
-  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, ParamBinding, RecipeDetail, RecipeStep,
-  RecipeSummary, SopStep, SopVersionRow, StationRow,
+  BomItem, BranchCase, CapabilityRow, DeviceMethodRow, FormField, LotRow, MaterialRow, ParamBinding, RecipeDetail,
+  RecipeStep, RecipeSummary, SopStep, SopVersionRow, StationRow,
 } from '../../shared/types';
 import { CheckList, Field, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import { canonicalUnit, withUnit } from '../../shared/units';
@@ -139,6 +139,7 @@ export function RecipeEditorPage() {
   const capabilities = useQuery<CapabilityRow[]>('capabilities', () => api.get<CapabilityRow[]>('/capabilities'));
   const stations = useQuery<StationRow[]>('stations', () => api.get<StationRow[]>('/stations'));
   const lots = useQuery<LotRow[]>('lots', () => api.get<LotRow[]>('/lots'));
+  const masterMaterials = useQuery<MaterialRow[]>('materials', () => api.get<MaterialRow[]>('/materials'));
   const methods = useQuery<DeviceMethodRow[]>('device-methods:released', () =>
     api.get<DeviceMethodRow[]>('/device-methods?state=released'),
   );
@@ -197,6 +198,16 @@ export function RecipeEditorPage() {
     [lots.data],
   );
   const unitOf = (material: string) => (lots.data ?? []).find((lot) => lot.material === material)?.unit ?? '';
+  /* 步骤「投料物料」的候选：流程 BOM 里列了的，加上物料主数据里登记的全部物料。
+     后者是为了「BOM 不列、用量由实验方案按样本给出」的配液步骤——那种物料在 BOM 里本来就没有。 */
+  const stepMaterials = useMemo(
+    () =>
+      [...new Set([
+        ...(draft?.bom ?? []).map((item) => item.material).filter(Boolean),
+        ...(masterMaterials.data ?? []).filter((row) => row.state !== 'retired').map((row) => row.name),
+      ])].sort(),
+    [draft?.bom, masterMaterials.data],
+  );
 
   const checks = useMemo(
     () =>
@@ -372,7 +383,11 @@ export function RecipeEditorPage() {
     setStep(id, (step) => {
       const wasDefaultName = step.name === capabilityIndex[step.cap]?.name;
       // 换了能力，原来引用的设备方法就不适用了
-      if (step.cap !== capabilityId) delete step.method;
+      if (step.cap !== capabilityId) {
+        delete step.method;
+        // 用量参数是按能力的参数名写的，换了能力就对不上了；留空由执行器按单位重新推断
+        delete step.material_param;
+      }
       step.cap = capabilityId;
       step.params = defaultParams(stations.data, capability);
       if (wasDefaultName) step.name = capability.name;
@@ -622,6 +637,8 @@ export function RecipeEditorPage() {
             capabilityIndex={capabilityIndex}
             stations={stations.data}
             methods={methods.data ?? []}
+            materials={stepMaterials}
+            bomMaterials={draft.bom.map((item) => item.material)}
             sopSteps={(sops.data ?? []).find((row) => row.id === draft.meta.sop_version_id)?.steps ?? []}
             readOnly={readOnly}
             onBack={() => setSelected(null)}
@@ -748,6 +765,8 @@ function StepProperties({
   capabilityIndex,
   stations,
   methods,
+  materials,
+  bomMaterials,
   sopSteps,
   readOnly,
   onBack,
@@ -770,6 +789,9 @@ function StepProperties({
   capabilityIndex: Record<string, CapabilityRow>;
   stations: StationRow[] | undefined;
   methods: DeviceMethodRow[];
+  /** 步骤「投料物料」下拉的候选：BOM 物料 ∪ 物料主数据 */
+  materials: string[];
+  bomMaterials: string[];
   /** 流程关联的 SOP 版本的结构化步骤；没有关联或没有步骤时为空 */
   sopSteps: SopStep[];
   readOnly: boolean;
@@ -844,7 +866,10 @@ function StepProperties({
               if (next !== 'device') {
                 current.cap = '';
                 current.params = {};
+                delete current.material_param; // 用量参数只对设备步骤有意义，人工步骤的表单也不显示它
               }
+              // 其余类型既不能消耗物料、也没有投料字段：留着看不见的物料只会报一个改不掉的错
+              if (next !== 'device' && next !== 'manual') setConsumes(current, false);
               const blank = next === 'device' ? null : blankStep(next);
               if (next === 'manual' && !current.form?.length) current.form = blank?.form;
               if (next === 'wait' && !current.wait_for) current.wait_for = { mode: 'duration' };
@@ -884,7 +909,9 @@ function StepProperties({
         <MethodField step={step} methods={methods} readOnly={readOnly} onSet={onSet} />
       ) : null}
 
-      {kind === 'manual' ? <ManualFields step={step} readOnly={readOnly} onSet={onSet} /> : null}
+      {kind === 'manual' ? (
+        <ManualFields step={step} bomMaterials={bomMaterials} readOnly={readOnly} onSet={onSet} />
+      ) : null}
 
       {kind === 'wait' ? (
         <>
@@ -1031,17 +1058,29 @@ function StepProperties({
         </>
       ) : null}
       {kind === 'device' ? (
-        <Field label="消耗物料">
-          <label className="small">
-            <input
-              type="checkbox"
-              checked={Boolean(step.consumes_materials)}
-              disabled={readOnly}
-              onChange={(event) => onSet((current) => void (current.consumes_materials = event.target.checked))}
+        <>
+          <Field label="消耗物料">
+            <label className="small">
+              <input
+                type="checkbox"
+                checked={Boolean(step.consumes_materials)}
+                disabled={readOnly}
+                onChange={(event) => onSet((current) => setConsumes(current, event.target.checked))}
+              />
+              该步骤消耗 BOM 物料
+            </label>
+          </Field>
+          {step.consumes_materials ? (
+            <MaterialFields
+              step={step}
+              materials={materials}
+              bomMaterials={bomMaterials}
+              capability={capability}
+              readOnly={readOnly}
+              onSet={onSet}
             />
-            该步骤消耗 BOM 物料
-          </label>
-        </Field>
+          ) : null}
+        </>
       ) : null}
 
       {kind !== 'device' ? null : Object.keys(capability?.params ?? {}).map((key) => (
@@ -1440,12 +1479,116 @@ function DeviceParamField({
   );
 }
 
-function ManualFields({
+/** 勾选 / 取消「消耗物料」。取消时一并去掉投料物料与用量参数：它们只在消耗步骤上有意义，
+   留着一个界面上看不见的字段只会让校验报「声明了投料物料，但没有勾选「消耗物料」」。 */
+function setConsumes(step: RecipeStep, on: boolean) {
+  step.consumes_materials = on;
+  if (!on) {
+    delete step.material;
+    delete step.material_param;
+  }
+}
+
+/* 投料物料与用量参数。
+
+   物料名称要与 BOM、批号上的名称逐字一致，所以给下拉而不是自由输入；
+   流程里已经存下、但既不在 BOM 也不在主数据里的名称照样显示出来，免得打开旧流程时悄悄丢掉。
+   用量参数只对设备步骤有意义：执行器从这一步下发的参数里按它取用量、与物料单位对账；
+   留空时由执行器在该能力的参数里找单位与物料一致的那一个。 */
+function MaterialFields({
   step,
+  materials,
+  bomMaterials,
+  capability,
   readOnly,
   onSet,
 }: {
   step: RecipeStep;
+  materials: string[];
+  bomMaterials: string[];
+  /** 设备步骤的能力；人工步骤不传，也就没有用量参数 */
+  capability?: CapabilityRow;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const options = step.material && !materials.includes(step.material) ? [step.material, ...materials] : materials;
+  const params = Object.keys(capability?.params ?? {});
+  const inBom = !step.material || bomMaterials.includes(step.material);
+  return (
+    <div className="grid cols-2">
+      <Field
+        label="投料物料"
+        hint={
+          !capability
+            ? inBom
+              ? '人工步骤投的物料要列在流程 BOM 里，用量按 BOM'
+              : `${step.material} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，请把它加进 BOM`
+            : inBom
+            ? 'BOM 没列这种物料时，用量由实验方案按样本给出'
+            : `${step.material} 不在 BOM 里：用量由实验方案按样本给出（方案里要有给出它用量的因子）`
+        }
+      >
+        <select
+          value={step.material ?? ''}
+          disabled={readOnly}
+          onChange={(event) =>
+            onSet((current) => {
+              const value = event.target.value;
+              if (value) current.material = value;
+              else delete current.material;
+            })
+          }
+        >
+          <option value="">不指定</option>
+          {options.map((name) => (
+            <option key={name} value={name}>
+              {name}
+              {bomMaterials.includes(name) ? '（BOM）' : ''}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {capability ? (
+        <Field label="用量参数" hint="下发时从这个参数取投料量；留空按物料单位自动推断">
+          <select
+            value={step.material_param ?? ''}
+            disabled={readOnly}
+            onChange={(event) =>
+              onSet((current) => {
+                const value = event.target.value;
+                if (value) current.material_param = value;
+                else delete current.material_param;
+              })
+            }
+          >
+            <option value="">自动推断</option>
+            {step.material_param && !params.includes(step.material_param) ? (
+              <option value={step.material_param}>{step.material_param}（不是该能力的参数）</option>
+            ) : null}
+            {params.map((key) => {
+              const unit = capability.param_specs?.[key]?.unit;
+              return (
+                <option key={key} value={key}>
+                  {capability.params[key] || key}
+                  {unit ? ` · ${unit}` : ' · 未登记单位'}
+                </option>
+              );
+            })}
+          </select>
+        </Field>
+      ) : null}
+    </div>
+  );
+}
+
+function ManualFields({
+  step,
+  bomMaterials,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  bomMaterials: string[];
   readOnly: boolean;
   onSet: (change: (step: RecipeStep) => void) => void;
 }) {
@@ -1551,11 +1694,21 @@ function ManualFields({
             type="checkbox"
             checked={Boolean(step.consumes_materials)}
             disabled={readOnly}
-            onChange={(event) => onSet((current) => void (current.consumes_materials = event.target.checked))}
+            onChange={(event) => onSet((current) => setConsumes(current, event.target.checked))}
           />
           该步骤消耗 BOM 物料（勾了才要求 BOM 与投料许可）
         </label>
       </Field>
+      {step.consumes_materials ? (
+        /* 人工步骤只给 BOM 里的物料：方案因子只能作用于设备步骤，人工步骤的用量只能按 BOM 预留 */
+        <MaterialFields
+          step={step}
+          materials={[...new Set(bomMaterials.filter(Boolean))].sort()}
+          bomMaterials={bomMaterials}
+          readOnly={readOnly}
+          onSet={onSet}
+        />
+      ) : null}
     </>
   );
 }

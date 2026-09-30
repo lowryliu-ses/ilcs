@@ -225,6 +225,15 @@ class RecipeService:
             )
         return problems
 
+    @staticmethod
+    def _require_manual_materials_in_bom(recipe: Recipe) -> None:
+        """人工步骤投的料没列在 BOM 里就不能提交、不能批准：放过去流程能发布，基于它的方案却永远锁不上。"""
+        from ..domain.recipe_rules import manual_materials_outside_bom
+
+        problem = manual_materials_outside_bom(normalize(recipe.steps or []), recipe.bom or [])
+        if problem:
+            raise ValidationFailed(problem, code="manual_material_not_in_bom")
+
     def _require_sop_usable(self, recipe: Recipe, action: str) -> None:
         problems = self.sop_problems(recipe)
         if problems:
@@ -259,12 +268,13 @@ class RecipeService:
 
     def create_from_steps(
         self, name: str, plate: int, steps: list[dict], user: User, *, sop_version_id: str = "", note: str = "",
+        bom: list[dict] | None = None, risk: str = "", design: str = "",
     ) -> Recipe:
-        """由数字 SOP 生成的流程草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
+        """由数字 SOP / 配方表生成的流程草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
         recipe_id = self._next_recipe_id()
         recipe = Recipe(
             id=recipe_id, name=name, version="0.1.0", state="draft", owner=user.display_name, updated=today_iso(),
-            plate=plate, steps=copy.deepcopy(steps), bom=[],
+            plate=plate, steps=copy.deepcopy(steps), bom=copy.deepcopy(bom or []), risk=risk, design=design,
             history=[{"v": "0.1.0", "state": "draft", "note": note or "由数字 SOP 生成", "by": user.display_name,
                       "at": today_iso()}],
             author_user_id=user.id, used_step_ids=[step["step_id"] for step in steps if step.get("step_id")],
@@ -348,6 +358,13 @@ class RecipeService:
             params = "，".join(f"{k}={v}" for k, v in (step.get("params") or {}).items())
             hard = step.get("hard") or {}
             tail = f" · 硬时限 ≤{hard.get('maxGapMin')} min（自{hard.get('from')}）" if hard else ""
+            # 消耗物料与投哪种料都影响预留与对账，评审要看得到它们的变化
+            material = step.get("material")
+            via = f"，用量取 {step['material_param']}" if step.get("material_param") else ""
+            if step.get("consumes_materials"):
+                tail += f" · 消耗物料（{material}{via}）" if material else " · 消耗物料"
+            elif material:
+                tail += f" · 投料 {material}{via}（未勾选消耗物料）"
             return (
                 f"[{kind}] {step.get('name')} · {step.get('cap') or '—'} · "
                 f"{params or '无参数'} · {step.get('dur') or '—'} min{tail}"
@@ -373,6 +390,7 @@ class RecipeService:
             raise StateConflict("能力校验未通过，已阻止提交")
         if not recipe.steps:
             raise StateConflict("流程没有步骤")
+        self._require_manual_materials_in_bom(recipe)
         self._require_sop_usable(recipe, "提交")
 
         # 执行前仿真：结构、所有分支路径、可达性、能力与硬时限在空实验室里排得下
@@ -403,6 +421,8 @@ class RecipeService:
             raise StateConflict(f"只有{STATE_LABEL[required_state]}流程可{action[:2]}")
         if target_state != "retired" and not is_valid(self.validation_of(recipe)):
             raise StateConflict("能力校验未通过，已阻止")
+        if target_state == "approved":
+            self._require_manual_materials_in_bom(recipe)
         if target_state != "retired":
             self._require_sop_usable(recipe, "批准" if target_state == "approved" else "发布")
         if target_state == "approved":

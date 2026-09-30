@@ -199,10 +199,98 @@ class PlanService:
                 "ok": True,
             },
             {"key": "control", "label": "对照条件在矩阵内", "detail": control_detail, "ok": control_ok},
+            self._physical_samples_check(plan, len(conditions)),
             self._targets_check(plan),
             self._bindings_check(plan),
+            self._step_materials_check(plan),
             self._metrics_check(plan),
         ]
+
+    def _physical_samples_check(self, plan: Plan, conditions: int) -> dict:
+        """矩阵方案指定物理样本（如贴好序列号标签的瓶子）：按「条件 × 重复」逐个对应，建批次时照此分配。
+
+        不指定时每个运行分配登记新样本（原来的行为）。指定了就必须一一对得上：少一个、多一个都说明
+        表格与方案不是同一份，放过去就会把配方投进别的瓶子。
+        """
+        listed = [str(sid) for sid in plan.sample_ids or []]
+        label = "指定的物理样本与条件 × 重复一一对应"
+        if not listed:
+            return {"key": "physical_samples", "label": label,
+                    "detail": "未指定：每个运行分配登记新样本", "ok": True}
+        wanted = conditions * max(1, int(plan.repeats or 1))
+        problems = []
+        if len(listed) != wanted:
+            problems.append(f"指定了 {len(listed)} 个样本，条件 × 重复是 {wanted} 个")
+        duplicated = sorted({sid for sid in listed if listed.count(sid) > 1})
+        if duplicated:
+            problems.append(f"重复：{'、'.join(duplicated[:8])}")
+        missing = [sid for sid in dict.fromkeys(listed) if self.samples.get(sid) is None]
+        if missing:
+            problems.append(f"未登记：{'、'.join(missing[:8])}{' 等' if len(missing) > 8 else ''}")
+        # 导入时就拒收已处置、已用尽的瓶子；导入之后才处置或分样用尽的，锁定与提交时同样挡住（建批次还会再判一次）
+        from .formulation_service import UNUSABLE_SAMPLE
+
+        unusable = [
+            f"{sid}（{UNUSABLE_SAMPLE[sample.lifecycle_state]}）" for sid in dict.fromkeys(listed)
+            if (sample := self.samples.get(sid)) is not None and sample.lifecycle_state in UNUSABLE_SAMPLE
+        ]
+        if unusable:
+            problems.append(f"已处置/已用尽：{'、'.join(unusable[:8])}{' 等' if len(unusable) > 8 else ''}")
+        return {
+            "key": "physical_samples", "label": label,
+            "detail": "；".join(problems) or f"{len(listed)} 个已登记样本，按条件顺序 × 重复号对应",
+            "ok": not problems,
+        }
+
+    def _run_flow(self, recipe) -> tuple[list[dict], list[dict], str]:
+        """批次实际要跑的步骤与 BOM：有子流程时按建批次同一取法展开步骤、合并子流程带来的 BOM。
+
+        方案检查与物料预览必须看这一份，否则子流程里投的料在锁定时看不见、建批次时却要预留。
+        展开不了时退回未展开的步骤并带上原因（建批次同样会因此拒绝）。
+        """
+        from ..domain.steps import normalize
+        from ..domain.subflow import SubflowError, has_subflow, merge_bom
+        from .flow_expansion import expanded_steps
+
+        if recipe is None:
+            return [], [], ""
+        steps = normalize(recipe.steps or [])
+        bom = list(recipe.bom or [])
+        if not has_subflow(steps):
+            return steps, bom, ""
+        try:
+            expanded, extra = expanded_steps(self.db, self.ctx, recipe)
+        except SubflowError as error:
+            return steps, bom, error.message
+        return expanded, merge_bom(bom, extra), ""
+
+    def _step_materials_check(self, plan: Plan) -> dict:
+        """流程里「用量由方案给出」的物料（步骤声明了投料物料、流程 BOM 没列）必须真的有因子给出。
+
+        认因子的规则与建批次预留同一份（domain.plan_dosing）：因子要作用在这一步的用量参数上、写了物料单位、
+        per > 0，否则检查放过了、预留却是 0 或按错的参数算。看的是子流程展开后的步骤与合并 BOM——批次跑的就是它。
+        单条件与委托方案没有因子，遇到这种流程直接不通过。
+        """
+        from ..domain.plan_dosing import plan_dosed_steps
+        from ..repositories.resources import CapabilityRepository
+
+        label = "由方案给出用量的物料都有对应因子"
+        recipe = self.recipes.get(plan.recipe_id)
+        steps, bom, error = self._run_flow(recipe)
+        if error:
+            return {"key": "step_materials", "label": label, "detail": f"子流程无法展开：{error}", "ok": False}
+        factors = (plan.factors or []) if plan.plan_type == MATRIX else []
+        rows = plan_dosed_steps(steps, bom, factors, CapabilityRepository(self.db).specs())
+        problems = [row.problem for row in rows if row.factor is None]
+        covered = [row.material for row in rows if row.factor is not None]
+        return {
+            "key": "step_materials", "label": label,
+            "detail": "；".join(problems[:6]) or (
+                f"{'、'.join(dict.fromkeys(covered))} 的用量由因子按样本给出" if covered
+                else "流程没有由方案给出用量的物料"
+            ),
+            "ok": not problems,
+        }
 
     def _design_space_check(self, plan: Plan) -> dict:
         """显式设计点必须落在设计空间内；没有设计点的全因子方案，设计空间只约束以后的提案。"""
@@ -318,6 +406,7 @@ class PlanService:
                 "ok": True,
             },
             self._bindings_check(plan),
+            self._step_materials_check(plan),
             self._metrics_check(plan),
         ]
 
@@ -346,6 +435,7 @@ class PlanService:
             },
             self._capacity_check(plan, recipe.plate if recipe else 0, "每批样本数不超过流程样品位"),
             self._bindings_check(plan),
+            self._step_materials_check(plan),
             self._metrics_check(plan),
         ]
 
@@ -377,10 +467,16 @@ class PlanService:
         }
 
     def material_preview(self, plan: Plan) -> list[dict]:
-        """BOM + 因子换算需求，对照每种物料的可用量。委托检测没有物料需求。"""
+        """BOM + 因子换算需求，对照每种物料的可用量。委托检测没有物料需求。
+
+        与建批次同一口径：BOM 取子流程合并后的那份；「按方案用量预留」只标建批次真会据此预留的因子
+        （domain.plan_dosing）；可用量只算建批次能预留的批号——已放行、在用、单位与需求完全一致、没有过期拦截，
+        否则这里显示够用、建批次却报可用量不足。
+        """
         if plan.plan_type == COMMISSIONED:
             return []
         recipe = self.recipes.require(plan.recipe_id, "流程不存在")
+        steps, bom, _ = self._run_flow(recipe)
         # BOM 是每批的需求：分几批执行就要几份
         batches = max(1, self.batch_plan(plan, recipe.plate)["batches"])
         demands = [
@@ -388,31 +484,49 @@ class PlanService:
                 **item, "factor": "流程 BOM" if batches == 1 else f"流程 BOM × {batches} 批",
                 "qty": float(dec(item.get("qty") or 0) * batches) if batches > 1 else item.get("qty"),
             }
-            for item in (recipe.bom or [])
+            for item in bom
         ]
         if plan.plan_type == MATRIX:
-            demands += matrix.material_demand(plan.factors or [], plan.repeats, plan.design_points or None)
+            # 因子给出的物料：流程 BOM 已列的按 BOM 预留（这一行只作参考，不再计一份需求）；
+            # 给出某个投料步骤用量的因子，建批次时按本批样本的水平 × per 预留；其余只是估算
+            from ..domain.plan_dosing import dosing_factors
+            from ..repositories.resources import CapabilityRepository
+
+            factors = plan.factors or []
+            listed = {str(item.get("material") or "") for item in bom}
+            dosing = dosing_factors(steps, bom, factors, CapabilityRepository(self.db).specs())
+            # material_demand 按因子顺序只给带物料的因子各出一行
+            positions = [index for index, factor in enumerate(factors) if factor.get("material")]
+            demand_rows = matrix.material_demand(factors, plan.repeats, plan.design_points or None)
+            for position, demand in zip(positions, demand_rows):
+                if demand.get("material") in listed:
+                    demand = {**demand, "covered": True, "factor": f"{demand.get('factor')}（流程 BOM 已列，按 BOM 预留）"}
+                elif position in dosing:
+                    demand = {**demand, "factor": f"{demand.get('factor')}（按方案用量预留）"}
+                demands.append(demand)
         rows = []
         for demand in demands:
-            material, unit = demand.get("material"), demand.get("unit")
-            lots = [
-                lot for lot in self.lots.list()
-                if lot.material == material and not self.inventory.lot_blockers(lot)
-            ]
+            material, unit = demand.get("material"), str(demand.get("unit") or "")
+            lots = [lot for lot in self.lots.released_for(material, unit) if not self.inventory.lot_blockers(lot)]
             available = sum(
                 (self.inventory.balances(lot)["available"] for lot in lots), dec(0)
             )
-            rows.append(
-                {
-                    "source": demand.get("factor", ""),
-                    "material": material,
-                    "unit": unit,
-                    "qty": demand.get("qty"),
-                    "available": f"{available:f}",
-                    "lots": [lot.id for lot in lots],
-                    "ok": bool(lots) and available >= dec(demand.get("qty") or 0),
-                }
-            )
+            row = {
+                "source": demand.get("factor", ""),
+                "material": material,
+                "unit": demand.get("unit"),
+                "qty": demand.get("qty"),
+                "available": f"{available:f}",
+                "lots": [lot.id for lot in lots],
+                "ok": bool(demand.get("covered")) or (bool(lots) and available >= dec(demand.get("qty") or 0)),
+            }
+            other_units = sorted({
+                str(lot.unit or "") for lot in self.lots.list() if lot.material == material and lot.unit != unit
+            } - {""})
+            if other_units:
+                # 同一物料按别的单位登记的批号预留不会用；不说明的话用户只看到「无已放行批号」
+                row["note"] = f"有以 {'、'.join(other_units)} 登记的批号，预留只用 {unit or '同单位'} 的批号，不会用它们"
+            rows.append(row)
         return rows
 
     def version_out(self, version: PlanVersion) -> dict:

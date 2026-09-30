@@ -16,7 +16,8 @@ from .params import spec_of, value_issues
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
     assist_issues, branch_issues, notify_issues,
-    consumes_materials, gate_issues, kind_of, manual_issues, needs_station, resource_demand, review_issues,
+    consumes_materials, gate_issues, kind_of, manual_issues, material_issues, needs_station, resource_demand,
+    review_issues, step_material,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
 
@@ -67,6 +68,13 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
     for key in params:
         if defined and key not in defined:
             issues.append(f"参数 {key} 不属于该能力")
+    # 用量参数：执行器按它从下发参数里取这一步的投料量，再按物料单位对账，所以必须是登记了单位的能力参数
+    material_param = step.get("material_param")
+    if material_param not in (None, "") and spec is not None:
+        if not isinstance(material_param, str) or material_param not in defined:
+            issues.append(f"用量参数 {material_param} 不是该能力的参数")
+        elif not spec_of(spec, material_param)["unit"]:
+            issues.append(f"用量参数 {material_param} 没有登记单位，无法与物料单位对账")
     return issues
 
 
@@ -96,6 +104,7 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(subflow_issues(step))
     elif kind == NOTIFY:
         issues.extend(notify_issues(step))
+    issues.extend(material_issues(step))
     issues.extend(timeout_issues(step))
     issues.extend(skippable_issues(step))
     issues.extend(requirement_issues(step, needs_zone=not needs_station(step)))
@@ -218,6 +227,7 @@ def recipe_checks(
     demand = resource_demand(recipe_steps or [])
     # 只看显式声明消耗物料的步骤；没有声明就是「无需物料」
     material_steps = [step for step in (recipe_steps or []) if consumes_materials(step)]
+    bom_ok, bom_detail = _bom_check(material_steps, bom or [])
     return [
         {
             "key": "steps",
@@ -258,11 +268,8 @@ def recipe_checks(
         {
             "key": "bom",
             "label": "物料需求（BOM）",
-            # 合法空 BOM：没有消耗物料的步骤就不需要 BOM
-            "ok": bool(bom) or not material_steps,
-            "detail": "、".join(f"{i.get('material')} {i.get('qty')}{i.get('unit')}" for i in bom or [])
-                      or ("无需物料：本流程没有消耗物料的步骤" if not material_steps
-                          else "存在消耗物料的步骤但未定义 BOM，排程前无法预留"),
+            "ok": bom_ok,
+            "detail": bom_detail,
         },
         {
             "key": "risk",
@@ -282,6 +289,48 @@ def recipe_checks(
             ]),
         },
     ]
+
+
+def manual_materials_outside_bom(steps: list[dict[str, Any]], bom: list[dict] | None) -> str:
+    """人工步骤投的物料没列在 BOM 里的，逐步给出原因（整句，「；」连接）；都列了返回空串。
+
+    「用量由方案给出」只对设备步骤成立：方案因子只能作用在设备参数上，人工步骤没有可下发的用量，
+    消耗也不会由设备回报——放过去的话流程能发布，基于它的方案却永远锁不上。所以人工步骤的料只能按 BOM 预留。
+    提交评审、批准都按这里的文字拦，前端 rules.ts 照抄同一句。
+    """
+    listed = {str(item.get("material") or "") for item in bom or []}
+    rows = []
+    for step in steps or []:
+        name = step_material(step)
+        if kind_of(step) == MANUAL and name and name not in listed:
+            rows.append(
+                f"人工步骤「{step.get('name') or step.get('step_id') or ''}」投的 {name} 不在 BOM 里："
+                f"人工步骤的用量只能按 BOM 预留，请把它加进 BOM"
+            )
+    return "；".join(rows)
+
+
+def _bom_check(material_steps: list[dict[str, Any]], bom: list[dict]) -> tuple[bool, str]:
+    """BOM 项。合法空 BOM 有两种：没有消耗物料的步骤；或每个消耗步骤都是设备步骤、写明了投哪种料——
+    这时每批的量随样本变（配方表逐瓶给出），由实验方案的因子给出，建批次时按本批样本预留。
+    人工步骤投的料不管 BOM 空不空，都必须列在 BOM 里（见 manual_materials_outside_bom）。
+    """
+    manual = manual_materials_outside_bom(material_steps, bom)
+    if manual:
+        return False, manual
+    declared = list(dict.fromkeys(filter(None, (step_material(step) for step in material_steps))))
+    if bom:
+        detail = "、".join(f"{i.get('material')} {i.get('qty')}{i.get('unit')}" for i in bom)
+        listed = {str(item.get("material") or "") for item in bom}
+        outside = [name for name in declared if name not in listed]
+        if outside:
+            detail += f"；{'、'.join(outside)} 不在 BOM 里，用量由实验方案给出"
+        return True, detail
+    if not material_steps:
+        return True, "无需物料：本流程没有消耗物料的步骤"
+    if all(step_material(step) for step in material_steps):
+        return True, f"{'、'.join(declared)} 的用量由实验方案按样本给出"
+    return False, "存在消耗物料的步骤但未定义 BOM，排程前无法预留"
 
 
 def next_state(current: str) -> str | None:

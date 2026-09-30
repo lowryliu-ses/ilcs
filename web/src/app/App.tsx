@@ -19,6 +19,7 @@ import { PlansPage } from '../features/plans/PlansPage';
 import { RecipeDetailPage } from '../features/recipes/RecipeDetailPage';
 import { RecipeEditorPage } from '../features/recipes/RecipeEditorPage';
 import { ExceptionsPage } from '../features/exceptions/ExceptionsPage';
+import { FormulationImportPage } from '../features/formulations/FormulationImportPage';
 import { IntegrationsPage } from '../features/integrations/IntegrationsPage';
 import { MethodsPage } from '../features/methods/MethodsPage';
 import { EnvironmentPage } from '../features/environment/EnvironmentPage';
@@ -55,6 +56,7 @@ const NAV: [string, NavItem[]][] = [
     { path: '/methods', label: '设备方法' },
     { path: '/recipes', label: '实验流程' },
     { path: '/plans', label: '实验方案' },
+    { path: '/formulations', label: '配方导入', perm: 'recipe.edit' },
   ]],
   ['执行与监控', [
     { path: '/samples', label: '样本管理' },
@@ -190,6 +192,7 @@ export function App() {
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/plans" element={<PlansPage />} />
           <Route path="/plans/:planId" element={<PlanDetailPage />} />
+          <Route path="/formulations" element={<FormulationImportPage />} />
           <Route path="/recipes" element={<RecipesPage />} />
           <Route path="/recipes/:recipeId" element={<RecipeDetailPage />} />
           <Route path="/recipes/:recipeId/edit" element={<RecipeEditorPage />} />

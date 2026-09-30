@@ -232,7 +232,11 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **矩阵条件下发**。因子可声明 `target: {step_id, param}`。方案校验逐个水平核对是否落在可承接工位的参数范围内；建批次时冻结方案的条件（`plan_snapshot.factors` 与按布局孔位展开的 `condition_params`），步骤固定参数是缺省值。孔位不冻结：该步骤的设备指令在 `params.wells` 里按这一步用的那块板上**此刻在途的样本**生成参数（`BatchService._well_params`），键是设备认的孔位（绑定了实体载具就是实体孔位），值取样本继承来的因子水平——实体分装把子样落到另一块板的别的孔、布局放进不同板型（2×4 放进 1×8，B1 在 A5）时照样对得上；那块板上还没有这批样本就不带逐孔参数。逐样本质检按同一个孔位读设备回报（`SampleService.device_wells`，系统内分组的子样本跟着母样的孔位）。
 
-**设备回报的实际消耗**（`services/consumption_service.py`）。回执 `delivered.materials` 里的每一项按「指令号#序号」去重写成库存消耗事件，按批号或物料名对到本批次预留。超出预留、对不上预留或单位换算不了一律不入账并报警；与计划量（BOM 按消耗步骤均分，只作对照）偏差超过阈值照常入账、报警待复核——账上记的永远是设备称出来的量。
+**设备回报的实际消耗**（`services/consumption_service.py`）。回执 `delivered.materials` 里的每一项按「指令号#序号」去重写成库存消耗事件，按批号或物料名对到本批次预留；只写物料名、而这种料的预留跨了几个批号时，按有效期先后拆到各批号（与建预留时选批号同序；剩余预留合计不够才拒绝）。超出预留、对不上预留或单位换算不了一律不入账并报警；与计划量（流程 BOM 的料按消耗步骤均分；方案给出用量的料取这条指令实际下发的量，`domain/dosing.py`；只作对照）偏差超过阈值照常入账、报警待复核——账上记的永远是设备称出来的量。
+
+**方案给出用量的物料**（`domain/steps.py` 的 `material` / `material_param` + `domain/dosing.py`）。设备步骤可声明投哪种料、用量取哪个能力参数；流程 BOM 没列、由方案因子（带 `material`、`target` 指向这一步的用量参数）给出每个样本的量。方案锁定前核对每种这样的料都有对应因子；建批次时按本批各样本的水平之和预留（`BatchService.plan_materials`，快照 BOM 行 `source=plan`）。只有设备步骤能这样投料——人工步骤没有下发与回报，投的料必须列在 BOM 里，否则流程评审检查不通过。
+
+**配液模板**（`services/formulation_service.py` + `domain/formulation.py`，`/formulation-templates`，迁移 `0042`）。把一张配方表（xlsx / csv，`core/spreadsheet.py` 解析）按模板生成流程草稿与矩阵方案草稿：每行一瓶，序列号写进方案的指定样本；同结构的配方表沿用已发布流程。模板不走发布，受控点仍是生成出来的流程与方案的评审审批。一瓶一配方：配过液、已处置或已用尽的瓶子导入拒绝，已分配给另一个未终止批次的瓶子建批次拒绝。电解液产线的用法见 `docs/电解液配液线.md`。
 
 **维护工单**（`services/maintenance_service.py`）。建单即登记维护占用（排程让路），开工资产转入维护状态（开跑检查拦截），完工写记录并签名；合格恢复原状态，不合格保持维护状态，取消恢复开工前状态。
 
@@ -297,6 +301,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0039_dataset_snapshots` | 训练数据快照 `dataset_snapshots`、分析运行 `analysis_runs`（(组织, 方案, 运行编号) 唯一）、提案的分析运行 `plan_proposals.analysis_run_id`（已有提案为空）；两张新表由触发器 `ilcs_frozen_record` 拒绝 UPDATE / DELETE |
 | `0040_acceptance_runs` | 设备接入验收记录 `acceptance_runs`（排队中、执行中可改；出了结论由触发器 `ilcs_acceptance_run_guard` 拒绝修改，任何时候不许删）；适配器的验收闸门 `acceptance_required`、`accepted_config_version`、`accepted_run_id`。已有适配器不追溯（`acceptance_required` 为空），下次改配置才进闸门 |
 | `0041_device_templates` | 设备接入模板 `device_templates`（(组织, 编号, 修订号) 唯一；发布后内容由触发器 `ilcs_device_template_guard` 冻结、不许删除）；工位套用的模板与连接参数 `adapters.template_id / template_connection`；验收记录上的模板版本 `acceptance_runs.template_id / template_code / template_revision`。已有工位不套模板 |
+| `0042_formulation_templates` | 配液模板 `formulation_templates`（(组织, 编号) 唯一，约束 `uq_formulation_template_code`；`config` 存固定步骤、加料阶段、物料类别对应的加法、搅拌规则与每次实验可配的参数）。模板本身不走发布，只决定怎么生成流程草稿，生成的流程照旧评审 → 批准 → 发布；改模板带 `row_version` 乐观锁并留审计，不用的退役（`state=retired`）不删除。只加新表，已有数据不变 |
 
 规则：
 

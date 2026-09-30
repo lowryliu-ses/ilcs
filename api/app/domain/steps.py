@@ -51,8 +51,14 @@ MAX_LOOPS = 10
 
 # 每类步骤适用哪些字段。不适用的字段即时校验时不提示缺失，服务端也不据此阻塞。
 APPLICABLE: dict[str, set[str]] = {
-    DEVICE: {"cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable"},
-    MANUAL: {"dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable"},
+    DEVICE: {
+        "cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable",
+        "consumes_materials", "material", "material_param",
+    },
+    MANUAL: {
+        "dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable",
+        "consumes_materials", "material",
+    },
     WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
     GATE: {"gate"},
@@ -143,6 +149,33 @@ def consumes_materials(step: dict[str, Any]) -> bool:
     if kind_of(step) in {WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY}:
         return False
     return bool((step or {}).get("consumes_materials", False))
+
+
+def step_material(step: dict[str, Any]) -> str:
+    """这一步投的是哪种物料（BOM / 批号上的物料名称）。没勾「消耗物料」或没写就是空串。
+
+    写在步骤顶层而不进 params：params 只能是能力参数、必须是数字，会原样下发给设备。
+    """
+    if not consumes_materials(step):
+        return ""
+    material = (step or {}).get("material")
+    # 名称按原文精确匹配 BOM 与批号，不做去空白之类的「宽容」：对不上的应当在编辑时就暴露
+    return material if isinstance(material, str) and material.strip() else ""
+
+
+def material_issues(step: dict[str, Any]) -> list[str]:
+    """步骤级投料物料的字段完整性。用量参数属不属于能力要看能力定义，由 recipe_rules.device_issues 判。"""
+    issues: list[str] = []
+    step = step or {}
+    if "material" in step:
+        material = step.get("material")
+        if not isinstance(material, str) or not material.strip():
+            issues.append("物料名称必须是非空文字")
+        elif not consumes_materials(step):
+            issues.append("声明了投料物料，但没有勾选「消耗物料」")
+    if step.get("material_param") not in (None, "") and kind_of(step) != DEVICE:
+        issues.append("只有设备步骤可以指定用量参数")
+    return issues
 
 
 def resource_demand(steps: list[dict[str, Any]]) -> dict[str, int]:
