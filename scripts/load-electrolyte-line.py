@@ -259,6 +259,24 @@ def register_stations(engineer: Actor, operator: Actor, line: dict) -> None:
     if offline:
         raise Failed(f"工位仍不可用：{ {sid: still[sid] for sid in offline} }")
     ok("工位", f"{len(line['stations'])} 个（新登记 {len(created)}），内置模拟适配器在线，资产按校准豁免占位")
+    close_recovered_alarms(operator, [station["id"] for station in line["stations"]])
+
+
+def close_recovered_alarms(operator: Actor, station_ids: list[str]) -> None:
+    """新登记的适配器在重连之前会被执行器报一次「适配器失联」：条件已恢复的确认后关闭（与 load-demo-cases 一致）。
+
+    只动本产线工位上、条件已经不在的失联报警；别的工位、条件仍在的报警一概不碰，留给人处理。
+    """
+    wanted = set(station_ids)
+    closed = []
+    for alarm in operator.get("/alarms"):
+        if (alarm.get("state") == "active" and alarm.get("source_id") in wanted
+                and not alarm.get("condition_active") and "失联" in (alarm.get("message") or "")):
+            operator.post(f"/alarms/{alarm['id']}/ack")
+            operator.post(f"/alarms/{alarm['id']}/close")
+            closed.append(alarm["id"])
+    if closed:
+        ok("关闭已恢复的接入报警", f"{len(closed)} 条（新适配器重连前的「失联」）")
 
 
 def register_methods(engineer: Actor, qa: Actor, line: dict) -> dict[str, str]:
