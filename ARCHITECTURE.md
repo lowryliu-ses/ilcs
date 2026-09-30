@@ -234,6 +234,8 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **设备回报的检测值**（`services/device_result_service.py`）。设备方法的输出项可以关联指标（`metric_id`，发布时核对指标在用、数值型、单位一致）。设备这一步完成时，关联了指标的输出按样本写成检测结果：孔位 → 样本与逐孔参数同一口径，每个样本一张「设备回报」检测任务（要求指标 = 批次快照里所有关联的指标），按「指令 + 孔位」去重，同一步重做的新读数取代上一版并重新待复核。越界照写、置可疑；只有批次级读数时按样本复制并标注；内置模拟的值标「模拟示意值」，照常走审核与报告，但闭环训练数据排除它。与步骤完成同一事务，写不进去只报警、不挡推进。
 
+**运行分配什么时候算完成**（`AnalysisService.settle_assignment`）。批次跑完、运行分配名下未取消的检测任务都采集齐了，运行分配记为完成——与历史三指标回传「回传即完成」同一个意思：这一次运行的检测结果到齐了。批次跑完才记：设备步骤中途写入的结果不让样本提前完成，保持、故障时的恢复评估与异常影响范围数的是还没做完的样本。批次完成、结果写入或更正、取消检测任务时各核一次；已失败、已拆分的不动，只进不退（完成后再开重测不改回去）。结果分析的「运行分配」与看板的样品完成数按它计；已跑完批次的历史数据由迁移 `0043` 按同一规则回填。
+
 **设备回报的实际消耗**（`services/consumption_service.py`）。回执 `delivered.materials` 里的每一项按「指令号#序号」去重写成库存消耗事件，按批号或物料名对到本批次预留；只写物料名、而这种料的预留跨了几个批号时，按有效期先后拆到各批号（与建预留时选批号同序；剩余预留合计不够才拒绝）。超出预留、对不上预留或单位换算不了一律不入账并报警；与计划量（流程 BOM 的料按消耗步骤均分；方案给出用量的料取这条指令实际下发的量，`domain/dosing.py`；只作对照）偏差超过阈值照常入账、报警待复核——账上记的永远是设备称出来的量。
 
 **方案给出用量的物料**（`domain/steps.py` 的 `material` / `material_param` + `domain/dosing.py`）。设备步骤可声明投哪种料、用量取哪个能力参数；流程 BOM 没列、由方案因子（带 `material`、`target` 指向这一步的用量参数）给出每个样本的量。方案锁定前核对每种这样的料都有对应因子；建批次时按本批各样本的水平之和预留（`BatchService.plan_materials`，快照 BOM 行 `source=plan`）。只有设备步骤能这样投料——人工步骤没有下发与回报，投的料必须列在 BOM 里，否则流程评审检查不通过。
@@ -304,6 +306,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0040_acceptance_runs` | 设备接入验收记录 `acceptance_runs`（排队中、执行中可改；出了结论由触发器 `ilcs_acceptance_run_guard` 拒绝修改，任何时候不许删）；适配器的验收闸门 `acceptance_required`、`accepted_config_version`、`accepted_run_id`。已有适配器不追溯（`acceptance_required` 为空），下次改配置才进闸门 |
 | `0041_device_templates` | 设备接入模板 `device_templates`（(组织, 编号, 修订号) 唯一；发布后内容由触发器 `ilcs_device_template_guard` 冻结、不许删除）；工位套用的模板与连接参数 `adapters.template_id / template_connection`；验收记录上的模板版本 `acceptance_runs.template_id / template_code / template_revision`。已有工位不套模板 |
 | `0042_formulation_templates` | 配液模板 `formulation_templates`（(组织, 编号) 唯一，约束 `uq_formulation_template_code`；`config` 存固定步骤、加料阶段、物料类别对应的加法、搅拌规则与每次实验可配的参数）。模板本身不走发布，只决定怎么生成流程草稿，生成的流程照旧评审 → 批准 → 发布；改模板带 `row_version` 乐观锁并留审计，不用的退役（`state=retired`）不删除。只加新表，已有数据不变 |
+| `0043_backfill_sample_done` | 只回填数据：已完成批次里仍是 running、至少有一个未取消检测任务且都已采集的运行分配记为 `done`（以前只有历史三指标回传会记完成，类型化结果从不改它）。在途批次、还有任务没采集齐或没有检测任务的保持原样，已失败、已拆分的不动；不改结构，回退不撤销回填 |
 
 规则：
 

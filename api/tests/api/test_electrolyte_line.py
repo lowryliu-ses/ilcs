@@ -182,6 +182,14 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     stored = db.query(ResultValue).filter(ResultValue.id.in_([row["id"] for row in results])).all()
     assert {_exclusion(row) for row in stored} == {"simulated"}
 
+    # 批次跑完、每瓶的检测任务都采集齐：运行分配记为完成，结果分析的「运行分配」与批次列表的样品数都是 2/2
+    finished = team["operator"].get(f"/batches/{batch_id}")
+    assert {row["state"] for row in finished["samples"]} == {"done"}, [row["state"] for row in finished["samples"]]
+    listed = next(row for row in team["researcher"].get("/results") if row["batch_id"] == batch_id)
+    assert (listed["sample_done"], listed["sample_count"]) == (2, 2)
+    summary = next(row for row in team["operator"].get("/batches") if row["id"] == batch_id)
+    assert (summary["sample_done"], summary["sample_count"]) == (2, 2)
+
     # 回执重放不重复写；同一步重做（新指令）的读数取代上一版、重新待复核，旧版保留
 
     from app.core.context import system_context

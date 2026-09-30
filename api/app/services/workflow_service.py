@@ -1552,6 +1552,7 @@ class WorkflowService:
                 parent.flag_note = "拆分被返工或回环作废，恢复在用，按母样重新拆分"
 
     def finish_batch(self, batch: Batch, user: User | None = None, detail: str = "") -> None:
+        from .analysis_service import AnalysisService
         from .exception_service import ExceptionService
 
         before = "运行中" if batch.state == "running" else batch.state
@@ -1559,12 +1560,15 @@ class WorkflowService:
         batch.held_at = None
         ExceptionService(self.db, self.ctx).settle_batch(batch, "批次运行完成", user)
         self.close_out(batch, user)
+        # 设备步骤中途已经把检测结果写齐的运行分配，批次跑完这一刻记为完成
+        analysis = AnalysisService(self.db, self.ctx)
+        settled = sum(analysis.settle_assignment(sample.id) for sample in self.samples.for_batch(batch.id))
         self.audit.record(
             user, "批次完成", batch.id, before=before, after="已完成",
-            detail=detail or (
+            detail=(detail or (
                 "运行结束；样本质量与结果审核状态不受此影响，"
                 "任务仍可处于待数据复核或待报告"
-            ),
+            )) + (f"；检测结果已到齐的运行分配 {settled} 个记为完成" if settled else ""),
         )
 
     def close_out(self, batch: Batch, user: User | None = None) -> dict:
