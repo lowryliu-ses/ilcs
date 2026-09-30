@@ -14,12 +14,16 @@ from ..services.report_pdf import Page, _ensure_font
 KIND_LABEL = {"device": "设备", "manual": "人工", "wait": "等待", "review": "审核"}
 
 
-def render(row: dict, owner_name: str) -> bytes:
+DEMO_NOTE = "演示受控文件（由种子生成，非正式 SOP）"
+
+
+def render(row: dict, owner_name: str, note: str = DEMO_NOTE) -> bytes:
+    """`note` 印在页眉版本号后面，说明这份文件的来历（演示种子、产线草案……），不冒充正式受控文件。"""
     _ensure_font()
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
     pdf.setTitle(f"{row['code']} {row['title']} {row['version']}")
-    page = Page(pdf, f"{row['code']}  {row['title']}", f"版本 {row['version']} · 演示受控文件（由种子生成，非正式 SOP）")
+    page = Page(pdf, f"{row['code']}  {row['title']}", f"版本 {row['version']}，{note}")
     page.heading("1. 受控文件信息")
     page.field("分类", row.get("category", ""))
     page.field("负责人", owner_name)

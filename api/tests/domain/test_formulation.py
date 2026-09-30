@@ -394,3 +394,22 @@ def test_float_noise_from_formulas_is_not_a_precision_warning_and_warnings_are_m
     many = generate([["序列号", "EC (g)", "EMC (g)"]] + [[f"B-{n}", "1.0000001", "2.0000001"] for n in range(1, 30)])
     precision = [item for item in many["warnings"] if "精度" in item]
     assert len(precision) == 1 and "等 58 处" in precision[0], precision
+
+
+def test_sop_reference_is_validated_and_passes_through_to_generated_steps():
+    config = template_config()
+    config["stir"]["sop_step"] = "加料后制冷搅拌"
+    # 写了 sop_step 却没有 sop：生成的流程不知道对哪份 SOP，模板就不合格
+    assert any("没有用 sop 指定 SOP" in item for item in rules.sop_issues(config))
+    config["sop"] = {"code": "SOP-T-01"}
+    assert rules.sop_issues(config) == []
+    config["prefix"][0]["sop_step"] = ""
+    assert any("sop_step 要写 SOP 步骤标题" in item for item in rules.sop_issues(config))
+    config["prefix"][0]["sop_step"] = "过渡舱载入空瓶"
+    config["sop"] = {"code": ""}
+    assert any("sop 要写成" in item for item in rules.sop_issues(config))
+    # 标题原样带到生成的步骤上，由服务层按当时生效的 SOP 版本换成步骤标识
+    config["sop"] = {"code": "SOP-T-01"}
+    result = generate([REFERENCE_HEADER, REFERENCE_ROW], config=config)
+    stirs = [step for step in result["steps"] if step["name"].endswith("加料后制冷搅拌")]
+    assert stirs and all(step["sop_step"] == "加料后制冷搅拌" for step in stirs)

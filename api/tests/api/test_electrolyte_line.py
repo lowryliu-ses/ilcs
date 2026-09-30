@@ -69,6 +69,17 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     # 43 步全部完成；依赖图上每一步都在它的前驱结束之后才开始
     steps = detail["snapshot"]["steps"]
     assert len(steps) == 43
+
+    # 按配液线 SOP 执行：流程关联 SOP-ELY-01 的生效版本，每个节点都对应到这一版的某一步，批次固化了这一版
+    assert detail["sop_snapshot"]["code"] == "SOP-ELY-01" and detail["sop_snapshot"]["version"] == "v1"
+    sop_keys = {row["key"]: row["title"] for row in detail["sop_snapshot"]["steps"]}
+    assert all(step.get("sop_step_key") in sop_keys for step in steps), [s["name"] for s in steps if not s.get("sop_step_key")]
+    by_name = {step["name"]: sop_keys[step["sop_step_key"]] for step in steps}
+    assert by_name["EC 预热移液加注"] == "溶剂与预热溶剂加注"
+    assert by_name["LiBF4 加料后制冷搅拌"] == "加料后制冷搅拌"
+    assert by_name["第 1 瓶拉曼"] == "拉曼检测"
+    recipe = team["researcher"].get(f"/recipes/{outcome['recipe']}")
+    assert recipe["sop_version_id"] == detail["sop_snapshot"]["sop_version_id"]
     runs = {row["step_id"]: row for row in detail["step_runs"] if row["state"] not in {"superseded", "cancelled"}}
     assert {step["step_id"] for step in steps} == set(runs)
     assert all(row["state"] == "completed" for row in runs.values()), {k: r["state"] for k, r in runs.items()}

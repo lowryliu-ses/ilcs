@@ -40,6 +40,7 @@ from typing import Any, Callable
 HERE = Path(__file__).resolve().parent
 LINE = HERE / "lines" / "c-electrolyte" / "line.json"
 FORMULA = HERE / "lines" / "c-electrolyte" / "formula-20260929.csv"
+SOP = HERE / "lines" / "c-electrolyte" / "sop.json"
 PASSWORD = "ilcs1234"
 RUN = uuid.uuid4().hex[:6]
 
@@ -145,6 +146,9 @@ class Actor:
     def patch(self, path: str, body: dict):
         return self.call("PATCH", path, body)
 
+    def put(self, path: str, body: dict):
+        return self.call("PUT", path, body)
+
     def upload(self, path: str, filename: str, content: bytes, media_type: str):
         return self.call("POST", path, files={"file": (filename, content, media_type)})
 
@@ -186,9 +190,48 @@ def register(team: dict[str, Actor], line: dict) -> dict:
     register_materials(operator, qa, line)
     metrics = register_metrics(researcher, line)
     grant_qualifications(admin, line)
+    # 模板生成的流程关联这份 SOP 的生效版本：先有 SOP，再建模板
+    register_sop(researcher, qa, operator, SOP)
     template = register_template(researcher, line, methods, metrics)
     return {"methods": methods, "metrics": metrics, "template": template,
             "stations": [station["id"] for station in line["stations"]]}
+
+
+def register_sop(researcher: Actor, qa: Actor, operator: Actor, path: Path) -> dict:
+    """配液线 SOP（sop.json + 同目录生成好的附件 PDF）：研究员起草、上传附件、写结构化步骤、提交评审，
+    QA 批准发布（起草人不能批准本人的版本），要求阅读确认的由执行批次的操作员确认。同编号同版本已有就接着走完。"""
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    rows = researcher.get("/sops?page_size=100")
+    rows = rows.get("items", rows) if isinstance(rows, dict) else rows
+    current = next((row for row in rows if row["code"] == spec["code"] and row["version"] == spec["version"]), None)
+    label = f"{spec['code']} {spec['version']}"
+    if current is None:
+        pdf = path.with_name(f"{spec['code']}-{spec['version']}.pdf")
+        attachment = researcher.upload("/files", pdf.name, pdf.read_bytes(), "application/pdf")
+        current = researcher.post("/sops", {
+            "code": spec["code"], "title": spec["title"], "version": spec["version"], "file_id": attachment["id"],
+            "capability_scope": spec["capability_scope"], "sample_types": spec["sample_types"],
+            "requires_training_ack": spec["requires_training_ack"], "category": spec["category"], "owner_id": qa.id,
+        })
+        note(f"SOP {label} 已起草（附件 {pdf.name}）")
+    if current["state"] == "draft":
+        steps = [{key: row[key] for key in ("title", "kind", "capability", "duration_min", "instructions", "checks")
+                  if key in row} for row in spec["steps"]]
+        current = researcher.put(f"/sops/{current['id']}/steps", {"steps": steps, "row_version": current["row_version"]})
+        researcher.post(f"/sops/{current['id']}/submit")
+        current = qa.get(f"/sops/{current['id']}")
+    if current["state"] == "review":
+        current = qa.post(f"/sops/{current['id']}/decision", {
+            "conclusion": "approved",
+            "signature_id": qa.sign("批准并发布 SOP", current["id"], current["row_version"]),
+        })
+    if current["state"] != "published":
+        raise Failed(f"SOP {label} 没能发布：当前状态 {current.get('state_label') or current['state']}")
+    if spec.get("requires_training_ack"):
+        operator.post(f"/sops/{current['id']}/acknowledge")
+    ok("SOP", f"{label} {spec['title']}（已发布，{len(spec['steps'])} 步"
+              + ("，操作员已阅读确认" if spec.get("requires_training_ack") else "") + "）")
+    return current
 
 
 def register_capabilities(engineer: Actor, line: dict) -> None:

@@ -202,6 +202,7 @@ class FormulationService:
         )
         # 模板存进来时是好的，之后方法可能退役、指标可能停用：按现在的主数据再核一次
         result["issues"][:0] = [f"模板：{item}" for item in self.problems(template.config or {})]
+        self._link_sop(template.config or {}, result)
         result["warnings"][:0] = list(sheet_warnings)
         # 读文件时的提醒（隐藏行、隐藏工作表）单独也给一份：之后改实验参数走 /preview 只提交表格、没有文件，
         # 前端要靠它把这些提醒一直留在页面上
@@ -345,13 +346,51 @@ class FormulationService:
             rows.append({"id": serial, "created": True})
         return rows
 
+    def _link_sop(self, config: dict, result: dict[str, Any]) -> None:
+        """模板用 `sop` 指定了 SOP：生成的流程关联它当前生效的版本，步骤的 `sop_step`（步骤标题）换成这一版的
+        步骤标识 `sop_step_key`——批次里每个节点就能带出对应的作业指导，SOP 修订插入步骤也还对得上。
+
+        没有生效版本、标题在这一版里找不到、设备能力超出 SOP 的适用范围，都是问题：这样的流程发布不了或建不了批次，
+        不如导入时就说清楚。没指定 SOP 时只去掉 `sop_step`。
+        """
+        from ..domain.sop_steps import scope_outside
+        from ..repositories.sops import SopRepository, SopVersionRepository
+
+        steps = result.get("steps") or []
+        titles = {index: step.pop("sop_step") for index, step in enumerate(steps) if "sop_step" in step}
+        code = str(((config.get("sop") or {}) if isinstance(config.get("sop"), dict) else {}).get("code") or "").strip()
+        if not code:
+            return
+        sop = SopRepository(self.db, self.ctx).by_code(code)
+        version = SopVersionRepository(self.db, self.ctx).effective(sop.id, now()) if sop is not None else None
+        if version is None:
+            result["issues"].append(f"模板指定的 SOP {code} 没有生效版本：先发布 SOP，再导入配方表")
+            return
+        label = f"{code} {version.version}"
+        keys = {str(row.get("title") or ""): str(row.get("key") or "") for row in version.steps or []}
+        for index, title in titles.items():
+            if keys.get(str(title)):
+                steps[index]["sop_step_key"] = keys[str(title)]
+            else:
+                result["issues"].append(
+                    f"第 {index + 1} 步「{steps[index].get('name')}」对应的 SOP 步骤「{title}」在 {label} 里没有"
+                )
+        outside = scope_outside(steps, version.capability_scope)
+        if outside:
+            result["issues"].append(f"设备能力 {'、'.join(outside)} 不在 {label} 的适用范围内")
+        result["recipe"]["sop_version_id"] = version.id
+        result["recipe"]["sop"] = {"code": code, "version": version.version, "title": sop.title}
+
     def _recipe_for(self, result: dict[str, Any], user: User, filename: str, template: FormulationTemplate):
-        """同结构沿用：步骤完全一致、每批样品位一致、BOM 为空、没退役、没被标记待修订。"""
+        """同结构沿用：步骤完全一致（含对应的 SOP 步骤）、关联同一版 SOP、每批样品位一致、BOM 为空、没退役、
+        没被标记待修订。SOP 出了新版本，旧版本的流程就不再沿用，按新版本生成。"""
         steps, spec = result["steps"], result["recipe"]
         wanted = _steps_key(steps)
+        sop_version_id = spec.get("sop_version_id") or ""
         candidates = [
             recipe for recipe in self.recipes.list()
             if recipe.state in REUSE_RANK and not recipe.needs_revision and not (recipe.bom or [])
+            and (recipe.sop_version_id or "") == sop_version_id
             and int(recipe.plate or 0) == int(spec["plate"]) and _steps_key(recipe.steps) == wanted
         ]
         if candidates:
@@ -361,6 +400,7 @@ class FormulationService:
 
         recipe = RecipeService(self.db, self.ctx).create_from_steps(
             spec["name"], int(spec["plate"]), steps, user, bom=[], risk=spec["risk"], design=spec["design"],
+            sop_version_id=sop_version_id,
             note=f"由配方表 {filename} 生成（配液模板 {template.code}）",
         )
         return recipe, False

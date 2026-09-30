@@ -309,6 +309,43 @@ def template_issues(
             targets.add(target)
         if not _is_number(row.get("default")):
             issues.append(f"{label}要给数字缺省值 default")
+    issues.extend(sop_issues(config))
+    return issues
+
+
+def sop_templates(config: dict) -> list[tuple[str, dict]]:
+    """模板里会变成流程步骤的所有步骤模板：固定步骤、各类别的加料步骤、搅拌步骤。按 (说明, 步骤) 给出。"""
+    rows: list[tuple[str, dict]] = []
+    for section, steps in fixed_sections(config):
+        for step in steps if isinstance(steps, list) else []:
+            if isinstance(step, dict):
+                rows.append((f"{section} 的「{step.get('name') or step.get('key')}」", step))
+    for category, route in (config.get("routes") or {}).items() if isinstance(config.get("routes"), dict) else []:
+        if isinstance(route, dict) and isinstance(route.get("step"), dict):
+            rows.append((f"类别「{category}」的加料步骤", route["step"]))
+    if isinstance(config.get("stir"), dict):
+        rows.append(("搅拌步骤", config["stir"]))
+    return rows
+
+
+def sop_issues(config: dict) -> list[str]:
+    """`sop: {code}` 指定生成的流程按哪份 SOP 执行；步骤模板的 `sop_step` 写这份 SOP 里的步骤标题。
+    标题在不在 SOP 里要等生成时按当时生效的版本核对（SOP 会修订），这里只查写法。"""
+    issues: list[str] = []
+    sop = config.get("sop")
+    code = ""
+    if sop is not None:
+        if not isinstance(sop, dict) or not isinstance(sop.get("code"), str) or not sop["code"].strip():
+            issues.append("sop 要写成 {\"code\": \"SOP 编号\"}")
+        else:
+            code = sop["code"].strip()
+    for label, step in sop_templates(config):
+        if "sop_step" not in step:
+            continue
+        if not isinstance(step["sop_step"], str) or not step["sop_step"].strip():
+            issues.append(f"{label}的 sop_step 要写 SOP 步骤标题")
+        elif not code:
+            issues.append(f"{label}写了 sop_step，但模板没有用 sop 指定 SOP")
     return issues
 
 
