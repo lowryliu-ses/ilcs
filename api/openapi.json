@@ -2996,10 +2996,20 @@
           "limits": {
             "additionalProperties": {
               "additionalProperties": {
-                "items": {
-                  "type": "number"
-                },
-                "type": "array"
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                ]
               },
               "type": "object"
             },
@@ -4104,8 +4114,16 @@
         "type": "object"
       },
       "ParamSpecIn": {
-        "description": "能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。",
+        "description": "能力参数的规格：数值、整数或选项、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。\n\n选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。",
         "properties": {
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Options",
+            "type": "array"
+          },
           "required": {
             "default": true,
             "title": "Required",
@@ -4115,7 +4133,8 @@
             "default": "number",
             "enum": [
               "number",
-              "integer"
+              "integer",
+              "enum"
             ],
             "title": "Type",
             "type": "string"
@@ -6801,10 +6820,20 @@
           "limits": {
             "additionalProperties": {
               "additionalProperties": {
-                "items": {
-                  "type": "number"
-                },
-                "type": "array"
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                ]
               },
               "type": "object"
             },

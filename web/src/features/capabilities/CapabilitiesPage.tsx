@@ -10,6 +10,7 @@ import { api } from '../../shared/api';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
+import { parseOptions } from '../../shared/params';
 import type { CapabilityRow, ParamSpec, Recovery } from '../../shared/types';
 import { withUnit } from '../../shared/units';
 import { ConfirmDialog, Field, ListState, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
@@ -82,7 +83,11 @@ export function CapabilitiesPage() {
                   </td>
                   <td className="small">
                     {Object.entries(capability.params)
-                      .map(([key, label]) => withUnit(label, capability.param_specs?.[key]?.unit ?? ''))
+                      .map(([key, label]) =>
+                        capability.param_specs?.[key]?.type === 'enum'
+                          ? `${label}（选项：${(capability.param_specs[key].options ?? []).join(' / ')}）`
+                          : withUnit(label, capability.param_specs?.[key]?.unit ?? ''),
+                      )
                       .join(' · ') || '无参数'}
                   </td>
                   <td className="small">
@@ -332,7 +337,10 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
   const [params, setParams] = useState<ParamRow[]>(() =>
     Object.entries(capability.params ?? {}).map(([key, label]) => {
       const spec = capability.param_specs?.[key] ?? {};
-      return { key, label, unit: spec.unit ?? '', type: spec.type ?? 'number', required: spec.required !== false };
+      return {
+        key, label, unit: spec.unit ?? '', type: spec.type ?? 'number', required: spec.required !== false,
+        options: (spec.options ?? []).join('、'),
+      };
     }),
   );
   const [recovery, setRecovery] = useState<Recovery>({ ...capability.recovery });
@@ -442,10 +450,11 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
   );
 }
 
-type ParamRow = { key: string; label: string; unit: string; type: 'number' | 'integer'; required: boolean };
+/** 编辑中的一行参数。options 是选项型参数的选项原文（顿号、逗号或换行分隔），提交时才拆成列表 */
+type ParamRow = { key: string; label: string; unit: string; type: 'number' | 'integer' | 'enum'; required: boolean; options: string };
 
 function blankParam(): ParamRow {
-  return { key: '', label: '', unit: '', type: 'number', required: true };
+  return { key: '', label: '', unit: '', type: 'number', required: true, options: '' };
 }
 
 function paramLabels(rows: ParamRow[]): Record<string, string> {
@@ -455,7 +464,12 @@ function paramLabels(rows: ParamRow[]): Record<string, string> {
 /** 只提交与缺省（数值、单位未登记、必填）不同的规格，服务端也按同一规则收成规范写法。 */
 function paramSpecs(rows: ParamRow[]): Record<string, ParamSpec> {
   return Object.fromEntries(
-    rows.map((row) => [row.key.trim(), { type: row.type, unit: row.unit.trim(), required: row.required }]),
+    rows.map((row) => [
+      row.key.trim(),
+      row.type === 'enum'
+        ? { type: row.type, required: row.required, options: parseOptions(row.options) }
+        : { type: row.type, unit: row.unit.trim(), required: row.required },
+    ]),
   );
 }
 
@@ -472,6 +486,7 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
             <th>标签</th>
             <th>单位</th>
             <th>类型</th>
+            <th>选项</th>
             <th>必填</th>
             <th />
           </tr>
@@ -499,7 +514,9 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
               <td>
                 <input
                   className="mono"
-                  value={row.unit}
+                  value={row.type === 'enum' ? '' : row.unit}
+                  disabled={row.type === 'enum'}
+                  title={row.type === 'enum' ? '选项型参数没有单位' : undefined}
                   aria-label={`参数 ${index + 1} 单位`}
                   placeholder="W"
                   style={{ width: 72 }}
@@ -510,11 +527,27 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
                 <select
                   value={row.type}
                   aria-label={`参数 ${index + 1} 类型`}
+                  title="选项型：值只能是登记的选项之一（溶剂种类、测试协议、气氛），原样作为文字下发给设备"
                   onChange={(event) => patch(index, { type: event.target.value as ParamRow['type'] })}
                 >
                   <option value="number">数值</option>
                   <option value="integer">整数</option>
+                  <option value="enum">选项</option>
                 </select>
+              </td>
+              <td>
+                {row.type === 'enum' ? (
+                  <input
+                    value={row.options}
+                    aria-label={`参数 ${index + 1} 选项`}
+                    placeholder="THF、DMF、Toluene"
+                    title="顿号、逗号或换行分隔；至少一个"
+                    className={parseOptions(row.options).length ? undefined : 'bad'}
+                    onChange={(event) => patch(index, { options: event.target.value })}
+                  />
+                ) : (
+                  <span className="tiny muted">—</span>
+                )}
               </td>
               <td>
                 <input

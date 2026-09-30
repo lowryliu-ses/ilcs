@@ -26,7 +26,7 @@ import re
 from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
-from .params import canonical_unit, decimal_of, spec_of
+from .params import canonical_unit, decimal_of, spec_of, value_issues
 from .steps import DEVICE, kind_of
 
 DEFAULT_SERIAL_HEADERS = ("序列号", "编号", "瓶号", "样品编号", "serial", "id")
@@ -171,7 +171,12 @@ def template_issues(
         else:
             declared = spec.get("params") or {}
             problems.extend(f"{label}的参数 {key} 不属于能力 {cap}" for key in params if key not in declared)
-            problems.extend(f"{label}的参数 {key} 必须是数字" for key, value in params.items() if not _is_number(value))
+            for key, value in params.items():
+                rule = spec_of(spec, key)
+                if rule["type"] == "enum":
+                    problems.extend(f"{label}的{text}" for text in value_issues(rule, value))
+                elif not _is_number(value):
+                    problems.append(f"{label}的参数 {key} 必须是数字")
         if "method" in step:
             method = step.get("method")
             ref = method.get("id") if isinstance(method, dict) else None
@@ -316,7 +321,10 @@ def template_issues(
             if target in targets:
                 issues.append(f"{label}与别的实验参数作用于同一参数 {row['step']}.{row.get('param')}")
             targets.add(target)
-        if not _is_number(row.get("default")):
+        rule = _experiment_rule(row, fixed, capabilities)
+        if rule is not None and rule["type"] == "enum":
+            issues.extend(f"{label}的缺省值：{text}" for text in value_issues(rule, row.get("default")))
+        elif not _is_number(row.get("default")):
             issues.append(f"{label}要给数字缺省值 default")
     check = config.get("volume_check")
     if check is not None:
@@ -331,6 +339,17 @@ def template_issues(
                 issues.append("volume_check 的 reserve（母瓶至少留多少 mL）必须是不小于 0 的数")
     issues.extend(sop_issues(config))
     return issues
+
+
+def _experiment_rule(row: dict, fixed: dict[str, dict], capabilities: dict[str, dict] | None) -> dict | None:
+    """实验参数作用的那个能力参数的规格；指向不明或没给能力表时为 None（按数值处理）。"""
+    step = fixed.get(row.get("step")) if isinstance(row.get("step"), str) else None
+    if step is None or capabilities is None or kind_of(step) != DEVICE:
+        return None
+    capability = capabilities.get(step.get("cap"))
+    if capability is None or row.get("param") not in (capability.get("params") or {}):
+        return None
+    return spec_of(capability, row["param"])
 
 
 def sop_templates(config: dict) -> list[tuple[str, dict]]:
@@ -452,10 +471,23 @@ def generate(
     }
 
     # 实验参数取值：没给的用缺省值
-    values: dict[str, int | float] = {}
+    values: dict[str, int | float | str] = {}
+    fixed_steps = {
+        step.get("key"): step for _, steps in fixed_sections(config) for step in (steps if isinstance(steps, list) else [])
+        if isinstance(step, dict) and step.get("key")
+    }
     for row in config.get("experiment_params") or []:
         key = row.get("key")
         raw = params.pop(key, row.get("default"))
+        rule = _experiment_rule(row, fixed_steps, capabilities)
+        if rule is not None and rule["type"] == "enum":
+            # 选项型实验参数（如终混程序）：值是登记的选项之一，原样写进方案
+            problems = value_issues(rule, raw)
+            if problems:
+                issues.extend(f"实验参数「{row.get('label') or key}」：{text}" for text in problems)
+            else:
+                values[key] = raw
+            continue
         number = _number(raw)
         if number is None:
             issues.append(f"实验参数「{row.get('label') or key}」的值 {raw!r} 不是数字")

@@ -94,6 +94,16 @@ def layout(
     return sorted(assignments, key=lambda a: wells.index(a.well))
 
 
+def ordered_levels(values) -> list:
+    """一组水平去重排序：数值按大小，选项按文字；两类混在一起时数值在前（校验另报），不让排序本身出错。"""
+    unique: list = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return sorted(unique, key=lambda value: (0, value, "") if isinstance(value, (int, float)) and not isinstance(value, bool)
+                  else (1, 0, str(value)))
+
+
 def material_demand(factors: list[dict], repeats: int, points: list | None = None) -> list[dict]:
     """因子水平换算到物料需求，用于计划页的物料预览。
 
@@ -106,6 +116,8 @@ def material_demand(factors: list[dict], repeats: int, points: list | None = Non
         material = factor.get("material")
         if not material:
             continue
+        if any(not isinstance(level, (int, float)) or isinstance(level, bool) for level in factor.get("levels") or []):
+            continue  # 带物料的因子水平是用量；选项型的水平不是数量，估不了需求（方案检查另报）
         per = float(material.get("per", 0) or 0)
         if points:
             # 显式设计点：逐点累加该因子的水平
@@ -167,8 +179,9 @@ def target_issues(
         if param in bindings_of(step):
             issues.append(f"「{step.get('name')}」的 {param} 已声明取自上游结果，因子「{name}」不能再作用于它")
             continue
-        if capabilities is not None:
-            unit = spec_of(capabilities.get(step.get("cap") or ""), param)["unit"]
+        spec = spec_of(capabilities.get(step.get("cap") or ""), param) if capabilities is not None else None
+        if spec is not None and spec["type"] != "enum":
+            unit = spec["unit"]
             factor_unit = canonical_unit(factor.get("unit"))
             if unit and factor_unit and factor_unit != unit:
                 issues.append(
@@ -181,7 +194,15 @@ def target_issues(
             continue
         claimed[key] = name
         for level in factor.get("levels") or []:
-            if not isinstance(level, (int, float)) or isinstance(level, bool):
+            if spec is not None and spec["type"] == "enum":
+                # 选项型参数：水平是登记的选项之一，原样作为文字下发
+                if not isinstance(level, str) or level not in spec["options"]:
+                    issues.append(
+                        f"因子「{name}」的水平 {level!r} 不是参数 {step.get('name')}.{param} 的选项"
+                        f"（{'、'.join(spec['options'])}）"
+                    )
+                    continue
+            elif not isinstance(level, (int, float)) or isinstance(level, bool):
                 issues.append(f"因子「{name}」的水平 {level!r} 不是数值，不能作为设备参数")
                 continue
             trial = {**step, "params": {**(step.get("params") or {}), param: level}}
@@ -244,10 +265,16 @@ def point_issues(factors: list[dict], points: list, design_space: dict) -> list[
             issues.append(f"第 {number} 个点与前面的点重复")
         seen.add(key)
         for name, value in zip(names, point):
+            bound = bounds.get(name) or {}
+            options = bound.get("options")
+            if isinstance(options, list) and options:
+                # 类别因子（溶剂、催化剂、协议）：设计空间写允许的选项
+                if value not in options:
+                    issues.append(f"第 {number} 个点的 {name} = {value!r} 不在设计空间允许的选项（{'、'.join(map(str, options))}）内")
+                continue
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 issues.append(f"第 {number} 个点的 {name} = {value!r} 不是数值")
                 continue
-            bound = bounds.get(name) or {}
             low, high = bound.get("min"), bound.get("max")
             if isinstance(low, (int, float)) and value < low:
                 issues.append(f"第 {number} 个点的 {name} = {value} 低于设计空间下限 {low}")

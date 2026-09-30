@@ -416,7 +416,8 @@ export type FactorTargetOption = {
   step_id: string;
   step_name: string;
   capability: string;
-  params: { name: string; label?: string; unit: string }[];
+  /** type 为 enum 时是选项型参数：因子水平只能从 options 里挑 */
+  params: { name: string; label?: string; unit: string; type?: 'number' | 'integer' | 'enum'; options?: string[] }[];
 };
 
 export type RecipeSummary = {
@@ -537,7 +538,8 @@ export type RecipeStep = {
   /** 由 SOP 生成流程时抄下的说明 */
   sop_instructions?: string;
   cap: string;
-  params: Record<string, number | ''>;
+  /** 固定参数：数值，或选项型参数的选项文字；'' 是界面上还没填 */
+  params: Record<string, number | string>;
   dur: number;
   hard?: { from: string; maxGapMin: number };
   form?: FormField[];
@@ -743,7 +745,7 @@ export type StationRow = {
   channel_unit: ChannelUnit;
   clean: boolean;
   dirty_batch_id: string;
-  limits: Record<string, Record<string, [number, number]>>;
+  limits: Record<string, Record<string, LimitWindow>>;
   retired: boolean;
   retire_blockers: string[];
   asset_id: string;
@@ -953,7 +955,10 @@ export type AdapterCatalog = {
   described_at: string | null;
 };
 
-export type MethodParamRule = { default?: number | null; min?: number | null; max?: number | null; unit?: string };
+/** 设备方法的参数规则。数值参数：缺省值与允许范围；选项型参数：缺省选项与允许的选项（能力登记选项的子集） */
+export type MethodParamRule = {
+  default?: number | string | null; min?: number | null; max?: number | null; unit?: string; options?: string[];
+};
 export type MethodOutputRule = {
   key: string;
   label?: string;
@@ -1022,7 +1027,11 @@ export type AdapterTestResult = {
 };
 
 /** 能力参数的规格：数值 / 整数、单位、是否必填。没登记的按「数值、单位未登记、必填」解释 */
-export type ParamSpec = { type?: 'number' | 'integer'; unit?: string; required?: boolean };
+/** 能力参数的规格。选项型（enum）写 options：值只能是其中之一，原样作为文字下发，没有单位 */
+export type ParamSpec = { type?: 'number' | 'integer' | 'enum'; unit?: string; required?: boolean; options?: string[] };
+
+/** 工位的能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项 */
+export type LimitWindow = [number, number] | string[];
 
 export type CapabilityRow = {
   id: string;
@@ -2373,7 +2382,8 @@ export type MaintenanceOrderRow = {
 };
 
 export type DesignSpace = {
-  bounds?: Record<string, { min?: number | null; max?: number | null }>;
+  /** 数值因子写上下限；类别因子（溶剂、催化剂、协议）写允许的选项 */
+  bounds?: Record<string, { min?: number | null; max?: number | null; options?: (number | string)[] }>;
   forbidden?: Record<string, number | string>[];
   max_points?: number;
 };

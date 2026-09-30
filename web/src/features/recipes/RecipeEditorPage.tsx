@@ -39,6 +39,7 @@ import {
   forwardCaseKeys,
   freeCase,
   isDosingStep,
+  paramOptions,
   graphMode,
   indexCapabilities,
   kindOf,
@@ -1281,6 +1282,42 @@ function DeviceParamField({
   const range = paramRange(stations, step.cap, paramKey);
   const rule = step.method?.params?.[paramKey];
   const binding = step.bindings?.[paramKey];
+  if (spec.type === 'enum') {
+    // 选项型：从登记的选项里挑；没有工位允许的选项、设备方法不允许的选项标出来。前馈只做数值换算，不能作用于它
+    const allowed = paramOptions(stations, step.cap, paramKey);
+    const value = step.params?.[paramKey];
+    const methodAllowed = rule?.options?.length ? rule.options : spec.options;
+    const filled = typeof value === 'string' && value !== '';
+    const ok = filled ? allowed.includes(value) && methodAllowed.includes(value) && spec.options.includes(value) : !spec.required;
+    return (
+      <Field
+        label={`${spec.label}　选项${spec.required ? '' : '（可不填）'}`}
+        hint={rule ? `设备方法允许 ${methodAllowed.join('、')}，缺省 ${rule.default ?? '—'}` : '选项原样作为文字下发给设备'}
+      >
+        <select
+          value={filled ? (value as string) : ''}
+          className={ok ? undefined : 'bad'}
+          disabled={readOnly}
+          aria-label={spec.label}
+          onChange={(event) =>
+            onSet((current) => {
+              if (!event.target.value && !spec.required) delete current.params[paramKey];
+              else current.params[paramKey] = event.target.value;
+            })
+          }
+        >
+          <option value="">{spec.required ? '选择' : '不填（设备按缺省执行）'}</option>
+          {spec.options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+              {allowed.includes(option) ? '' : '（没有工位允许）'}
+              {methodAllowed.includes(option) ? '' : '（设备方法不允许）'}
+            </option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
   const hint = rule
     ? `设备方法允许 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]${rule.unit ? ` ${rule.unit}` : ''}，缺省 ${rule.default ?? '—'}`
     : undefined;
@@ -1316,7 +1353,7 @@ function DeviceParamField({
     return (
       <Field label={`${label}　${range ? `[${range[0]}, ${range[1]}]` : '无工位定义该参数'}${spec.required ? '' : '（可不填）'}`} hint={hint}>
         <NumberInput
-          value={value ?? ''}
+          value={typeof value === 'number' ? value : ''}
           invalid={!ok}
           disabled={readOnly}
           ariaLabel={spec.label}

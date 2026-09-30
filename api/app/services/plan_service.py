@@ -311,6 +311,7 @@ class PlanService:
     def _target_options(self, plan: Plan) -> list[dict]:
         """因子可以作用的设备参数：流程里每个设备步骤及其能力声明的参数。"""
         from ..domain.bindings import bindings_of
+        from ..domain.params import spec_of
         from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
         from ..repositories.resources import CapabilityRepository
 
@@ -320,18 +321,21 @@ class PlanService:
         for index, step in enumerate(normalize(recipe.steps if recipe else [])):
             if kind_of(step) != DEVICE:
                 continue
-            declared = (capabilities.get(step.get("cap", "")) or {}).get("params") or {}
+            capability = capabilities.get(step.get("cap", "")) or {}
+            declared = capability.get("params") or {}
             # 取自上游结果的参数（前馈）不能再让因子作用
             params = sorted((set(declared) | set(step.get("params") or {})) - set(bindings_of(step)))
+            rows = []
+            for name in params:
+                spec = spec_of(capability, name)
+                rows.append({
+                    "name": name, "label": declared.get(name, name), "unit": spec["unit"], "type": spec["type"],
+                    # 选项型参数：因子水平只能从这些选项里挑
+                    "options": spec["options"],
+                })
             options.append({
                 "step_id": step_id_of(step, index), "step_name": step.get("name") or f"第 {index + 1} 步",
-                "capability": step.get("cap", ""),
-                "params": [
-                    {"name": name, "label": declared.get(name, name),
-                     "unit": ((capabilities.get(step.get("cap", "")) or {}).get("param_specs") or {})
-                     .get(name, {}).get("unit", "")}
-                    for name in params
-                ],
+                "capability": step.get("cap", ""), "params": rows,
             })
         return options
 

@@ -9,9 +9,10 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
+import { isOptionWindow } from '../../shared/params';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
-import type { AcceptanceDefaults, AcceptanceListing, AcceptanceRun, AdapterRow, StationRow } from '../../shared/types';
+import type { AcceptanceDefaults, AcceptanceListing, AcceptanceRun, AdapterRow, LimitWindow, StationRow } from '../../shared/types';
 import { Field, Modal, NumberInput, Pill, useToast } from '../../shared/ui';
 
 const RUN_PILL: Record<string, string> = {
@@ -19,19 +20,24 @@ const RUN_PILL: Record<string, string> = {
 };
 const CHECK_PILL: Record<string, string> = { pass: 'running', fail: 'fault', skip: 'retired' };
 
-function midpoints(window: Record<string, [number, number]> | undefined): Record<string, number> {
-  return Object.fromEntries(Object.entries(window ?? {}).map(([name, [low, high]]) => [name, Number(((low + high) / 2).toFixed(6))]));
+/** 每个参数取一个一定落在极限里的值：数值取中点，选项型取第一个允许的选项（与服务端 default_template 一致） */
+function midpoints(window: Record<string, LimitWindow> | undefined): Record<string, number | string> {
+  return Object.fromEntries(
+    Object.entries(window ?? {}).map(([name, span]) =>
+      isOptionWindow(span) ? [name, span[0]] : [name, Number((((span[0] as number) + (span[1] as number)) / 2).toFixed(6))],
+    ),
+  );
 }
 
 const SOURCE_LABEL: Record<string, string> = { template: '设备接入模板的验收缺省', config: '连接配置的验收缺省', limits: '工位极限中点' };
 
 /* 某项能力的初始参数：缺省（模板 / 配置）里给了就用它，数值参数进表单，其余（起止位置等）进 JSON；否则取极限中点 */
-function initialParams(capability: string, window: Record<string, [number, number]>, defaults?: AcceptanceDefaults) {
+function initialParams(capability: string, window: Record<string, LimitWindow>, defaults?: AcceptanceDefaults) {
   const given = defaults && defaults.capability === capability ? defaults.params : {};
-  const numeric: Record<string, number | ''> = { ...midpoints(window) };
+  const numeric: Record<string, number | string> = { ...midpoints(window) };
   const extra: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(given)) {
-    if (name in window && typeof value === 'number') numeric[name] = value;
+    if (name in window && (typeof value === 'number' || typeof value === 'string')) numeric[name] = value;
     else if (!(name in window)) extra[name] = value;
   }
   return { numeric, extra: Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '' };
@@ -269,7 +275,7 @@ function PhysicalRequest({
   const capabilities = Object.keys(station.limits ?? {}).sort();
   const first = defaults && capabilities.includes(defaults.capability) ? defaults.capability : capabilities[0] ?? '';
   const [capability, setCapability] = useState(first);
-  const [params, setParams] = useState<Record<string, number | ''>>(
+  const [params, setParams] = useState<Record<string, number | string>>(
     () => initialParams(first, station.limits?.[first] ?? {}, defaults).numeric,
   );
   const [extra, setExtra] = useState(() => initialParams(first, station.limits?.[first] ?? {}, defaults).extra);
@@ -339,11 +345,29 @@ function PhysicalRequest({
         </Field>
       </div>
       <div className="grid cols-3">
-        {Object.entries(window).map(([name, [low, high]]) => (
-          <Field key={name} label={`${name}（${low}–${high}）`}>
-            <NumberInput value={params[name] ?? ''} onChange={(value) => setParams((current) => ({ ...current, [name]: value }))} />
-          </Field>
-        ))}
+        {Object.entries(window).map(([name, span]) =>
+          isOptionWindow(span) ? (
+            <Field key={name} label={`${name}（选项）`}>
+              <select
+                value={String(params[name] ?? '')}
+                onChange={(event) => setParams((current) => ({ ...current, [name]: event.target.value }))}
+              >
+                {span.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : (
+            <Field key={name} label={`${name}（${span[0]}–${span[1]}）`}>
+              <NumberInput
+                value={typeof params[name] === 'number' ? (params[name] as number) : ''}
+                onChange={(value) => setParams((current) => ({ ...current, [name]: value }))}
+              />
+            </Field>
+          ),
+        )}
       </div>
       <Field
         label="其他参数（JSON，可空）"

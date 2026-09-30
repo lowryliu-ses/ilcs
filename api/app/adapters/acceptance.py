@@ -180,6 +180,13 @@ class AcceptanceRecord:
         return cls(**known)
 
 
+def _middle(span: Any) -> Any:
+    """极限里取一个一定落在范围内的值：数值取中点，选项型参数取第一个允许的选项。"""
+    if isinstance(span, (list, tuple)) and span and all(isinstance(item, str) for item in span):
+        return span[0]
+    return round((span[0] + span[1]) / 2, 6)
+
+
 def default_template(station_id: str, limits: dict[str, Any], capability: str = "",
                      params: dict[str, Any] | None = None) -> CommandRequest:
     """一条正常的动作指令：缺省用工位第一个能力、参数取工位极限的中点——落在承接范围内，
@@ -190,7 +197,7 @@ def default_template(station_id: str, limits: dict[str, Any], capability: str = 
     capability = capability or next(iter(sorted(limits or {})), "")
     window = (limits or {}).get(capability)
     if params is None:
-        params = {name: round((span[0] + span[1]) / 2, 6) for name, span in (window or {}).items() if span}
+        params = {name: _middle(span) for name, span in (window or {}).items() if span}
     return CommandRequest(
         command_id="", station_id=station_id, capability=capability, params=dict(params),
         type="transfer" if capability == TRANSFER_CAPABILITY else "dispatch",

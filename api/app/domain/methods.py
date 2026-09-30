@@ -74,6 +74,12 @@ def definition_issues(
             continue
         if capability is not None and key not in known:
             issues.append(f"参数 {key} 不是能力 {capability_id} 的参数（可用：{'、'.join(sorted(known)) or '无'}）")
+        if capability is not None and key in known:
+            from .params import spec_of
+
+            if spec_of(capability, key)["type"] == "enum":
+                issues.extend(_enum_rule_issues(key, rule, spec_of(capability, key)))
+                continue
         lo, hi, default = _num(rule.get("min")), _num(rule.get("max")), _num(rule.get("default"))
         if lo is not None and hi is not None and lo > hi:
             issues.append(f"参数 {key} 下限 {lo:g} 大于上限 {hi:g}")
@@ -145,6 +151,38 @@ def snapshot(spec: MethodSpec) -> dict[str, Any]:
     }
 
 
+def _enum_rule_issues(key: str, rule: dict, spec: dict) -> list[str]:
+    """选项型参数的方法规则：可以收窄允许的选项（`options`，要是能力登记选项的子集），缺省值是其中之一；没有上下限与单位。"""
+    issues: list[str] = []
+    if rule.get("min") not in (None, "") or rule.get("max") not in (None, ""):
+        issues.append(f"参数 {key} 是选项型，不写上下限，用 options 列允许的选项")
+    if rule.get("unit"):
+        issues.append(f"参数 {key} 是选项型，没有单位")
+    allowed = rule.get("options")
+    if allowed not in (None, []):
+        if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
+            issues.append(f"参数 {key} 的允许选项必须是文字列表")
+            allowed = []
+        else:
+            unknown = [item for item in allowed if item not in spec["options"]]
+            if unknown:
+                issues.append(f"参数 {key} 的允许选项 {'、'.join(unknown)} 不是能力登记的选项")
+    default = rule.get("default")
+    if default not in (None, ""):
+        choices = allowed or spec["options"]
+        if not isinstance(default, str) or default not in choices:
+            issues.append(f"参数 {key} 缺省值 {default!r} 不在允许的选项 {'、'.join(choices)} 里")
+    return issues
+
+
+def rule_default(rule: dict) -> Any:
+    """方法规则的缺省值：数值参数取数，选项型参数取文字；没有返回 None。"""
+    default = (rule or {}).get("default")
+    if isinstance(default, str) and default.strip() and _num(default) is None:
+        return default
+    return _num(default)
+
+
 def step_problems(step: dict[str, Any], spec: MethodSpec | None) -> list[str]:
     ref = method_ref(step)
     if not ref:
@@ -166,6 +204,11 @@ def step_problems(step: dict[str, Any], spec: MethodSpec | None) -> list[str]:
             continue  # 方法没有参数表：步骤参数只受工位极限约束
         if rule is None:
             problems.append(f"参数 {key} 不在设备方法 {spec.code} 的参数表里")
+            continue
+        if isinstance(value, str):
+            allowed = rule.get("options") or []
+            if allowed and value not in allowed:
+                problems.append(f"参数 {key}={value} 不在设备方法允许的选项 {'、'.join(allowed)} 里")
             continue
         number = _num(value)
         lo, hi = _num(rule.get("min")), _num(rule.get("max"))
@@ -205,8 +248,8 @@ def apply(
         # 取自上游结果的参数不补缺省值：它在下发时才有值，补一个固定值等于绕过前馈
         bound = set((step.get("bindings") or {}) if isinstance(step.get("bindings"), dict) else ())
         defaults = {
-            key: _num(rule.get("default")) for key, rule in spec.params.items()
-            if _num(rule.get("default")) is not None and key not in bound
+            key: rule_default(rule) for key, rule in spec.params.items()
+            if rule_default(rule) is not None and key not in bound
         }
         row["params"] = {**defaults, **(step.get("params") or {})}
         if not step.get("dur") and spec.dur_min:

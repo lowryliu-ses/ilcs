@@ -7,6 +7,7 @@
    判据按步骤类型分支：设备步骤看能力与参数，人工步骤看记录表单，
    等待步骤看等待方式，审核步骤看审核角色。不适用的字段不提示缺失——
    否则一个纯人工流程会被「没有可承接工位」挡住。 */
+import { isOptionWindow, paramSpec, valueProblem, windowFits } from '../../shared/params';
 import type { BomItem, BranchCase, CapabilityRow, Check, ParamBinding, RecipeStep, StationRow } from '../../shared/types';
 import { canonicalUnit, convertible, splitRatio } from '../../shared/units';
 
@@ -108,14 +109,31 @@ export function paramRange(
 ): [number, number] | null {
   const windows = (stations ?? [])
     .map((station) => station.limits?.[cap]?.[key])
-    .filter((window): window is [number, number] => Array.isArray(window) && window.length === 2);
+    .filter((window): window is [number, number] =>
+      Array.isArray(window) && window.length === 2 && !isOptionWindow(window));
   if (!windows.length) return null;
   return [Math.min(...windows.map((w) => w[0])), Math.max(...windows.map((w) => w[1]))];
 }
 
-export function defaultParams(stations: StationRow[] | undefined, capability: CapabilityRow): Record<string, number | ''> {
+/** 选项型参数：全部工位允许的选项的并集。没有工位允许的选项排不上。 */
+export function paramOptions(stations: StationRow[] | undefined, cap: string, key: string): string[] {
+  const allowed = new Set<string>();
+  (stations ?? []).forEach((station) => {
+    const window = station.limits?.[cap]?.[key];
+    if (isOptionWindow(window)) window.forEach((option) => allowed.add(option));
+  });
+  return [...allowed];
+}
+
+export function defaultParams(stations: StationRow[] | undefined, capability: CapabilityRow): Record<string, number | string> {
   return Object.fromEntries(
     Object.keys(capability.params ?? {}).map((key) => {
+      const spec = paramSpec(capability, key);
+      if (spec.type === 'enum') {
+        // 选项型：取第一个有工位允许的选项
+        const allowed = paramOptions(stations, capability.id, key);
+        return [key, spec.options.find((option) => allowed.includes(option)) ?? spec.options[0] ?? ''];
+      }
       const range = paramRange(stations, capability.id, key);
       return [key, range ? Number(((range[0] + range[1]) / 2).toFixed(2)) : 0];
     }),
@@ -166,31 +184,23 @@ export function stationsForStep(
     const implemented = station.limits?.[step.cap];
     if (!implemented) return false;
     if (methodBlocksStation(station, step).length) return false;
-    const fixed = Object.entries(step.params ?? {}).every(([key, value]) => {
-      const window = implemented[key];
-      if (!window) return false;
-      return typeof value === 'number' && value >= window[0] && value <= window[1];
-    });
+    const fixed = Object.entries(step.params ?? {}).every(([key, value]) => windowFits(value, implemented[key]));
     // 取自上游结果的参数排程时还没有值：工位极限要覆盖整个预期范围（与服务端 bindings.window_holds 同一判据）
     return fixed && Object.entries(step.bindings ?? {}).every(([key, binding]) => {
       const window = implemented[key];
       const expect = expectOf(binding);
-      return Boolean(window && expect && expect[0] >= window[0] && expect[1] <= window[1]);
+      if (!window || !expect || isOptionWindow(window)) return false;
+      const [low, high] = window as [number, number];
+      return expect[0] >= low && expect[1] <= high;
     });
   });
 }
 
 /* ---------- 参数规格与前馈（对应后端 domain/params.py 与 domain/bindings.py） ---------- */
 
-/** 参数规格：没登记的按「数值、单位未登记、必填」——有规格之前的行为。 */
+/** 参数规格：没登记的按「数值、单位未登记、必填」——有规格之前的行为。选项型带 options */
 export function specOf(capability: CapabilityRow | undefined, key: string) {
-  const raw = capability?.param_specs?.[key] ?? {};
-  return {
-    label: capability?.params?.[key] || key,
-    type: raw.type === 'integer' ? 'integer' : 'number',
-    unit: canonicalUnit(raw.unit),
-    required: raw.required !== false,
-  };
+  return paramSpec(capability, key);
 }
 
 
@@ -313,11 +323,12 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (bound.has(key)) return; // 取自上游结果，由 bindingIssues 核对
     const spec = specOf(capability, key);
     const value = step.params?.[key];
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
+    if (value === undefined || value === '' || (typeof value === 'number' && !Number.isFinite(value))) {
       if (spec.required) issues.push(`${spec.label} 未填写`);
       return;
     }
-    if (spec.type === 'integer' && !Number.isInteger(value)) issues.push(`${spec.label} 必须是整数`);
+    const problem = valueProblem(spec, value);
+    if (problem) issues.push(problem);
   });
   if (capability) {
     Object.keys(step.params ?? {}).forEach((key) => {
@@ -328,6 +339,8 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (materialParam != null && materialParam !== '') {
       if (typeof materialParam !== 'string' || !(materialParam in defined)) {
         issues.push(`用量参数 ${String(materialParam)} 不是该能力的参数`);
+      } else if (specOf(capability, materialParam).type === 'enum') {
+        issues.push(`用量参数 ${materialParam} 是选项型参数，不能当投料量`);
       } else if (!specOf(capability, materialParam).unit) {
         issues.push(`用量参数 ${materialParam} 没有登记单位，无法与物料单位对账`);
       }
@@ -337,7 +350,15 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
   const rules = step.method?.params ?? {};
   Object.entries(step.params ?? {}).forEach(([key, value]) => {
     const rule = rules[key];
-    if (!rule || typeof value !== 'number') return;
+    if (!rule) return;
+    if (typeof value === 'string') {
+      const allowed = rule.options ?? [];
+      if (value && allowed.length && !allowed.includes(value)) {
+        issues.push(`参数 ${key}=${value} 不在设备方法允许的选项 ${allowed.join('、')} 里`);
+      }
+      return;
+    }
+    if (typeof value !== 'number') return;
     if ((rule.min != null && value < rule.min) || (rule.max != null && value > rule.max)) {
       issues.push(`参数 ${key}=${value} 超出设备方法允许的 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]`);
     }

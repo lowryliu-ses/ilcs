@@ -60,7 +60,7 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
         if key in bound:
             continue
         value = params.get(key)
-        if value is None or value == "" or not isinstance(value, (int, float)) or isinstance(value, bool):
+        if value is None or value == "":
             if rule["required"]:
                 issues.append(f"{rule['label']} 未填写")
             continue
@@ -73,6 +73,8 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
     if material_param not in (None, "") and spec is not None:
         if not isinstance(material_param, str) or material_param not in defined:
             issues.append(f"用量参数 {material_param} 不是该能力的参数")
+        elif spec_of(spec, material_param)["type"] == "enum":
+            issues.append(f"用量参数 {material_param} 是选项型参数，不能当投料量")
         elif not spec_of(spec, material_param)["unit"]:
             issues.append(f"用量参数 {material_param} 没有登记单位，无法与物料单位对账")
     return issues

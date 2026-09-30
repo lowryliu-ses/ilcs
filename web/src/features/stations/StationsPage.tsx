@@ -3,11 +3,14 @@ import { Link, useSearchParams } from 'react-router-dom';
 
 import { ApiError, api, pageQuery } from '../../shared/api';
 import { day, time } from '../../shared/format';
+import { defaultWindow, isOptionWindow, paramSpec, windowProblem } from '../../shared/params';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CHANNEL_UNIT_LABEL } from '../../shared/types';
-import type { AssetRow, CapabilityRow, ChannelUnit, IslandRow, Paged, StationAsset, StationRow } from '../../shared/types';
+import type {
+  AssetRow, CapabilityRow, ChannelUnit, IslandRow, LimitWindow, Paged, StationAsset, StationRow,
+} from '../../shared/types';
 import { Blocked, ConfirmDialog, ConnectionPill, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import { AdapterEditor } from './AdapterEditor';
 import { AreasTab, areaLabel } from './AreasTab';
@@ -595,7 +598,8 @@ function LimitsEditor({
 }) {
   const toast = useToast();
   const { sign } = useSignature();
-  const [limits, setLimits] = useState<Record<string, Record<string, [number | '', number | '']>>>(
+  // 数值参数 [下限, 上限]（编辑中可能是 ''），选项型参数是允许的选项
+  const [limits, setLimits] = useState<Record<string, Record<string, [number | '', number | ''] | string[]>>>(
     () => JSON.parse(JSON.stringify(station.limits ?? {})),
   );
   const [adding, setAdding] = useState('');
@@ -623,7 +627,17 @@ function LimitsEditor({
   const setBound = (capability: string, param: string, edge: 0 | 1, value: number | '') =>
     setLimits((current) => {
       const next = JSON.parse(JSON.stringify(current)) as typeof current;
-      next[capability][param][edge] = value;
+      (next[capability][param] as [number | '', number | ''])[edge] = value;
+      return next;
+    });
+  const toggleOption = (capability: string, param: string, option: string, on: boolean) =>
+    setLimits((current) => {
+      const next = JSON.parse(JSON.stringify(current)) as typeof current;
+      const spec = paramSpec(capabilities.find((row) => row.id === capability), param);
+      const chosen = new Set(isOptionWindow(next[capability][param] as LimitWindow) ? (next[capability][param] as string[]) : []);
+      if (on) chosen.add(option);
+      else chosen.delete(option);
+      next[capability][param] = spec.options.filter((item) => chosen.has(item));
       return next;
     });
 
@@ -632,7 +646,9 @@ function LimitsEditor({
     if (!definition || limits[capabilityId]) return;
     setLimits((current) => ({
       ...current,
-      [capabilityId]: Object.fromEntries(Object.keys(definition.params).map((key) => [key, [0, 100]])),
+      [capabilityId]: Object.fromEntries(
+        Object.keys(definition.params).map((key) => [key, defaultWindow(paramSpec(definition, key))]),
+      ),
     }));
     setRemoved((current) => current.filter((id) => id !== capabilityId));
     setAdding('');
@@ -644,15 +660,17 @@ function LimitsEditor({
     if (capabilityId in (station.limits ?? {})) setRemoved((current) => [...current, capabilityId]);
   };
 
+  const problemOf = (capability: string, param: string, window: unknown) =>
+    windowProblem(paramSpec(capabilities.find((row) => row.id === capability), param), window);
   const invalidRows = Object.entries(limits).flatMap(([capability, params]) =>
     Object.entries(params)
-      .filter(([, window]) => !(typeof window[0] === 'number' && typeof window[1] === 'number' && window[0] < window[1]))
-      .map(([param]) => `${capability}.${param}`),
+      .filter(([param, window]) => problemOf(capability, param, window))
+      .map(([param, window]) => `${capability}.${param} ${problemOf(capability, param, window)}`),
   );
 
   const submit = async () => {
     if (invalidRows.length) {
-      setError(`下限必须小于上限：${invalidRows.join('、')}`);
+      setError(invalidRows.join('；'));
       return;
     }
     setError('');
@@ -713,7 +731,38 @@ function LimitsEditor({
               </thead>
               <tbody>
                 {Object.entries(params).map(([param, window]) => {
-                  const bad = !(typeof window[0] === 'number' && typeof window[1] === 'number' && window[0] < window[1]);
+                  const spec = paramSpec(definition, param);
+                  const bad = Boolean(problemOf(capabilityId, param, window));
+                  if (spec.type === 'enum') {
+                    // 选项型参数：这台工位允许哪些选项（能力登记选项的子集）
+                    const chosen = isOptionWindow(window as LimitWindow) ? (window as string[]) : [];
+                    return (
+                      <tr key={param}>
+                        <td className="small">
+                          {spec.label}
+                          <div className="tiny muted mono">{param} · 选项</div>
+                        </td>
+                        <td colSpan={2} className={bad ? 'bad-text' : undefined}>
+                          <div className="dep-list">
+                            {spec.options.map((option) => (
+                              <label key={option} className="check">
+                                <input
+                                  type="checkbox"
+                                  checked={chosen.includes(option)}
+                                  onChange={(event) => toggleOption(capabilityId, param, option, event.target.checked)}
+                                />
+                                {option}
+                              </label>
+                            ))}
+                          </div>
+                          {bad ? <div className="tiny">{problemOf(capabilityId, param, window)}</div> : null}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  const [low, high]: [number | '', number | ''] = isOptionWindow(window as LimitWindow)
+                    ? ['', '']
+                    : (window as [number | '', number | '']);
                   return (
                     <tr key={param}>
                       <td className="small">
@@ -722,7 +771,7 @@ function LimitsEditor({
                       </td>
                       <td className="num">
                         <NumberInput
-                          value={window[0]}
+                          value={low}
                           invalid={bad}
                           ariaLabel={`${param} 下限`}
                           onChange={(next) => setBound(capabilityId, param, 0, next)}
@@ -730,7 +779,7 @@ function LimitsEditor({
                       </td>
                       <td className="num">
                         <NumberInput
-                          value={window[1]}
+                          value={high}
                           invalid={bad}
                           ariaLabel={`${param} 上限`}
                           onChange={(next) => setBound(capabilityId, param, 1, next)}

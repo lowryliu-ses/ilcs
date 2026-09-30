@@ -1156,20 +1156,27 @@ class PublishIn(Signed):
 
 # ---------- 资源 ----------
 
+# 能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项（登记选项的子集）；写法由服务端按参数规格核
+LimitWindow = list[float] | list[str]
+
+
 class LimitsIn(Signed):
     # 只列要改的能力：没列出的保持原样（合并写入）
-    limits: dict[str, dict[str, list[float]]] = {}
+    limits: dict[str, dict[str, LimitWindow]] = {}
     # 这台工位不再承接的能力：整项移除，引用它的流程随之重校验
     remove: list[str] = []
     row_version: int | None = None
 
 
 class ParamSpecIn(BaseModel):
-    """能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。"""
+    """能力参数的规格：数值、整数或选项、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。
 
-    type: Literal["number", "integer"] = "number"
+    选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。"""
+
+    type: Literal["number", "integer", "enum"] = "number"
     unit: str = Field(default="", max_length=32)
     required: bool = True
+    options: list[str] = Field(default_factory=list, max_length=50)
 
 
 class CapabilityIn(Signed):
@@ -1203,7 +1210,7 @@ class StationCreateIn(Signed):
     channels: int = Field(default=1, ge=1, le=512)
     # 通道怎么计：batch 一个批次的一个设备步骤占 1 个；sample 批次里每个样本各占 1 个（一颗电芯一个通道）
     channel_unit: Literal["batch", "sample"] = "batch"
-    limits: dict[str, dict[str, list[float]]] = {}
+    limits: dict[str, dict[str, LimitWindow]] = {}
     asset_id: str = ""
     protocol: str = ""
     adapter_driver: str = "simulation"

@@ -50,6 +50,8 @@ def window_holds(window: Any, expect: tuple[float, float] | None) -> bool:
     """工位极限是否覆盖整个预期范围：排程时实际值还不知道，只能按最坏情况挑工位。"""
     if expect is None or not isinstance(window, (list, tuple)) or len(window) != 2:
         return False
+    if not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in window):
+        return False  # 选项型参数的极限是允许的选项，前馈算出来的数落不进去
     return expect[0] >= window[0] and expect[1] <= window[1]
 
 
@@ -125,6 +127,9 @@ def binding_issues(
         spec = spec_of(capability, param)
         label = spec["label"]
         target_unit = spec["unit"]
+        if spec["type"] == "enum":
+            issues.append(f"{label} 是选项型参数：前馈只做「来源值 × 系数」的数值换算，不能作用于它")
+            continue
         if param in (step.get("params") or {}):
             issues.append(f"{label} 已声明取自上游结果，不能再写固定值")
         if not target_unit:

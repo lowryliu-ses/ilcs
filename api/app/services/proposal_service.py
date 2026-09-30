@@ -30,7 +30,7 @@ from ..models import (
 )
 from ..repositories.base import ScopedRepository
 from ..repositories.recipes import PlanRepository, RecipeRepository
-from ..repositories.resources import StationRepository
+from ..repositories.resources import CapabilityRepository, StationRepository
 from .audit_service import AuditService
 from .identity_service import user_may
 
@@ -170,11 +170,12 @@ class ProposalService:
             issues.append(f"{len(points)} 个点 × {repeats} 次重复超过流程每批 {recipe.plate} 个样品位")
         if points and recipe is not None:
             proposed = [
-                {**factor, "levels": sorted({point[index] for point in points})}
+                {**factor, "levels": matrix.ordered_levels(point[index] for point in points)}
                 for index, factor in enumerate(factors)
             ]
             issues += matrix.target_issues(
                 proposed, normalize(recipe.steps or []), StationRepository(self.db, self.ctx).specs(),
+                CapabilityRepository(self.db).specs(),
             )
         return issues, points
 
@@ -182,7 +183,7 @@ class ProposalService:
         from .plan_service import PlanService
 
         factors = [
-            {**factor, "levels": sorted({point[index] for point in points})}
+            {**factor, "levels": matrix.ordered_levels(point[index] for point in points)}
             for index, factor in enumerate(plan.factors or [])
         ]
         round_no = (plan.round_no or 1) + 1
