@@ -164,6 +164,9 @@ tbody tr:last-child td { border-bottom: 0; }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--surface-2); }
 tr.current td { background: var(--accent-soft); }
+/* 操作列：单元格必须保持 table-cell 才随整行撑高——flex 的单元格只包住按钮，底边分隔线会比同行其他格高一截 */
+td.row-end { display: table-cell; text-align: right; }
+td.row-end > * + * { margin-left: 6px; }
 .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* ---------- 状态标识 ---------- */
