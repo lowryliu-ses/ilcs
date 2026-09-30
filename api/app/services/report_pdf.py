@@ -18,6 +18,8 @@ FONT = "STSong-Light"
 # CID 字体的字形映射不是 Unicode：U+00B7（·）会画成「▲」，U+2022（•）会画成「煉」。
 # 项目符号只用实测过的 U+30FB，别换成看起来更合适的那几个。
 BULLET = "\u30fb"
+# \u6b63\u6587\u91cc\u7684\u4e2d\u70b9\uff08mPa\u00b7s\u3001N\u00b7m\uff09\u540c\u7406\u753b\u4e0d\u51fa\u6765\uff1a\u753b\u4e4b\u524d\u6362\u6210 U+30FB
+GLYPHS = str.maketrans({"\u00b7": BULLET})
 _registered = False
 
 LEFT = 20 * mm
@@ -45,10 +47,10 @@ class Page:
 
     def _header(self) -> None:
         self.pdf.setFont(FONT, 14)
-        self.pdf.drawString(LEFT, self.y, self.title)
+        self.pdf.drawString(LEFT, self.y, self.title.translate(GLYPHS))
         self.y -= 6 * mm
         self.pdf.setFont(FONT, 8)
-        self.pdf.drawString(LEFT, self.y, self.subtitle)
+        self.pdf.drawString(LEFT, self.y, self.subtitle.translate(GLYPHS))
         self.pdf.setLineWidth(0.5)
         self.y -= 2.5 * mm
         self.pdf.line(LEFT, self.y, RIGHT, self.y)
@@ -70,7 +72,7 @@ class Page:
         self.space(12 * mm)
         self.y -= 2 * mm
         self.pdf.setFont(FONT, 11)
-        self.pdf.drawString(LEFT, self.y, text)
+        self.pdf.drawString(LEFT, self.y, text.translate(GLYPHS))
         self.y -= 1.8 * mm
         self.pdf.setLineWidth(0.3)
         self.pdf.line(LEFT, self.y, RIGHT, self.y)
@@ -123,7 +125,7 @@ class Page:
     @staticmethod
     def _wrap(value: str, size: float, width: float) -> list[str]:
         lines: list[str] = []
-        for paragraph in str(value or "").split("\n"):
+        for paragraph in str(value or "").translate(GLYPHS).split("\n"):
             current = ""
             for char in paragraph:
                 if pdfmetrics.stringWidth(current + char, FONT, size) > width:
@@ -136,6 +138,7 @@ class Page:
 
     @staticmethod
     def _clip(value: str, size: float, width: float) -> str:
+        value = value.translate(GLYPHS)
         if pdfmetrics.stringWidth(value, FONT, size) <= width:
             return value
         clipped = value
