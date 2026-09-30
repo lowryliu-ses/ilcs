@@ -268,6 +268,8 @@ class MethodOutputRule(BaseModel):
     lo: float | None = None
     hi: float | None = None
     required: bool = False
+    # 关联的检测指标：设备回报这个值时按样本写成该指标的检测结果（进数据审核）；不填只进检查点
+    metric_id: str = ""
 
 
 class DeviceMethodIn(BaseModel):

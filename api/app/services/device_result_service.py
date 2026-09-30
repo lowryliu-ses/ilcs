@@ -1,0 +1,210 @@
+"""设备回报的检测值 → 检测结果。
+
+设备方法的输出项关联了指标（`metric_id`）时，设备这一步回报的值按样本写成该指标的检测结果：进「数据审核」
+待复核，复核通过后进结果分析、报告，也才进闭环的训练数据——与仪器结果回传是同一条链，不用人从批次记录里抄数。
+
+- 按瓶记：取 `delivered.wells[孔位][键]`，孔位 → 样本与逐孔参数同一口径（`BatchService._step_targets`）。
+  设备只给了顶层值（批次级读数）时照 `dataquality.output_flags` 的口径当作每个孔位的值，并打上「批次级读数」标记。
+- 每个样本一张「设备回报」检测任务，要求指标 = 这个批次快照里所有输出项关联的指标（建任务时冻结）。
+- 按「指令 + 孔位」去重（回传事件表的同一唯一键）：回执重放不重复写；同一步重做（返工、续跑）的新读数取代上一版，
+  留版本链，重新待复核。
+- 值不成立（类型、单位不对）不写并报警；越界照写、置可疑、打标，与回传同一口径。内置模拟给的是示意值：
+  打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。
+- 与设备步骤完成同一个事务，不自己提交；出错只报警，不挡流程推进——值留在检查点上，可以人工补录。
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from ..core.clock import now
+from ..core.context import AccessContext
+from ..domain import dataquality
+from ..domain.metrics import check_value
+from ..domain.steps import normalize
+from ..models import AnalysisTask, Batch, Command, IngestEvent, ResultValue, Sample
+from ..repositories.batches import AnalysisTaskRepository
+from ..repositories.metrics import IngestEventRepository, MetricRepository, ResultValueRepository
+from .alarm_service import AlarmService
+from .analysis_service import AnalysisService, digest
+
+METHOD = "设备回报"
+SIMULATED = "simulated"
+
+
+def linked_rules(step: dict) -> list[dict]:
+    """这一步方法输出项里关联了指标的那些规则（步骤快照里冻结的方法）。"""
+    outputs = ((step or {}).get("method") or {}).get("outputs") or []
+    return [rule for rule in outputs if isinstance(rule, dict) and str(rule.get("metric_id") or "").strip()]
+
+
+def linked_metrics(snapshot: dict) -> list[str]:
+    """批次快照里所有设备步骤关联的指标：「设备回报」检测任务的要求集合。按首次出现排序，稳定。"""
+    seen: list[str] = []
+    for step in normalize((snapshot or {}).get("steps") or []):
+        for rule in linked_rules(step):
+            metric_id = str(rule["metric_id"]).strip()
+            if metric_id not in seen:
+                seen.append(metric_id)
+    return seen
+
+
+class DeviceResultService:
+    def __init__(self, db: Session, ctx: AccessContext):
+        self.db = db
+        self.ctx = ctx
+        self.tasks = AnalysisTaskRepository(db, ctx)
+        self.metrics = MetricRepository(db, ctx)
+        self.events = IngestEventRepository(db, ctx)
+        self.values = ResultValueRepository(db, ctx)
+        self.analysis = AnalysisService(db, ctx)
+        self.alarms = AlarmService(db, ctx)
+
+    def record(self, batch: Batch, command: Command, step: dict, delivered: dict, origin: str) -> dict[str, Any]:
+        """写这一步的检测结果。返回 {written, samples, problems}；不提交。"""
+        rules = linked_rules(step)
+        if not rules:
+            return {"written": 0, "samples": 0, "problems": []}
+        instrument = self._instrument(command.station_id, origin)
+        from .batch_service import BatchService
+
+        targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
+        problems: list[str] = []
+        if not targets:
+            return {"written": 0, "samples": 0, "problems": []}
+        definitions = self.metrics.many([str(rule["metric_id"]).strip() for rule in rules])
+        required = linked_metrics(batch.recipe_snapshot or {})
+        wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
+        source = f"device:{command.station_id}"
+        collected_at = command.updated_at if isinstance(command.updated_at, datetime) else now()
+        written = 0
+        samples = 0
+        for well, sample in sorted(targets.items()):
+            task = self._task_for(batch, sample, required)
+            event_id = f"{command.id}:{well}"
+            if self.events.find(source, task.id, event_id) is not None:
+                continue  # 回执重放：这一瓶这一步已经记过
+            prepared: list[dict] = []
+            for rule in rules:
+                key = str(rule.get("key") or "")
+                metric_id = str(rule["metric_id"]).strip()
+                definition = definitions.get(metric_id)
+                if definition is None or definition.state != "active":
+                    problems.append(f"输出 {key} 关联的指标 {metric_id} 不存在或已停用")
+                    continue
+                if metric_id not in (task.required_metrics or []):
+                    problems.append(f"样本 {sample.id} 的设备回报任务没有要求指标 {definition.code}")
+                    continue
+                row = wells.get(well) if isinstance(wells.get(well), dict) else {}
+                value, batch_level = row.get(key), False
+                if value is None and delivered.get(key) is not None:
+                    value, batch_level = delivered.get(key), len(targets) > 1
+                if value is None:
+                    continue  # 缺必报项由输出规则检查打标报警，这里不重复
+                unit = str(rule.get("unit") or definition.unit)
+                errors = check_value(definition.value_type, definition.unit, definition.rules or {}, value, unit)
+                if errors:
+                    problems.append(f"样本 {sample.id} 的 {definition.code}：{'；'.join(errors)}")
+                    continue
+                flags = dataquality.range_flags(definition.value_type, definition.rules or {}, value, definition.code)
+                prepared.append({"definition": definition, "value": value, "unit": unit, "flags": flags,
+                                 "batch_level": batch_level, "key": key})
+            if not prepared:
+                continue
+            current = self.values.current_for_task(task.id)
+            others = {metric: value for metric, value in current.items()
+                      if metric not in {row["definition"].id for row in prepared}}
+            # 前后逻辑规则：设备值不因冲突拒收（值是设备真实回报的），拒收级也只打标，交审核下结论
+            for problem in self.analysis._logic_check(others, prepared):
+                for row in prepared:
+                    row["flags"] = [*row["flags"], dataquality.flag("logic", problem["label"])]
+            event = IngestEvent(
+                org_id=batch.org_id, source=source, analysis_task_id=task.id, event_id=event_id,
+                digest=digest({"command": command.id, "well": well,
+                               "values": {row["key"]: row["value"] for row in prepared}}),
+                payload={"batch_id": batch.id, "command_id": command.id, "step_index": command.step_index,
+                         "station_id": command.station_id, "well": well, "origin": origin,
+                         "values": {row["key"]: row["value"] for row in prepared}},
+                state="accepted",
+            )
+            self.db.add(event)
+            self.db.flush()
+            written += self._write(task, sample, event, prepared, current, command, origin, instrument, collected_at)
+            samples += 1
+            self.analysis._refresh_task_state(task)
+            event.response = {"task_id": task.id, "task_state": task.state, "written": len(prepared)}
+        if problems:
+            self.alarms.raise_alarm(
+                severity=3, source_type="batch", source_id=batch.id,
+                message=f"第 {command.step_index + 1} 步设备回报的检测值有 {len(problems)} 项没能写成结果：{problems[0]}"[:500],
+                response="核对设备方法输出项关联的指标与单位；值仍在批次检查点里，可在检测任务里人工补录。",
+                owner="数据审核员", origin="system", condition_key=f"data:{batch.id}:{command.id}:results",
+            )
+        return {"written": written, "samples": samples, "problems": problems}
+
+    def _task_for(self, batch: Batch, sample: Sample, required: list[str]) -> AnalysisTask:
+        """这个样本的「设备回报」检测任务：有就沿用，没有就建（要求指标冻结为批次快照里关联的指标）。"""
+        for task in self.tasks.for_sample(sample.id):
+            if task.method == METHOD and task.state != "cancelled":
+                return task
+        snapshot = batch.recipe_snapshot or {}
+        task = self.analysis.create_task({
+            "sample_id": sample.id, "physical_sample_id": sample.physical_sample_id,
+            "method": METHOD, "method_version": f"{batch.recipe_id} v{snapshot.get('version') or ''}".strip(),
+            "required_metrics": required,
+        })
+        self.db.flush()
+        self.analysis.audit.record(
+            None, "建立检测任务", task.id, before="—", after="待采集",
+            detail=f"批次 {batch.id} 样本 {sample.id} 的设备回报；要求指标 {len(required)} 项已冻结",
+        )
+        return task
+
+    def _write(self, task: AnalysisTask, sample: Sample, event: IngestEvent, prepared: list[dict],
+               current: dict[str, ResultValue], command: Command, origin: str, instrument: str,
+               collected_at: datetime) -> int:
+        for row in prepared:
+            definition = row["definition"]
+            flags = list(row["flags"])
+            if row["batch_level"]:
+                flags.append(dataquality.flag("batch_level", "设备只回报了批次级读数，按每个样本各记一份"))
+            if origin == "simulation":
+                flags.append(dataquality.flag(SIMULATED, "内置模拟设备按方法输出规则给的示意值，不是实测"))
+            previous = current.get(definition.id)
+            value = ResultValue(
+                org_id=task.org_id, analysis_task_id=task.id, physical_sample_id=task.physical_sample_id,
+                assignment_id=task.sample_id or sample.id, metric_definition_id=definition.id,
+                ingest_event_id=event.id, value_num=float(row["value"]), unit=row["unit"],
+                collected_at=collected_at, parser_version=self._parser(command),
+                result_version=self.values.max_version(task.id, definition.id) + 1,
+                revises_id=previous.id if previous is not None else "",
+                # 越界、逻辑冲突才置可疑；「模拟示意值」「批次级读数」只是来历说明
+                quality="suspect" if row["flags"] else "unassessed", review_state="pending",
+                provenance="device", entered_by="", flags=flags,
+                station_id=command.station_id, instrument=instrument,
+            )
+            self.db.add(value)
+            self.db.flush()
+            if previous is not None:
+                # 同一步重做（返工、续跑）的新读数：取代上一版，旧版保留，重新待复核
+                previous.superseded_by_id = value.id
+                previous.row_version = int(previous.row_version or 0) + 1
+        return len(prepared)
+
+    def _instrument(self, station_id: str, origin: str) -> str:
+        """测出这个值的仪器：工位关联资产的序列号（没有就资产编号），内置模拟另外注明。"""
+        from ..repositories.resources import AssetRepository, StationRepository
+
+        station = StationRepository(self.db, self.ctx).get(station_id)
+        asset = AssetRepository(self.db, self.ctx).get(station.asset_id) if station and station.asset_id else None
+        label = (asset.serial or asset.asset_no) if asset is not None else ""
+        if origin == "simulation":
+            return f"内置模拟（{label}）" if label else "内置模拟"
+        return label
+
+    @staticmethod
+    def _parser(command: Command) -> str:
+        method = command.method or {}
+        return f"{method.get('code')} v{method.get('version')}" if method.get("code") else ""

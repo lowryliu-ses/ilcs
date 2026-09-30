@@ -9,7 +9,7 @@ import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule } from '../../shared/types';
+import type { CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule, MetricRow } from '../../shared/types';
 import { Field, ListState, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 const STATE_PILL: Record<string, string> = { draft: 'scheduled', released: 'running', retired: 'done' };
@@ -182,6 +182,11 @@ function MethodDialog({
   );
   const [outputs, setOutputs] = useState<MethodOutputRule[]>(method?.outputs ?? []);
   const capability = capabilities.find((row) => row.id === capabilityId);
+  /* 输出项能关联的指标：在用的数值型指标（设备回报的是数）。已关联、后来停用的仍列出，发布检查会报出来 */
+  const metrics = useQuery<MetricRow[]>('metrics', () => api.get<MetricRow[]>('/metrics'));
+  const linkable = (metrics.data ?? []).filter(
+    (row) => (row.state === 'active' && row.value_type === 'number') || outputs.some((output) => output.metric_id === row.id),
+  );
 
   const payload = () => ({
     name,
@@ -312,7 +317,10 @@ function MethodDialog({
       )}
 
       <h4>数据输出规则</h4>
-      <div className="small muted">设备这一步应该回报的值与合理范围。越界的值照常入库并打标，交数据审核处理。</div>
+      <div className="small muted">
+        设备这一步应该回报的值与合理范围。越界的值照常入库并打标，交数据审核处理。关联了指标的输出，设备回报后按样本
+        写成该指标的检测结果、进「数据审核」，复核通过后进结果分析与报告；单位要与指标一致。
+      </div>
       <table>
         <thead>
           <tr>
@@ -322,6 +330,7 @@ function MethodDialog({
             <th>下限</th>
             <th>上限</th>
             <th>必报</th>
+            <th>关联指标</th>
             <th />
           </tr>
         </thead>
@@ -348,6 +357,25 @@ function MethodDialog({
                 </td>
                 <td>
                   <input type="checkbox" checked={Boolean(row.required)} disabled={readOnly} onChange={(event) => update({ required: event.target.checked })} />
+                </td>
+                <td>
+                  <select
+                    value={row.metric_id ?? ''}
+                    disabled={readOnly}
+                    aria-label={`${row.key || '输出'} 关联指标`}
+                    onChange={(event) => {
+                      const metric = linkable.find((item) => item.id === event.target.value);
+                      // 选了指标、输出项还没写单位：带上指标的单位（两者必须一致）
+                      update({ metric_id: event.target.value, ...(metric && !(row.unit ?? '').trim() ? { unit: metric.unit } : {}) });
+                    }}
+                  >
+                    <option value="">不关联（只进检查点）</option>
+                    {linkable.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}（{item.code}，{item.unit || '无单位'}）{item.state !== 'active' ? ' · 已停用' : ''}
+                      </option>
+                    ))}
+                  </select>
                 </td>
                 <td>
                   {readOnly ? null : (

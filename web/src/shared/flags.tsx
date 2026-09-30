@@ -16,4 +16,6 @@ export function FlagList({ flags }: { flags?: DataFlag[] }) {
 
 const FLAG_LABEL: Record<string, string> = {
   out_of_range: '越界', logic: '逻辑冲突', output_missing: '缺必报项', output_invalid: '非数值',
+  // 设备回报写成的结果：来历说明，不是质量问题（不置可疑）
+  simulated: '模拟示意值', batch_level: '批次级读数',
 };

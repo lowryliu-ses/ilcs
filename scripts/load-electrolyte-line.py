@@ -187,9 +187,10 @@ def register(team: dict[str, Actor], line: dict) -> dict:
     register_capabilities(engineer, line)
     register_islands(engineer, line)
     register_stations(engineer, operator, line)
-    methods = register_methods(engineer, qa, line)
-    register_materials(operator, qa, line)
+    # 检测方法的输出项关联指标：先有指标，再登记方法
     metrics = register_metrics(researcher, line)
+    methods = register_methods(engineer, qa, line, metrics)
+    register_materials(operator, qa, line)
     grant_qualifications(admin, line)
     # 模板生成的流程关联这份 SOP 的生效版本：先有 SOP，再建模板
     register_sop(researcher, qa, operator, SOP)
@@ -336,30 +337,62 @@ def close_recovered_alarms(operator: Actor, station_ids: list[str]) -> None:
         ok("关闭已恢复的接入报警", f"{len(closed)} 条（新适配器重连前的「失联」）")
 
 
-def register_methods(engineer: Actor, qa: Actor, line: dict) -> dict[str, str]:
-    """工程师起草、QA 发布（起草人不能发布自己的方法）。适用型号只写对应工位的型号：同能力多工位靠它分流。"""
+def method_outputs(method: dict, metrics: dict[str, str]) -> list[dict]:
+    """line.json 里输出项用 metric 写指标编码；换成本库的指标 id（metric_id），设备回报的值才会写成检测结果。"""
+    rows = []
+    for rule in method.get("outputs") or []:
+        row = {key: value for key, value in rule.items() if key != "metric"}
+        if rule.get("metric"):
+            if rule["metric"] not in metrics:
+                raise Failed(f"方法 {method['name']} 的输出 {rule['key']} 关联的指标 {rule['metric']} 没有登记")
+            row["metric_id"] = metrics[rule["metric"]]
+        rows.append(row)
+    return rows
+
+
+def _same_outputs(current: list[dict], wanted: list[dict]) -> bool:
+    """比较输出项时补齐缺省字段：接口返回的规则带齐了 label / lo / hi / required / metric_id。"""
+    def norm(rows):
+        return [{"key": r.get("key"), "label": r.get("label") or "", "unit": r.get("unit") or "",
+                 "lo": r.get("lo"), "hi": r.get("hi"), "required": bool(r.get("required")),
+                 "metric_id": r.get("metric_id") or ""} for r in rows or []]
+    return norm(current) == norm(wanted)
+
+
+def register_methods(engineer: Actor, qa: Actor, line: dict, metrics: dict[str, str]) -> dict[str, str]:
+    """工程师起草、QA 发布（起草人不能发布自己的方法）。适用型号只写对应工位的型号：同能力多工位靠它分流。
+
+    已发布的方法输出项与 line.json 不一致（例如后来给检测输出关联了指标）：按修订流程出一个新版本——
+    工程师修订、改输出项，QA 发布，同编号旧版本随之退役；模板随后按新版本的 id 更新。"""
     models = {row["id"]: row["model"] for row in line["stations"]}
     ids: dict[str, str] = {}
-    created = 0
+    created = revised = 0
     for method in line["methods"]:
         cap = method["capability"]
+        outputs = method_outputs(method, metrics)
         released = [row for row in engineer.get(f"/device-methods?state=released&capability_id={cap}")
                     if row["name"] == method["name"]]
-        if released:
-            ids[method["key"]] = released[0]["id"]
-            continue
-        # 上次中途失败留下的草稿接着发布，不再起草第二份
         drafts = [row for row in engineer.get(f"/device-methods?state=draft&capability_id={cap}")
                   if row["name"] == method["name"]]
-        draft = drafts[0] if drafts else engineer.post("/device-methods", {
-            "name": method["name"], "capability_id": cap, "instrument_models": [models[method["station"]]],
-            "program": method["program"], "params": method.get("params") or {}, "outputs": method.get("outputs") or [],
-            "dur_min": method["dur_min"], "note": method.get("note", ""),
-        })
+        if released and _same_outputs(released[0].get("outputs") or [], outputs):
+            ids[method["key"]] = released[0]["id"]
+            continue
+        if released:
+            # 上次中途失败留下的修订草稿接着用，不再修订第二份
+            draft = drafts[0] if drafts else engineer.post(f"/device-methods/{released[0]['id']}/revise")
+            draft = engineer.patch(f"/device-methods/{draft['id']}", {"outputs": outputs, "row_version": draft["row_version"]})
+            revised += 1
+        else:
+            # 上次中途失败留下的草稿接着发布，不再起草第二份
+            draft = drafts[0] if drafts else engineer.post("/device-methods", {
+                "name": method["name"], "capability_id": cap, "instrument_models": [models[method["station"]]],
+                "program": method["program"], "params": method.get("params") or {}, "outputs": outputs,
+                "dur_min": method["dur_min"], "note": method.get("note", ""),
+            })
+            created += 1
         done = qa.post(f"/device-methods/{draft['id']}/release", {"row_version": draft["row_version"]})
         ids[method["key"]] = done["id"]
-        created += 1
-    ok("设备方法", f"{len(ids)} 个已发布（新发布 {created}）")
+    ok("设备方法", f"{len(ids)} 个已发布（新发布 {created}" + (f"、修订 {revised}" if revised else "") + "）")
     return ids
 
 
@@ -639,7 +672,73 @@ def run(team: dict[str, Actor], context: dict, filename: str, content: bytes, pa
     # 执行器记报警有先后：新工位重连前的「失联」可能在登记时那一遍清理之后才落库，跑完再清一遍
     close_recovered_alarms(operator, context.get("stations") or [])
     report(detail)
-    return {"recipe": recipe_id, "plan": plan_id, "batch": batch_id, "import": result, "detail": detail}
+    step("数据复核与报告")
+    reviewed = review_device_results(researcher, qa, detail)
+    report_id = publish_report(researcher, qa, batch_id, detail, reviewed)
+    return {"recipe": recipe_id, "plan": plan_id, "batch": batch_id, "import": result, "detail": detail,
+            "results": reviewed, "report": report_id}
+
+
+def device_results(actor: Actor, detail: dict) -> list[dict]:
+    """这个批次各样本「设备回报」检测任务里的当前结果（设备方法输出项关联了指标时由系统写入）。"""
+    rows = []
+    for sample in sorted(detail["samples"], key=lambda row: row["position"]):
+        for task in _items(actor.get(f"/analysis-tasks?sample_id={sample['id']}&page_size=100")):
+            if task.get("method") != "设备回报":
+                continue
+            for value in actor.get(f"/analysis-tasks/{task['id']}").get("values") or []:
+                if not value.get("superseded_by_id"):
+                    rows.append({**value, "sample_id": sample["id"], "physical_sample_id": sample["physical_sample_id"]})
+    return rows
+
+
+def review_device_results(researcher: Actor, qa: Actor, detail: dict) -> list[dict]:
+    """QA 逐条复核设备写入的结果。模拟阶段的值是示意值：复核通过、质量判有效，只为走通审核与报告；
+    结果上的「模拟设备示意值」标记保留，闭环训练数据照样把它们排除。"""
+    rows = device_results(researcher, detail)
+    if not rows:
+        raise Failed("批次跑完了，但没有设备写入的检测结果：检查检测方法的输出项有没有关联指标")
+    for row in rows:
+        if row.get("review_state") != "pending":
+            continue
+        simulated = any(flag.get("code") == "simulated" for flag in row.get("flags") or [])
+        qa.post(f"/result-values/{row['id']}/review", {
+            "conclusion": "approved", "quality": "valid", "result_version": row["result_version"],
+            "reason": "模拟阶段：内置模拟设备的示意值，复核只为验证数据链路" if simulated else "设备回报，数据完整",
+            "signature_id": qa.sign("数据复核通过", row["id"], row["result_version"]),
+        })
+    fresh = device_results(researcher, detail)
+    by_metric: dict[str, list] = {}
+    for row in fresh:
+        by_metric.setdefault(row.get("metric_name") or row.get("metric_code") or "?", []).append(row)
+    ok("设备回报结果已复核", "；".join(
+        f"{name} {len(items)} 条（{'、'.join(str(item.get('display') or item.get('value')) for item in items)}）"
+        for name, items in by_metric.items()))
+    return fresh
+
+
+def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, results: list[dict]) -> str:
+    """出报告：研究员起草并提交，QA 批准、发布。结论写明模拟阶段的数据来历。"""
+    simulated = any(any(flag.get("code") == "simulated" for flag in row.get("flags") or []) for row in results)
+    bottles = len(detail["samples"])
+    metrics = "、".join(dict.fromkeys(row.get("metric_name") or row.get("metric_code") or "?" for row in results))
+    conclusion = (
+        f"批次 {batch_id} 按 {detail.get('sop_snapshot', {}).get('code') or '配液线 SOP'} 完成 {bottles} 瓶电解液的配制与检测"
+        f"（{len(detail['snapshot']['steps'])} 步）；{metrics} {len(results)} 条结果已复核。"
+        + ("模拟阶段：检测值为内置模拟设备按方法输出规则给的示意值，不是实测，只用于验证配液、检测、审核与报告链路。"
+           if simulated else "")
+    )
+    report = researcher.post("/reports", {"batch_id": batch_id, "conclusion": conclusion})
+    researcher.post(f"/reports/{report['id']}/submit")
+    fresh = qa.get(f"/reports/{report['id']}")
+    approved = qa.post(f"/reports/{report['id']}/approve", {
+        "conclusion": "approved", "signature_id": qa.sign("批准报告", report["id"], fresh["row_version"]),
+    })
+    published = qa.post(f"/reports/{report['id']}/publish", {
+        "signature_id": qa.sign("发布报告", report["id"], approved["row_version"]),
+    })
+    ok("报告已发布", f"{report['id']} · {published.get('state_label') or published.get('state')}")
+    return report["id"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -668,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
         every = 3.0
         outcome = run(team, context, table.name, table.read_bytes(), params,
                       pump=lambda: time.sleep(every), rounds=max(1, int(args.timeout / every)), plan_name=args.plan_name)
-        print(f"\n完成：流程 {outcome['recipe']} · 方案 {outcome['plan']} · 批次 {outcome['batch']}")
+        print(f"\n完成：流程 {outcome['recipe']} · 方案 {outcome['plan']} · 批次 {outcome['batch']} · 报告 {outcome['report']}")
         return 0
     except Failed as exc:
         print(f"\n失败：{exc}", file=sys.stderr)

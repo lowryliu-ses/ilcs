@@ -80,8 +80,11 @@ class CommandRequest:
     # 的单位。只在执行设备动作的指令上填，是给驱动的内部挂钩：真实驱动的线协议不带它（上位机的物料映射
     # 接口定了再接），内置模拟据此回报消耗
     material: dict = field(default_factory=dict)
-    # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required}）；同样只是内部挂钩
+    # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required, metric_id}）；同样只是内部挂钩
     outputs: tuple = ()
+    # 这一步处理的孔位（设备认的孔位键 → 在用样本，与逐孔参数同一口径）。没有逐孔参数的检测步骤也要逐瓶回报读数，
+    # 驱动据此知道这条指令覆盖哪几个孔位；内置模拟按它逐孔给示意值。同样只是内部挂钩，不上线协议
+    wells: tuple = ()
 
 
 @dataclass(frozen=True)

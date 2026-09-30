@@ -951,6 +951,8 @@ export type MethodOutputRule = {
   lo?: number | null;
   hi?: number | null;
   required?: boolean;
+  /** 关联的检测指标：设备回报这个值时按样本写成该指标的检测结果（进数据审核）；空 = 只进检查点 */
+  metric_id?: string;
 };
 
 /** 设备方法：能力 + 适用型号 + 设备端程序 + 参数范围 + 输出规则，按版本管理 */

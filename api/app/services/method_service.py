@@ -20,6 +20,7 @@ from ..domain.access import same_person
 from ..domain.steps import normalize
 from ..models import DeviceMethod, Recipe, User
 from ..repositories.methods import DeviceMethodRepository
+from ..repositories.metrics import MetricRepository
 from ..repositories.resources import CapabilityRepository
 from .audit_service import AuditService
 from .identity_service import admin_self_approval
@@ -61,13 +62,14 @@ class MethodService:
         self.ctx = ctx
         self.methods = DeviceMethodRepository(db, ctx)
         self.capabilities = CapabilityRepository(db, ctx)
+        self.metrics = MetricRepository(db, ctx)
         self.audit = AuditService(db, ctx)
 
     # ---------- 读 ----------
 
     def list(self, state: str | None = None, capability_id: str | None = None) -> list[dict]:
-        usage = self._usage()
-        return [self.out(row, usage) for row in self.methods.list(state, capability_id)]
+        usage, metrics = self._usage(), self._metric_specs()
+        return [self.out(row, usage, metrics) for row in self.methods.list(state, capability_id)]
 
     def get(self, method_id: str) -> dict:
         method = self._require(method_id)
@@ -79,10 +81,12 @@ class MethodService:
         ]
         return out
 
-    def out(self, method: DeviceMethod, usage: dict[str, list[dict]] | None = None) -> dict:
+    def out(
+        self, method: DeviceMethod, usage: dict[str, list[dict]] | None = None, metrics: dict[str, dict] | None = None,
+    ) -> dict:
         issues = rules.definition_issues(
             method.capability_id, method.params or {}, method.outputs or [], self.capabilities.specs(),
-            method.name, method.dur_min,
+            method.name, method.dur_min, metrics=metrics if metrics is not None else self._metric_specs(),
         )
         return {
             "id": method.id, "code": method.code, "version": method.version, "name": method.name,
@@ -110,6 +114,13 @@ class MethodService:
                     {"id": recipe.id, "name": recipe.name, "version": recipe.version, "state": recipe.state},
                 )
         return usage
+
+    def _metric_specs(self) -> dict[str, dict]:
+        """输出项关联指标的核对口径：本组织全部指标定义（含已停用，停用的要报出来而不是当不存在）。"""
+        return {
+            metric.id: {"code": metric.code, "unit": metric.unit, "value_type": metric.value_type, "state": metric.state}
+            for metric in self.metrics.list()
+        }
 
     def _require(self, method_id: str) -> DeviceMethod:
         method = self.methods.get(method_id)
@@ -163,7 +174,7 @@ class MethodService:
             raise StateConflict("只有草稿可以发布")
         issues = rules.definition_issues(
             method.capability_id, method.params or {}, method.outputs or [], self.capabilities.specs(),
-            method.name, method.dur_min,
+            method.name, method.dur_min, metrics=self._metric_specs(),
         )
         if issues:
             raise StateConflict(

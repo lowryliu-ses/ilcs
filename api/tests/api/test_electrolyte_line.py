@@ -155,6 +155,62 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     }, expect=(422,))
     assert rejected["detail"]["code"] == "sample_unusable", rejected
 
+    # 设备回报的检测值写成检测结果：每瓶 3 个指标（电导率、密度、黏度），记在各自的样本与测出它的工位上，
+    # 标明是模拟示意值；导入脚本已由 QA 复核通过并发布报告；闭环训练数据把它们排除
+    from app.models import ResultValue
+    from app.services.proposal_service import _exclusion
+
+    results = outcome["results"]
+    assert len(results) == 6, results
+    by_sample: dict[str, dict[str, dict]] = {}
+    for row in results:
+        by_sample.setdefault(row["physical_sample_id"], {})[row["metric_code"]] = row
+    assert set(by_sample) == set(serials)
+    for serial, metrics in by_sample.items():
+        assert set(metrics) == {"ely_conductivity", "ely_density", "ely_viscosity"}, (serial, metrics)
+        assert metrics["ely_conductivity"]["station_id"] == "EL-T-CND"
+        assert metrics["ely_density"]["station_id"] == metrics["ely_viscosity"]["station_id"] == "EL-T-DV"
+        for row in metrics.values():
+            assert row["review_state"] == "approved" and row["quality"] == "valid", row
+            assert any(flag["code"] == "simulated" for flag in row["flags"]), row["flags"]
+            assert not any(flag["code"] == "batch_level" for flag in row["flags"]), "逐瓶读数，不是批次级复制"
+    # 两瓶各测各的：同一指标两瓶的值不同（模拟按指令 + 孔位给值）
+    assert by_sample[serials[0]]["ely_conductivity"]["value"] != by_sample[serials[1]]["ely_conductivity"]["value"]
+    report = team["qa"].get(f"/reports/{outcome['report']}")
+    assert report["state"] == "published", report["state"]
+    db.expire_all()
+    stored = db.query(ResultValue).filter(ResultValue.id.in_([row["id"] for row in results])).all()
+    assert {_exclusion(row) for row in stored} == {"simulated"}
+
+    # 回执重放不重复写；同一步重做（新指令）的读数取代上一版、重新待复核，旧版保留
+
+    from app.core.context import system_context
+    from app.models import Batch, Command
+    from app.services.device_result_service import DeviceResultService
+
+    batch = db.get(Batch, batch_id)
+    command = next(row for row in db.query(Command).filter(Command.batch_id == batch_id, Command.station_id == "EL-T-CND").all()
+                   if row.type == "dispatch")
+    checkpoint = next(row for row in detail["checkpoints"] if row["payload"]["station_id"] == "EL-T-CND")
+    step = next(row for row in batch.recipe_snapshot["steps"] if row["name"] == "第 1 瓶电导率")
+    service = DeviceResultService(db, system_context(batch.org_id))
+    delivered = checkpoint["payload"]["delivered"]
+    assert service.record(batch, command, step, delivered, "simulation")["written"] == 0
+    rerun = Command(id=f"{command.id[:24]}-rerun", org_id=command.org_id, batch_id=batch_id, station_id=command.station_id,
+                    capability=command.capability, params=command.params, method=command.method, type="retry",
+                    state="done", delivery_state="delivered", step_index=command.step_index)
+    db.add(rerun)
+    db.flush()
+    assert service.record(batch, rerun, step, delivered, "simulation") == {"written": 2, "samples": 2, "problems": []}
+    db.commit()
+    db.expire_all()
+    for serial in serials:
+        rows = sorted((row for row in db.query(ResultValue).filter(ResultValue.physical_sample_id == serial).all()
+                       if row.station_id == "EL-T-CND"), key=lambda row: row.result_version)
+        assert [row.result_version for row in rows] == [1, 2]
+        assert rows[0].superseded_by_id == rows[1].id and rows[1].revises_id == rows[0].id
+        assert rows[1].review_state == "pending"
+
     # 同结构的第二张表（新瓶子）沿用已发布流程，只新建方案
     fresh = (f"ELY-{uid}-03", f"ELY-{uid}-04")
     _, _, second = _table(loader, fresh)

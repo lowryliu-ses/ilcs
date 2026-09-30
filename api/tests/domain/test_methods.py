@@ -60,3 +60,29 @@ def test_stations_are_filtered_by_model_and_reported_programs():
     assert station_fits(right, step) and station_fits(unknown_catalog, step) and station_fits(wildcard, step)
     assert not station_fits(other_model, step) and "不在方法适用型号" in out_of_range(other_model, step)[0]
     assert not station_fits(wrong_catalog, step) and "未报告支持程序 VD-120" in out_of_range(wrong_catalog, step)[0]
+
+
+def test_outputs_linked_to_metrics_must_match_the_metric():
+    metrics = {
+        "M-moist": {"code": "moisture", "unit": "ppm", "value_type": "number", "state": "active"},
+        "M-old": {"code": "moisture_old", "unit": "ppm", "value_type": "number", "state": "retired"},
+        "M-look": {"code": "appearance", "unit": "", "value_type": "enum", "state": "active"},
+    }
+    params = _spec().params
+
+    def issues(outputs):
+        return methods.definition_issues("cap.vacuum_dry", params, outputs, CAPS, name="干燥", metrics=metrics)
+
+    assert issues([{"key": "moisture_ppm", "unit": "ppm", "metric_id": "M-moist"}]) == []
+    assert any("单位 %" in issue and "moisture 的单位 ppm" in issue
+               for issue in issues([{"key": "moisture_ppm", "unit": "%", "metric_id": "M-moist"}]))
+    assert any("不存在" in issue for issue in issues([{"key": "a", "unit": "ppm", "metric_id": "M-none"}]))
+    assert any("已停用" in issue for issue in issues([{"key": "a", "unit": "ppm", "metric_id": "M-old"}]))
+    assert any("不是数值型" in issue for issue in issues([{"key": "a", "metric_id": "M-look"}]))
+    assert any("关联了同一个指标" in issue for issue in issues([
+        {"key": "a", "unit": "ppm", "metric_id": "M-moist"}, {"key": "b", "unit": "ppm", "metric_id": "M-moist"},
+    ]))
+    # 没给指标目录（纯规则调用）就不查关联；不关联指标的输出项照旧
+    assert methods.definition_issues(
+        "cap.vacuum_dry", params, [{"key": "a", "unit": "%", "metric_id": "M-moist"}], CAPS, name="干燥",
+    ) == []

@@ -769,6 +769,12 @@ class ExecutionService:
         outputs = (step.get("method") or {}).get("outputs") or []
         if outputs:
             hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
+            # 要回报读数的步骤带上它覆盖的孔位：检测步骤一般没有逐孔参数，驱动也得知道逐瓶回报哪几瓶
+            from .batch_service import BatchService
+
+            targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
+            if targets:
+                hooks["wells"] = tuple(sorted(targets))
         name = step_material(step)
         entry = next((row for row in snapshot.get("bom") or [] if row.get("material") == name), None) if name else None
         if entry is None:
@@ -885,6 +891,11 @@ class ExecutionService:
         consumption = ConsumptionService(self.db, self.ctx).book(
             batch, command, result.delivered or {}, step_run_id=command.step_run_id, origin=result.origin,
         )
+        from .device_result_service import DeviceResultService
+
+        results = DeviceResultService(self.db, self.ctx).record(
+            batch, command, step, result.delivered or {}, result.origin,
+        )
         self.audit.record(
             None, "步骤检查点", batch.id,
             before=f"步骤 {command.step_index + 1} 执行中", after="已完成",
@@ -897,6 +908,7 @@ class ExecutionService:
                     if consumption["booked"] or consumption["rejected"]
                     else "设备未回报实际消耗；实际投料需由库存事件入账，不按步骤比例推算"
                 )
+                + (f"；检测结果 {results['written']} 项（{results['samples']} 个样本），待复核" if results["written"] else "")
             ),
         )
         # 回执只产生事件；状态转换与下一节点由推进器在自己的短事务里做

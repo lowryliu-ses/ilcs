@@ -128,10 +128,15 @@ class SimulationAdapter:
         return delivered
 
     def _fill_outputs(self, request: CommandRequest, delivered: dict) -> None:
-        """方法输出规则里没回显的检测项补示意值：有孔位时逐孔一份、顶层写均值。绝不覆盖回显的参数键。"""
+        """方法输出规则里没回显的检测项补示意值：有孔位时逐孔一份、顶层写均值。绝不覆盖回显的参数键。
+
+        孔位取回显的逐孔参数；这一步没有逐孔参数（如检测步骤）就按指令覆盖的孔位（`request.wells`）逐孔给——
+        每瓶各有读数，结果才能按瓶记到各自的样本上。"""
         wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else None
         if wells:
             wells = {well: dict(values or {}) for well, values in wells.items()}
+        elif request.wells:
+            wells = {str(well): {} for well in request.wells}
         for rule in request.outputs:
             key = str((rule or {}).get("key") or "")
             if not key or key in delivered or key == "materials":

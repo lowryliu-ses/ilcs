@@ -52,9 +52,13 @@ def _num(value: Any) -> float | None:
 
 def definition_issues(
     capability_id: str, params: dict[str, Any], outputs: list[Any], capabilities: dict[str, dict],
-    name: str = "", dur_min: Any = 0,
+    name: str = "", dur_min: Any = 0, metrics: dict[str, dict] | None = None,
 ) -> list[str]:
-    """方法定义本身的问题。发布前必须为空。"""
+    """方法定义本身的问题。发布前必须为空。
+
+    `metrics` 是本组织的指标定义 {id: {code, unit, value_type, state}}：输出项关联了指标时，指标要存在、在用、
+    是数值型、单位与输出项相同——设备回报的数是按输出项的单位原样写成结果的，单位不同就差出倍数。没给就不查关联。
+    """
     issues: list[str] = []
     if not str(name or "").strip():
         issues.append("方法名称为空")
@@ -85,6 +89,7 @@ def definition_issues(
             if unit and spec["unit"] and unit != spec["unit"]:
                 issues.append(f"参数 {key} 的单位 {unit} 与能力登记的单位 {spec['unit']} 不同：设定值是原样下发的")
     seen: set[str] = set()
+    linked: dict[str, str] = {}
     for row in outputs or []:
         key = str((row or {}).get("key") or "").strip() if isinstance(row, dict) else ""
         if not key:
@@ -96,6 +101,25 @@ def definition_issues(
         lo, hi = _num(row.get("lo")), _num(row.get("hi"))
         if lo is not None and hi is not None and lo > hi:
             issues.append(f"输出 {key} 下限 {lo:g} 大于上限 {hi:g}")
+        metric_id = str(row.get("metric_id") or "").strip()
+        if metric_id and metrics is not None:
+            from .params import canonical_unit
+
+            metric = metrics.get(metric_id)
+            if metric is None:
+                issues.append(f"输出 {key} 关联的指标 {metric_id} 不存在")
+            elif metric.get("state") != "active":
+                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 已停用")
+            elif metric.get("value_type") != "number":
+                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 不是数值型：设备回报的是数")
+            elif canonical_unit(row.get("unit")) != canonical_unit(metric.get("unit")):
+                issues.append(
+                    f"输出 {key} 的单位 {row.get('unit') or '（未填）'} 与指标 {metric.get('code')} 的单位 "
+                    f"{metric.get('unit') or '（未填）'} 不同：结果按输出项的单位原样入库"
+                )
+            if metric_id in linked:
+                issues.append(f"输出 {key} 与 {linked[metric_id]} 关联了同一个指标：一个样本每个指标只有一条当前结果")
+            linked[metric_id] = key
     duration = _num(dur_min)
     if duration is not None and duration < 0:
         issues.append("缺省时长不能为负")

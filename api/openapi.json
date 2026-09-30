@@ -3712,6 +3712,11 @@
             ],
             "title": "Lo"
           },
+          "metric_id": {
+            "default": "",
+            "title": "Metric Id",
+            "type": "string"
+          },
           "required": {
             "default": false,
             "title": "Required",
