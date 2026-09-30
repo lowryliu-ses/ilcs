@@ -4,7 +4,7 @@ import { api } from '../../shared/api';
 import { params as formatParams } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { RecipeDetail } from '../../shared/types';
+import type { RecipeDetail, RecipeStep } from '../../shared/types';
 import { CheckList, Empty, Panel, Pill, useToast } from '../../shared/ui';
 import { useSignature } from '../../shared/signature';
 import { SimulationBadge, SimulationPanel } from './SimulationPanel';
@@ -153,6 +153,7 @@ export function RecipeDetailPage() {
                     {data.steps[step.index]?.hard?.maxGapMin ? (
                       <div className="tiny warn-text">硬时限 {data.steps[step.index].hard?.maxGapMin} min</div>
                     ) : null}
+                    <StepResourceNote step={data.steps[step.index]} steps={data.steps} />
                   </td>
                   <td>
                     {step.cap_name}
@@ -282,4 +283,24 @@ export function RecipeDetailPage() {
 
     </div>
   );
+}
+
+/** 工位资源、资质要求与按瓶执行的一行说明：这些字段只在编辑器里改，详情页照着列出来 */
+function StepResourceNote({ step, steps }: { step?: RecipeStep; steps: RecipeStep[] }) {
+  if (!step) return null;
+  const parts: string[] = [];
+  if (step.resource?.station) parts.push(`占用工位 ${step.resource.station}`);
+  if (step.resource?.capability) parts.push(`占用一台 ${step.resource.capability} 工位`);
+  if (step.resource?.holds_station) parts.push('等待期间样本留在上一步的设备里');
+  if (step.qualification?.sop) parts.push(`要求 SOP 资质 ${step.qualification.sop}`);
+  if (step.qualification?.safety) parts.push(`要求安全操作资质 ${step.qualification.safety}`);
+  if (step.applies_to?.dosed) {
+    const names = (ids: string[]) =>
+      ids.map((id) => steps.find((row) => row.step_id === id)?.name ?? id).join('、');
+    parts.push(
+      `按瓶执行：只处理在「${names([step.applies_to.dosed])}」加了料的样本` +
+        (step.applies_to.then_any?.length ? `，且之后还要加 ${names(step.applies_to.then_any)} 之一` : ''),
+    );
+  }
+  return parts.length ? <div className="tiny muted">{parts.join(' · ')}</div> : null;
 }

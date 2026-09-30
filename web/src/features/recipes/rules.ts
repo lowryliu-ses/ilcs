@@ -137,8 +137,31 @@ export function methodBlocksStation(station: StationRow, step: RecipeStep): stri
   return reasons;
 }
 
-export function stationsForStep(stations: StationRow[] | undefined, step: RecipeStep): StationRow[] {
+/** 人工步骤声明占用的工位：指定一台，或实现了某能力的任一台（不看参数范围）。对应后端 capability.resource_fits */
+function resourceFits(station: StationRow, step: RecipeStep): boolean {
+  if (station.retired) return false;
+  const resource = step.resource ?? {};
+  if (resource.station) return station.id === resource.station;
+  if (resource.capability) return Boolean(station.limits?.[resource.capability]);
+  return false;
+}
+
+/** 等待期间样本留在上一步的设备里：它占的就是能承接那个设备前驱的工位。 */
+export function holdsStation(step: RecipeStep): boolean {
+  return kindOf(step) === 'wait' && Boolean(step.resource?.holds_station);
+}
+
+export function stationsForStep(
+  stations: StationRow[] | undefined, step: RecipeStep, steps?: RecipeStep[], index?: number,
+): StationRow[] {
   if (!needsStation(step)) return [];
+  if (kindOf(step) === 'manual') return (stations ?? []).filter((station) => resourceFits(station, step));
+  if (holdsStation(step)) {
+    if (!steps || index === undefined) return [];
+    const parent = predecessors(steps)[index];
+    const source = parent.length === 1 ? steps[parent[0]] : undefined;
+    return source && kindOf(source) === 'device' ? stationsForStep(stations, source) : [];
+  }
   return (stations ?? []).filter((station) => {
     const implemented = station.limits?.[step.cap];
     if (!implemented) return false;
@@ -337,6 +360,73 @@ function manualIssues(step: RecipeStep): string[] {
       issues.push(`表单字段 ${key} 是枚举但没有可选值`);
     }
     if (field.per_sample && field.type !== 'number') issues.push(`表单字段 ${key} 按样本录入时必须是数值字段`);
+  });
+  return issues;
+}
+
+/* ---------- 工位资源、资质、按瓶执行（对应后端 steps.resource_issues / qualification_issues /
+   holds_station_issues / applies_to_issues） ---------- */
+
+function resourceIssues(step: RecipeStep): string[] {
+  const resource = step.resource;
+  if (!resource || !Object.keys(resource).length) return [];
+  const kind = kindOf(step);
+  if (kind === 'manual') {
+    if (resource.station && resource.capability) {
+      return ['人工步骤占用的工位要么指定一台（station），要么按能力任一台（capability），不能两个都写'];
+    }
+    if (!resource.station && !resource.capability) {
+      return ['人工步骤声明了工位资源，但没写占哪台工位（station）或哪种能力的工位（capability）'];
+    }
+    return [];
+  }
+  if (kind === 'wait') return [];
+  if (kind === 'device') return [];
+  return [`${STEP_KINDS.find(([value]) => value === kind)?.[1] ?? kind}步骤不占工位，不写工位资源`];
+}
+
+function qualificationIssues(step: RecipeStep): string[] {
+  const required = step.qualification;
+  if (!required || !Object.keys(required).length) return [];
+  if (kindOf(step) !== 'manual') return ['只有人工步骤能声明执行人资质要求（设备步骤按能力自动要求）'];
+  if (!required.sop?.trim() && !required.safety?.trim()) return ['声明了资质要求，但 SOP 与安全操作资质都没写'];
+  return [];
+}
+
+function holdsStationIssues(steps: RecipeStep[], index: number): string[] {
+  if (!holdsStation(steps[index])) return [];
+  const before = predecessors(steps);
+  const parent = before[index];
+  if (parent.length !== 1) return ['等待期间占着工位：样本留在上一步的设备里，所以前驱只能有一个，而且要是设备步骤'];
+  const source = steps[parent[0]];
+  if (kindOf(source) !== 'device') {
+    return [`等待期间占着工位：前驱「${source.name || stepIdOf(source, parent[0])}」不是设备步骤，样本不在设备里`];
+  }
+  const twins = steps.some(
+    (other, at) => at !== index && holdsStation(other) && before[at].length === 1 && before[at][0] === parent[0],
+  );
+  return twins ? [`「${source.name || stepIdOf(source, parent[0])}」之后已经有一个等待步骤占着这台设备：样本只能在一处`] : [];
+}
+
+/** 能作按瓶执行依据的投料步骤：指定了投料物料与用量参数的设备步骤 */
+export function isDosingStep(step: RecipeStep): boolean {
+  return kindOf(step) === 'device' && Boolean(step.material?.trim()) && Boolean(step.material_param);
+}
+
+function appliesToIssues(step: RecipeStep, steps: RecipeStep[], index: number): string[] {
+  const rule = step.applies_to;
+  if (!rule) return [];
+  if (kindOf(step) !== 'device') return ['只有设备步骤能按瓶限定处理对象（applies_to）'];
+  const ids = steps.map(stepIdOf);
+  const dosed = ids.indexOf(rule.dosed ?? '');
+  const issues: string[] = [];
+  if (dosed < 0 || dosed >= index) issues.push(`applies_to 引用的投料步骤 ${rule.dosed || '（未选）'} 不存在或不在本步之前`);
+  else if (!isDosingStep(steps[dosed])) issues.push(`applies_to 引用的 ${rule.dosed} 不是指定了投料物料与用量参数的设备步骤`);
+  (rule.then_any ?? []).forEach((ref) => {
+    const at = ids.indexOf(ref);
+    if (at < 0) issues.push(`applies_to 的 then_any 引用的步骤 ${ref} 不存在`);
+    else if (dosed >= 0 && at <= dosed) issues.push(`applies_to 的 then_any 引用的 ${ref} 要排在 ${rule.dosed} 之后`);
+    else if (!isDosingStep(steps[at])) issues.push(`applies_to 的 then_any 引用的 ${ref} 不是指定了投料物料与用量参数的设备步骤`);
   });
   return issues;
 }
@@ -760,11 +850,15 @@ export function stepIssues(
   else if (kind === 'notify') issues.push(...notifyIssues(step));
   else issues.push(...reviewIssues(step));
   issues.push(...materialIssues(step));
+  issues.push(...resourceIssues(step));
+  issues.push(...qualificationIssues(step));
   issues.push(...timeoutIssues(step));
   issues.push(...skippableIssues(step));
   issues.push(...environmentIssues(step));
   issues.push(...graphIssues(steps, index));
   issues.push(...bindingIssues(step, steps, index, capabilities));
+  issues.push(...appliesToIssues(step, steps, index));
+  issues.push(...holdsStationIssues(steps, index));
   if (kind === 'gate' && graphMode(steps)) {
     const target = steps.map(stepIdOf).indexOf(step.gate?.rework_to ?? '');
     if (target >= 0 && !ancestors(steps, index).has(target)) issues.push('返工目标必须是本关卡的上游步骤（依赖链上的前驱）');
@@ -796,7 +890,7 @@ export function editorChecks(
 ): Check[] {
   const issues = steps.map((step, index) => stepIssues(step, capabilities, steps, index, subflows, selfId));
   const noStation = steps
-    .map((step, index) => (!needsStation(step) || stationsForStep(stations, step).length ? null : index + 1))
+    .map((step, index) => (!needsStation(step) || stationsForStep(stations, step, steps, index).length ? null : index + 1))
     .filter((index): index is number => index !== null);
   const incomplete = issues
     .map((list, index) => (list.length ? index + 1 : null))

@@ -550,8 +550,12 @@ export type RecipeStep = {
   material?: string;
   /** 投料用量取自哪个能力参数（仅设备步骤）；不填时执行器按物料单位推断 */
   material_param?: string;
+  /** 人工步骤占哪台工位（指定一台，或某能力的任一台）；等待步骤 holds_station：样本留在上一步的设备里 */
   resource?: { station?: string; capability?: string; holds_station?: boolean };
+  /** 人工步骤要求执行人具备的资质：SOP 编号、安全操作资质编号 */
   qualification?: { sop?: string; safety?: string };
+  /** 按瓶执行：只处理在 dosed 那一步真加了料的样本；写了 then_any 时之后还要再加其中一种 */
+  applies_to?: { dosed?: string; then_any?: string[] };
   /** 质检关卡：读测量来源步骤回执里的 field，按 min/max 判定 */
   gate?: {
     source_step_id?: string;

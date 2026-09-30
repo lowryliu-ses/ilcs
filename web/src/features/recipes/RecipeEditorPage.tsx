@@ -38,6 +38,7 @@ import {
   explicitAfter,
   forwardCaseKeys,
   freeCase,
+  isDosingStep,
   graphMode,
   indexCapabilities,
   kindOf,
@@ -455,7 +456,7 @@ export function RecipeEditorPage() {
   const nodes: FlowGraphNode[] = draft.steps.map((step, index) => {
     const id = ids[index];
     const issues = stepIssues(step, capabilityIndex, draft.steps, index, recipes.data ? subflowIndex : undefined, recipeId);
-    const fits = stationsForStep(stations.data, step).map((station) => station.id);
+    const fits = stationsForStep(stations.data, step, draft.steps, index).map((station) => station.id);
     const requiresStation = needsStation(step);
     const bad = issues.length > 0 || (requiresStation && fits.length === 0);
     return {
@@ -640,6 +641,7 @@ export function RecipeEditorPage() {
             materials={stepMaterials}
             bomMaterials={draft.bom.map((item) => item.material)}
             sopSteps={(sops.data ?? []).find((row) => row.id === draft.meta.sop_version_id)?.steps ?? []}
+            sopCodes={[...new Set((sops.data ?? []).map((row) => row.code))].sort()}
             readOnly={readOnly}
             onBack={() => setSelected(null)}
             onSet={(change) => setStep(ids[selectedIndex], change)}
@@ -768,6 +770,7 @@ function StepProperties({
   materials,
   bomMaterials,
   sopSteps,
+  sopCodes,
   readOnly,
   onBack,
   onSet,
@@ -794,6 +797,8 @@ function StepProperties({
   bomMaterials: string[];
   /** 流程关联的 SOP 版本的结构化步骤；没有关联或没有步骤时为空 */
   sopSteps: SopStep[];
+  /** 生效 SOP 的编号：人工步骤资质要求的候选 */
+  sopCodes: string[];
   readOnly: boolean;
   onBack: () => void;
   onSet: (change: (step: RecipeStep) => void) => void;
@@ -807,7 +812,7 @@ function StepProperties({
 }) {
   const capability = capabilityIndex[step.cap];
   const recovery = capability?.recovery ?? {};
-  const fits = stationsForStep(stations, step);
+  const fits = stationsForStep(stations, step, steps, index);
   const kind = kindOf(step);
   const upstream = predecessors(steps)[index].map((at) => steps[at]);
   const timeoutActions = TIMEOUT_ACTIONS_BY_KIND[kind];
@@ -910,7 +915,17 @@ function StepProperties({
       ) : null}
 
       {kind === 'manual' ? (
-        <ManualFields step={step} bomMaterials={bomMaterials} readOnly={readOnly} onSet={onSet} />
+        <>
+          <ManualFields step={step} bomMaterials={bomMaterials} readOnly={readOnly} onSet={onSet} />
+          <ManualResourceFields
+            step={step}
+            capabilities={capabilities}
+            stations={stations}
+            sopCodes={sopCodes}
+            readOnly={readOnly}
+            onSet={onSet}
+          />
+        </>
       ) : null}
 
       {kind === 'wait' ? (
@@ -940,6 +955,23 @@ function StepProperties({
               />
             </Field>
           ) : null}
+          <label
+            className="check"
+            title="如烘箱内冷却、炉内保温：排程时和上一步连在一起占那台工位，清洗排在等待之后；运行时别的批次要等它结束"
+          >
+            <input
+              type="checkbox"
+              disabled={readOnly}
+              checked={Boolean(step.resource?.holds_station)}
+              onChange={(event) =>
+                onSet((current) => {
+                  if (event.target.checked) current.resource = { holds_station: true };
+                  else delete current.resource;
+                })
+              }
+            />
+            等待期间样本留在上一步的设备里（占着那台工位）
+          </label>
         </>
       ) : null}
 
@@ -1080,6 +1112,7 @@ function StepProperties({
               onSet={onSet}
             />
           ) : null}
+          <AppliesToFields step={step} steps={steps} index={index} readOnly={readOnly} onSet={onSet} />
         </>
       ) : null}
 
@@ -1578,6 +1611,190 @@ function MaterialFields({
         </Field>
       ) : null}
     </div>
+  );
+}
+
+/* 人工步骤占工位与执行人资质。
+
+   占工位：人工操作在某台设备 / 工位上做（手套箱里装样、烘箱前取放），这段时间别的批次不能用它——排程时预约，
+   运行时执行器数设备占用时把它算上。指定一台，或按能力取任一台实现了它的工位（不看参数范围）。
+   资质：设备步骤按能力自动要求能力资质；人工步骤在这里写要求的 SOP 资质与安全操作资质，开跑检查与节点开始时按执行人核对。 */
+function ManualResourceFields({
+  step,
+  capabilities,
+  stations,
+  sopCodes,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  capabilities: CapabilityRow[];
+  stations: StationRow[] | undefined;
+  sopCodes: string[];
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const resource = step.resource ?? {};
+  const mode = resource.station !== undefined ? 'station' : resource.capability !== undefined ? 'capability' : '';
+  const setQualification = (key: 'sop' | 'safety', value: string) =>
+    onSet((current) => {
+      const next = { ...current.qualification, [key]: value.trim() || undefined };
+      if (!next.sop) delete next.sop;
+      if (!next.safety) delete next.safety;
+      if (Object.keys(next).length) current.qualification = next;
+      else delete current.qualification;
+    });
+  return (
+    <>
+      <div className="grid cols-2">
+        <Field label="占用工位" hint="人工操作在某台工位上做时选：排程预约这段时间，运行时别的批次要等它结束">
+          <select
+            value={mode}
+            disabled={readOnly}
+            onChange={(event) =>
+              onSet((current) => {
+                if (event.target.value === 'station') current.resource = { station: '' };
+                else if (event.target.value === 'capability') current.resource = { capability: '' };
+                else delete current.resource;
+              })
+            }
+          >
+            <option value="">不占工位</option>
+            <option value="station">指定一台工位</option>
+            <option value="capability">某能力的任一台工位</option>
+          </select>
+        </Field>
+        {mode === 'station' ? (
+          <Field label="工位">
+            <select
+              value={resource.station ?? ''}
+              disabled={readOnly}
+              onChange={(event) => onSet((current) => void (current.resource = { station: event.target.value }))}
+            >
+              <option value="">选择工位</option>
+              {(stations ?? []).filter((row) => !row.retired || row.id === resource.station).map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.id} · {row.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+        {mode === 'capability' ? (
+          <Field label="能力" hint="实现了这项能力的工位里挑空着的那台">
+            <select
+              value={resource.capability ?? ''}
+              disabled={readOnly}
+              onChange={(event) => onSet((current) => void (current.resource = { capability: event.target.value }))}
+            >
+              <option value="">选择能力</option>
+              {capabilities.filter((row) => !row.retired || row.id === resource.capability).map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+      </div>
+      <div className="grid cols-2">
+        <Field label="要求的 SOP 资质" hint="与「人员与资质」里登记的 SOP 资质编号一致；留空不要求">
+          <input
+            value={step.qualification?.sop ?? ''}
+            readOnly={readOnly}
+            list="manual-sop-codes"
+            placeholder="如 SOP-ELY-01"
+            onChange={(event) => setQualification('sop', event.target.value)}
+          />
+          <datalist id="manual-sop-codes">
+            {sopCodes.map((code) => (
+              <option key={code} value={code} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="要求的安全操作资质" hint="如 危化品、手套箱；留空不要求">
+          <input
+            value={step.qualification?.safety ?? ''}
+            readOnly={readOnly}
+            onChange={(event) => setQualification('safety', event.target.value)}
+          />
+        </Field>
+      </div>
+    </>
+  );
+}
+
+/* 按瓶执行：这一步只处理在某个投料步骤真加了料的样本（指令的孔位只列这些），本批一个都没有就跳过、归还时间窗。
+   写了「之后还要再加」时，这瓶在那之后还要再加其中一种料才处理——如「每加一种料后搅拌，最后一种加完不搅」。 */
+function AppliesToFields({
+  step,
+  steps,
+  index,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  steps: RecipeStep[];
+  index: number;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const ids = steps.map(stepIdOf);
+  const dosing = steps
+    .map((row, at) => ({ row, at, id: ids[at] }))
+    .filter(({ row, at }) => at < index && isDosingStep(row));
+  const rule = step.applies_to;
+  if (!dosing.length && !rule) return null;
+  const dosedAt = ids.indexOf(rule?.dosed ?? '');
+  const later = steps
+    .map((row, at) => ({ row, at, id: ids[at] }))
+    .filter(({ row, at }) => dosedAt >= 0 && at > dosedAt && isDosingStep(row));
+  return (
+    <>
+      <Field label="按瓶执行" hint="只处理在所选投料步骤真加了料的样本；某瓶这种料是 0，这瓶这一步不动">
+        <select
+          value={rule?.dosed ?? ''}
+          disabled={readOnly}
+          onChange={(event) =>
+            onSet((current) => {
+              if (event.target.value) current.applies_to = { dosed: event.target.value };
+              else delete current.applies_to;
+            })
+          }
+        >
+          <option value="">不限定：整批都做</option>
+          {dosing.map(({ row, at, id }) => (
+            <option key={id} value={id}>
+              第 {at + 1} 步 · {row.name}（{row.material}）
+            </option>
+          ))}
+        </select>
+      </Field>
+      {rule && later.length ? (
+        <Field label="之后还要再加其中一种才处理" hint="不勾就是只要加了所选的料就处理">
+          <div className="dep-list">
+            {later.map(({ row, at, id }) => (
+              <label key={id} className="check">
+                <input
+                  type="checkbox"
+                  disabled={readOnly}
+                  checked={(rule.then_any ?? []).includes(id)}
+                  onChange={(event) =>
+                    onSet((current) => {
+                      const next = new Set(current.applies_to?.then_any ?? []);
+                      if (event.target.checked) next.add(id);
+                      else next.delete(id);
+                      current.applies_to = { dosed: current.applies_to?.dosed ?? rule.dosed, ...(next.size ? { then_any: ids.filter((ref) => next.has(ref)) } : {}) };
+                    })
+                  }
+                />
+                第 {at + 1} 步 · {row.name}（{row.material}）
+              </label>
+            ))}
+          </div>
+        </Field>
+      ) : null}
+    </>
   );
 }
 

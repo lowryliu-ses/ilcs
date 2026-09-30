@@ -11,13 +11,13 @@ from typing import Any
 from .bindings import binding_issues, bindings_of
 from .capability import StationSpec, out_of_range, stations_for_step
 from .environment import requirement_issues
-from .graph import ancestors, critical_path_min, graph_issues, graph_mode
+from .graph import ancestors, critical_path_min, graph_issues, graph_mode, predecessors
 from .params import spec_of, value_issues
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
     applies_to_issues, assist_issues, branch_issues, notify_issues,
-    consumes_materials, gate_issues, kind_of, manual_issues, material_issues, needs_station, resource_demand,
-    review_issues, step_material,
+    consumes_materials, gate_issues, holds_station, holds_station_issues, kind_of, manual_issues, material_issues,
+    needs_station, qualification_issues, resource_demand, resource_issues, review_issues, step_material,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
 
@@ -105,6 +105,8 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
     elif kind == NOTIFY:
         issues.extend(notify_issues(step))
     issues.extend(material_issues(step))
+    issues.extend(resource_issues(step))
+    issues.extend(qualification_issues(step))
     issues.extend(timeout_issues(step))
     issues.extend(skippable_issues(step))
     issues.extend(requirement_issues(step, needs_zone=not needs_station(step)))
@@ -154,6 +156,7 @@ def validate_steps(
         # 前馈来源、按瓶限定引用的投料步骤都要看上下游步骤，同样只能在整条流程上校验
         issues.extend(binding_issues(step, steps, index, capabilities))
         issues.extend(applies_to_issues(step, steps, index))
+        issues.extend(holds_station_issues(steps, index))
         if kind == SUBFLOW:
             issues.extend((subflow_problems or {}).get(step_id, []))
         issues.extend((method_problems or {}).get(step_id, []))
@@ -162,9 +165,18 @@ def validate_steps(
         seen_ids[step_id] = index
 
         requires_station = needs_station(step)
-        fits = stations_for_step(stations, step) if requires_station else []
+        if holds_station(step):
+            # 样本留在前驱那台设备里：能承接前驱的工位就是它会占的工位
+            parent = predecessors(steps)[index]
+            source = steps[parent[0]] if len(parent) == 1 and kind_of(steps[parent[0]]) == DEVICE else None
+            fits = stations_for_step(stations, source) if source is not None else []
+        else:
+            fits = stations_for_step(stations, step) if requires_station else []
         blockers: list[str] = list(issues)
-        if requires_station and not fits:
+        if requires_station and not fits and not holds_station(step):
+            station_ref = ((step.get("resource") or {}).get("station") or "") if kind == MANUAL else ""
+            if station_ref:
+                blockers.append(f"指定占用的工位 {station_ref} 不存在或已停用")
             for station in stations:
                 blockers.extend(out_of_range(station, step))
         rows.append(
@@ -187,6 +199,8 @@ def validate_steps(
                 "split": step.get("split") or {},
                 "assist": step.get("assist") or [],
                 "labware": step.get("labware") or "",
+                "resource": step.get("resource") or {},
+                "qualification": step.get("qualification") or {},
                 "branch": step.get("branch") or {},
                 "subflow": step.get("subflow") or {},
                 "method": step.get("method") or {},

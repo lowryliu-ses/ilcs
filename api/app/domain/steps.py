@@ -59,7 +59,7 @@ APPLICABLE: dict[str, set[str]] = {
         "dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable",
         "consumes_materials", "material",
     },
-    WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
+    WAIT: {"dur", "wait_for", "resource", "hard", "timeout", "skippable"},
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
     GATE: {"gate"},
     SPLIT: {"split"},
@@ -137,6 +137,102 @@ def needs_station(step: dict[str, Any]) -> bool:
     if kind == WAIT:
         return bool(resource.get("holds_station"))
     return False
+
+
+def holds_station(step: dict[str, Any]) -> bool:
+    """等待期间样本仍留在上一步的设备里：这段时间照样占着那台工位。"""
+    return kind_of(step) == WAIT and bool(((step or {}).get("resource") or {}).get("holds_station"))
+
+
+def resource_issues(step: dict[str, Any]) -> list[str]:
+    """工位资源的写法。人工步骤：`{station}` 指定一台，或 `{capability}` 任一台实现该能力的；
+    等待步骤：`{holds_station: true}` 样本留在上一步的设备里。设备步骤按能力找工位，不写这一项。"""
+    if "resource" not in (step or {}) or step.get("resource") in (None, {}):
+        return []
+    resource = step["resource"]
+    kind = kind_of(step)
+    if not isinstance(resource, dict):
+        return ["工位资源 resource 必须是对象"]
+    if kind == MANUAL:
+        station, capability = resource.get("station"), resource.get("capability")
+        extra = sorted(set(resource) - {"station", "capability"})
+        issues = [f"人工步骤的工位资源不认 {key}" for key in extra]
+        if station and capability:
+            issues.append("人工步骤占用的工位要么指定一台（station），要么按能力任一台（capability），不能两个都写")
+        elif not station and not capability:
+            issues.append("人工步骤声明了工位资源，但没写占哪台工位（station）或哪种能力的工位（capability）")
+        for key, value in (("station", station), ("capability", capability)):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                issues.append(f"工位资源的 {key} 必须是非空文字")
+        return issues
+    if kind == WAIT:
+        extra = sorted(set(resource) - {"holds_station"})
+        issues = [f"等待步骤的工位资源只认 holds_station，不认 {key}" for key in extra]
+        if not isinstance(resource.get("holds_station", False), bool):
+            issues.append("holds_station 只能是是或否")
+        return issues
+    if kind == DEVICE:
+        return []  # 历史快照里可能带着，设备步骤按能力找工位、不读它
+    return [f"{KIND_NAMES.get(kind, kind)}步骤不占工位，不写工位资源"]
+
+
+QUALIFICATION_KINDS = {"sop": "SOP", "safety": "安全操作"}
+
+
+def qualification_issues(step: dict[str, Any]) -> list[str]:
+    """人工步骤要求执行人具备的资质：`{sop: SOP 编号, safety: 安全操作资质编号}`，至少写一项。
+
+    设备步骤按能力自动要求能力资质，不在这里写。编号要与「人员与资质」里登记的资质范围对上，
+    开跑检查与节点开始时按执行人逐项核对。"""
+    if "qualification" not in (step or {}) or step.get("qualification") in (None, {}):
+        return []
+    required = step["qualification"]
+    if kind_of(step) != MANUAL:
+        return ["只有人工步骤能声明执行人资质要求（设备步骤按能力自动要求）"]
+    if not isinstance(required, dict):
+        return ["资质要求 qualification 必须是对象"]
+    issues = [f"资质要求不认 {key}（只有 sop、safety）" for key in sorted(set(required) - set(QUALIFICATION_KINDS))]
+    for key, label in QUALIFICATION_KINDS.items():
+        value = required.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            issues.append(f"{label}资质编号必须是非空文字")
+    if not any(isinstance(required.get(key), str) and required[key].strip() for key in QUALIFICATION_KINDS):
+        issues.append("声明了资质要求，但 SOP 与安全操作资质都没写")
+    return issues
+
+
+def holds_station_issues(steps: list[dict[str, Any]], index: int) -> list[str]:
+    """等待期间占着工位：样本留在哪台设备里就占哪台，所以前驱只能是一个设备步骤。"""
+    from .graph import predecessors
+
+    if not holds_station(steps[index]):
+        return []
+    before = predecessors(steps)[index]
+    if len(before) != 1:
+        return ["等待期间占着工位：样本留在上一步的设备里，所以前驱只能有一个，而且要是设备步骤"]
+    parent = before[0]
+    if kind_of(steps[parent]) != DEVICE:
+        return [f"等待期间占着工位：前驱「{steps[parent].get('name') or step_id_of(steps[parent], parent)}」不是设备步骤，样本不在设备里"]
+    twins = [
+        other for other, parents in enumerate(predecessors(steps))
+        if other != index and parents == [parent] and holds_station(steps[other])
+    ]
+    if twins:
+        return [f"「{steps[parent].get('name') or step_id_of(steps[parent], parent)}」之后已经有一个等待步骤占着这台设备：样本只能在一处"]
+    return []
+
+
+def held_after(steps: list[dict[str, Any]]) -> dict[int, int]:
+    """占着工位的等待步骤 → 它占的那个设备步骤（唯一的前驱）。配置不成立的不算，校验另报。"""
+    from .graph import predecessors
+
+    found: dict[int, int] = {}
+    before = predecessors(steps)
+    for index, step in enumerate(steps):
+        if holds_station(step) and len(before[index]) == 1 and kind_of(steps[before[index][0]]) == DEVICE:
+            if before[index][0] not in found.values():
+                found[index] = before[index][0]
+    return found
 
 
 def consumes_materials(step: dict[str, Any]) -> bool:

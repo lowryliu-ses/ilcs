@@ -25,7 +25,7 @@ from ..domain import graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
     BRANCH, DEVICE, GATE, MANUAL, NOTIFY, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
-    case_label, kind_of, match_case, missing_form_values, normalize, step_id_of,
+    case_label, kind_of, match_case, missing_form_values, needs_station, normalize, step_id_of,
 )
 from ..domain.permissions import ADMIN, ROLE_NAMES
 from ..models import Batch, BatchSignal, Sample, StepRun, User, WorkflowEvent, roles_of
@@ -102,6 +102,10 @@ class WorkflowService:
                 run.due_at = now() + timedelta(minutes=float(step.get("dur") or 0))
         if run.kind == MANUAL and step.get("dur"):
             run.due_at = now() + timedelta(minutes=float(step["dur"]))
+        if run.kind in (MANUAL, WAIT) and needs_station(step):
+            # 人工步骤占着工位、等待期间样本留在设备里：记下占的是哪台（排程时选定的那台），
+            # 执行器数设备占用时把它算上，别的批次的动作要等它结束
+            run.station_id = self._planned_station(batch, index)
         timeout = step.get("timeout") or {}
         if isinstance(timeout, dict) and isinstance(timeout.get("minutes"), (int, float)) and timeout["minutes"] > 0:
             run.deadline_at = now() + timedelta(minutes=float(timeout["minutes"]))
@@ -110,6 +114,17 @@ class WorkflowService:
         if run.kind == WAIT and ((step.get("wait_for") or {}).get("mode") == "event"):
             self._consume_early_signal(batch, run, step)
         return run
+
+    def _planned_station(self, batch: Batch, index: int) -> str:
+        from ..models import Allocation
+
+        row = (
+            self.db.query(Allocation)
+            .filter(Allocation.batch_id == batch.id, Allocation.step_index == index, Allocation.kind == "work")
+            .order_by(Allocation.starts_at.desc())
+            .first()
+        )
+        return row.station_id if row is not None else ""
 
     def _consume_early_signal(self, batch: Batch, run: StepRun, step: dict) -> None:
         """事件等待开出时，先看有没有早到的同名信号：有就直接消费，不让它空等。"""
