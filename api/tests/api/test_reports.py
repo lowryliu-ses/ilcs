@@ -500,3 +500,75 @@ def test_report_templates_add_instruments_operation_log_and_raw_files(admin, ope
     assert switched.json()["content"]["template"]["key"] == "summary"
     assert switched.json()["template_version"] == "summary-1.1"
     assert render(switched.json()["content"]).startswith(b"%PDF")
+
+
+def test_custom_report_template_draft_release_revise_and_use(admin, researcher, qa, reviewed_batch):
+    """组织自己的报告模板：起草 → 起草人不能自己发布 → QA 发布 → 出报告用它（快照带标题与文字章节）→ 修订出 v2。"""
+    from uuid import uuid4
+
+    from app.services.report_pdf import render
+
+    key = f"lab-{uuid4().hex[:6]}"
+    sections = [
+        {"key": "plan"}, {"kind": "text", "key": "text:scope", "title": "适用范围", "body": "本报告只用于内部研发。\n不作为放行依据。"},
+        {"key": "results", "title": "检测结果"}, {"key": "statistics"}, {"key": "approval"},
+    ]
+    bad = researcher.post("/api/report-templates", {"key": key, "name": "内部研发报告",
+                                                    "sections": [{"key": "nope"}, {"kind": "text", "key": "text:x"}]})
+    assert bad.status_code == 422, bad.text
+    problems = bad.json()["detail"]["problems"]
+    assert "第 1 节 nope 不是内置章节" in problems and any("要有标题" in item for item in problems)
+    assert researcher.post("/api/report-templates", {"key": "standard", "name": "撞名", "copy_from": "standard"}).status_code == 409
+    typo = researcher.post("/api/reports", {"batch_id": reviewed_batch["batch_id"], "template": "standrad"})
+    assert typo.status_code == 422 and typo.json()["detail"]["code"] == "report_template_unknown", "写错的键不悄悄换成标准模板"
+
+    draft = researcher.post("/api/report-templates", {"key": key, "name": "内部研发报告", "sections": sections})
+    assert draft.status_code == 201, draft.text
+    row = draft.json()
+    assert row["state"] == "draft" and [item["title"] for item in row["sections"]][:3] == ["方案与目的", "适用范围", "检测结果"]
+    # 还没发布：生成报告时不能选它
+    assert key not in {item["key"] for item in researcher.get("/api/reports/templates").json()}
+    unreleased = researcher.post("/api/reports", {"batch_id": reviewed_batch["batch_id"], "template": key})
+    assert unreleased.status_code == 422 and unreleased.json()["detail"]["code"] == "report_template_unreleased"
+
+    renamed = researcher.patch(f"/api/report-templates/{row['id']}", {"name": "内部研发报告 A", "row_version": row["row_version"]})
+    assert renamed.status_code == 200, renamed.text
+    assert researcher.post(f"/api/report-templates/{row['id']}/release", {}).status_code == 403, "研究员没有批准报告的权限"
+    assert admin.post(f"/api/report-templates/{row['id']}/release", {}).status_code == 200, "管理员不是起草人，可以发布"
+
+    # 发布后冻结；报告按它生成
+    assert researcher.patch(f"/api/report-templates/{row['id']}", {"name": "改"}).status_code == 409
+    listed = {item["key"]: item for item in researcher.get("/api/reports/templates").json()}
+    assert listed[key]["version"] == "1" and not listed[key]["builtin"]
+    created = researcher.post("/api/reports", {"batch_id": reviewed_batch["batch_id"], "template": key})
+    assert created.status_code == 201, created.text
+    report = created.json()
+    snapshot = report["content"]["template"]
+    assert report["template_version"] == f"{key}-1"
+    assert snapshot["sections"] == ["plan", "text:scope", "results", "statistics", "approval"]
+    assert snapshot["titles"] == {"results": "检测结果"} and snapshot["texts"]["text:scope"]["title"] == "适用范围"
+    assert render(report["content"]).startswith(b"%PDF")
+
+    # 修订：v2 草稿，研究员自己起草的，由 QA 发布；v1 退役，之后的报告用 v2，已有报告的快照不变
+    revised = researcher.post(f"/api/report-templates/{row['id']}/revise")
+    assert revised.status_code == 201, revised.text
+    v2 = revised.json()
+    assert v2["version"] == 2 and v2["state"] == "draft"
+    assert researcher.post(f"/api/report-templates/{row['id']}/revise").status_code == 409, "同一个键只能有一份草稿"
+    edited = researcher.patch(f"/api/report-templates/{v2['id']}", {"sections": sections[:2] + [{"key": "approval"}],
+                                                                    "row_version": v2["row_version"]})
+    assert edited.status_code == 200, edited.text
+    released = qa.post(f"/api/report-templates/{v2['id']}/release", {"row_version": edited.json()["row_version"]})
+    assert released.status_code == 200, released.text
+    versions = {item["version"]: item["state"] for item in researcher.get("/api/report-templates").json()["custom"] if item["key"] == key}
+    assert versions == {1: "retired", 2: "released"}
+    again = researcher.post("/api/reports", {"batch_id": reviewed_batch["batch_id"], "template": key}).json()
+    assert again["template_version"] == f"{key}-2" and again["content"]["template"]["sections"] == ["plan", "text:scope", "approval"]
+    kept = researcher.get(f"/api/reports/{report['id']}").json()
+    assert kept["content"]["template"]["sections"][2] == "results", "已有报告的章节快照不随模板修订变"
+
+    # 模板整个停用之后，用它的草稿报告重新取数：取数照旧，章节沿用原来的快照
+    assert qa.post(f"/api/report-templates/{v2['id']}/retire", {}).status_code == 200
+    refreshed = researcher.patch(f"/api/reports/{again['id']}", {"refresh": True, "row_version": again["row_version"]})
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["content"]["template"]["sections"] == ["plan", "text:scope", "approval"]

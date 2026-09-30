@@ -26,6 +26,7 @@ import { MethodsPage } from '../features/methods/MethodsPage';
 import { EnvironmentPage } from '../features/environment/EnvironmentPage';
 import { RecipesPage } from '../features/recipes/RecipesPage';
 import { ReportsPage } from '../features/reports/ReportsPage';
+import { ReportTemplatesPage } from '../features/reports/ReportTemplatesPage';
 import { ResultsPage } from '../features/results/ResultsPage';
 import { SampleDetailPage, SamplesPage } from '../features/samples/SamplesPage';
 import { SchedulePage } from '../features/schedule/SchedulePage';
@@ -73,6 +74,7 @@ const NAV: [string, NavItem[]][] = [
     { path: '/data-review', label: '数据审核' },
     { path: '/results', label: '结果分析' },
     { path: '/reports', label: '报告管理' },
+    { path: '/report-templates', label: '报告模板' },
   ]],
   ['资源管理', [
     { path: '/assets', label: '仪器设备' },
@@ -216,6 +218,7 @@ export function App() {
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:batchId" element={<ResultsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/report-templates" element={<ReportTemplatesPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/stations" element={<StationsPage tab="ledger" />} />
           <Route path="/stations/connections" element={<StationsPage tab="connections" />} />

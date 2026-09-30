@@ -30,6 +30,7 @@ from ..repositories.resources import station_model
 from ..repositories.samples import PhysicalSampleRepository
 from ..repositories.workflow import StepRunRepository
 from .audit_service import AuditService
+from .report_template_service import ReportTemplateService
 from .file_service import FileService, FileStore
 from .identity_service import IdentityService, admin_self_approval
 from .inventory_service import InventoryService
@@ -77,6 +78,7 @@ class ReportService:
         self.inventory = InventoryService(db, ctx)
         self.audit = AuditService(db, ctx)
         self.identity = IdentityService(db, ctx)
+        self.report_templates = ReportTemplateService(db, ctx)
 
     # ---------- 数据集 ----------
 
@@ -462,7 +464,7 @@ class ReportService:
             "conclusion": conclusion,
             "plan_type": view["plan_type"],
             "batch_id": batch_id,
-            "template": report_templates.template(template_key),
+            "template": self.report_templates.resolve(template_key),
         }
 
     def build_task_content(self, task_id: str, conclusion: str = "", template_key: str | None = None) -> dict:
@@ -570,7 +572,7 @@ class ReportService:
             "batch_id": "",
             # 报告引用的批次：终止的批次只在「分批情况」里列出，不进结果、不参与发布前校验与固化
             "batch_ids": view.get("batch_ids") or [batch.id for batch in batches],
-            "template": report_templates.template(template_key),
+            "template": self.report_templates.resolve(template_key),
         }
 
     def _effect_out(self, effect: dict | None) -> dict | None:
@@ -585,6 +587,18 @@ class ReportService:
         return list(content.get("batch_ids") or ([content["batch_id"]] if content.get("batch_id") else []))
 
     def _rebuild(self, content: dict, conclusion: str, template_key: str | None) -> dict:
+        """重新取数。报告原来用的组织模板后来停用了（没有已发布版本）：取数照旧，章节沿用原来的快照。"""
+        try:
+            self.report_templates.resolve(template_key)
+        except ValidationFailed:
+            if template_key != (content.get("template") or {}).get("key"):
+                raise
+            rebuilt = self._rebuild_with(content, conclusion, None)
+            rebuilt["template"] = content["template"]
+            return rebuilt
+        return self._rebuild_with(content, conclusion, template_key)
+
+    def _rebuild_with(self, content: dict, conclusion: str, template_key: str | None) -> dict:
         """按报告原来的范围重新取数：多批合并报告按父任务，单批报告按批次。"""
         if content.get("batch_ids") and content.get("task_id"):
             return self.build_task_content(content["task_id"], conclusion, template_key)
@@ -897,7 +911,7 @@ class ReportService:
         task = self.tasks.get(task_id) if task_id else None
         if task_id and task is None:
             raise NotFound("实验任务不存在")
-        template = report_templates.template(payload.get("template"))
+        template = self.report_templates.resolve(payload.get("template"))
         if task is not None and not batch_id and self.tasks.children(task.id):
             # 一个方案分多批执行：在父任务上出一份合并报告，子任务不必各出一份
             self._require_task_reportable(task.id)
@@ -928,7 +942,7 @@ class ReportService:
         self.reports.add(report)
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=report.id, version=1, state="draft",
-            template_version=report_templates.template_version(template["key"]), algorithm_version=ALGORITHM_VERSION,
+            template_version=self.report_templates.version_label(content["template"]), algorithm_version=ALGORITHM_VERSION,
             author_id=user.id, content=content,
         )
         self.versions.add(version)
@@ -960,11 +974,11 @@ class ReportService:
                 payload.get("template") or (content.get("template") or {}).get("key"),
             )
             content = refreshed
-            version.template_version = report_templates.template_version(content["template"]["key"])
+            version.template_version = self.report_templates.version_label(content["template"])
         elif payload.get("template"):
             # 换模板不重新取数：只换章节选择
-            content["template"] = report_templates.template(payload["template"])
-            version.template_version = report_templates.template_version(content["template"]["key"])
+            content["template"] = self.report_templates.resolve(payload["template"])
+            version.template_version = self.report_templates.version_label(content["template"])
         version.content = content
         self.versions.bump(version)
         self.audit.record(
@@ -1168,7 +1182,7 @@ class ReportService:
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=published.report_id,
             version=published.version + 1, state="draft",
-            template_version=report_templates.template_version(content["template"]["key"]),
+            template_version=self.report_templates.version_label(content["template"]),
             algorithm_version=ALGORITHM_VERSION, author_id=user.id, content=content,
             supersedes_id=published.id,
         )

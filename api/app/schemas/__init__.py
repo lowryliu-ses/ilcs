@@ -1141,13 +1141,14 @@ class ReportCreateIn(BaseModel):
     title: str = ""
     conclusion: str = ""
     # 报告模板：standard 完整实验报告 / summary 结果摘要 / audit 质量审计报告
-    template: Literal["standard", "summary", "audit"] = "standard"
+    # 内置模板键（standard / summary / audit）或组织报告模板的键；服务端按键取最新的已发布版本
+    template: str = Field(default="standard", max_length=32)
 
 
 class ReportPatchIn(Versioned):
     conclusion: str | None = None
     refresh: bool = False
-    template: Literal["standard", "summary", "audit"] | None = None
+    template: str | None = Field(default=None, max_length=32)
 
 
 class PublishIn(Signed):
@@ -1486,6 +1487,26 @@ class LocationActiveIn(BaseModel):
 
 # 表格单元格：xlsx 里的数字是 float，文字与 csv 单元格是 str，空格子是 None
 TableCell = str | float | None
+
+
+class ReportTemplateIn(BaseModel):
+    """新建组织报告模板草稿。sections 不给而给了 copy_from（内置模板键或组织模板 id）时以它的章节为起点。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(max_length=32)
+    name: str = Field(max_length=200)
+    description: str = ""
+    sections: list[dict[str, Any]] | None = None
+    copy_from: str = ""
+
+
+class ReportTemplatePatchIn(Versioned):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    sections: list[dict[str, Any]] | None = None
 
 
 class FormulationTemplateIn(BaseModel):

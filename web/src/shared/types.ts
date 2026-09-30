@@ -2168,7 +2168,11 @@ export type ReportContent = {
   operation_log?: { time: string; user: string; action: string; before: string; after: string; detail: string; signed: boolean; meaning: string }[];
   raw_files?: { id: string; filename: string; media_type: string; size: number; checksum: string; usage: string[] }[];
   data_flags?: { scope: string; target: string; code: string; message: string; quality: string; review_state: string }[];
-  template?: { key: string; name: string; version: string; sections: string[] };
+  /** 生成时的模板快照：章节键顺序；组织模板另带改过的标题与固定文字章节 */
+  template?: {
+    key: string; name: string; version: string; sections: string[];
+    titles?: Record<string, string>; texts?: Record<string, { title: string; body: string }>;
+  };
 };
 
 export type ReportInstrument = {
@@ -2191,6 +2195,38 @@ export type ReportTemplate = {
   name: string;
   version: string;
   description: string;
+  sections: { key: string; title: string }[];
+  /** 内置模板（代码里，只读）还是组织自己的模板 */
+  builtin?: boolean;
+};
+
+/** 组织报告模板的一节：内置章节（可改标题）或固定文字章节（声明、方法说明） */
+export type ReportTemplateSection = { key: string; title?: string; kind?: 'text'; body?: string };
+
+export type CustomReportTemplate = {
+  id: string;
+  key: string;
+  version: number;
+  name: string;
+  description: string;
+  /** draft | released | retired */
+  state: string;
+  state_label: string;
+  builtin: false;
+  sections: ReportTemplateSection[];
+  /** 起草人的用户 id：起草人不能发布本人起草的模板 */
+  created_by: string;
+  created_by_name: string;
+  released_by_name: string;
+  created_at: string | null;
+  released_at: string | null;
+  row_version: number;
+};
+
+export type ReportTemplateListing = {
+  builtin: ReportTemplate[];
+  custom: CustomReportTemplate[];
+  /** 可选的内置章节 */
   sections: { key: string; title: string }[];
 };
 

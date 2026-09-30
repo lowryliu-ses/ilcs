@@ -4,7 +4,8 @@ from . import (
     materials, methods,
     metrics,
     people,
-    plans, recipes, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks, templates,
+    plans, recipes, report_templates, reports, results, runtime, samples, schedule, sops, stations, steps, stream, tasks,
+    templates,
 )
 
 ROUTERS = [
@@ -35,6 +36,7 @@ ROUTERS = [
     results.router,
     sops.router,
     reports.router,
+    report_templates.router,
     files.router,
     stream.router,
     labware.router,

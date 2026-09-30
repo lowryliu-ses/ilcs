@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 
-from ..domain.report_templates import SECTION_TITLES
+from ..domain.report_templates import title_of
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -174,14 +174,23 @@ def render(content: dict) -> bytes:
         ),
     )
 
-    sections = (content.get("template") or {}).get("sections") or LEGACY_SECTIONS
+    template = content.get("template") or {}
+    sections = template.get("sections") or LEGACY_SECTIONS
+    texts = template.get("texts") or {}
     # 「分批情况」只有多批合并报告才有内容；单批报告跳过它，章节编号照常连续
     sections = [key for key in sections if key != "batches" or content.get("batches")]
     for number, key in enumerate(sections, start=1):
+        if key in texts:
+            # 组织模板里的固定文字章节（声明、方法说明）：原样印出，一行一段
+            page.heading(f"{_chinese(number)}、{title_of(template, key)}")
+            for paragraph in str(texts[key].get("body") or "").splitlines():
+                if paragraph.strip():
+                    page.text(paragraph.strip())
+            continue
         renderer = RENDERERS.get(key)
         if renderer is None:
             continue
-        page.heading(f"{_chinese(number)}、{SECTION_TITLES.get(key, key)}")
+        page.heading(f"{_chinese(number)}、{title_of(template, key)}")
         renderer(page, content)
 
     page.finish()
