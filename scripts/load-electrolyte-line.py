@@ -187,7 +187,8 @@ def register(team: dict[str, Actor], line: dict) -> dict:
     metrics = register_metrics(researcher, line)
     grant_qualifications(admin, line)
     template = register_template(researcher, line, methods, metrics)
-    return {"methods": methods, "metrics": metrics, "template": template}
+    return {"methods": methods, "metrics": metrics, "template": template,
+            "stations": [station["id"] for station in line["stations"]]}
 
 
 def register_capabilities(engineer: Actor, line: dict) -> None:
@@ -579,6 +580,8 @@ def run(team: dict[str, Actor], context: dict, filename: str, content: bytes, pa
     batch_id = launch(operator, plan_id, f"电解液产线脚本：配方表 {filename}")
     step("执行")
     detail = drive(operator, qa, batch_id, pump, rounds)
+    # 执行器记报警有先后：新工位重连前的「失联」可能在登记时那一遍清理之后才落库，跑完再清一遍
+    close_recovered_alarms(operator, context.get("stations") or [])
     report(detail)
     return {"recipe": recipe_id, "plan": plan_id, "batch": batch_id, "import": result, "detail": detail}
 
