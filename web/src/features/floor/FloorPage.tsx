@@ -6,7 +6,8 @@ import { clock } from '../../shared/format';
 import { useLive, useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { QrLabel } from '../../shared/labels';
-import type { Floor, FloorSlot, FloorStation, LabwareRow, LabwareType, LocationRow } from '../../shared/types';
+import { areaLabel } from '../stations/AreasTab';
+import type { Floor, FloorSlot, FloorStation, IslandRow, LabwareRow, LabwareType, LocationRow } from '../../shared/types';
 import { Blocked, Empty, Field, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 /* 现场监控：中控室大屏看的就是这一页。
@@ -198,6 +199,8 @@ export function FloorPage() {
   const { can } = useSession();
   const { live } = useLive();
   const floor = useQuery<Floor>('floor', () => api.get<Floor>('/floor'), 10000);
+  const areas = useQuery<IslandRow[]>('islands', () => api.get<IslandRow[]>('/islands'));
+  const areaNames = Object.fromEntries((areas.data ?? []).map((row) => [row.id, row.name]));
   const [scanning, setScanning] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [inspecting, setInspecting] = useState(false);
@@ -249,8 +252,8 @@ export function FloorPage() {
 
       {data && !data.tracking ? (
         <div className="note">
-          尚未登记放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员在
-          <Link to="/stations/locations">工位与接入 → 放置位</Link>按现场布局登记后启用。
+          尚未登记载具放置位与板库：载具位置追踪未启用，转运按排程时间窗处理。管理员在
+          <Link to="/stations/locations">工位与接入 → 载具放置位</Link>按现场布局登记后启用。
         </div>
       ) : null}
       {data?.lost.length ? (
@@ -260,7 +263,7 @@ export function FloorPage() {
       ) : null}
 
       {islands.map(([island, stations]) => (
-        <Panel key={island} title={island ? `岛 #${island}` : '转运与公共'} flush>
+        <Panel key={island} title={island ? areaLabel(island, areaNames[island]) : '转运与公共'} flush>
           <div className="station-grid">
             {stations.map((station) => (
               <StationCard key={station.id} station={station} />

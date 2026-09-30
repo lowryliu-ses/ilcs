@@ -12,7 +12,7 @@ from ..domain.lifecycle import capability_delete_blockers, station_delete_blocke
 from ..domain.params import clean_specs, spec_issues
 from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
-from ..models import Adapter, Capability, Station, User
+from ..models import Adapter, Capability, Island, Station, User
 from ..adapters.base import AdapterError
 from ..adapters.registry import adapter_for, catalog_of, describe, reset_cache
 from ..repositories.batches import AllocationRepository
@@ -223,7 +223,37 @@ class StationService:
         return self.allocations.open_count_for_station(station_id)
 
     def list_islands(self) -> list[dict]:
-        return [{"id": i.id, "name": i.name} for i in self.islands.list()]
+        """实验区：登记了名称的，加上工位用着、还没起名的岛号（名称为空），各带在用工位数。岛号 0 是「未分区」。"""
+        names = {island.id: island.name for island in self.islands.list()}
+        counts: dict[int, int] = {}
+        for station in self.stations.list():
+            if station.island and not station.retired:
+                counts[station.island] = counts.get(station.island, 0) + 1
+        return [
+            {"id": island_id, "name": names.get(island_id, ""), "stations": counts.get(island_id, 0)}
+            for island_id in sorted({*names, *counts})
+        ]
+
+    def name_island(self, island_id: int, name: str, user: User) -> dict:
+        """给实验区起名字（有就改，没有就登记）。只是给人看的名称：工位、排程、执行都按岛号，改名不影响任何运行。"""
+        if not 1 <= island_id <= 9999:
+            raise ValidationFailed("实验区编号必须是 1–9999 的整数", code="island_id_invalid")
+        name = name.strip()
+        if not name:
+            raise ValidationFailed("实验区名称不能为空", code="island_name_required")
+        island = self.db.get(Island, island_id)
+        before = island.name if island is not None else ""
+        if island is None:
+            island = Island(id=island_id, name=name)
+            self.db.add(island)
+        else:
+            island.name = name
+        self.audit.record(
+            user, "修改实验区名称" if before else "登记实验区", f"实验区 #{island_id}",
+            before=before or "—", after=name,
+        )
+        self.db.commit()
+        return {"id": island_id, "name": name}
 
     def command_ledger(self, limit: int = 50) -> list[dict]:
         return [

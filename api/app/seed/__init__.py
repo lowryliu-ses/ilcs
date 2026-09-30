@@ -149,7 +149,7 @@ def seed(
                 ident = f"{row['id']}/N{index + 1}"
                 if not db.get(Location, ident):
                     db.add(Location(id=ident, name=f"{row['name']} 放置位 {index + 1}", kind="nest",
-                                    station_id=row["id"], group=f"岛 #{row['island']}", position=index + 1))
+                                    station_id=row["id"], group=f"实验区 #{row['island']}", position=index + 1))
         for hotel, name, slots in data.HOTELS:
             for index in range(slots):
                 ident = f"{hotel}/S{index + 1:02d}"

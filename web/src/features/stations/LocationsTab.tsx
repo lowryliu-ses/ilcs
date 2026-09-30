@@ -1,4 +1,4 @@
-/* 放置位：载具（板、托盘）在现场能放在哪——工位上的放置位、板库槽位、缓冲位、库房。
+/* 载具放置位：载具（板、托盘、架子）在现场能放在哪——工位上的放置位、板库槽位、缓冲位、库房。
 
    这是现场布局的静态登记，所以放在「工位与接入」；哪个位置上现在放着什么在「现场监控」看。
    登记一个也没有时载具位置追踪不启用，转运按排程时间窗处理。位置编号全站唯一，登记后不改：
@@ -43,7 +43,7 @@ export function LocationsTab({ stations }: { stations: StationRow[] }) {
   return (
     <>
       <Panel
-        title={`放置位（${locations.data?.length ?? 0}）`}
+        title={`载具放置位（${locations.data?.length ?? 0}）`}
         aside={
           <div className="filters">
             <select value={kind} onChange={(event) => setKind(event.target.value)}>
@@ -59,7 +59,7 @@ export function LocationsTab({ stations }: { stations: StationRow[] }) {
           loading={locations.loading && !locations.data}
           error={locations.error}
           empty={!rows.length}
-          emptyText={locations.data?.length ? '没有这类位置' : '还没有登记放置位：载具位置追踪不启用，转运按排程时间窗处理'}
+          emptyText={locations.data?.length ? '没有这类位置' : '还没有登记载具放置位：载具位置追踪不启用，转运按排程时间窗处理'}
         />
         {rows.length ? (
           <table>
@@ -170,7 +170,7 @@ function RegisterDialog({ stations, existing, onClose }: { stations: StationRow[
       return Array.from({ length: total }, (_, index) => ({
         id: `${station.id}/N${start + index + 1}`,
         name: `${name.trim() || station.name} 放置位 ${start + index + 1}`,
-        group: `岛 #${station.island}`, position: start + index + 1, station_id: station.id,
+        group: `实验区 #${station.island}`, position: start + index + 1, station_id: station.id,
       }));
     }
     const prefix = group.trim();

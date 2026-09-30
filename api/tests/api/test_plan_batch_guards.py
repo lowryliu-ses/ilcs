@@ -5,7 +5,7 @@
 - 方案检查按子流程展开后的步骤：子流程里「用量由方案给出」的料锁不上。
 - 物料预览与预留同一口径：批号单位不一致不算可用。
 - 方案给出用量、本批合计为 0：开跑检查的物料项不适用，不再永久拦住。
-- 看板功能岛：没登记的岛号也汇总，名字退回「岛 #N」。
+- 看板功能岛：没登记的岛号也汇总，名字退回「实验区 #N」。
 """
 from decimal import Decimal
 from types import SimpleNamespace
@@ -231,7 +231,39 @@ def test_dashboard_lists_stations_on_unregistered_islands(operator, db):
         station.island = 97
         db.commit()
         islands = {row["id"]: row for row in operator.get("/api/dashboard").json()["islands"]}
-        assert islands[97]["name"] == "岛 #97" and islands[97]["stations"] == 1
+        assert islands[97]["name"] == "实验区 #97" and islands[97]["stations"] == 1
     finally:
         station.island = original
+        db.commit()
+
+
+def test_naming_an_experiment_area(admin, operator, db):
+    """实验区（岛号）起名：要工位编辑权限；列表带出工位用着、还没起名的岛号；看板按名称显示；改名留审计。"""
+    from app.models import AuditEvent, Island, Station
+
+    station = db.query(Station).order_by(Station.id).first()
+    original = station.island
+    try:
+        station.island = 96
+        db.commit()
+        listed = {row["id"]: row for row in admin.get("/api/islands").json()}
+        assert listed[96] == {"id": 96, "name": "", "stations": 1}
+        assert operator.put("/api/islands/96", {"name": "配液段"}).status_code == 403
+        assert admin.put("/api/islands/96", {"name": "  "}).status_code == 422
+        assert admin.put("/api/islands/0", {"name": "未分区"}).status_code == 422
+        named = admin.put("/api/islands/96", {"name": "  配液段 "})
+        assert named.status_code == 200 and named.json() == {"id": 96, "name": "配液段"}
+        renamed = admin.put("/api/islands/96", {"name": "配液段（手套箱 B）"})
+        assert renamed.status_code == 200
+        assert {row["id"]: row for row in admin.get("/api/islands").json()}[96]["name"] == "配液段（手套箱 B）"
+        islands = {row["id"]: row for row in operator.get("/api/dashboard").json()["islands"]}
+        assert islands[96]["name"] == "配液段（手套箱 B）"
+        db.expire_all()
+        trail = db.query(AuditEvent).filter(AuditEvent.target == "实验区 #96").order_by(AuditEvent.id).all()
+        assert [row.action for row in trail][-2:] == ["登记实验区", "修改实验区名称"]
+    finally:
+        station.island = original
+        row = db.get(Island, 96)
+        if row is not None:
+            db.delete(row)
         db.commit()

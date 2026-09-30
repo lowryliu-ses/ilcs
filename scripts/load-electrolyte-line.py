@@ -185,6 +185,7 @@ def register(team: dict[str, Actor], line: dict) -> dict:
     engineer, qa, operator, researcher, admin = (team[k] for k in ("engineer", "qa", "operator", "researcher", "admin"))
     step(f"登记产线：{line['name']}")
     register_capabilities(engineer, line)
+    register_islands(engineer, line)
     register_stations(engineer, operator, line)
     methods = register_methods(engineer, qa, line)
     register_materials(operator, qa, line)
@@ -232,6 +233,18 @@ def register_sop(researcher: Actor, qa: Actor, operator: Actor, path: Path) -> d
     ok("SOP", f"{label} {spec['title']}（已发布，{len(spec['steps'])} 步"
               + ("，操作员已阅读确认" if spec.get("requires_training_ack") else "") + "）")
     return current
+
+
+def register_islands(engineer: Actor, line: dict) -> None:
+    """三段各是一个实验区：工位上写岛号，这里给岛号起名（看板、现场监控按名称显示）。名称一致就不动。"""
+    current = {row["id"]: row["name"] for row in engineer.get("/islands")}
+    changed = 0
+    for island in line.get("islands") or []:
+        if current.get(island["id"]) != island["name"]:
+            engineer.put(f"/islands/{island['id']}", {"name": island["name"]})
+            changed += 1
+    ok("实验区", "、".join(f"#{row['id']} {row['name']}" for row in line.get("islands") or [])
+                 + (f"（登记 / 改名 {changed}）" if changed else ""))
 
 
 def register_capabilities(engineer: Actor, line: dict) -> None:

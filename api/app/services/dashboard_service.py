@@ -288,10 +288,10 @@ class DashboardService:
         )
 
     def _island_load(self, held: set[str]) -> list[dict]:
-        """按功能岛汇总工位负载。
+        """按实验区（工位上的岛号）汇总工位负载。
 
         岛号写在工位上，岛表只是给岛起名字：工位用了没登记的岛号（产线装载脚本、界面上新建的工位都可能），
-        同样要算进来，名字退回「岛 #N」——否则整条线的运行、故障、挂起都不在看板上。岛号 0 是「未分岛」。
+        同样要算进来，名字退回「实验区 #N」——否则整条线的运行、故障、挂起都不在看板上。岛号 0 是「未分区」。
         """
         stations = self.stations.list()
         names = {island.id: island.name for island in self.islands.list()}
@@ -302,7 +302,7 @@ class DashboardService:
             rows.append(
                 {
                     "id": island_id,
-                    "name": names.get(island_id) or f"岛 #{island_id}",
+                    "name": names.get(island_id) or f"实验区 #{island_id}",
                     "stations": len(members),
                     "running": len([s for s in members if s.status == "running"]),
                     "fault": len([s for s in members if s.status == "fault"]),

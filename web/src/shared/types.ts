@@ -714,6 +714,9 @@ export type StationAsset = {
   unavailable_reasons: string[];
 };
 
+/** 实验区：工位上的岛号 + 给人看的名称（没起名为空串），带在用工位数 */
+export type IslandRow = { id: number; name: string; stations: number };
+
 export type StationRow = {
   id: string;
   island: number;

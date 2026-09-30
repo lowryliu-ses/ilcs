@@ -7,9 +7,10 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { CHANNEL_UNIT_LABEL } from '../../shared/types';
-import type { AssetRow, CapabilityRow, ChannelUnit, Paged, StationAsset, StationRow } from '../../shared/types';
+import type { AssetRow, CapabilityRow, ChannelUnit, IslandRow, Paged, StationAsset, StationRow } from '../../shared/types';
 import { Blocked, ConfirmDialog, ConnectionPill, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
 import { AdapterEditor } from './AdapterEditor';
+import { AreasTab, areaLabel } from './AreasTab';
 import { DeviceTemplatesTab } from './DeviceTemplatesTab';
 import { LocationsTab } from './LocationsTab';
 
@@ -24,13 +25,14 @@ import { LocationsTab } from './LocationsTab';
    登记新工位只登记台账与关联的仪器设备，之后分两步接设备、填能力极限，各走各的签名与检查。
    清洗确认、结果未知指令转人工核查、适配器重连是现场操作，在「现场监控」做；能力本身的定义在「能力字典」。 */
 
-export type StationsTab = 'ledger' | 'connections' | 'templates' | 'locations';
+export type StationsTab = 'ledger' | 'connections' | 'templates' | 'locations' | 'areas';
 
 const TABS: { key: StationsTab; path: string; label: string; perm?: string[] }[] = [
   { key: 'ledger', path: '/stations', label: '工位' },
   { key: 'connections', path: '/stations/connections', label: '设备连接' },
   { key: 'templates', path: '/stations/templates', label: '接入模板', perm: ['station.edit', 'template.release'] },
-  { key: 'locations', path: '/stations/locations', label: '放置位' },
+  { key: 'locations', path: '/stations/locations', label: '载具放置位' },
+  { key: 'areas', path: '/stations/areas', label: '实验区' },
 ];
 
 const CHANNELS_HINT =
@@ -92,7 +94,9 @@ export function StationsPage({ tab = 'ledger' }: { tab?: StationsTab }) {
             ) : current === 'connections' ? (
               '每个工位怎么连设备：驱动、连接参数、凭据引用与接入验收。同型号的几台设备套用同一份接入模板，只填各自的连接参数。'
             ) : current === 'locations' ? (
-              '载具在现场能放在哪：工位放置位、板库槽位、缓冲位、库房。登记了位置才启用载具位置追踪，转运按位置规划。'
+              '载具（板、托盘、架子）在现场能放的位置：工位放置位、板库槽位、缓冲位、库房；样本在载具的孔位里。登记了位置才启用载具位置追踪，转运按位置规划。'
+            ) : current === 'areas' ? (
+              '工位按所在区域分组（如物料准备段、配液段、测试段）。登记工位时填实验区编号，这里给编号起名字；看板与现场监控按名称显示，改名不影响排程与执行。'
             ) : (
               '一类设备怎么接，存成有版本、要发布的模板；工位在「设备连接」里套用模板、只填自己的连接参数。设备模块交付的 profile.json 在这里导入。'
             )}
@@ -123,6 +127,7 @@ export function StationsPage({ tab = 'ledger' }: { tab?: StationsTab }) {
       {current === 'connections' ? <ConnectionsPanel stations={rows} onConfigure={setEditingAdapter} /> : null}
       {current === 'templates' ? <DeviceTemplatesTab /> : null}
       {current === 'locations' ? <LocationsTab stations={rows} /> : null}
+      {current === 'areas' ? <AreasTab /> : null}
 
       {editing ? (
         <LimitsEditor station={editing} capabilities={capabilities.data ?? []} onClose={() => setEditing(null)} />
@@ -170,6 +175,8 @@ function LedgerPanel({
 }) {
   const { can } = useSession();
   const toast = useToast();
+  const areas = useQuery<IslandRow[]>('islands', () => api.get<IslandRow[]>('/islands'));
+  const areaName = (id: number) => areas.data?.find((row) => row.id === id)?.name ?? '';
   const retireStation = useMutation(
     (payload: { id: string; retired: boolean }) =>
       api.post<{ broken_recipes: string[] }>(`/stations/${payload.id}/retire`, { retired: payload.retired }),
@@ -228,7 +235,7 @@ function LedgerPanel({
                 <td>
                   <b className="mono">{station.id}</b>
                   <div className="tiny muted">
-                    {station.name} · 岛 {station.island}
+                    {station.name} · {areaLabel(station.island, areaName(station.island))}
                   </div>
                 </td>
                 <td>
@@ -775,7 +782,7 @@ function LimitsEditor({
   );
 }
 
-/* 登记新工位：只登记台账（标识、名称、功能岛、通道）和关联的仪器设备。怎么连设备、能接什么活在登记之后分两步做
+/* 登记新工位：只登记台账（标识、名称、实验区、通道）和关联的仪器设备。怎么连设备、能接什么活在登记之后分两步做
    （设备连接、能力极限），各走各的签名与检查——不在这里另嵌一份不能套模板的简化版连接配置。
    关联了资产的工位型号以资产为准；AGV、机械臂这类没有资产档案的，才在这里填型号。 */
 function StationForm({
@@ -881,8 +888,8 @@ function StationForm({
         </div>
       </Field>
       <div className="grid cols-2">
-        <Field label="功能岛">
-          <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
+        <Field label="实验区" hint="编号；名称在「实验区」页签里起">
+          <NumberInput value={form.island} ariaLabel="实验区" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
         {asset ? (
           <Field label="型号" hint={`以资产 ${asset.asset_no} 登记的为准，设备方法按它匹配；要改请到「仪器设备」`}>
@@ -972,8 +979,8 @@ function StationLedgerForm({ station, onClose }: { station: StationRow; onClose:
             <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
           </Field>
         )}
-        <Field label="功能岛">
-          <NumberInput value={form.island} ariaLabel="功能岛" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
+        <Field label="实验区" hint="编号；名称在「实验区」页签里起">
+          <NumberInput value={form.island} ariaLabel="实验区" onChange={(v) => setForm({ ...form, island: Number(v) || 0 })} />
         </Field>
       </div>
       <div className="grid cols-2">

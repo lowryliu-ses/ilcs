@@ -286,11 +286,11 @@ export function DashboardPage() {
           )}
         </Panel>
 
-        <Panel title="功能岛负载" flush>
+        <Panel title="实验区负载" flush>
           <table>
             <thead>
               <tr>
-                <th>功能岛</th>
+                <th>实验区</th>
                 <th className="num">工位</th>
                 <th className="num">运行</th>
                 <th className="num">故障</th>

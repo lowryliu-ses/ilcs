@@ -2889,6 +2889,23 @@
         "title": "InventoryLineIn",
         "type": "object"
       },
+      "IslandIn": {
+        "additionalProperties": false,
+        "description": "给实验区（工位上的岛号）起名字。岛号写在工位上，这里只登记给人看的名称。",
+        "properties": {
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "IslandIn",
+        "type": "object"
+      },
       "LabwareBindIn": {
         "properties": {
           "labware_id": {
@@ -17234,6 +17251,77 @@
           }
         ],
         "summary": "List Islands",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/islands/{island_id}": {
+      "put": {
+        "operationId": "name_island_api_islands__island_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "island_id",
+            "required": true,
+            "schema": {
+              "title": "Island Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IslandIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Name Island",
         "tags": [
           "resource"
         ]

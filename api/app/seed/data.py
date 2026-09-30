@@ -71,8 +71,8 @@ PARAM_SPECS = {
 }
 
 ISLANDS = [
-    (1, "岛 #1 高通量浆料制备"), (2, "岛 #2 中试匀浆"), (3, "岛 #3 涂布烘干"),
-    (4, "岛 #4 极片后处理"), (5, "岛 #5 扣电组装"), (6, "岛 #6 电性能测试"),
+    (1, "实验区 #1 高通量浆料制备"), (2, "实验区 #2 中试匀浆"), (3, "实验区 #3 涂布烘干"),
+    (4, "实验区 #4 极片后处理"), (5, "实验区 #5 扣电组装"), (6, "实验区 #6 电性能测试"),
 ]
 
 SLURRY_LIMITS = {
@@ -335,22 +335,22 @@ QUALIFICATIONS = [
 
 ASSETS = [
     dict(asset_no="AS-0001", name="高通量匀浆站 A", model="EXP-SLURRY-24", serial="SLR-24-A01",
-         location="岛 #1", stations=["ST-01-A"], capacity=1, cal_days=365),
+         location="实验区 #1", stations=["ST-01-A"], capacity=1, cal_days=365),
     dict(asset_no="AS-0002", name="高通量匀浆站 B", model="EXP-SLURRY-24", serial="SLR-24-B01",
-         location="岛 #1", stations=["ST-01-B"], capacity=1, cal_days=365),
+         location="实验区 #1", stations=["ST-01-B"], capacity=1, cal_days=365),
     dict(asset_no="AS-0003", name="中试匀浆罐", model="PILOT-MIX-8", serial="PM-8-001",
-         location="岛 #2", stations=["ST-02"], capacity=1, cal_days=40),
+         location="实验区 #2", stations=["ST-02"], capacity=1, cal_days=40),
     dict(asset_no="AS-0004", name="涂布烘干线", model="COATER-150", serial="CT-150-001",
-         location="岛 #3", stations=["ST-03"], capacity=1, cal_days=365),
+         location="实验区 #3", stations=["ST-03"], capacity=1, cal_days=365),
     dict(asset_no="AS-0005", name="辊压冲切机", model="CALENDER-P2", serial="CL-200-001",
-         location="岛 #4", stations=["ST-04"], capacity=1, cal_days=365),
+         location="实验区 #4", stations=["ST-04"], capacity=1, cal_days=365),
     dict(asset_no="AS-0006", name="真空干燥箱", model="VAC-WEIGH-12", serial="VC-80-001",
-         location="岛 #4", stations=["ST-05"], capacity=1, cal_days=365),
+         location="实验区 #4", stations=["ST-05"], capacity=1, cal_days=365),
     dict(asset_no="AS-0007", name="手套箱组装台", model="GB-ASSY-8", serial="GB-001",
-         location="岛 #5", stations=["ST-06"], capacity=1, cal_days=365),
+         location="实验区 #5", stations=["ST-06"], capacity=1, cal_days=365),
     # 8 通道充放电柜：资产容量与工位通道数一致，同一时刻最多 8 份作业
     dict(asset_no="AS-0008", name="电性能测试柜", model="CYCLER-32", serial="EC-TESTER-0001",
-         location="岛 #6", stations=["ST-07"], capacity=8, cal_days=365),
+         location="实验区 #6", stations=["ST-07"], capacity=8, cal_days=365),
     # 手工工作台：没有适配器，也明确不适用校准
     dict(asset_no="AS-0009", name="称量工作台", model="BENCH-W", serial="", location="备料间",
          stations=[], capacity=1, cal_days=0, calibration_applicable=False,

@@ -1105,6 +1105,14 @@ class SopDocumentPatchIn(BaseModel):
     owner_id: str | None = None
 
 
+class IslandIn(BaseModel):
+    """给实验区（工位上的岛号）起名字。岛号写在工位上，这里只登记给人看的名称。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+
+
 class RetireIn(BaseModel):
     retired: bool = True
     reason: str = ""

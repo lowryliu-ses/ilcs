@@ -3,7 +3,7 @@ from fastapi.responses import Response
 
 from ...schemas import (
     AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterCreateIn, AdapterPatchIn, CapabilityIn,
-    CapabilityPatchIn, CommandVerifyIn, LimitsIn, ManualReviewIn, ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
+    CapabilityPatchIn, CommandVerifyIn, IslandIn, LimitsIn, ManualReviewIn, ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
 )
 from ...services.acceptance_service import AcceptanceService, run_out
 from ...services.batch_service import BatchService
@@ -26,6 +26,11 @@ def list_capabilities(db: DbSession, ctx: Ctx):
 @router.get("/islands")
 def list_islands(db: DbSession, ctx: Ctx):
     return StationService(db, ctx).list_islands()
+
+
+@router.put("/islands/{island_id}")
+def name_island(island_id: int, payload: IslandIn, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
+    return StationService(db, ctx).name_island(island_id, payload.name, user)
 
 
 @router.get("/commands")

@@ -56,6 +56,8 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     context = loader.register(team, line)
     # 重复运行不多建：方法、模板都沿用
     again = loader.register(team, line)
+    areas = {row["id"]: row["name"] for row in team["engineer"].get("/islands")}
+    assert (areas[7], areas[8], areas[9]) == ("物料准备段", "配液段", "测试段")
     assert again["methods"] == context["methods"] and again["template"]["id"] == context["template"]["id"]
 
     uid = uuid4().hex[:6].upper()
