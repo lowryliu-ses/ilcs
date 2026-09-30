@@ -16,6 +16,17 @@
 - 流程 BOM 留空，用量全由方案因子给出（因子带 material，建批次时按各瓶之和预留）；
 - 方案是矩阵：每行一瓶，完全相同的配方行是同一条件的重复瓶；瓶身序列号按「条件顺序 × 重复号」排进 sample_ids。
 
+结构上可以按线调整（都写在模板配置里，不用改代码）：
+- 加料后步骤：类别（`routes.{类别}.stir`）或阶段（`stages[].stir`）可以各写一份，覆盖全局的 `stir`——
+  锂盐加完冷藏搅拌、添加剂加完只涡旋，各走各的设备；
+- 逐瓶参数列（`row_params`）：表格里除了用量还有别的列（终混温度、分装量），按表头认，每瓶的值成为作用于某个
+  固定步骤参数的方案因子，按孔位下发；
+- 阶段不串行（`stages[].chain: false`）：这个阶段只接它 `after` 写的步骤，不接上一个阶段的尾巴，后面的阶段或后段
+  再把没汇合的尾巴一起接上；
+- 加料顺序（`stages[].order`）：`table` 按表格列顺序（缺省），`routes` 按 routes 里类别的先后、同类再按表格顺序；
+- 分装量核对优先用物料主数据里登记的密度（换算「1 mL = x g」），没有登记的才用 `volume_check.density`；
+  按体积填的列直接算体积。
+
 生成结果确定性：同输入同输出（步骤标识按生成顺序 s01、s02…，每一步都写显式 after），服务层据此判断能否沿用已有流程。
 """
 from __future__ import annotations
@@ -26,6 +37,7 @@ import re
 from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
+from .matrix import ordered_levels
 from .params import canonical_unit, decimal_of, spec_of, value_issues
 from .steps import DEVICE, kind_of
 
@@ -38,6 +50,8 @@ UNIT_SUFFIX = re.compile(r"^(?P<name>.*?)\s*[(（]\s*(?P<unit>[^()（）]*?)\s*[
 NAME_LIMIT = 60
 # 用量与实验参数的量级上限：远超实验室尺度的数（误贴进来的长编号之类）当问题报，不往下算
 MAGNITUDE = Decimal("1e12")
+# 阶段内的加料顺序：表格列顺序，或 routes 里类别的先后
+ORDERS = ("table", "routes")
 QUANTUM = Decimal("0.000001")
 # 量化用的精度要够：默认 28 位有效数字时 1e22 以上 quantize 会抛 InvalidOperation
 WIDE = Context(prec=60)
@@ -192,6 +206,12 @@ def template_issues(
     def step_label(step: dict, fallback: str) -> str:
         return f"「{step.get('name') or step.get('key') or fallback}」"
 
+    def stir_template_issues(step: Any, label: str) -> None:
+        if not isinstance(step, dict) or kind_of(step) != DEVICE or step.get("kind") not in (None, "", DEVICE):
+            issues.append(f"{label}必须是设备步骤")
+        else:
+            issues.extend(device_issues(step, label))
+
     # 固定步骤：key 唯一，after 只引用排在前面的固定步骤
     fixed: dict[str, dict] = {}
     stages = config.get("stages")
@@ -248,15 +268,27 @@ def template_issues(
             issues.extend(f"阶段「{key}」的 after 引用了 {ref}：不存在或排在它之后" for ref in after if ref not in fixed)
         if "stir_after_last" in stage and not isinstance(stage["stir_after_last"], bool):
             issues.append(f"阶段「{key}」的 stir_after_last 只能是是或否")
+        if "chain" in stage and not isinstance(stage["chain"], bool):
+            issues.append(f"阶段「{key}」的 chain 只能是是或否")
+        elif stage.get("chain") is False and position > 1 and not stage.get("after"):
+            issues.append(f"阶段「{key}」不接上一个阶段（chain: false），要用 after 写明从哪一步开始")
+        if stage.get("order", "table") not in ORDERS:
+            issues.append(f"阶段「{key}」的加料顺序 order 只能是 {'、'.join(ORDERS)}")
+        if "stir" in stage:
+            stir_template_issues(stage["stir"], f"阶段「{stage.get('label') or key}」的加料后步骤")
         check_fixed(f"阶段「{stage.get('label') or key}」的 then", stage.get("then", []))
     check_fixed("suffix", config.get("suffix", []))
 
     # 物料类别 → 加法
     routes = config.get("routes")
-    stirring = any(isinstance(stage, dict) and stage.get("stir_after_last", True) is not False for stage in stage_list)
     if not isinstance(routes, dict) or not routes:
         issues.append("至少要有一种物料类别的加法 routes")
         routes = {}
+    stage_stir = {stage.get("key"): stage.get("stir") for stage in stage_list if isinstance(stage, dict)}
+    stage_last = {stage.get("key"): stage.get("stir_after_last", True) is not False
+                  for stage in stage_list if isinstance(stage, dict)}
+    # 用得到全局搅拌模板的类别：要搅（本类加完搅，或阶段最后一种加完搅），又没有类别或阶段自己的搅拌模板
+    needs_default = False
     for category, route in routes.items():
         label = f"加法「{category}」"
         if not isinstance(route, dict):
@@ -266,10 +298,14 @@ def template_issues(
             issues.append(f"{label}的阶段 {route.get('stage') or '（未填）'} 不存在")
         if "stir_after" in route and not isinstance(route["stir_after"], bool):
             issues.append(f"{label}的 stir_after 只能是是或否")
+        if "stir" in route:
+            stir_template_issues(route["stir"], f"{label}的加料后步骤")
+        stirs = route.get("stir_after", True) is not False or stage_last.get(route.get("stage"), True)
+        if stirs and "stir" not in route and not stage_stir.get(route.get("stage")):
+            needs_default = True
         not_last = route.get("not_last")
         if "not_last" in route and not (isinstance(not_last, bool) or (isinstance(not_last, str) and not_last.strip())):
             issues.append(f"{label}的 not_last 只能是是或否，或写明原因的文字")
-        stirring = stirring or route.get("stir_after", True) is not False
         step = route.get("step")
         if not isinstance(step, dict) or kind_of(step) != DEVICE or step.get("kind") not in (None, "", DEVICE):
             issues.append(f"{label}的步骤模板必须是设备步骤")
@@ -285,9 +321,9 @@ def template_issues(
             issues.append(f"{label}的用量参数 {param} 没有登记单位，无法与表格单位对账")
 
     stir = config.get("stir")
-    if stir is not None or stirring:
+    if stir is not None or needs_default:
         if not isinstance(stir, dict) or kind_of(stir) != DEVICE or stir.get("kind") not in (None, "", DEVICE):
-            issues.append("搅拌步骤模板 stir 必须是设备步骤")
+            issues.append("搅拌步骤模板 stir 必须是设备步骤（有类别加完要搅拌、又没写自己的加料后步骤）")
         else:
             issues.extend(device_issues(stir, "搅拌步骤模板"))
 
@@ -326,6 +362,50 @@ def template_issues(
             issues.extend(f"{label}的缺省值：{text}" for text in value_issues(rule, row.get("default")))
         elif not _is_number(row.get("default")):
             issues.append(f"{label}要给数字缺省值 default")
+    # 逐瓶参数列：表格里的一列 → 某个固定设备步骤的参数，每瓶一个值
+    params_rows = config.get("row_params", [])
+    if not isinstance(params_rows, list):
+        issues.append("row_params 必须是列表")
+        params_rows = []
+    headers: set[str] = set()
+    for position, row in enumerate(params_rows, start=1):
+        if not isinstance(row, dict):
+            issues.append(f"第 {position} 个逐瓶参数必须是对象")
+            continue
+        key = row.get("key")
+        label = f"逐瓶参数「{row.get('header') or key or position}」"
+        if not isinstance(key, str) or not key.strip():
+            issues.append(f"第 {position} 个逐瓶参数缺少 key")
+        elif key in keys:
+            issues.append(f"逐瓶参数 key「{key}」与别的实验参数或逐瓶参数重复")
+        else:
+            keys.add(key)
+        header = row.get("header")
+        if not isinstance(header, str) or not header.strip():
+            issues.append(f"{label}要写表头 header（表格里这一列的列名）")
+        elif header_key(header) in headers:
+            issues.append(f"{label}的表头与别的逐瓶参数重复")
+        else:
+            headers.add(header_key(header))
+        step = fixed.get(row.get("step")) if isinstance(row.get("step"), str) else None
+        if step is None or kind_of(step) != DEVICE:
+            issues.append(f"{label}指向的 {row.get('step') or '（未填）'} 不是设备固定步骤")
+            continue
+        capability = capabilities.get(step.get("cap")) or {}
+        if row.get("param") not in (capability.get("params") or {}):
+            issues.append(f"{label}的参数 {row.get('param') or '（未填）'} 不是能力 {step.get('cap')} 的参数")
+            continue
+        rule = spec_of(capability, row["param"])
+        if rule["type"] not in ("number", "integer", "enum"):
+            issues.append(f"{label}的参数 {row['param']} 不是数值或选项，表格里一格给不出")
+        elif rule["type"] != "enum" and canonical_unit(row.get("unit") or rule["unit"]) != rule["unit"]:
+            issues.append(f"{label}的单位 {row.get('unit')} 与参数 {row['param']} 登记的单位 {rule['unit'] or '（未登记）'} 不同")
+        target = (row["step"], str(row["param"]))
+        if target in targets:
+            issues.append(f"{label}与别的实验参数作用于同一参数 {row['step']}.{row['param']}")
+        targets.add(target)
+        if "default" in row and row["default"] is not None:
+            issues.extend(f"{label}的缺省值：{text}" for text in value_issues(rule, row["default"]))
     check = config.get("volume_check")
     if check is not None:
         if not isinstance(check, dict):
@@ -333,8 +413,8 @@ def template_issues(
         else:
             issues.extend(f"volume_check 的 {key} 要写一个实验参数的 key" for key in ("bottles", "volume")
                           if check.get(key) not in keys)
-            if not _is_number(check.get("density")) or check["density"] <= 0:
-                issues.append("volume_check 的 density（估算母液体积用的密度，g/mL）必须是正数")
+            if "density" in check and (not _is_number(check.get("density")) or check["density"] <= 0):
+                issues.append("volume_check 的 density（物料主数据没登记密度时估算母液体积用，g/mL）必须是正数")
             if "reserve" in check and (not _is_number(check["reserve"]) or check["reserve"] < 0):
                 issues.append("volume_check 的 reserve（母瓶至少留多少 mL）必须是不小于 0 的数")
     issues.extend(sop_issues(config))
@@ -362,6 +442,11 @@ def sop_templates(config: dict) -> list[tuple[str, dict]]:
     for category, route in (config.get("routes") or {}).items() if isinstance(config.get("routes"), dict) else []:
         if isinstance(route, dict) and isinstance(route.get("step"), dict):
             rows.append((f"类别「{category}」的加料步骤", route["step"]))
+        if isinstance(route, dict) and isinstance(route.get("stir"), dict):
+            rows.append((f"类别「{category}」的加料后步骤", route["stir"]))
+    for stage in config.get("stages") or [] if isinstance(config.get("stages"), list) else []:
+        if isinstance(stage, dict) and isinstance(stage.get("stir"), dict):
+            rows.append((f"阶段「{stage.get('label') or stage.get('key')}」的加料后步骤", stage["stir"]))
     if isinstance(config.get("stir"), dict):
         rows.append(("搅拌步骤", config["stir"]))
     return rows
@@ -416,36 +501,98 @@ def _not_last_issues(rows: list[dict], stages: list[dict], dosed: list[dict]) ->
     return issues
 
 
-def _volume_issues(config: dict, values: dict, reagents: list[dict], rows: list[dict]) -> tuple[list[str], list[str]]:
-    """`volume_check`：每瓶总质量 ÷ 密度估算母液体积，放不下「分装瓶数 × 每瓶分装量 + 母瓶留样」是问题。
+def _density_of(entry: dict | None) -> Decimal | None:
+    """物料主数据登记的密度（g/mL）：基础单位是 g 时看「1 mL = x g」，基础单位是 mL 时看「1 g = x mL」。"""
+    conversions = (entry or {}).get("conversions") or {}
+    base = canonical_unit((entry or {}).get("base_unit"))
+    if base == "g" and conversions.get("mL") is not None:
+        value = _number(conversions["mL"])
+        return value if value is not None and value > 0 else None
+    if base == "mL" and conversions.get("g") is not None:
+        value = _number(conversions["g"])
+        return (Decimal(1) / value) if value is not None and value > 0 else None
+    return None
 
-    密度取偏大的值，估出的体积偏小，核对偏保守。试剂列不全是按 g 填的就估算不了，只提醒。
+
+def _volume_issues(
+    config: dict, values: dict, reagents: list[dict], rows: list[dict], catalog: dict[str, dict] | None = None,
+) -> tuple[list[str], list[str]]:
+    """`volume_check`：估算每瓶母液体积，放不下「分装瓶数 × 每瓶分装量 + 母瓶留样」是问题。
+
+    按体积填的列直接算体积；按质量填的列用物料主数据登记的密度（没登记的用模板的 `density`，取偏大的值，
+    估出的体积偏小，核对偏保守）。分装瓶数、每瓶分装量可以是实验参数（整批一个值），也可以是逐瓶参数列。
+    有列既不是质量也不是体积、或是质量却查不到密度，估算不了，只提醒。
     """
+    from .params import convert, convertible
+
     check = config.get("volume_check")
     if not isinstance(check, dict) or not rows or not reagents:
         return [], []
-    bottles, volume = values.get(check.get("bottles")), values.get(check.get("volume"))
-    density, reserve = check.get("density"), check.get("reserve", 0)
-    if not all(_is_number(value) for value in (bottles, volume, density, reserve)) or density <= 0:
+    fallback = check.get("density")
+    fallback = Decimal(str(fallback)) if _is_number(fallback) and fallback > 0 else None
+    reserve = check.get("reserve", 0)
+    if not _is_number(reserve):
         return [], []
-    if any(item["unit"] != canonical_unit("g") for item in reagents):
-        return [], ["有试剂列不是按质量（g）填的，估算不了母液体积，没有核对分装量"]
-    need = Decimal(str(bottles)) * Decimal(str(volume)) + Decimal(str(reserve))
+    per_unit: dict[str, Decimal] = {}
+    used_registered = used_fallback = False
+    unknown: list[str] = []
+    for item in reagents:
+        unit = canonical_unit(item["unit"])
+        if convertible(unit, "mL"):
+            per_unit[item["name"]] = convert(Decimal(1), unit, "mL")
+            continue
+        if not convertible(unit, "g"):
+            unknown.append(f"{item['name']}（{unit or '未写单位'}）")
+            continue
+        density = _density_of((catalog or {}).get(item["name"]))
+        if density is not None:
+            used_registered = True
+        elif fallback is not None:
+            density, used_fallback = fallback, True
+        else:
+            unknown.append(f"{item['name']}（没有登记密度）")
+            continue
+        per_unit[item["name"]] = convert(Decimal(1), unit, "g") / density
+    if unknown:
+        return [], [f"{'、'.join(unknown)} 估算不了体积（物料主数据换算写「1 mL = x g」登记密度），没有核对分装量"]
+    all_mass = all(convertible(canonical_unit(item["unit"]), "g") and canonical_unit(item["unit"]) == "g" for item in reagents)
     short: list[str] = []
+    sizes: set[tuple] = set()
     for row in rows:
-        mass = sum((Decimal(str(value)) for value in row["amounts"].values()), Decimal(0))
-        if mass <= 0:
+        bottles = (row.get("params") or {}).get(check.get("bottles"), values.get(check.get("bottles")))
+        volume = (row.get("params") or {}).get(check.get("volume"), values.get(check.get("volume")))
+        if not _is_number(bottles) or not _is_number(volume):
+            continue
+        need = Decimal(str(bottles)) * Decimal(str(volume)) + Decimal(str(reserve))
+        sizes.add((bottles, volume))
+        estimate = sum((Decimal(str(amount)) * per_unit[name] for name, amount in row["amounts"].items() if name in per_unit),
+                       Decimal(0))
+        if estimate <= 0:
             continue  # 一种料都没加的行已单独报
-        estimate = mass / Decimal(str(density))
         if need > estimate:
-            short.append(f"第 {row['row']} 行（{row['serial'] or '无序列号'}）{_plain(mass)} g 约 {estimate:.1f} mL")
+            # 都按质量填时带上总质量，便于和配方表对照；有按体积填的列就只说估出的体积
+            mass = sum((Decimal(str(value)) for value in row["amounts"].values()), Decimal(0))
+            weight = f"{_plain(mass)} g " if all_mass else ""
+            short.append(f"第 {row['row']} 行（{row['serial'] or '无序列号'}）{weight}约 {estimate:.1f} mL"
+                         + (f"，要 {_plain(need)} mL" if len(sizes) > 1 else ""))
     if not short:
         return [], []
     shown = "；".join(short[:5]) + (f" 等 {len(short)} 瓶" if len(short) > 5 else "")
-    return [
-        f"分装 {bottles:g} 瓶 × {volume:g} mL、母瓶至少留 {reserve:g} mL，共要 {_plain(need)} mL，"
-        f"超过母液体积（总质量按 {density:g} g/mL 估算）：{shown}；请减少分装瓶数或每瓶分装量，或加大配制量"
-    ], []
+    if used_registered and used_fallback:
+        basis = f"按物料主数据登记的密度估算，没登记的按 {fallback:g} g/mL"
+    elif used_registered:
+        basis = "按物料主数据登记的密度估算"
+    elif used_fallback:
+        basis = f"总质量按 {fallback:g} g/mL 估算"
+    else:
+        basis = "按体积列直接相加"
+    if len(sizes) == 1:
+        bottles, volume = next(iter(sizes))
+        head = (f"分装 {bottles:g} 瓶 × {volume:g} mL、母瓶至少留 {reserve:g} mL，共要 "
+                f"{_plain(Decimal(str(bottles)) * Decimal(str(volume)) + Decimal(str(reserve)))} mL，")
+    else:
+        head = f"每瓶的分装量加母瓶留样 {reserve:g} mL，"
+    return [f"{head}超过母液体积（{basis}）：{shown}；请减少分装瓶数或每瓶分装量，或加大配制量"], []
 
 
 def generate(
@@ -530,9 +677,29 @@ def generate(
         issues.append(f"有 {len(serial_columns)} 列都像序列号列（{'、'.join(c['header'] for c in serial_columns)}），只能有一列")
     serial_col = serial_columns[0] if serial_columns else None
 
+    # 逐瓶参数列：按表头认（不区分大小写、去空白，表头里的单位后缀照样认）
+    row_param_specs: list[dict[str, Any]] = []
+    fixed_steps_by_key = {
+        step.get("key"): step for _, steps in fixed_sections(config) for step in (steps if isinstance(steps, list) else [])
+        if isinstance(step, dict) and step.get("key")
+    }
+    for spec_row in config.get("row_params") or []:
+        if not isinstance(spec_row, dict) or not spec_row.get("key") or not spec_row.get("header"):
+            continue
+        match = [col for col in columns if col["kind"] == "ignored" and col["header"]
+                 and header_key(col["name"]) == header_key(spec_row["header"])]
+        target_step = fixed_steps_by_key.get(spec_row.get("step")) or {}
+        rule = spec_of((capabilities or {}).get(target_step.get("cap")), spec_row.get("param")) if capabilities else None
+        entry = {**spec_row, "rule": rule, "column": match[0]["index"] if match else None}
+        if match:
+            match[0].update(kind="param", name=spec_row["header"], unit=canonical_unit(spec_row.get("unit")) or match[0]["unit"])
+        elif "default" not in spec_row or spec_row.get("default") is None:
+            issues.append(f"没有识别到逐瓶参数列「{spec_row['header']}」：表格要有这一列（或在模板里给它缺省值）")
+        row_param_specs.append(entry)
+
     reagents: list[dict[str, Any]] = []
     for col in columns:
-        if col["kind"] == "serial":
+        if col["kind"] in ("serial", "param"):
             continue
         cells = [cell(row, col["index"]) for row in body]
         has_number = any(_number(value) is not None for value in cells)
@@ -633,10 +800,40 @@ def generate(
             totals[item["name"]] += amount
             zeros[item["name"]] += 1 if amount == 0 else 0
             amounts[item["name"]] = _plain(amount)
+        row_values: dict[str, Any] = {}
+        for entry in row_param_specs:
+            raw_value = cell(raw, entry["column"]) if entry["column"] is not None else None
+            label = entry.get("header") or entry["key"]
+            if _blank(raw_value):
+                if entry.get("default") is None:
+                    issues.append(f"{where}{label} 是空白：逐瓶参数每瓶都要写（或在模板里给缺省值）")
+                    continue
+                raw_value = entry["default"]
+            rule = entry.get("rule")
+            if rule is not None and rule["type"] == "enum":
+                text = _text(raw_value)
+                problems = value_issues(rule, text)
+                if problems:
+                    issues.append(f"{where}{label}：{problems[0]}")
+                    continue
+                row_values[entry["key"]] = text
+                continue
+            number = _number(raw_value)
+            if number is None or abs(number) >= MAGNITUDE:
+                issues.append(f"{where}{label} 的值 {_shown(raw_value)!r} 不是数字")
+                continue
+            value = _plain(number)
+            if rule is not None:
+                problems = value_issues(rule, value)
+                if problems:
+                    issues.append(f"{where}{label}：{problems[0]}")
+                    continue
+            row_values[entry["key"]] = value
         if serial and reagents and not bad_value and all(amount == 0 for amount in amounts.values()):
             # 有序列号却一种料都不加：多半是预先贴了标签、配方没填。空瓶不能分装和检测，也不能悄悄丢掉这个序列号
             issues.append(f"第 {number} 行（序列号 {serial}）{'没有填任何试剂用量' if empty else '所有试剂都是 0'}")
-        rows.append({"row": number, "serial": serial, "amounts": amounts})
+        rows.append({"row": number, "serial": serial, "amounts": amounts,
+                     **({"params": row_values} if row_param_specs else {})})
     for item in reagents:
         # 0 是有意不加，空白是没填：同一列里有的填了、有的空着，多半是漏填，不能替人决定按 0 配
         gaps = blanks[item["name"]]
@@ -662,7 +859,7 @@ def generate(
     elif not reagents and serial_col is not None:
         issues.append("表格里没有识别到任何试剂列")
     issues.extend(_not_last_issues(rows, stages, dosed))
-    volume_issues, volume_warnings = _volume_issues(config, values, reagents, rows)
+    volume_issues, volume_warnings = _volume_issues(config, values, reagents, rows, catalog)
     issues.extend(volume_issues)
     warnings.extend(volume_warnings)
     result["columns"] = [{key: col[key] for key in ("header", "name", "unit", "kind", "category", "stage")}
@@ -697,10 +894,23 @@ def generate(
     # 阶段接在哪：第一个阶段的第一步写了 stage.after 就只等它们——从 prefix 里分叉出来，
     # prefix 最后那步（如「固体物料到加料位」）另走一路，到后面某个阶段的 stage.after 处汇合（客户流程图就是这样）。
     # 后面的阶段一律接上一个阶段的尾巴（瓶子按阶段顺序走），再加上 stage.after。
+    # 阶段写了 chain: false 就只接它的 stage.after，不接上一个阶段的尾巴；没汇合的尾巴由后面的阶段或后段一起接上
     forking = True
-    for stage in stages:
+    dangling: list[str] = []
+    route_order = {category: position for position, category in enumerate(routes)}
+    for number, stage in enumerate(stages):
         pending = [fixed_ids[ref] for ref in stage.get("after") or [] if ref in fixed_ids]
+        detached = stage.get("chain") is False and number > 0 and bool(pending)
+        if detached:
+            if previous[0]:
+                dangling.append(previous[0])
+        elif dangling:
+            pending = [*pending, *dangling]
+            dangling = []
         stage_doses = [item for item in dosed if item["stage"] == stage.get("key")]
+        if stage.get("order") == "routes":
+            # 按 routes 里类别的先后加，同类再按表格顺序（sorted 稳定，dosed 本来就是表格顺序）
+            stage_doses = sorted(stage_doses, key=lambda item: route_order.get(item["category"], len(route_order)))
         dose_ids: list[str] = []
         stirs: list[tuple[dict, int]] = []
         for position, item in enumerate(stage_doses):
@@ -713,14 +923,17 @@ def generate(
             step["material_param"] = param
             # 每瓶的量不属于流程：由方案因子按孔位给出，流程上写 0
             step["params"] = {**(step.get("params") or {}), param: 0}
-            step_id = emit(step, [*([] if forking and pending else [previous[0]]), *pending])
-            pending, forking = [], False
+            step_id = emit(step, [*([] if (forking or detached) and pending else [previous[0]]), *pending])
+            pending, forking, detached = [], False, False
             doses.append((item, step_id))
             dose_ids.append(step_id)
             last = position == len(stage_doses) - 1
             stir = stage.get("stir_after_last", True) if last else route.get("stir_after", True)
-            if stir is not False and isinstance(config.get("stir"), dict):
-                stirring = copy.deepcopy(config["stir"])
+            # 加料后步骤：类别自己的 > 阶段自己的 > 全局的
+            template = next((row for row in (route.get("stir"), stage.get("stir"), config.get("stir")) if isinstance(row, dict)),
+                            None)
+            if stir is not False and template is not None:
+                stirring = copy.deepcopy(template)
                 stirring["name"] = str(stirring.get("name") or "{material} 加料后搅拌").replace("{material}", item["name"])
                 # 按瓶执行：只搅这一步真加了料的瓶子，某瓶这种料是 0 就连搅拌一起跳过
                 stirring["applies_to"] = {"dosed": step_id}
@@ -732,10 +945,11 @@ def generate(
                 stirring["applies_to"]["then_any"] = dose_ids[position + 1:]
         for step in stage.get("then") or []:
             # 本阶段没有加料时，stage.after 落到第一个 then 步骤上，分叉规则同上
-            add_fixed(step, pending, chain=not (forking and pending))
-            pending, forking = [], False
-    for step in config.get("suffix") or []:
-        add_fixed(step)
+            add_fixed(step, pending, chain=not ((forking or detached) and pending))
+            pending, forking, detached = [], False, False
+    for position, step in enumerate(config.get("suffix") or []):
+        # 后段第一步把还没汇合的阶段尾巴一起接上
+        add_fixed(step, dangling if position == 0 and "after" not in step else [])
     result["steps"] = steps
 
     # 方案：每个加料步骤一个因子（水平 = 各瓶用量去重排序），实验参数各一个单水平因子
@@ -753,9 +967,19 @@ def generate(
             "name": row.get("label") or row["key"], "unit": row.get("unit") or "", "levels": [values[row["key"]]],
             "target": {"step_id": fixed_ids.get(row.get("step")), "param": row.get("param")},
         })
+    # 逐瓶参数：每个一个因子，水平是各瓶的值，作用于它指向的固定步骤参数（按孔位下发）
+    per_row = [entry for entry in row_param_specs if all(entry["key"] in (row.get("params") or {}) for row in rows)]
+    for entry in per_row:
+        factors.append({
+            "name": entry.get("label") or entry.get("header") or entry["key"],
+            "unit": "" if (entry.get("rule") or {}).get("type") == "enum" else canonical_unit(entry.get("unit")),
+            "levels": ordered_levels((row.get("params") or {})[entry["key"]] for row in rows),
+            "target": {"step_id": fixed_ids.get(entry.get("step")), "param": entry.get("param")},
+        })
     groups: dict[tuple, list[str]] = {}
     for row in rows:
-        point = tuple(row["amounts"][item["name"]] for item, _ in doses) + tuple(values[r["key"]] for r in experiment)
+        point = (tuple(row["amounts"][item["name"]] for item, _ in doses) + tuple(values[r["key"]] for r in experiment)
+                 + tuple((row.get("params") or {})[entry["key"]] for entry in per_row))
         groups.setdefault(point, []).append(row["serial"])
     counts = [len(serials) for serials in groups.values()]
     repeats = counts[0] if counts else 0

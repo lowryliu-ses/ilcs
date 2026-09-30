@@ -176,15 +176,19 @@ class FormulationService:
 
     # ---------- 解析与预览 ----------
 
-    def catalog(self) -> dict[str, dict[str, str]]:
-        """试剂目录：物料主数据的名称 → 类别与基本单位。同名多条（不同单位登记）时取有类别的那条。"""
-        catalog: dict[str, dict[str, str]] = {}
+    def catalog(self) -> dict[str, dict[str, Any]]:
+        """试剂目录：物料主数据的名称 → 类别、基本单位与单位换算（分装量核对按登记的密度估体积）。
+        同名多条（不同单位登记）时取有类别的那条。"""
+        catalog: dict[str, dict[str, Any]] = {}
         for material in self.materials.list():
             if material.state != "active":
                 continue
             if material.name in catalog and catalog[material.name]["category"]:
                 continue
-            catalog[material.name] = {"category": material.category or "", "base_unit": material.base_unit or ""}
+            catalog[material.name] = {
+                "category": material.category or "", "base_unit": material.base_unit or "",
+                "conversions": dict(material.conversions or {}),
+            }
         return catalog
 
     def _generate(self, template: FormulationTemplate, filename: str, table: list[list[Any]],
