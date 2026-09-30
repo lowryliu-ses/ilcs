@@ -321,6 +321,11 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 
 ### 试点：外部模拟设备（示例工位各接一台）
 
+> **现状（2026-09-30）**：本机 8090 与 10.10.106.51 都已重置为只有电解液配液线（见 [docs/电解液配液线.md](docs/电解液配液线.md)），
+> 种子里的老演示产线（ST-01~07、AGV、机械臂）与四个参考案例都已删除，外部模拟设备容器已停。这两套环境日常启动用
+> `docker compose up -d`，**不要带 `--profile pilot`**——带了只会拉起一批没有工位可接的模拟设备。下面的试点说明只适用于
+> 用 `scripts/reset-demo-cases.sh` 重新播种了老演示产线的环境。
+
 真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：除 ST-01-B、ST-05 用内置模拟外，示例工位各接一台，走各自的真实协议，
 只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
 
