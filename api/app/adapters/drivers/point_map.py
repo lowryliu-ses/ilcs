@@ -101,6 +101,10 @@ class PointMapAdapter(MappedJobAdapter):
     def _coded(parameter: str, item, value):
         """选项型参数下发的是文字（THF、CCCV-4.2），PLC 点多半只收数：`{"point": …, "map": {"THF": 1}}` 换成代码。
         map 里没有的值直接拒绝——写进去一个 PLC 不认识的代码，比不下发更糟。"""
+        if isinstance(value, (list, dict)):
+            raise AdapterError(
+                f"参数 {parameter} 是程序表，写不进单个点：程序表参数请用按 ILCS 契约接的驱动或设备网关下发"
+            )
         mapping = item.get("map") if isinstance(item, dict) else None
         if not isinstance(mapping, dict):
             return value

@@ -1435,6 +1435,12 @@ class BatchService:
             bound = BindingResolver(self.db, self.ctx).resolve(batch, step, self._step_targets(batch, step), limits)
             if not bound.problems:
                 params = bound.apply(params)
+        program_problems: list[str] = []
+        if step and command_type in DISPATCHING and capability is None:
+            # 程序表里引用本步参数的格子：按孔位（方案因子、前馈）代成具体的数，设备不认识引用
+            from ..domain.program import resolve_command
+
+            params, program_problems = resolve_command(params)
         from ..domain.steps import assist_capabilities
 
         # 协同资源：排程时与主设备同一时段预约的其他工位，随这条动作一起取得、一起释放
@@ -1479,6 +1485,9 @@ class BatchService:
             return command
         if bound is not None and bound.problems:
             self._refuse_unsent(batch, command, "前馈参数不能下发：" + "；".join(bound.problems[:5]))
+            return command
+        if program_problems:
+            self._refuse_unsent(batch, command, "程序表不能下发：" + "；".join(program_problems[:5]))
             return command
         if per_sample_station is not None and units > max(1, int(per_sample_station.channels or 1)):
             self._refuse_unsent(

@@ -173,7 +173,7 @@ def template_issues(
             problems.extend(f"{label}的参数 {key} 不属于能力 {cap}" for key in params if key not in declared)
             for key, value in params.items():
                 rule = spec_of(spec, key)
-                if rule["type"] == "enum":
+                if rule["type"] in ("enum", "program"):
                     problems.extend(f"{label}的{text}" for text in value_issues(rule, value))
                 elif not _is_number(value):
                     problems.append(f"{label}的参数 {key} 必须是数字")

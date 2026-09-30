@@ -9,15 +9,18 @@
 
 选项型参数（`type: enum`）：值是登记的选项之一（溶剂种类、测试协议名、气氛），原样作为文字下发；
 没有单位、不能比大小，所以工位极限写「允许哪些选项」而不是区间，前馈不能作用于它，也不能当用量参数。
+
+程序表参数（`type: program`）：值是一张表（充放电工步、升温程序），列定义与校验见 `domain/program.py`。
 """
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-PARAM_TYPES = {"number": "数值", "integer": "整数", "enum": "选项"}
+PARAM_TYPES = {"number": "数值", "integer": "整数", "enum": "选项", "program": "程序表"}
 NUMERIC_TYPES = {"number", "integer"}
 ENUM = "enum"
+PROGRAM = "program"
 MAX_OPTIONS = 50
 OPTION_LIMIT = 60
 
@@ -101,9 +104,12 @@ def spec_of(capability: dict | None, key: str) -> dict[str, Any]:
     label = ((capability or {}).get("params") or {}).get(key) or key
     kind = raw.get("type") if raw.get("type") in PARAM_TYPES else "number"
     return {
-        "label": label, "type": kind, "unit": "" if kind == ENUM else canonical_unit(raw.get("unit")),
+        "label": label, "type": kind, "unit": "" if kind in (ENUM, PROGRAM) else canonical_unit(raw.get("unit")),
         "required": raw.get("required", True) is not False,
         "options": list(raw.get("options") or []) if kind == ENUM else [],
+        # 程序表：列定义与最多行数（结构见 domain/program.py）
+        "columns": list(raw.get("columns") or []) if kind == PROGRAM else [],
+        "max_rows": raw.get("max_rows") if kind == PROGRAM else None,
     }
 
 
@@ -156,6 +162,12 @@ def spec_issues(params: dict[str, str], specs: dict[str, Any]) -> list[str]:
                 issues.append(f"选项型参数 {key} 没有单位")
         elif spec.get("options"):
             issues.append(f"参数 {key} 不是选项型，不写选项")
+        if spec.get("type") == PROGRAM:
+            from . import program
+
+            issues.extend(program.definition_issues(key, spec))
+        elif spec.get("columns"):
+            issues.append(f"参数 {key} 不是程序表，不写列定义")
         if not isinstance(spec.get("required", True), bool):
             issues.append(f"参数 {key} 的「必填」只能是是或否")
     return issues
@@ -168,6 +180,11 @@ def clean_specs(params: dict[str, str], specs: dict[str, Any] | None) -> dict[st
         if key not in (params or {}) or not isinstance(spec, dict):
             continue
         row: dict[str, Any] = {}
+        if spec.get("type") == PROGRAM:
+            from . import program
+
+            result[key] = program.clean_definition(spec)
+            continue
         if spec.get("type") in PARAM_TYPES and spec.get("type") != "number":
             row["type"] = spec["type"]
         if spec.get("type") == ENUM:
@@ -187,6 +204,10 @@ def value_issues(spec: dict[str, Any], value: Any) -> list[str]:
         if not isinstance(value, str) or value not in spec["options"]:
             return [f"{spec['label']} 只能是 {'、'.join(spec['options']) or '（没有登记选项）'} 之一（现在是 {value!r}）"]
         return []
+    if spec["type"] == PROGRAM:
+        from . import program
+
+        return program.value_issues(spec, value, spec["label"])
     number = decimal_of(value)
     if number is None:
         return [f"{spec['label']} 必须是数值"]
@@ -200,7 +221,11 @@ def is_numeric_value(value: Any) -> bool:
 
 
 def window_fits(value: Any, window: Any) -> bool:
-    """一个设定值落不落在工位极限里：数值按 [下限, 上限]，选项按「允许的选项」。"""
+    """一个设定值落不落在工位极限里：数值按 [下限, 上限]，选项按「允许的选项」，程序表按列极限逐格查。"""
+    if isinstance(window, dict):
+        from . import program
+
+        return program.fits(value, window)
     if not isinstance(window, (list, tuple)) or not window:
         return False
     if isinstance(value, str):
@@ -211,7 +236,12 @@ def window_fits(value: Any, window: Any) -> bool:
 
 
 def limit_issues(spec: dict[str, Any], window: Any, name: str) -> list[str]:
-    """工位极限的写法：数值参数 [下限, 上限]（下限小于上限）；选项型参数是允许的选项，要是登记选项的子集。"""
+    """工位极限的写法：数值参数 [下限, 上限]（下限小于上限）；选项型参数是允许的选项，要是登记选项的子集；
+    程序表按列写 {列: 极限}。"""
+    if spec["type"] == PROGRAM:
+        from . import program
+
+        return program.limit_issues(spec, window, name)
     if spec["type"] == ENUM:
         if not isinstance(window, (list, tuple)) or not window or not all(isinstance(item, str) for item in window):
             return [f"{name} 是选项型参数，极限要写允许的选项"]

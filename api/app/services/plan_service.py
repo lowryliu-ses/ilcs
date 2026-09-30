@@ -328,6 +328,8 @@ class PlanService:
             rows = []
             for name in params:
                 spec = spec_of(capability, name)
+                if spec["type"] == "program":
+                    continue  # 程序表不作因子水平：要变的量做成数值参数、在程序表里引用
                 rows.append({
                     "name": name, "label": declared.get(name, name), "unit": spec["unit"], "type": spec["type"],
                     # 选项型参数：因子水平只能从这些选项里挑

@@ -3,7 +3,7 @@
    能力的参数定义决定流程、设备方法能填哪些字段，恢复规则（能不能保持、能不能重试、用后要不要清洗）
    由每个引用它的步骤继承；工位能力极限、校准适用范围、人员资质、SOP 适用能力也都按它登记。
    它不属于某一台工位，所以单独成页；各工位能实现到什么范围在「工位与接入」里按工位改（能力极限只有那一个入口）。 */
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
@@ -86,6 +86,8 @@ export function CapabilitiesPage() {
                       .map(([key, label]) =>
                         capability.param_specs?.[key]?.type === 'enum'
                           ? `${label}（选项：${(capability.param_specs[key].options ?? []).join(' / ')}）`
+                          : capability.param_specs?.[key]?.type === 'program'
+                          ? `${label}（程序表 ${(capability.param_specs[key].columns ?? []).length} 列）`
                           : withUnit(label, capability.param_specs?.[key]?.unit ?? ''),
                       )
                       .join(' · ') || '无参数'}
@@ -340,6 +342,11 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
       return {
         key, label, unit: spec.unit ?? '', type: spec.type ?? 'number', required: spec.required !== false,
         options: (spec.options ?? []).join('、'),
+        columns: (spec.columns ?? []).map((column) => ({
+          key: column.key, label: column.label ?? '', type: column.type ?? 'number', unit: column.unit ?? '',
+          options: (column.options ?? []).join('、'), required: Boolean(column.required),
+        })),
+        maxRows: spec.max_rows ?? '',
       };
     }),
   );
@@ -450,11 +457,22 @@ function CapabilityEditForm({ capability, onClose }: { capability: CapabilityRow
   );
 }
 
-/** 编辑中的一行参数。options 是选项型参数的选项原文（顿号、逗号或换行分隔），提交时才拆成列表 */
-type ParamRow = { key: string; label: string; unit: string; type: 'number' | 'integer' | 'enum'; required: boolean; options: string };
+/** 编辑中的程序表一列。options 是选项列的选项原文 */
+type ColumnRow = { key: string; label: string; type: 'number' | 'integer' | 'enum'; unit: string; options: string; required: boolean };
+
+/** 编辑中的一行参数。options 是选项型参数的选项原文（顿号、逗号或换行分隔），提交时才拆成列表；
+    程序表参数带列定义与最多行数 */
+type ParamRow = {
+  key: string; label: string; unit: string; type: 'number' | 'integer' | 'enum' | 'program'; required: boolean; options: string;
+  columns: ColumnRow[]; maxRows: number | '';
+};
 
 function blankParam(): ParamRow {
-  return { key: '', label: '', unit: '', type: 'number', required: true, options: '' };
+  return { key: '', label: '', unit: '', type: 'number', required: true, options: '', columns: [], maxRows: '' };
+}
+
+function blankColumn(): ColumnRow {
+  return { key: '', label: '', type: 'number', unit: '', options: '', required: false };
 }
 
 function paramLabels(rows: ParamRow[]): Record<string, string> {
@@ -468,6 +486,17 @@ function paramSpecs(rows: ParamRow[]): Record<string, ParamSpec> {
       row.key.trim(),
       row.type === 'enum'
         ? { type: row.type, required: row.required, options: parseOptions(row.options) }
+        : row.type === 'program'
+        ? {
+            type: row.type, required: row.required, ...(row.maxRows === '' ? {} : { max_rows: row.maxRows }),
+            columns: row.columns
+              .filter((column) => column.key.trim())
+              .map((column) => ({
+                key: column.key.trim(), label: column.label.trim() || column.key.trim(), type: column.type,
+                ...(column.type === 'enum' ? { options: parseOptions(column.options) } : { unit: column.unit.trim() }),
+                required: column.required,
+              })),
+          }
         : { type: row.type, unit: row.unit.trim(), required: row.required },
     ]),
   );
@@ -493,7 +522,8 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={index}>
+            <Fragment key={index}>
+            <tr>
               <td>
                 <input
                   className="mono"
@@ -514,11 +544,11 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
               <td>
                 <input
                   className="mono"
-                  value={row.type === 'enum' ? '' : row.unit}
-                  disabled={row.type === 'enum'}
-                  title={row.type === 'enum' ? '选项型参数没有单位' : undefined}
+                  value={row.type === 'enum' || row.type === 'program' ? '' : row.unit}
+                  disabled={row.type === 'enum' || row.type === 'program'}
+                  title={row.type === 'enum' ? '选项型参数没有单位' : row.type === 'program' ? '程序表的单位写在各列上' : undefined}
                   aria-label={`参数 ${index + 1} 单位`}
-                  placeholder="W"
+                  placeholder={row.type === 'enum' || row.type === 'program' ? '' : 'W'}
                   style={{ width: 72 }}
                   onChange={(event) => patch(index, { unit: event.target.value })}
                 />
@@ -533,6 +563,7 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
                   <option value="number">数值</option>
                   <option value="integer">整数</option>
                   <option value="enum">选项</option>
+                  <option value="program">程序表</option>
                 </select>
               </td>
               <td>
@@ -545,6 +576,10 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
                     className={parseOptions(row.options).length ? undefined : 'bad'}
                     onChange={(event) => patch(index, { options: event.target.value })}
                   />
+                ) : row.type === 'program' ? (
+                  <span className={row.columns.some((column) => column.key.trim()) ? 'tiny muted' : 'tiny bad-text'}>
+                    {row.columns.filter((column) => column.key.trim()).length} 列（在下面定义）
+                  </span>
                 ) : (
                   <span className="tiny muted">—</span>
                 )}
@@ -568,6 +603,17 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
                 </button>
               </td>
             </tr>
+            {row.type === 'program' ? (
+              <tr>
+                <td colSpan={7}>
+                  <ProgramColumnsEditor
+                    row={row}
+                    onChange={(changes) => patch(index, changes)}
+                  />
+                </td>
+              </tr>
+            ) : null}
+            </Fragment>
           ))}
         </tbody>
       </table>
@@ -575,5 +621,88 @@ function ParamRowsEditor({ rows, onChange }: { rows: ParamRow[]; onChange: (rows
         添加参数
       </button>
     </>
+  );
+}
+
+/* 程序表的列定义：每列一个量（工步类型、电流、电压、时长……）。列的单位用于和本步数值参数核对引用，
+   选项列写可选的工步类型；「每步必填」的列每一行都要写，其余可以空着（静置没有电流）。 */
+function ProgramColumnsEditor({ row, onChange }: { row: ParamRow; onChange: (changes: Partial<ParamRow>) => void }) {
+  const setColumn = (index: number, changes: Partial<ColumnRow>) =>
+    onChange({ columns: row.columns.map((column, order) => (order === index ? { ...column, ...changes } : column)) });
+  return (
+    <div className="note" style={{ display: 'grid', gap: 6 }}>
+      <div className="small">
+        <b>{row.label || row.key || '程序表'}</b> 的列：每一步（行）按这些列填写。数值列可以在流程里引用本步的数值参数（单位要相同），
+        方案因子改那个参数就改了程序表里的数。
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>列标识</th>
+            <th>名称</th>
+            <th>类型</th>
+            <th>单位</th>
+            <th>选项</th>
+            <th>每步必填</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {row.columns.map((column, index) => (
+            <tr key={index}>
+              <td>
+                <input className="mono" value={column.key} placeholder="current" aria-label={`列 ${index + 1} 标识`}
+                  onChange={(event) => setColumn(index, { key: event.target.value })} />
+              </td>
+              <td>
+                <input value={column.label} placeholder="电流" aria-label={`列 ${index + 1} 名称`}
+                  onChange={(event) => setColumn(index, { label: event.target.value })} />
+              </td>
+              <td>
+                <select value={column.type} aria-label={`列 ${index + 1} 类型`}
+                  onChange={(event) => setColumn(index, { type: event.target.value as ColumnRow['type'] })}>
+                  <option value="number">数值</option>
+                  <option value="integer">整数</option>
+                  <option value="enum">选项</option>
+                </select>
+              </td>
+              <td>
+                <input className="mono" style={{ width: 64 }} value={column.type === 'enum' ? '' : column.unit}
+                  disabled={column.type === 'enum'} placeholder="C" aria-label={`列 ${index + 1} 单位`}
+                  onChange={(event) => setColumn(index, { unit: event.target.value })} />
+              </td>
+              <td>
+                {column.type === 'enum' ? (
+                  <input value={column.options} placeholder="恒流充电、恒压充电、静置" aria-label={`列 ${index + 1} 选项`}
+                    className={parseOptions(column.options).length ? undefined : 'bad'}
+                    onChange={(event) => setColumn(index, { options: event.target.value })} />
+                ) : (
+                  <span className="tiny muted">—</span>
+                )}
+              </td>
+              <td>
+                <input type="checkbox" checked={column.required} aria-label={`列 ${index + 1} 每步必填`}
+                  onChange={(event) => setColumn(index, { required: event.target.checked })} />
+              </td>
+              <td className="row-end">
+                <button className="btn sm" aria-label={`删除列 ${index + 1}`}
+                  onClick={() => onChange({ columns: row.columns.filter((_, order) => order !== index) })}>
+                  删
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="row">
+        <button className="btn sm" onClick={() => onChange({ columns: [...row.columns, blankColumn()] })}>
+          添加列
+        </button>
+        <label className="small">
+          最多行数{' '}
+          <NumberInput value={row.maxRows} ariaLabel="最多行数" onChange={(next) => onChange({ maxRows: next })} />
+        </label>
+      </div>
+    </div>
   );
 }

@@ -180,6 +180,12 @@ def target_issues(
             issues.append(f"「{step.get('name')}」的 {param} 已声明取自上游结果，因子「{name}」不能再作用于它")
             continue
         spec = spec_of(capabilities.get(step.get("cap") or ""), param) if capabilities is not None else None
+        if spec is not None and spec["type"] == "program":
+            issues.append(
+                f"因子「{name}」不能作用于程序表参数 {step.get('name')}.{param}：把要变的量做成这一步的数值参数，"
+                f"在程序表里引用它，因子作用于那个参数"
+            )
+            continue
         if spec is not None and spec["type"] != "enum":
             unit = spec["unit"]
             factor_unit = canonical_unit(factor.get("unit"))

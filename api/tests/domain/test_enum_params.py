@@ -61,7 +61,7 @@ def test_recipe_step_accepts_option_values_only():
     assert any("只能是 THF、DMF、Toluene 之一" in issue for issue in wrong)
     assert "溶剂 未填写" in device_issues({**STEP, "params": {"temp": 60}}, CAPS)
     dosing = device_issues({**STEP, "material": "底物 A", "consumes_materials": True, "material_param": "solvent"}, CAPS)
-    assert "用量参数 solvent 是选项型参数，不能当投料量" in dosing
+    assert "用量参数 solvent 不是数值参数，不能当投料量" in dosing
 
 
 def test_method_rules_for_options():

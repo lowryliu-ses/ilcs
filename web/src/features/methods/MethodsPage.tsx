@@ -8,9 +8,12 @@ import { useState } from 'react';
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { paramSpec } from '../../shared/params';
+import { ProgramTableEditor } from '../../shared/program';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule, MetricRow } from '../../shared/types';
+import type {
+  CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule, MetricRow, ProgramRow,
+} from '../../shared/types';
 import { Field, ListState, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 const STATE_PILL: Record<string, string> = { draft: 'scheduled', released: 'running', retired: 'done' };
@@ -145,10 +148,14 @@ export function MethodsPage() {
   );
 }
 
-/** 编辑中的参数规则。数值参数用 default / min / max / unit；选项型参数用 default（一个选项）与 options（允许的选项） */
-type ParamDraft = Record<string, { on: boolean; default: string; min: string; max: string; unit: string; options: string[] }>;
+/** 编辑中的参数规则。数值参数用 default / min / max / unit；选项型参数用 default（一个选项）与 options（允许的选项）；
+    程序表参数用 program（缺省程序表） */
+type ParamDraft = Record<
+  string,
+  { on: boolean; default: string; min: string; max: string; unit: string; options: string[]; program: ProgramRow[] }
+>;
 
-const BLANK_RULE: ParamDraft[string] = { on: false, default: '', min: '', max: '', unit: '', options: [] };
+const BLANK_RULE: ParamDraft[string] = { on: false, default: '', min: '', max: '', unit: '', options: [], program: [] };
 
 function toNumber(value: string): number | null {
   if (value.trim() === '') return null;
@@ -181,8 +188,9 @@ function MethodDialog({
       Object.entries(method?.params ?? {}).map(([key, rule]) => [
         key,
         {
-          on: true, default: String(rule.default ?? ''), min: String(rule.min ?? ''), max: String(rule.max ?? ''),
-          unit: rule.unit ?? '', options: rule.options ?? [],
+          on: true, default: Array.isArray(rule.default) ? '' : String(rule.default ?? ''),
+          min: String(rule.min ?? ''), max: String(rule.max ?? ''),
+          unit: rule.unit ?? '', options: rule.options ?? [], program: Array.isArray(rule.default) ? rule.default : [],
         },
       ]),
     ),
@@ -210,6 +218,9 @@ function MethodDialog({
           paramSpec(capability, key).type === 'enum'
             ? // 选项型：缺省选项与允许的选项；不写上下限与单位
               { default: rule.default || null, ...(rule.options.length ? { options: rule.options } : {}) }
+            : paramSpec(capability, key).type === 'program'
+            ? // 程序表：只给缺省程序表（标准化成工步、标准升温程序）
+              { default: rule.program.length ? rule.program : null }
             : { default: toNumber(rule.default), min: toNumber(rule.min), max: toNumber(rule.max), unit: rule.unit },
         ]),
     ),
@@ -228,7 +239,7 @@ function MethodDialog({
       },
     },
   );
-  const setParam = (key: string, field: keyof ParamDraft[string], value: string | boolean | string[]) =>
+  const setParam = (key: string, field: keyof ParamDraft[string], value: string | boolean | string[] | ProgramRow[]) =>
     setParams((current) => ({
       ...current,
       [key]: { ...(current[key] ?? BLANK_RULE), [field]: value },
@@ -296,6 +307,36 @@ function MethodDialog({
             {Object.entries(capability?.params ?? {}).map(([key, label]) => {
               const rule = params[key] ?? BLANK_RULE;
               const spec = paramSpec(capability, key);
+              if (spec.type === 'program') {
+                // 程序表：这条方法的缺省程序表（流程步骤没写时补进去）；引用只能指向本能力的数值参数
+                const refs = Object.keys(capability?.params ?? {})
+                  .map((name) => ({ name, spec: paramSpec(capability, name) }))
+                  .filter((row) => row.name !== key && (row.spec.type === 'number' || row.spec.type === 'integer'))
+                  .map((row) => ({ key: row.name, label: row.spec.label, unit: row.spec.unit }));
+                return (
+                  <tr key={key}>
+                    <td>
+                      <input type="checkbox" checked={rule.on} disabled={readOnly} onChange={(event) => setParam(key, 'on', event.target.checked)} />
+                    </td>
+                    <td className="small">
+                      {label} <span className="tiny muted mono">{key} · 程序表</span>
+                    </td>
+                    <td colSpan={4}>
+                      {rule.on ? (
+                        <ProgramTableEditor
+                          spec={spec}
+                          value={rule.program}
+                          refs={refs}
+                          readOnly={readOnly}
+                          onChange={(rows) => setParam(key, 'program', rows)}
+                        />
+                      ) : (
+                        <span className="tiny muted">不给缺省程序表</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              }
               if (spec.type === 'enum') {
                 // 选项型：缺省选项 + 这条方法允许的选项（不勾 = 能力登记的全部选项）
                 const allowed = rule.options.length ? rule.options : spec.options;

@@ -489,3 +489,10 @@ table.compact th, table.compact td { padding: 4px 8px; }
 .seg a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .seg a + a { border-left: 1px solid var(--border-2); }
 .page-tabs { justify-self: start; }
+
+/* 程序表编辑器：表格可能比属性栏宽，只在自己的框里横向滚动，不把整页撑出滚动条 */
+.program-editor { min-width: 0; max-width: 100%; }
+.program-scroll { overflow-x: auto; max-width: 100%; }
+.program-scroll td, .program-scroll th { white-space: nowrap; }
+.program-cell { width: 80px; }
+.program-ref { width: 76px; padding-left: 2px; padding-right: 2px; }

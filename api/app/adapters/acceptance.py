@@ -197,7 +197,8 @@ def default_template(station_id: str, limits: dict[str, Any], capability: str = 
     capability = capability or next(iter(sorted(limits or {})), "")
     window = (limits or {}).get(capability)
     if params is None:
-        params = {name: _middle(span) for name, span in (window or {}).items() if span}
+        # 程序表参数的极限是按列写的，推不出一张程序表：不带它（要测就在验收缺省里写上）
+        params = {name: _middle(span) for name, span in (window or {}).items() if span and not isinstance(span, dict)}
     return CommandRequest(
         command_id="", station_id=station_id, capability=capability, params=dict(params),
         type="transfer" if capability == TRANSFER_CAPABILITY else "dispatch",

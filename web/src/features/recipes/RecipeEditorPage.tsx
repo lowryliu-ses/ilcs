@@ -14,6 +14,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { api } from '../../shared/api';
 import { FlowGraph, PALETTE_TYPE, type FlowGraphEdge, type FlowGraphLoop, type FlowGraphNode } from '../../shared/flowgraph';
+import { ProgramTableEditor } from '../../shared/program';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type {
@@ -40,6 +41,7 @@ import {
   freeCase,
   isDosingStep,
   paramOptions,
+  programLimits,
   graphMode,
   indexCapabilities,
   kindOf,
@@ -702,7 +704,10 @@ function NodeCard({
     kind === 'device'
       ? [
           ...Object.entries(step.params ?? {}).map(
-            ([key, value]) => `${(paramLabels[key] ?? key).split(' ')[0]} ${value === '' ? '?' : value}`,
+            ([key, value]) =>
+              `${(paramLabels[key] ?? key).split(' ')[0]} ${
+                Array.isArray(value) ? `${value.length} 步` : value === '' ? '?' : value
+              }`,
           ),
           // 取自上游结果的参数：画布上标出来源，一眼看出这一步的设定值依赖前面的结果
           ...Object.entries(step.bindings ?? {}).map(
@@ -1282,6 +1287,35 @@ function DeviceParamField({
   const range = paramRange(stations, step.cap, paramKey);
   const rule = step.method?.params?.[paramKey];
   const binding = step.bindings?.[paramKey];
+  if (spec.type === 'program') {
+    // 程序表：逐步编辑；数值格可以引用本步的数值参数（方案因子改它就改了程序表里的数）。前馈不能作用于程序表
+    const value = step.params?.[paramKey];
+    const refs = Object.keys(capability?.params ?? {})
+      .map((name) => ({ name, spec: specOf(capability, name) }))
+      .filter((row) => row.name !== paramKey && (row.spec.type === 'number' || row.spec.type === 'integer'))
+      .map((row) => ({ key: row.name, label: row.spec.label, unit: row.spec.unit }));
+    const defaultProgram = Array.isArray(rule?.default) ? rule.default : null;
+    return (
+      <Field
+        label={`${spec.label}　程序表${spec.required ? '' : '（可不填）'}`}
+        hint={defaultProgram ? `设备方法给了缺省程序表（${defaultProgram.length} 步），不填就用它` : '每行一步；设备收到的是代入参数后的具体数值'}
+      >
+        <ProgramTableEditor
+          spec={spec}
+          value={Array.isArray(value) ? value : []}
+          refs={refs}
+          limits={programLimits(stations, step.cap, paramKey)}
+          readOnly={readOnly}
+          onChange={(rows) =>
+            onSet((current) => {
+              if (!rows.length && !spec.required) delete current.params[paramKey];
+              else current.params[paramKey] = rows;
+            })
+          }
+        />
+      </Field>
+    );
+  }
   if (spec.type === 'enum') {
     // 选项型：从登记的选项里挑；没有工位允许的选项、设备方法不允许的选项标出来。前馈只做数值换算，不能作用于它
     const allowed = paramOptions(stations, step.cap, paramKey);

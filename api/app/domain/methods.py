@@ -80,6 +80,9 @@ def definition_issues(
             if spec_of(capability, key)["type"] == "enum":
                 issues.extend(_enum_rule_issues(key, rule, spec_of(capability, key)))
                 continue
+            if spec_of(capability, key)["type"] == "program":
+                issues.extend(_program_rule_issues(key, rule, spec_of(capability, key), capability))
+                continue
         lo, hi, default = _num(rule.get("min")), _num(rule.get("max")), _num(rule.get("default"))
         if lo is not None and hi is not None and lo > hi:
             issues.append(f"参数 {key} 下限 {lo:g} 大于上限 {hi:g}")
@@ -175,9 +178,24 @@ def _enum_rule_issues(key: str, rule: dict, spec: dict) -> list[str]:
     return issues
 
 
+def _program_rule_issues(key: str, rule: dict, spec: dict, capability: dict) -> list[str]:
+    """程序表参数的方法规则：只给缺省程序表（标准化成工步、标准升温程序），按列定义核对；没有上下限、选项与单位。"""
+    from . import program
+
+    issues = [f"参数 {key} 是程序表，不写 {field}" for field in ("min", "max", "options", "unit")
+              if rule.get(field) not in (None, "", [])]
+    default = rule.get("default")
+    if default not in (None, [], ""):
+        issues.extend(f"参数 {key} 的缺省程序表：{text}" for text in program.value_issues(spec, default, spec["label"]))
+        issues.extend(program.ref_issues(spec, default, capability, f"参数 {key} 的缺省程序表", key))
+    return issues
+
+
 def rule_default(rule: dict) -> Any:
-    """方法规则的缺省值：数值参数取数，选项型参数取文字；没有返回 None。"""
+    """方法规则的缺省值：数值参数取数，选项型参数取文字，程序表取一份拷贝；没有返回 None。"""
     default = (rule or {}).get("default")
+    if isinstance(default, list):
+        return copy.deepcopy(default) if default else None
     if isinstance(default, str) and default.strip() and _num(default) is None:
         return default
     return _num(default)
@@ -210,6 +228,8 @@ def step_problems(step: dict[str, Any], spec: MethodSpec | None) -> list[str]:
             if allowed and value not in allowed:
                 problems.append(f"参数 {key}={value} 不在设备方法允许的选项 {'、'.join(allowed)} 里")
             continue
+        if isinstance(value, list):
+            continue  # 程序表：方法只给缺省，逐格范围由能力的列定义与工位的列极限管
         number = _num(value)
         lo, hi = _num(rule.get("min")), _num(rule.get("max"))
         if number is None:

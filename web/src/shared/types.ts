@@ -538,8 +538,8 @@ export type RecipeStep = {
   /** 由 SOP 生成流程时抄下的说明 */
   sop_instructions?: string;
   cap: string;
-  /** 固定参数：数值，或选项型参数的选项文字；'' 是界面上还没填 */
-  params: Record<string, number | string>;
+  /** 固定参数：数值、选项型参数的选项文字，或程序表的行；'' 是界面上还没填 */
+  params: Record<string, number | string | ProgramRow[]>;
   dur: number;
   hard?: { from: string; maxGapMin: number };
   form?: FormField[];
@@ -957,7 +957,7 @@ export type AdapterCatalog = {
 
 /** 设备方法的参数规则。数值参数：缺省值与允许范围；选项型参数：缺省选项与允许的选项（能力登记选项的子集） */
 export type MethodParamRule = {
-  default?: number | string | null; min?: number | null; max?: number | null; unit?: string; options?: string[];
+  default?: number | string | ProgramRow[] | null; min?: number | null; max?: number | null; unit?: string; options?: string[];
 };
 export type MethodOutputRule = {
   key: string;
@@ -1027,11 +1027,24 @@ export type AdapterTestResult = {
 };
 
 /** 能力参数的规格：数值 / 整数、单位、是否必填。没登记的按「数值、单位未登记、必填」解释 */
-/** 能力参数的规格。选项型（enum）写 options：值只能是其中之一，原样作为文字下发，没有单位 */
-export type ParamSpec = { type?: 'number' | 'integer' | 'enum'; unit?: string; required?: boolean; options?: string[] };
+/** 程序表的一列：数值 / 整数 / 选项；required 表示每行都要写 */
+export type ProgramColumn = {
+  key: string; label?: string; type?: 'number' | 'integer' | 'enum'; unit?: string; options?: string[]; required?: boolean;
+};
 
-/** 工位的能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项 */
-export type LimitWindow = [number, number] | string[];
+/** 程序表的一格：具体的数或选项，或引用本步另一个数值参数（下发前代入） */
+export type ProgramCell = number | string | { param: string };
+export type ProgramRow = Record<string, ProgramCell>;
+
+/** 能力参数的规格。选项型（enum）写 options：值只能是其中之一，原样作为文字下发，没有单位；
+    程序表（program）写 columns 与 max_rows：值是行的列表（充放电工步、升温程序） */
+export type ParamSpec = {
+  type?: 'number' | 'integer' | 'enum' | 'program'; unit?: string; required?: boolean; options?: string[];
+  columns?: ProgramColumn[]; max_rows?: number | null;
+};
+
+/** 工位的能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项，程序表按列写 {列: 极限}（没写的列不约束） */
+export type LimitWindow = [number, number] | string[] | Record<string, [number, number] | string[]>;
 
 export type CapabilityRow = {
   id: string;

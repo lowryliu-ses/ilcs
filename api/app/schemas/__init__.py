@@ -1156,8 +1156,9 @@ class PublishIn(Signed):
 
 # ---------- 资源 ----------
 
-# 能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项（登记选项的子集）；写法由服务端按参数规格核
-LimitWindow = list[float] | list[str]
+# 能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项（登记选项的子集），程序表按列写 {列: 极限}；
+# 写法由服务端按参数规格核
+LimitWindow = list[float] | list[str] | dict[str, list[float] | list[str]]
 
 
 class LimitsIn(Signed):
@@ -1168,15 +1169,29 @@ class LimitsIn(Signed):
     row_version: int | None = None
 
 
-class ParamSpecIn(BaseModel):
-    """能力参数的规格：数值、整数或选项、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。
+class ProgramColumnIn(BaseModel):
+    """程序表的一列：标识、显示名、类型（数值 / 整数 / 选项）、单位、选项、每行是否必填。"""
 
-    选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。"""
-
+    key: str = Field(max_length=32)
+    label: str = Field(default="", max_length=60)
     type: Literal["number", "integer", "enum"] = "number"
+    unit: str = Field(default="", max_length=32)
+    options: list[str] = Field(default_factory=list, max_length=50)
+    required: bool = False
+
+
+class ParamSpecIn(BaseModel):
+    """能力参数的规格：数值、整数、选项或程序表、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。
+
+    选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。
+    程序表（program）写 `columns` 与 `max_rows`：值是行的列表（充放电工步、升温程序），见 domain/program.py。"""
+
+    type: Literal["number", "integer", "enum", "program"] = "number"
     unit: str = Field(default="", max_length=32)
     required: bool = True
     options: list[str] = Field(default_factory=list, max_length=50)
+    columns: list[ProgramColumnIn] = Field(default_factory=list, max_length=20)
+    max_rows: int | None = Field(default=None, ge=1, le=200)
 
 
 class CapabilityIn(Signed):

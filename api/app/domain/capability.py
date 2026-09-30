@@ -101,6 +101,10 @@ def out_of_range(station: StationSpec, step: dict[str, Any]) -> list[str]:
             reasons.append(f"{station.id} 未定义参数 {name}")
         elif window_fits(value, window):
             continue
+        elif isinstance(window, dict):
+            from .program import misfits
+
+            reasons.extend(f"{station.id} {name} {reason}" for reason in misfits(value, window))
         elif isinstance(value, str) or all(isinstance(item, str) for item in window):
             reasons.append(f"{station.id} {name}={value} 不在允许的选项 {'、'.join(map(str, window))} 内")
         else:

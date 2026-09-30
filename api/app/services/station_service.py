@@ -32,6 +32,20 @@ from .gate_service import GateService
 from .identity_service import IdentityService
 
 
+def _kind(spec: dict) -> str:
+    """参数的大类：数值与整数的极限写法相同（区间），选项、程序表各是一种写法。"""
+    return "numeric" if spec["type"] in ("number", "integer") else spec["type"]
+
+
+def _default_window(spec: dict):
+    """新接一项能力时的缺省极限：选项型全部允许，程序表不约束列，数值 [0, 100]。"""
+    if spec["type"] == "enum":
+        return list(spec["options"])
+    if spec["type"] == "program":
+        return {}
+    return [0, 100]
+
+
 class StationService:
     def __init__(self, db: Session, ctx: AccessContext):
         self.db = db
@@ -397,10 +411,7 @@ class StationService:
                 continue
             limits = dict(station.limits or {})
             spec = {"params": params, "param_specs": clean_specs(params, param_specs)}
-            limits[capability_id] = {
-                key: (list(spec_of(spec, key)["options"]) if spec_of(spec, key)["type"] == "enum" else [0, 100])
-                for key in params
-            }
+            limits[capability_id] = {key: _default_window(spec_of(spec, key)) for key in params}
             station.limits = limits
             self.stations.bump(station)
         self.audit.record(
@@ -1080,10 +1091,11 @@ class StationService:
         after_spec = {"params": capability.params or {}, "param_specs": capability.param_specs}
         retyped = {
             key for key in spec_changed if key in (capability.params or {}) and key in before_params
-            and (spec_of(before_spec, key)["type"] == "enum") != (spec_of(after_spec, key)["type"] == "enum")
+            and _kind(spec_of(before_spec, key)) != _kind(spec_of(after_spec, key))
         }
         narrowed = {key for key in spec_changed if spec_of(after_spec, key)["type"] == "enum"} - retyped
-        if removed or retyped or narrowed:
+        reshaped = {key for key in spec_changed if spec_of(after_spec, key)["type"] == "program"} - retyped
+        if removed or retyped or narrowed or reshaped:
             # 工位极限里残留已删参数会让匹配永远不通过，顺手清掉；数值与选项互换了的参数，原来的区间或选项
             # 对新类型没有意义，清掉让工位重填（不替工位放宽能做的范围）；选项减少了的，去掉已经没有的选项
             for station in self.stations.list():
@@ -1099,6 +1111,11 @@ class StationService:
                         kept[key] = window
                     else:
                         kept.pop(key)
+                for key in reshaped & set(kept):
+                    # 程序表删了的列，它的列极限一并去掉
+                    columns = {column.get("key") for column in spec_of(after_spec, key)["columns"]}
+                    kept[key] = {column: window for column, window in (kept[key] or {}).items() if column in columns} \
+                        if isinstance(kept[key], dict) else {}
                 if kept != slot:
                     limits[capability_id] = kept
                     station.limits = limits

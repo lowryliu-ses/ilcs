@@ -7,8 +7,10 @@
    判据按步骤类型分支：设备步骤看能力与参数，人工步骤看记录表单，
    等待步骤看等待方式，审核步骤看审核角色。不适用的字段不提示缺失——
    否则一个纯人工流程会被「没有可承接工位」挡住。 */
-import { isOptionWindow, paramSpec, valueProblem, windowFits } from '../../shared/params';
-import type { BomItem, BranchCase, CapabilityRow, Check, ParamBinding, RecipeStep, StationRow } from '../../shared/types';
+import { isOptionWindow, paramSpec, programProblems, programRefs, valueProblem, windowFits } from '../../shared/params';
+import type {
+  BomItem, BranchCase, CapabilityRow, Check, ParamBinding, ProgramRow, RecipeStep, StationRow,
+} from '../../shared/types';
 import { canonicalUnit, convertible, splitRatio } from '../../shared/units';
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
@@ -115,6 +117,29 @@ export function paramRange(
   return [Math.min(...windows.map((w) => w[0])), Math.max(...windows.map((w) => w[1]))];
 }
 
+/** 程序表参数：全部工位在各列上的极限并集（数值取最宽的区间，选项取并集）；没写极限的列不在结果里 */
+export function programLimits(
+  stations: StationRow[] | undefined, cap: string, key: string,
+): Record<string, [number, number] | string[]> {
+  const out: Record<string, [number, number] | string[]> = {};
+  (stations ?? []).forEach((station) => {
+    const window = station.limits?.[cap]?.[key];
+    if (typeof window !== 'object' || window === null || Array.isArray(window)) return;
+    Object.entries(window).forEach(([column, limit]) => {
+      const current = out[column];
+      if (isOptionWindow(limit)) {
+        out[column] = [...new Set([...(isOptionWindow(current) ? current : []), ...limit])];
+      } else if (Array.isArray(limit) && limit.length === 2) {
+        const [low, high] = limit as [number, number];
+        out[column] = current && !isOptionWindow(current)
+          ? [Math.min((current as [number, number])[0], low), Math.max((current as [number, number])[1], high)]
+          : [low, high];
+      }
+    });
+  });
+  return out;
+}
+
 /** 选项型参数：全部工位允许的选项的并集。没有工位允许的选项排不上。 */
 export function paramOptions(stations: StationRow[] | undefined, cap: string, key: string): string[] {
   const allowed = new Set<string>();
@@ -125,10 +150,13 @@ export function paramOptions(stations: StationRow[] | undefined, cap: string, ke
   return [...allowed];
 }
 
-export function defaultParams(stations: StationRow[] | undefined, capability: CapabilityRow): Record<string, number | string> {
+export function defaultParams(
+  stations: StationRow[] | undefined, capability: CapabilityRow,
+): Record<string, number | string | ProgramRow[]> {
   return Object.fromEntries(
     Object.keys(capability.params ?? {}).map((key) => {
       const spec = paramSpec(capability, key);
+      if (spec.type === 'program') return [key, [] as ProgramRow[]]; // 程序表从空表开始编辑（或用设备方法的缺省程序表）
       if (spec.type === 'enum') {
         // 选项型：取第一个有工位允许的选项
         const allowed = paramOptions(stations, capability.id, key);
@@ -323,8 +351,24 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (bound.has(key)) return; // 取自上游结果，由 bindingIssues 核对
     const spec = specOf(capability, key);
     const value = step.params?.[key];
-    if (value === undefined || value === '' || (typeof value === 'number' && !Number.isFinite(value))) {
+    if (
+      value === undefined || value === '' || (Array.isArray(value) && !value.length) ||
+      (typeof value === 'number' && !Number.isFinite(value))
+    ) {
       if (spec.required) issues.push(`${spec.label} 未填写`);
+      return;
+    }
+    if (spec.type === 'program') {
+      issues.push(...programProblems(spec, value));
+      // 引用本步参数的格子：引用的要是本能力的数值参数、单位相同，而且这一步给了它值（与服务端 program.ref_issues 对应）
+      programRefs(value).forEach((ref) => {
+        const target = specOf(capability, ref);
+        if (ref === key || !(ref in defined)) issues.push(`${spec.label} 引用的参数 ${ref} 不是本能力的另一个参数`);
+        else if (target.type !== 'number' && target.type !== 'integer') issues.push(`${spec.label} 引用的 ${target.label} 不是数值参数`);
+        else if (!bound.has(ref) && (step.params?.[ref] === undefined || step.params?.[ref] === '')) {
+          issues.push(`${spec.label} 引用的 ${target.label} 没有值：程序表下发时要代入它`);
+        }
+      });
       return;
     }
     const problem = valueProblem(spec, value);
@@ -339,8 +383,8 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (materialParam != null && materialParam !== '') {
       if (typeof materialParam !== 'string' || !(materialParam in defined)) {
         issues.push(`用量参数 ${String(materialParam)} 不是该能力的参数`);
-      } else if (specOf(capability, materialParam).type === 'enum') {
-        issues.push(`用量参数 ${materialParam} 是选项型参数，不能当投料量`);
+      } else if (specOf(capability, materialParam).type === 'enum' || specOf(capability, materialParam).type === 'program') {
+        issues.push(`用量参数 ${materialParam} 不是数值参数，不能当投料量`);
       } else if (!specOf(capability, materialParam).unit) {
         issues.push(`用量参数 ${materialParam} 没有登记单位，无法与物料单位对账`);
       }

@@ -127,8 +127,9 @@ def binding_issues(
         spec = spec_of(capability, param)
         label = spec["label"]
         target_unit = spec["unit"]
-        if spec["type"] == "enum":
-            issues.append(f"{label} 是选项型参数：前馈只做「来源值 × 系数」的数值换算，不能作用于它")
+        if spec["type"] in ("enum", "program"):
+            kind = "选项型" if spec["type"] == "enum" else "程序表"
+            issues.append(f"{label} 是{kind}参数：前馈只做「来源值 × 系数」的数值换算，不能作用于它")
             continue
         if param in (step.get("params") or {}):
             issues.append(f"{label} 已声明取自上游结果，不能再写固定值")

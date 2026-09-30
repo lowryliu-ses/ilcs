@@ -60,8 +60,10 @@ export function signed(value: number | null | undefined, digits = 1): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`;
 }
 
-export function params(record: Record<string, number | string>): string {
+export function params(record: Record<string, unknown>): string {
   return Object.entries(record)
-    .map(([key, value]) => `${key} ${value}`)
+    .filter(([key]) => key !== 'wells')
+    // 程序表（充放电工步、升温程序）只说几步；具体工步在批次页、流程编辑器里看
+    .map(([key, value]) => (Array.isArray(value) ? `${key} 程序表 ${value.length} 步` : `${key} ${String(value)}`))
     .join(' · ');
 }

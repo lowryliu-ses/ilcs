@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 
 import { ApiError, api, pageQuery } from '../../shared/api';
 import { day, time } from '../../shared/format';
-import { defaultWindow, isOptionWindow, paramSpec, windowProblem } from '../../shared/params';
+import { columnSpec, defaultWindow, isOptionWindow, paramSpec, windowProblem } from '../../shared/params';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
@@ -12,6 +12,7 @@ import type {
   AssetRow, CapabilityRow, ChannelUnit, IslandRow, LimitWindow, Paged, StationAsset, StationRow,
 } from '../../shared/types';
 import { Blocked, ConfirmDialog, ConnectionPill, Field, Modal, NumberInput, Panel, Pill, useToast } from '../../shared/ui';
+import { withUnit } from '../../shared/units';
 import { AdapterEditor } from './AdapterEditor';
 import { AreasTab, areaLabel } from './AreasTab';
 import { DeviceTemplatesTab } from './DeviceTemplatesTab';
@@ -587,6 +588,25 @@ function AssetCalibration({ asset }: { asset: StationAsset | null }) {
 /* 结构化极限编辑。一行一个参数，只填上下限两个数；未列出的参数视为该工位不能承接。
    区间是流程校验与排程匹配的唯一判据，所以这里改完要签名，并当场把受影响的流程列出来。
    这台工位不再承接的能力整项移除；排好程、还要在这台工位上用它的批次没结束时，服务端会拒绝并列出批次。 */
+type ColumnWindow = [number | '', number | ''] | string[];
+/** 编辑中的一项极限：数值 [下限, 上限]、选项型的允许选项、程序表的 {列: 极限} */
+type EditWindow = ColumnWindow | Record<string, ColumnWindow>;
+
+/** 提交前的极限：程序表去掉没勾选项的选项列（两端都空的数值列照样提交，由服务端报「下限必须小于上限」） */
+function cleanWindow(window: EditWindow): EditWindow {
+  if (typeof window !== 'object' || Array.isArray(window)) return window;
+  return Object.fromEntries(Object.entries(window).filter(([, limit]) => !(Array.isArray(limit) && limit.length === 0)));
+}
+
+function cleanLimits(limits: Record<string, Record<string, EditWindow>>) {
+  return Object.fromEntries(
+    Object.entries(limits).map(([capability, params]) => [
+      capability,
+      Object.fromEntries(Object.entries(params).map(([param, window]) => [param, cleanWindow(window)])),
+    ]),
+  );
+}
+
 function LimitsEditor({
   station,
   capabilities,
@@ -598,8 +618,8 @@ function LimitsEditor({
 }) {
   const toast = useToast();
   const { sign } = useSignature();
-  // 数值参数 [下限, 上限]（编辑中可能是 ''），选项型参数是允许的选项
-  const [limits, setLimits] = useState<Record<string, Record<string, [number | '', number | ''] | string[]>>>(
+  // 数值参数 [下限, 上限]（编辑中可能是 ''），选项型参数是允许的选项，程序表按列 {列: 极限}（没写的列不约束）
+  const [limits, setLimits] = useState<Record<string, Record<string, EditWindow>>>(
     () => JSON.parse(JSON.stringify(station.limits ?? {})),
   );
   const [adding, setAdding] = useState('');
@@ -628,6 +648,16 @@ function LimitsEditor({
     setLimits((current) => {
       const next = JSON.parse(JSON.stringify(current)) as typeof current;
       (next[capability][param] as [number | '', number | ''])[edge] = value;
+      return next;
+    });
+  /* 程序表某一列的极限：undefined 表示这一列不约束 */
+  const setColumn = (capability: string, param: string, column: string, window: ColumnWindow | undefined) =>
+    setLimits((current) => {
+      const next = JSON.parse(JSON.stringify(current)) as typeof current;
+      const slot = { ...((next[capability][param] as Record<string, ColumnWindow>) ?? {}) };
+      if (window === undefined) delete slot[column];
+      else slot[column] = window;
+      next[capability][param] = slot;
       return next;
     });
   const toggleOption = (capability: string, param: string, option: string, on: boolean) =>
@@ -664,8 +694,8 @@ function LimitsEditor({
     windowProblem(paramSpec(capabilities.find((row) => row.id === capability), param), window);
   const invalidRows = Object.entries(limits).flatMap(([capability, params]) =>
     Object.entries(params)
-      .filter(([param, window]) => problemOf(capability, param, window))
-      .map(([param, window]) => `${capability}.${param} ${problemOf(capability, param, window)}`),
+      .filter(([param, window]) => problemOf(capability, param, cleanWindow(window)))
+      .map(([param, window]) => `${capability}.${param} ${problemOf(capability, param, cleanWindow(window))}`),
   );
 
   const submit = async () => {
@@ -676,7 +706,7 @@ function LimitsEditor({
     setError('');
     const signatureId = await sign('修改能力极限', station.id, ['工程变更批准']);
     if (!signatureId) return;
-    await save.run({ limits, remove: removed, signature_id: signatureId }).catch((caught) =>
+    await save.run({ limits: cleanLimits(limits), remove: removed, signature_id: signatureId }).catch((caught) =>
       setError([caught.message, ...(caught instanceof ApiError ? caught.blocked.map((row) => row.label) : [])].join('；')),
     );
   };
@@ -732,7 +762,82 @@ function LimitsEditor({
               <tbody>
                 {Object.entries(params).map(([param, window]) => {
                   const spec = paramSpec(definition, param);
-                  const bad = Boolean(problemOf(capabilityId, param, window));
+                  const bad = Boolean(problemOf(capabilityId, param, cleanWindow(window)));
+                  if (spec.type === 'program') {
+                    // 程序表：按列填极限；不勾的列不约束（登记了这个参数就是能跑程序，列极限是额外的安全边界）
+                    const slot = (typeof window === 'object' && !Array.isArray(window) ? window : {}) as Record<string, ColumnWindow>;
+                    return (
+                      <tr key={param}>
+                        <td className="small">
+                          {spec.label}
+                          <div className="tiny muted mono">{param} · 程序表</div>
+                        </td>
+                        <td colSpan={2}>
+                          <table>
+                            <tbody>
+                              {spec.columns.map((column) => {
+                                const limit = slot[column.key];
+                                const kind = columnSpec(column);
+                                return (
+                                  <tr key={column.key}>
+                                    <td className="small">
+                                      <label className="check">
+                                        <input
+                                          type="checkbox"
+                                          checked={limit !== undefined}
+                                          onChange={(event) =>
+                                            setColumn(capabilityId, param, column.key,
+                                              event.target.checked ? (kind.type === 'enum' ? [...kind.options] : ['', '']) : undefined)
+                                          }
+                                        />
+                                        {withUnit(kind.label, kind.unit)}
+                                      </label>
+                                    </td>
+                                    <td>
+                                      {limit === undefined ? (
+                                        <span className="tiny muted">不约束</span>
+                                      ) : kind.type === 'enum' ? (
+                                        <div className="dep-list">
+                                          {kind.options.map((option) => (
+                                            <label key={option} className="check">
+                                              <input
+                                                type="checkbox"
+                                                checked={(limit as string[]).includes(option)}
+                                                onChange={(event) =>
+                                                  setColumn(capabilityId, param, column.key, kind.options.filter((item) =>
+                                                    item === option ? event.target.checked : (limit as string[]).includes(item)))
+                                                }
+                                              />
+                                              {option}
+                                            </label>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <div className="row">
+                                          <NumberInput
+                                            value={(limit as [number | '', number | ''])[0]}
+                                            ariaLabel={`${column.key} 下限`}
+                                            onChange={(next) => setColumn(capabilityId, param, column.key, [next, (limit as [number | '', number | ''])[1]])}
+                                          />
+                                          <span>–</span>
+                                          <NumberInput
+                                            value={(limit as [number | '', number | ''])[1]}
+                                            ariaLabel={`${column.key} 上限`}
+                                            onChange={(next) => setColumn(capabilityId, param, column.key, [(limit as [number | '', number | ''])[0], next])}
+                                          />
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          {bad ? <div className="tiny bad-text">{problemOf(capabilityId, param, cleanWindow(window))}</div> : null}
+                        </td>
+                      </tr>
+                    );
+                  }
                   if (spec.type === 'enum') {
                     // 选项型参数：这台工位允许哪些选项（能力登记选项的子集）
                     const chosen = isOptionWindow(window as LimitWindow) ? (window as string[]) : [];

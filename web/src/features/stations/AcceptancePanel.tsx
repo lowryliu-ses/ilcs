@@ -23,9 +23,13 @@ const CHECK_PILL: Record<string, string> = { pass: 'running', fail: 'fault', ski
 /** 每个参数取一个一定落在极限里的值：数值取中点，选项型取第一个允许的选项（与服务端 default_template 一致） */
 function midpoints(window: Record<string, LimitWindow> | undefined): Record<string, number | string> {
   return Object.fromEntries(
-    Object.entries(window ?? {}).map(([name, span]) =>
-      isOptionWindow(span) ? [name, span[0]] : [name, Number((((span[0] as number) + (span[1] as number)) / 2).toFixed(6))],
-    ),
+    Object.entries(window ?? {})
+      // 程序表的极限按列写，推不出一张程序表：要测就写进下面的「其他参数」
+      .filter(([, span]) => Array.isArray(span))
+      .map(([name, span]) => {
+        const list = span as [number, number] | string[];
+        return isOptionWindow(list) ? [name, list[0]] : [name, Number((((list[0] as number) + (list[1] as number)) / 2).toFixed(6))];
+      }),
   );
 }
 
@@ -345,8 +349,9 @@ function PhysicalRequest({
         </Field>
       </div>
       <div className="grid cols-3">
-        {Object.entries(window).map(([name, span]) =>
-          isOptionWindow(span) ? (
+        {Object.entries(window).filter(([, span]) => Array.isArray(span)).map(([name, raw]) => {
+          const span = raw as [number, number] | string[];
+          return isOptionWindow(span) ? (
             <Field key={name} label={`${name}（选项）`}>
               <select
                 value={String(params[name] ?? '')}
@@ -366,8 +371,8 @@ function PhysicalRequest({
                 onChange={(value) => setParams((current) => ({ ...current, [name]: value }))}
               />
             </Field>
-          ),
-        )}
+          );
+        })}
       </div>
       <Field
         label="其他参数（JSON，可空）"

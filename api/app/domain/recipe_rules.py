@@ -8,6 +8,7 @@
 """
 from typing import Any
 
+from . import program
 from .bindings import binding_issues, bindings_of
 from .capability import StationSpec, out_of_range, stations_for_step
 from .environment import requirement_issues
@@ -60,11 +61,19 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
         if key in bound:
             continue
         value = params.get(key)
-        if value is None or value == "":
+        if value is None or value == "" or value == []:
             if rule["required"]:
                 issues.append(f"{rule['label']} 未填写")
             continue
         issues.extend(value_issues(rule, value))
+        if rule["type"] == "program":
+            # 程序表里引用本步参数的格子：引用的要是本能力的数值参数、单位相同，而且这一步给了它值
+            issues.extend(program.ref_issues(rule, value, spec, rule["label"], key))
+            issues.extend(
+                f"{rule['label']} 引用的 {spec_of(spec, ref)['label']} 没有值：程序表下发时要代入它"
+                for ref in sorted(program.refs(value))
+                if ref in defined and ref not in bound and params.get(ref) in (None, "")
+            )
     for key in params:
         if defined and key not in defined:
             issues.append(f"参数 {key} 不属于该能力")
@@ -73,8 +82,8 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
     if material_param not in (None, "") and spec is not None:
         if not isinstance(material_param, str) or material_param not in defined:
             issues.append(f"用量参数 {material_param} 不是该能力的参数")
-        elif spec_of(spec, material_param)["type"] == "enum":
-            issues.append(f"用量参数 {material_param} 是选项型参数，不能当投料量")
+        elif spec_of(spec, material_param)["type"] in ("enum", "program"):
+            issues.append(f"用量参数 {material_param} 不是数值参数，不能当投料量")
         elif not spec_of(spec, material_param)["unit"]:
             issues.append(f"用量参数 {material_param} 没有登记单位，无法与物料单位对账")
     return issues
@@ -179,7 +188,10 @@ def validate_steps(
             station_ref = ((step.get("resource") or {}).get("station") or "") if kind == MANUAL else ""
             if station_ref:
                 blockers.append(f"指定占用的工位 {station_ref} 不存在或已停用")
-            for station in stations:
+            # 实现了这项能力、只差参数范围的工位最有参考价值，排在前面；没实现能力的、已停用的放后面
+            wanted = step.get("cap") or ((step.get("resource") or {}).get("capability") or "")
+            ranked = sorted(stations, key=lambda row: (row.retired, wanted not in row.limits, row.id))
+            for station in ranked:
                 blockers.extend(out_of_range(station, step))
         rows.append(
             {
