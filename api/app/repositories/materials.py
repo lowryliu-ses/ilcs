@@ -23,7 +23,9 @@ class MaterialRepository(ScopedRepository[Material]):
         return self.query().filter(Material.code == code).first()
 
     def by_name_unit(self, name: str, unit: str) -> Material | None:
-        return self.query().filter(Material.name == name, Material.base_unit == unit).first()
+        """同名同单位的主数据。停用的和在用的都有时取在用的那条。"""
+        rows = self.query().filter(Material.name == name, Material.base_unit == unit).order_by(Material.created_at).all()
+        return next((row for row in rows if row.state == "active"), rows[0] if rows else None)
 
 
 class LotRepository(ScopedRepository[Lot]):

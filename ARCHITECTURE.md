@@ -87,6 +87,8 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **库存三量分离**（`domain/inventory.py`）。账面库存、未耗用占用、可用量是三个独立的量，可用量 = 账面 − 占用。台账（`InventoryLedger`）只追加，按「组织 + 来源 + 事件 ID + 行号」唯一，重放不重复记账。**消耗必须由实际投料事件写入，不按步骤比例推算**——推算出来的数字看起来完整，但它不是称出来的。
 
+**物料主数据**（`services/material_service.py`，「试剂耗材 → 物料主数据」，迁移 `0044`）。一种料的名称、基础单位、类别、单位换算（「1 单位折合多少基础单位」，十进制文字）、CAS 与 GHS。类别决定配液模板怎么加这种料，换算决定入库与设备回报怎么折成基础单位——改了只影响之后的导入与入账，已生成的流程、已入账的流水不回溯。改要带 `row_version` 并留审计。**已有批号的物料不能改名称与基础单位**（`material_locked`）：批号、预留与设备回报的消耗按名称与单位对账，改了名就对不上已有批号。同名同单位只能有一条在用（`material_duplicate`）：入库时不指定主数据就按（名称，单位）找，两条就分不清入到哪条；找的时候停用的和在用的都有取在用的。不用的停用、不删除：停用后不能再按它入库新批号（`material_retired`），配液模板导入不再认它，已有批号照常可用；恢复前再核一次同名同单位。
+
 **六类流程节点**（`domain/steps.py` + `services/workflow_service.py`）。设备 / 人工 / 等待 / 审核，加上系统即时执行的质检关卡与样本拆分（见下文）。每类的适用字段不同，校验只看适用的那些：纯人工流程不会被「没有可承接工位」拦住，没有声明消耗物料的流程不会被「没有 BOM」拦住。`consumes_materials` 默认 `False`——默认要 BOM 就会把合法的空 BOM 流程判成配置错误。
 
 **推进与设备动作分离**。`StepRun` 记录每次尝试，推进走 `WorkflowEvent` 队列 + `StepAdvance` 去重表。设备动作成功不等于流程可以推进，流程推进也不会代替设备确认。指令结果未知时批次转人工核查，**绝不盲目重试**——重试一次不可逆的注液，代价不是一条日志。
@@ -310,6 +312,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0041_device_templates` | 设备接入模板 `device_templates`（(组织, 编号, 修订号) 唯一；发布后内容由触发器 `ilcs_device_template_guard` 冻结、不许删除）；工位套用的模板与连接参数 `adapters.template_id / template_connection`；验收记录上的模板版本 `acceptance_runs.template_id / template_code / template_revision`。已有工位不套模板 |
 | `0042_formulation_templates` | 配液模板 `formulation_templates`（(组织, 编号) 唯一，约束 `uq_formulation_template_code`；`config` 存固定步骤、加料阶段、物料类别对应的加法、搅拌规则与每次实验可配的参数）。模板本身不走发布，只决定怎么生成流程草稿，生成的流程照旧评审 → 批准 → 发布；改模板带 `row_version` 乐观锁并留审计，不用的退役（`state=retired`）不删除。只加新表，已有数据不变 |
 | `0043_backfill_sample_done` | 只回填数据：已完成批次里仍是 running、至少有一个未取消检测任务且都已采集的运行分配记为 `done`（以前只有历史三指标回传会记完成，类型化结果从不改它）。在途批次、还有任务没采集齐或没有检测任务的保持原样，已失败、已拆分的不动；不改结构，回退不撤销回填 |
+| `0044_material_master_edit` | 物料主数据可维护：`materials` 加 `row_version`（乐观锁，已有行记为 1）与 `updated_at`（可空）。只加列，已有数据不变 |
 
 规则：
 

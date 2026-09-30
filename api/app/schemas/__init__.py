@@ -875,6 +875,18 @@ class MaterialCreateIn(BaseModel):
     ghs: list[str] = []
 
 
+class MaterialPatchIn(Versioned):
+    """改物料主数据。没传的字段不动；名称与基础单位在已有批号时锁定（服务端判）。"""
+
+    name: str | None = None
+    base_unit: str | None = None
+    category: str | None = None
+    cas: str | None = None
+    conversions: dict[str, Quantity] | None = None
+    external_ref: str | None = None
+    ghs: list[str] | None = None
+
+
 class LotCreateIn(BaseModel):
     id: str
     material: str

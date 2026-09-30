@@ -390,11 +390,17 @@ export type MaterialRow = {
   base_unit: string;
   category: string;
   cas: string;
-  conversions: Record<string, unknown>;
+  /** 单位 → 1 单位折合多少基础单位（十进制文字） */
+  conversions: Record<string, string>;
   external_ref: string;
   ghs: string[];
+  /** active | retired */
   state: string;
   lot_count: number;
+  /** 已有批号时锁定的字段（name、base_unit）：批号、预留与消耗按名称与单位对账 */
+  locked_fields: string[];
+  row_version: number;
+  updated_at: string;
 };
 
 export type Factor = {

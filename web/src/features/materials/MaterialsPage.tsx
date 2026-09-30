@@ -5,11 +5,12 @@ import { clock, num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { LotLedger, LotRow, ReservationRow, WasteRow } from '../../shared/types';
+import type { LotLedger, LotRow, MaterialRow, ReservationRow, WasteRow } from '../../shared/types';
 import {
   Balances, Bar, ConfirmDialog, Empty, Field, ListState, Modal, NumberInput, Panel, Pill,
   useToast,
 } from '../../shared/ui';
+import { MaterialMasterPanel } from './MaterialMasterPanel';
 
 export function MaterialsPage() {
   const { can } = useSession();
@@ -28,7 +29,7 @@ export function MaterialsPage() {
   const [editingTank, setEditingTank] = useState<WasteRow | null>(null);
   const [deletingTank, setDeletingTank] = useState<WasteRow | null>(null);
 
-  const invalidates = ['lots', 'reservations', 'waste', 'dashboard', 'alarms', 'plans', 'audit'];
+  const invalidates = ['lots', 'materials', 'reservations', 'waste', 'dashboard', 'alarms', 'plans', 'audit'];
   const release = useMutation(
     (payload: { lotId: string; signatureId: string }) =>
       api.post(`/lots/${payload.lotId}/release`, { signature_id: payload.signatureId }),
@@ -192,6 +193,8 @@ export function MaterialsPage() {
           未放行、过期或开封超期的批号不可预留，开跑检查会拦截。
         </div>
       </Panel>
+
+      <MaterialMasterPanel />
 
       <Panel title="按批次的预留明细" flush>
         {reservations.data?.length ? (
@@ -566,8 +569,10 @@ function TankDialog({ tank, onClose, invalidates }: { tank?: WasteRow; onClose: 
 
 function ReceiveDialog({ onClose, invalidates }: { onClose: () => void; invalidates: string[] }) {
   const toast = useToast();
+  const materials = useQuery<MaterialRow[]>('materials', () => api.get<MaterialRow[]>('/materials'));
   const [form, setForm] = useState({
     id: '',
+    material_id: '',
     material: '',
     cas: '',
     type: '',
@@ -576,6 +581,16 @@ function ReceiveDialog({ onClose, invalidates }: { onClose: () => void; invalida
     expiry: '',
     storage: '',
   });
+  const active = (materials.data ?? []).filter((row) => row.state === 'active');
+  const picked = active.find((row) => row.id === form.material_id);
+  /* 选了主数据：名称、类别、CAS 随它，单位只能是基础单位或登记过换算的单位 */
+  const units = picked ? [picked.base_unit, ...Object.keys(picked.conversions)] : [];
+  const pick = (id: string) => {
+    const row = active.find((item) => item.id === id);
+    setForm(row
+      ? { ...form, material_id: row.id, material: row.name, cas: row.cas, type: row.category, unit: row.base_unit }
+      : { ...form, material_id: '' });
+  };
   const receive = useMutation(() => api.post('/lots', form), {
     invalidates,
     onSuccess: () => {
@@ -603,12 +618,22 @@ function ReceiveDialog({ onClose, invalidates }: { onClose: () => void; invalida
         </>
       }
     >
+      <Field label="物料主数据" hint={picked ? '名称、类别、CAS 按主数据填好了' : '不选就按名称与单位找主数据，找不到新建一条'}>
+        <select value={form.material_id} onChange={(event) => pick(event.target.value)}>
+          <option value="">（不选：按名称与单位）</option>
+          {active.map((row) => (
+            <option key={row.id} value={row.id}>
+              {row.name} · {row.code} · {row.base_unit}
+            </option>
+          ))}
+        </select>
+      </Field>
       <div className="grid cols-2">
         <Field label="批号">
           <input value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} />
         </Field>
         <Field label="物料名称">
-          <input value={form.material} onChange={(event) => setForm({ ...form, material: event.target.value })} />
+          <input value={form.material} disabled={!!picked} onChange={(event) => setForm({ ...form, material: event.target.value })} />
         </Field>
         <Field label="CAS">
           <input value={form.cas} onChange={(event) => setForm({ ...form, cas: event.target.value })} />
@@ -623,8 +648,18 @@ function ReceiveDialog({ onClose, invalidates }: { onClose: () => void; invalida
             onChange={(event) => setForm({ ...form, qty: Number(event.target.value) })}
           />
         </Field>
-        <Field label="单位" hint="必须与流程 BOM 的单位一致才能预留">
-          <input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} />
+        <Field label="单位" hint={picked ? '基础单位或登记过换算的单位' : '必须与流程 BOM 的单位一致才能预留'}>
+          {picked ? (
+            <select value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })}>
+              {units.map((unit) => (
+                <option key={unit} value={unit}>
+                  {unit}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} />
+          )}
         </Field>
         <Field label="有效期">
           <input type="date" value={form.expiry} onChange={(event) => setForm({ ...form, expiry: event.target.value })} />
