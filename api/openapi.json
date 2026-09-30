@@ -1081,6 +1081,20 @@
         "title": "Body_parse_table_api_formulation_templates__template_id__parse_post",
         "type": "object"
       },
+      "Body_read_table_api_formulation_templates_table_post": {
+        "properties": {
+          "file": {
+            "format": "binary",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_read_table_api_formulation_templates_table_post",
+        "type": "object"
+      },
       "Body_upload_file_api_files_post": {
         "properties": {
           "file": {
@@ -2482,6 +2496,80 @@
         "title": "FlagIn",
         "type": "object"
       },
+      "FormulationCheckIn": {
+        "additionalProperties": false,
+        "description": "模板编辑器：按还没保存的配置核对问题；带了表格就顺便按它试算一次（不写库、不登记瓶子）。",
+        "properties": {
+          "config": {
+            "title": "Config",
+            "type": "object"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "filename": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Filename",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "table": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table"
+          }
+        },
+        "required": [
+          "config"
+        ],
+        "title": "FormulationCheckIn",
+        "type": "object"
+      },
       "FormulationImportIn": {
         "description": "导入：服务端重新生成（不信任前端预览），一个事务里登记样本、建流程草稿（或沿用）与方案草稿。",
         "properties": {
@@ -2493,7 +2581,14 @@
           },
           "params": {
             "additionalProperties": {
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
             },
             "default": {},
             "title": "Params",
@@ -2533,7 +2628,7 @@
         "type": "object"
       },
       "FormulationPreviewIn": {
-        "description": "按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。",
+        "description": "按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。\n实验参数是数，选项型的实验参数是选项文字。",
         "properties": {
           "filename": {
             "default": "",
@@ -2543,7 +2638,14 @@
           },
           "params": {
             "additionalProperties": {
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
             },
             "default": {},
             "title": "Params",
@@ -16647,6 +16749,132 @@
           }
         ],
         "summary": "Create Template",
+        "tags": [
+          "recipe"
+        ]
+      }
+    },
+    "/api/formulation-templates/check": {
+      "post": {
+        "description": "模板编辑器：按还没保存的配置列出问题；带了表格就按它试算（与导入同一套规则，不写库）。",
+        "operationId": "check_template_api_formulation_templates_check_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormulationCheckIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Template",
+        "tags": [
+          "recipe"
+        ]
+      }
+    },
+    "/api/formulation-templates/table": {
+      "post": {
+        "description": "模板编辑器试算用：只把上传的 .xlsx / .csv 读成表格（与导入同一个读取器），不涉及任何模板、不写库。",
+        "operationId": "read_table_api_formulation_templates_table_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_read_table_api_formulation_templates_table_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Table",
         "tags": [
           "recipe"
         ]

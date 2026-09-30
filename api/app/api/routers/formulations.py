@@ -3,7 +3,8 @@ from fastapi import APIRouter, File, UploadFile
 
 from ...core.spreadsheet import MAX_BYTES
 from ...schemas import (
-    FormulationImportIn, FormulationPreviewIn, FormulationTemplateIn, FormulationTemplatePatchIn, Versioned,
+    FormulationCheckIn, FormulationImportIn, FormulationPreviewIn, FormulationTemplateIn, FormulationTemplatePatchIn,
+    Versioned,
 )
 from ...services.formulation_service import FormulationService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
@@ -19,6 +20,19 @@ def list_templates(db: DbSession, ctx: Ctx, state: str | None = None):
 @router.post("", status_code=201)
 def create_template(payload: FormulationTemplateIn, db: DbSession, user: CurrentUser, ctx=require("recipe.edit")):
     return FormulationService(db, ctx).create(payload.model_dump(), user)
+
+
+@router.post("/table")
+def read_table(file: UploadFile = File(...), ctx=require("recipe.edit")):
+    """模板编辑器试算用：只把上传的 .xlsx / .csv 读成表格（与导入同一个读取器），不涉及任何模板、不写库。"""
+    data = file.file.read(MAX_BYTES + 1)
+    return FormulationService.read_table(file.filename or "", data)
+
+
+@router.post("/check")
+def check_template(payload: FormulationCheckIn, db: DbSession, ctx=require("recipe.edit")):
+    """模板编辑器：按还没保存的配置列出问题；带了表格就按它试算（与导入同一套规则，不写库）。"""
+    return FormulationService(db, ctx).check(payload.model_dump())
 
 
 @router.get("/{template_id}")

@@ -1508,11 +1508,25 @@ class FormulationTemplatePatchIn(Versioned):
 
 
 class FormulationPreviewIn(BaseModel):
-    """按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。"""
+    """按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。
+    实验参数是数，选项型的实验参数是选项文字。"""
 
     filename: str = Field(default="", max_length=200)
     table: list[list[TableCell]]
-    params: dict[str, float] = {}
+    params: dict[str, float | str] = {}
+
+
+class FormulationCheckIn(BaseModel):
+    """模板编辑器：按还没保存的配置核对问题；带了表格就顺便按它试算一次（不写库、不登记瓶子）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any]
+    name: str = Field(default="", max_length=200)
+    description: str = ""
+    filename: str = Field(default="", max_length=200)
+    table: list[list[TableCell]] | None = None
+    params: dict[str, float | str] = {}
 
 
 class FormulationImportIn(FormulationPreviewIn):

@@ -2697,6 +2697,12 @@ export type FormulationStage = {
   after?: string[];
   /** 本阶段最后一个加料之后是否紧跟搅拌；缺省是 */
   stir_after_last?: boolean;
+  /** false：不接上一个阶段的尾巴，只接 after；没汇合的尾巴由后面的阶段或后段一起接上 */
+  chain?: boolean;
+  /** 加料顺序：table 按表格列顺序（缺省），routes 按 routes 里类别的先后 */
+  order?: 'table' | 'routes';
+  /** 本阶段的加料后步骤，覆盖全局 stir */
+  stir?: RecipeStep;
   then?: FormulationFixedStep[];
 };
 
@@ -2709,14 +2715,30 @@ export type FormulationRoute = {
   /** 这类料不能是一瓶在本阶段加的最后一种；写文字就是原因（如 EC 常温是固体） */
   not_last?: boolean | string;
   step: RecipeStep;
+  /** 这类料的加料后步骤，覆盖阶段与全局的 stir */
+  stir?: RecipeStep;
+};
+
+/** 逐瓶参数列：表格里用量以外的一列（终混温度、每瓶分装量），每瓶的值作用于某个固定设备步骤的参数 */
+export type FormulationRowParam = {
+  key: string;
+  /** 表格里这一列的列名（表头里的单位后缀照认） */
+  header: string;
+  label?: string;
+  step: string;
+  param: string;
+  unit?: string;
+  /** 空白格或表格没有这一列时用它；不给就每瓶都要写 */
+  default?: number | string | null;
 };
 
 /** 分装量核对：每瓶总质量 ÷ density（g/mL）估算母液体积，分装瓶数 × 每瓶分装量 + 母瓶留样 reserve（mL）要放得下 */
 export type FormulationVolumeCheck = {
-  /** 实验参数的 key */
+  /** 实验参数或逐瓶参数的 key */
   bottles: string;
   volume: string;
-  density: number;
+  /** 物料主数据没登记密度（1 mL = x g）时用的缺省密度，g/mL */
+  density?: number;
   reserve?: number;
 };
 
@@ -2727,7 +2749,8 @@ export type FormulationExperimentParam = {
   step: string;
   param: string;
   unit: string;
-  default: number;
+  /** 数值，或选项型参数的选项 */
+  default: number | string;
 };
 
 export type FormulationTemplateConfig = {
@@ -2744,7 +2767,20 @@ export type FormulationTemplateConfig = {
   stir?: RecipeStep;
   suffix?: FormulationFixedStep[];
   experiment_params?: FormulationExperimentParam[];
+  row_params?: FormulationRowParam[];
   volume_check?: FormulationVolumeCheck;
+  /** 生成的流程按哪份 SOP 执行；步骤模板的 sop_step 写这份 SOP 里的步骤标题 */
+  sop?: { code: string };
+};
+
+/** 实验参数 / 逐瓶参数作用的能力参数的规格：选项型的给下拉 */
+export type FormulationParamSpec = { type: 'number' | 'integer' | 'enum' | 'program'; unit: string; options: string[]; label: string };
+
+export type FormulationCheck = {
+  ok: boolean;
+  problems: string[];
+  param_specs: Record<string, FormulationParamSpec>;
+  preview?: FormulationPreview;
 };
 
 export type FormulationTemplate = {
@@ -2758,6 +2794,8 @@ export type FormulationTemplate = {
   config?: FormulationTemplateConfig;
   /** 模板配置按现在的主数据（方法、能力、指标）重核的结果；只在详情里有 */
   check?: { ok: boolean; problems: string[] };
+  /** 实验参数与逐瓶参数的规格；只在详情里有 */
+  param_specs?: Record<string, FormulationParamSpec>;
   row_version: number;
   created_by_name?: string;
   created_at?: string | null;
@@ -2768,13 +2806,17 @@ export type FormulationColumn = {
   header: string;
   name: string;
   unit: string;
-  kind: 'serial' | 'reagent' | 'ignored';
+  kind: 'serial' | 'reagent' | 'param' | 'ignored';
   category?: string;
   stage?: string;
 };
 
 /** 表格里的一瓶：行号（表格里的第几行）、瓶身序列号、各试剂用量（按试剂名） */
-export type FormulationRow = { row: number; serial: string; amounts: Record<string, number> };
+export type FormulationRow = {
+  row: number; serial: string; amounts: Record<string, number>;
+  /** 逐瓶参数：参数 key → 这一瓶的值 */
+  params?: Record<string, number | string>;
+};
 
 export type FormulationReagent = {
   name: string;
@@ -2808,7 +2850,7 @@ export type FormulationPreview = {
   /** 生成的流程草稿的名称、样品位、风险评估编号与设计说明 */
   recipe?: { name: string; plate: number; risk: string; design: string };
   /** 实际用上的实验参数取值 */
-  params?: Record<string, number>;
+  params?: Record<string, number | string>;
   issues: string[];
   warnings: string[];
   /** 读文件时的提醒（隐藏行、隐藏工作表）；只在上传解析的结果里有 */
