@@ -239,6 +239,9 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 **设备回报的实际消耗**（`services/consumption_service.py`）。回执 `delivered.materials` 里的每一项按「指令号#序号」去重写成库存消耗事件，按批号或物料名对到本批次预留；只写物料名、而这种料的预留跨了几个批号时，按有效期先后拆到各批号（与建预留时选批号同序；剩余预留合计不够才拒绝）。超出预留、对不上预留或单位换算不了一律不入账并报警；与计划量（流程 BOM 的料按消耗步骤均分；方案给出用量的料取这条指令实际下发的量，`domain/dosing.py`；只作对照）偏差超过阈值照常入账、报警待复核——账上记的永远是设备称出来的量。
 
 **方案给出用量的物料**（`domain/steps.py` 的 `material` / `material_param` + `domain/dosing.py`）。设备步骤可声明投哪种料、用量取哪个能力参数；流程 BOM 没列、由方案因子（带 `material`、`target` 指向这一步的用量参数）给出每个样本的量。方案锁定前核对每种这样的料都有对应因子；建批次时按本批各样本的水平之和预留（`BatchService.plan_materials`，快照 BOM 行 `source=plan`）。只有设备步骤能这样投料——人工步骤没有下发与回报，投的料必须列在 BOM 里，否则流程评审检查不通过。
+设备步骤还可以声明 `applies_to: {dosed, then_any}`（`steps.applies_to` + `dosing.covers`）：只处理在 `dosed` 那一步真加了料、
+（写了 `then_any` 时）之后还要再加其中一种的样本——指令的 `params.wells` 只列这些孔位；一个都没有时推进器不下发、记为跳过。
+配液模板生成的「加料后搅拌」都带它，每瓶的搅拌因此只由自己的配方决定。
 
 **配液模板**（`services/formulation_service.py` + `domain/formulation.py`，`/formulation-templates`，迁移 `0042`）。把一张配方表（xlsx / csv，`core/spreadsheet.py` 解析）按模板生成流程草稿与矩阵方案草稿：每行一瓶，序列号写进方案的指定样本；同结构的配方表沿用已发布流程。模板不走发布，受控点仍是生成出来的流程与方案的评审审批。一瓶一配方：配过液、已处置或已用尽的瓶子导入拒绝，已分配给另一个未终止批次的瓶子建批次拒绝。电解液产线的用法见 `docs/电解液配液线.md`。
 

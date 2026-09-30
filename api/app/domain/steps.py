@@ -53,7 +53,7 @@ MAX_LOOPS = 10
 APPLICABLE: dict[str, set[str]] = {
     DEVICE: {
         "cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable",
-        "consumes_materials", "material", "material_param",
+        "consumes_materials", "material", "material_param", "applies_to",
     },
     MANUAL: {
         "dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable",
@@ -175,6 +175,54 @@ def material_issues(step: dict[str, Any]) -> list[str]:
             issues.append("声明了投料物料，但没有勾选「消耗物料」")
     if step.get("material_param") not in (None, "") and kind_of(step) != DEVICE:
         issues.append("只有设备步骤可以指定用量参数")
+    return issues
+
+
+def applies_to(step: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    """设备步骤只处理在某个投料步骤真加了料的瓶子：`applies_to: {dosed, then_any}` → (投料步骤, then_any)。
+
+    配液线「每加一种料后搅拌」按瓶执行：某瓶这种料是 0，这瓶跳过加料，也不做随后的搅拌；`then_any` 非空时
+    这瓶在其中至少还要再加一种才搅（阶段最后一种料加完不搅）。没声明返回 None：照旧处理这一步的全部瓶子。
+    """
+    rule = (step or {}).get("applies_to")
+    if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
+        return None
+    later = rule.get("then_any") if isinstance(rule.get("then_any"), list) else []
+    return rule["dosed"].strip(), tuple(item.strip() for item in later if isinstance(item, str) and item.strip())
+
+
+def applies_to_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -> list[str]:
+    """`applies_to` 引用的都要是指定了投料物料与用量参数的设备步骤：dosed 在本步之前，then_any 在 dosed 之后。"""
+    if "applies_to" not in (step or {}):
+        return []
+    rule = step["applies_to"]
+    if kind_of(step) != DEVICE:
+        return ["只有设备步骤能按瓶限定处理对象（applies_to）"]
+    if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
+        return ['applies_to 要写成 {"dosed": 投料步骤标识, "then_any": [投料步骤标识…]}']
+    later = rule.get("then_any", [])
+    if not isinstance(later, list) or not all(isinstance(item, str) and item.strip() for item in later):
+        return ["applies_to 的 then_any 必须是步骤标识列表"]
+    ids = [step_id_of(row, position) for position, row in enumerate(steps or [])]
+
+    def dosing(ref: str) -> bool:
+        row = steps[ids.index(ref)]
+        return kind_of(row) == DEVICE and bool(step_material(row)) and bool(str(row.get("material_param") or "").strip())
+
+    issues: list[str] = []
+    dosed = rule["dosed"].strip()
+    if dosed not in ids[:index]:
+        issues.append(f"applies_to 引用的投料步骤 {dosed} 不存在或不在本步之前")
+    elif not dosing(dosed):
+        issues.append(f"applies_to 引用的 {dosed} 不是指定了投料物料与用量参数的设备步骤")
+    start = ids.index(dosed) if dosed in ids else -1
+    for ref in (item.strip() for item in later):
+        if ref not in ids:
+            issues.append(f"applies_to 的 then_any 引用的步骤 {ref} 不存在")
+        elif ids.index(ref) <= start:
+            issues.append(f"applies_to 的 then_any 引用的 {ref} 要排在 {dosed} 之后")
+        elif not dosing(ref):
+            issues.append(f"applies_to 的 then_any 引用的 {ref} 不是指定了投料物料与用量参数的设备步骤")
     return issues
 
 

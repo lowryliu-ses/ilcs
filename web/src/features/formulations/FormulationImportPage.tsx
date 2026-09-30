@@ -15,7 +15,8 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { PLAN_STATE_LABEL, RECIPE_STATE_LABEL } from '../../shared/types';
 import type {
-  CapabilityRow, FormulationImportResult, FormulationPreview, FormulationTemplate, FormulationTemplateConfig, RecipeStep,
+  CapabilityRow, FormulationImportResult, FormulationPreview, FormulationTemplate, FormulationTemplateConfig,
+  FormulationVolumeCheck, RecipeStep,
 } from '../../shared/types';
 import { Blocked, Empty, Field, ListState, Metric, NumberInput, Panel, useToast } from '../../shared/ui';
 import { STEP_KINDS, kindOf } from '../recipes/rules';
@@ -322,7 +323,7 @@ export function FormulationImportPage() {
             <Panel title="配方表">
               <Empty>
                 {templateId
-                  ? '上传 .xlsx 或 .csv：第一行表头，一列是瓶身序列号，其余列表头写试剂名与单位，如 EC (g)；空单元格按 0（这一瓶不加这种料）'
+                  ? '上传 .xlsx 或 .csv：第一行表头，一列是瓶身序列号，其余列表头写试剂名与单位，如 EC (g)；这一瓶不加的料填 0——同一列有的填了、有的空着不能导入，整列空白表示这次不用这种料'
                   : '先选配液模板'}
               </Empty>
             </Panel>
@@ -754,6 +755,11 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
                 <div className="tiny muted">
                   用量写到 <span className="mono">{route.param}</span>
                 </div>
+                {route.not_last ? (
+                  <div className="tiny muted">
+                    不能是一瓶在本阶段加的最后一种{typeof route.not_last === 'string' ? `：${route.not_last}` : ''}
+                  </div>
+                ) : null}
               </td>
               <td className="small">{route.stir_after === false ? '否' : '是'}</td>
             </tr>
@@ -761,7 +767,8 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
         </tbody>
       </table>
       <div className="tiny muted">
-        「紧跟搅拌」指不是本阶段最后一个加料时；最后一个按阶段规则。搅拌步骤：{config.stir?.name?.replace('{material}', '…') ?? '未配置'}
+        「紧跟搅拌」指不是本阶段最后一个加料时；最后一个按阶段规则。搅拌步骤：{config.stir?.name?.replace('{material}', '…') ?? '未配置'}。
+        搅拌按瓶执行：某瓶这种料是 0，这瓶跳过加料和随后的搅拌，「最后一个」也按这瓶自己加的料算。
       </div>
 
       {config.experiment_params?.length ? (
@@ -777,9 +784,21 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
           </ul>
         </div>
       ) : null}
+      {config.volume_check ? <VolumeCheckNote config={config} check={config.volume_check} /> : null}
       {config.required_metrics?.length ? (
         <div className="tiny muted">必测指标：{config.required_metrics.join('、')}</div>
       ) : null}
     </Panel>
+  );
+}
+
+/** 分装量核对的说明：参数写成实验参数的名称，与上面的「实验参数」对得上 */
+function VolumeCheckNote({ config, check }: { config: FormulationTemplateConfig; check: FormulationVolumeCheck }) {
+  const label = (key: string) => config.experiment_params?.find((row) => row.key === key)?.label ?? key;
+  return (
+    <div className="tiny muted">
+      分装量核对：每瓶总质量 ÷ {check.density} g/mL 估算母液体积，{label(check.bottles)} × {label(check.volume)}
+      {check.reserve ? ` + 母瓶留样 ${check.reserve} mL` : ''} 放不下就不能导入
+    </div>
   );
 }

@@ -642,6 +642,12 @@ class WorkflowService:
             return self._notify(batch, run)
         command_id = ""
         if run.kind == DEVICE:
+            from .batch_service import BatchService
+
+            # 按瓶限定的步骤（配液线「加料后搅拌」）本批一瓶都不用做：不下发、不占设备，保持中也可以直接跳过
+            uncovered = BatchService(self.db, self.ctx).uncovered(batch, index)
+            if uncovered:
+                return self._skip_uncovered(batch, run, index, uncovered)
             if workflow.hold_blocks_device_action(batch.state):
                 run.state = workflow.PENDING
                 return {"next": self.run_out(run), "device_blocked": True}
@@ -650,8 +656,6 @@ class WorkflowService:
                 run.state = workflow.PENDING
                 run.reason = "等待载具：并行分支的设备步骤正在使用"
                 return {"next": self.run_out(run), "waiting_labware": True}
-            from .batch_service import BatchService
-
             command = BatchService(self.db, self.ctx).issue_command(
                 batch, "dispatch", index, step_run_id=run.id
             )
@@ -773,6 +777,17 @@ class WorkflowService:
         if verdict is None:
             return self._gate_hold(batch, run, f"测量来源没有 {field} 的数值，无法判定")
         return self._gate_failed(batch, run, index, gate, f"{field}={value} 超出范围（{limits}）")
+
+    def _skip_uncovered(self, batch: Batch, run: StepRun, index: int, reason: str) -> dict:
+        """按瓶限定的设备步骤本批一瓶都不用做：记为跳过、归还预约的时间窗，接着推进。"""
+        run.started_at = run.started_at or now()
+        self._close_run(run, workflow.SKIPPED, reason)
+        self.release_step_windows(batch, index)
+        self.audit.record(
+            None, "按瓶跳过设备步骤", batch.id, after="已跳过",
+            detail=f"第 {index + 1} 步「{(run.step_snapshot or {}).get('name') or run.step_id}」{reason}，不下发",
+        )
+        return self._advance(run, batch)
 
     def _close_run(self, run: StepRun, state: str, reason: str) -> None:
         run.state = state

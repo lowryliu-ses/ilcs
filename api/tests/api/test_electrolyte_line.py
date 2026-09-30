@@ -4,6 +4,7 @@
 与正式部署的调用序列完全相同，只是执行器由测试逐轮驱动（正式部署是常驻执行器）：
 - 43 个步骤全部完成，并行段（准备段两路汇合、测试段两路分叉）顺序正确；
 - 每种试剂一条消耗入账、量 = 各瓶之和 = 预留，没有偏差 / 拒绝报警；变体瓶 LiBF4 下发 0，消耗只含参考瓶的量；
+- 按瓶搅拌：LiBF4 之后的制冷搅拌只下发参考瓶；一瓶都不用做的搅拌（另一张表）不下发、记为跳过；
 - 电导率、密度黏度检查点有数值，没有「缺必报项」；
 - 运行分配的物理样本就是两个瓶身序列号；每一步落在方法型号对应的工位；
 - 一瓶一配方：同结构的第二张表用新瓶子沿用已发布流程；配过液的瓶子再导入被拒绝。
@@ -73,7 +74,7 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     assert len(steps) == 43
 
     # 按配液线 SOP 执行：流程关联 SOP-ELY-01 的生效版本，每个节点都对应到这一版的某一步，批次固化了这一版
-    assert detail["sop_snapshot"]["code"] == "SOP-ELY-01" and detail["sop_snapshot"]["version"] == "v1"
+    assert detail["sop_snapshot"]["code"] == "SOP-ELY-01" and detail["sop_snapshot"]["version"] == "v2"
     sop_keys = {row["key"]: row["title"] for row in detail["sop_snapshot"]["steps"]}
     assert all(step.get("sop_step_key") in sop_keys for step in steps), [s["name"] for s in steps if not s.get("sop_step_key")]
     by_name = {step["name"]: sop_keys[step["sop_step_key"]] for step in steps}
@@ -129,6 +130,11 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     libf4 = checkpoints[steps.index(by_name["LiBF4 称量加料"])]
     assert libf4["params"]["wells"][well_of[serials[1]]]["mass"] == 0
     assert libf4["delivered"]["materials"] == [{"material": "LiBF4", "unit": "g", "quantity": 0.36}]
+    # 按瓶搅拌：变体瓶没加 LiBF4，LiBF4 之后那次制冷搅拌只下发参考瓶；两瓶都加了的料之后两瓶都搅
+    stir = checkpoints[steps.index(by_name["LiBF4 加料后制冷搅拌"])]
+    assert stir["params"]["wells"] == {well_of[serials[0]]: {"temp": -10, "time": 60, "rpm": 400}}, stir["params"]
+    both = checkpoints[steps.index(by_name["LiPF6 加料后制冷搅拌"])]
+    assert set(both["params"]["wells"]) == set(well_of.values())
 
     # 检测值：电导率、密度黏度都有数值，没有缺必报项；方法输出之外不造数（拉曼只有谱图）
     for name, keys in (("第 1 瓶电导率", ["conductivity_mS_cm"]), ("第 1 瓶密度黏度", ["density_g_cm3", "viscosity_mPa_s"])):
@@ -222,8 +228,9 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     # 同结构的第二张表（新瓶子）沿用已发布流程，只新建方案
     fresh = (f"ELY-{uid}-03", f"ELY-{uid}-04")
     _, _, second = _table(loader, fresh)
+    # 3 瓶要把每瓶分装量降到 15 mL：3 × 15 + 母瓶留样 5 = 50 mL，放得下约 53 mL 母液（3 × 20 mL 放不下，导入不通过）
     reused = loader.import_table(team["researcher"], context["template"], f"formula-{uid}-b.csv", second,
-                                 {"bottles": 3})
+                                 {"bottles": 3, "volume": 15})
     assert reused["recipe"] == {**reused["recipe"], "id": outcome["recipe"], "reused": True, "state": "released"}
     assert reused["plan"]["id"] != outcome["plan"]
     assert reused["samples"] == [{"id": serial, "created": True} for serial in fresh]
@@ -231,3 +238,34 @@ def test_electrolyte_line_runs_end_to_end_through_the_loader(client, reset_runti
     bottles = next(f for f in plan["factors"] if f["target"]["param"] == "bottles")
     assert bottles["levels"] == [3]
     loader.approve_plan(team["researcher"], team["qa"], reused["plan"]["id"])
+
+
+def test_a_stir_no_bottle_needs_is_skipped_not_dispatched(client, reset_runtime, executor, db):
+    """A 瓶的 FEC 是它最后一种料、B 瓶不加 FEC：「FEC 加料后制冷搅拌」本批一瓶都不用做——不下发、记为跳过，
+    批次照常完成。LiPF6 之后两瓶都还有料，那一次两瓶都搅。"""
+    from app.models import Command
+
+    loader = _loader()
+    team = loader.actors(loader.client_transport(client))
+    context = loader.register(team, loader.load_line())
+    uid = uuid4().hex[:6].upper()
+    serials = (f"ELY-{uid}-11", f"ELY-{uid}-12")
+    content = ("序列号,EC (g),EMC(g),LiPF6(g),FEC(g),LiDFP(g)\n"
+               f"{serials[0]},20,40,8,2,0\n{serials[1]},20,40,8,0,0.6\n").encode("utf-8")
+    outcome = loader.run(team, context, f"formula-{uid}-skip.csv", content, {}, pump=executor, rounds=200)
+    detail = outcome["detail"]
+    assert detail["state"] == "done", detail.get("failure_reason")
+
+    steps = detail["snapshot"]["steps"]
+    index = {step["name"]: position for position, step in enumerate(steps)}
+    assert "LiDFP 加料后制冷搅拌" not in index, "阶段最后一种料加完不搅"
+    skipped = steps[index["FEC 加料后制冷搅拌"]]["step_id"]
+    runs = {row["step_id"]: row for row in detail["step_runs"] if row["state"] not in {"superseded", "cancelled"}}
+    assert runs[skipped]["state"] == "skipped" and "本批没有这样的在用瓶子" in runs[skipped]["reason"], runs[skipped]
+    assert {row["state"] for step_id, row in runs.items() if step_id != skipped} == {"completed"}
+    db.expire_all()
+    commands = db.query(Command).filter(Command.batch_id == outcome["batch"]).all()
+    assert not [row for row in commands if row.step_index == index["FEC 加料后制冷搅拌"]], "跳过的一步不下发"
+    wells = {row["well"] for row in detail["samples"]}
+    checkpoints = {cp["step_index"]: cp["payload"] for cp in detail["checkpoints"]}
+    assert set(checkpoints[index["LiPF6 加料后制冷搅拌"]]["params"]["wells"]) == wells

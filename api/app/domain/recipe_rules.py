@@ -15,7 +15,7 @@ from .graph import ancestors, critical_path_min, graph_issues, graph_mode
 from .params import spec_of, value_issues
 from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
-    assist_issues, branch_issues, notify_issues,
+    applies_to_issues, assist_issues, branch_issues, notify_issues,
     consumes_materials, gate_issues, kind_of, manual_issues, material_issues, needs_station, resource_demand,
     review_issues, step_material,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
@@ -151,8 +151,9 @@ def validate_steps(
                 issues.append("返工目标必须是本关卡的上游步骤（依赖链上的前驱）")
         if kind == BRANCH:
             issues.extend(branch_issues(step, steps, index))
-        # 前馈来源要看上游步骤，同样只能在整条流程上校验
+        # 前馈来源、按瓶限定引用的投料步骤都要看上下游步骤，同样只能在整条流程上校验
         issues.extend(binding_issues(step, steps, index, capabilities))
+        issues.extend(applies_to_issues(step, steps, index))
         if kind == SUBFLOW:
             issues.extend((subflow_problems or {}).get(step_id, []))
         issues.extend((method_problems or {}).get(step_id, []))

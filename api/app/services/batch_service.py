@@ -21,15 +21,17 @@ from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import graph as dag
 from ..domain import preflight, recovery, sop_steps
+from ..domain.dosing import covers
 from ..domain.labware import container_of
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
 from ..domain.methods import command_method
+from ..domain.params import decimal_of
 from ..domain.permissions import ROLE_NAMES
 from ..domain.resources import Window, evaluate_steps
 from ..domain.scheduling import WORK
 from ..domain.steps import (
-    DEVICE, KIND_NAMES, consumes_materials, kind_of, needs_station, normalize, resource_demand,
+    DEVICE, KIND_NAMES, applies_to, consumes_materials, kind_of, needs_station, normalize, resource_demand,
     step_id_of,
 )
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
@@ -1470,6 +1472,11 @@ class BatchService:
         )
         self.db.add(command)
         self.db.flush()
+        if command_type in DISPATCHING and capability is None and applies_to(step) is not None and not wells:
+            # 推进器会先跳过一瓶都不用做的步骤；续跑 / 重试时覆盖的瓶子都已剔除才会走到这里。
+            # 不带孔位下发等于整批都做，宁可挂起让人看
+            self._refuse_unsent(batch, command, f"第 {step_index + 1} 步{self.uncovered(batch, step_index)}：指令不下发")
+            return command
         if bound is not None and bound.problems:
             self._refuse_unsent(batch, command, "前馈参数不能下发：" + "；".join(bound.problems[:5]))
             return command
@@ -1507,11 +1514,15 @@ class BatchService:
         别的孔上，布局放不进板型时实体孔位也与布局孔位不同。子样本继承母样的水平，条件跟着样本走。
         板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
         只投影在用样本：已拆分的母样、被剔除的样本仍占着孔位（实物还在），但不再是下游处理对象。
+        声明了 `applies_to` 的步骤按瓶限定处理对象，见 `_covered_params`。
         """
         from ..domain.matrix import step_condition
 
         step_id = step_id_of(step, step_index)
         frozen = ((batch.plan_snapshot or {}).get("condition_params") or {}).get(step_id)
+        rule = applies_to(step)
+        if rule is not None:
+            return self._covered_params(batch, step, step_id, rule, frozen)
         if not frozen:
             return None
         factors = (batch.plan_snapshot or {}).get("factors") or []
@@ -1525,6 +1536,53 @@ class BatchService:
             }
             return projected or None
         return {well: values for well, values in frozen.items() if well in targets}
+
+    def _covered_params(self, batch: Batch, step: dict, step_id: str, rule: tuple, frozen: dict | None) -> dict:
+        """按瓶限定（`applies_to`）的步骤：只带在指定投料步骤真加了料的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
+
+        没列出的瓶子这一步不做——配液线「加料后搅拌」按瓶执行，某瓶这种料是 0 就连搅拌一起跳过。一瓶都没有时
+        返回空 dict：不能退回「不带孔位 = 整批都做」。用量与逐孔参数同一口径（布局孔位或实体占用）。
+        """
+        from ..domain.matrix import step_condition
+
+        targets, physical = self._step_projection(batch, step)
+        if not targets:
+            return {}
+        plan = batch.plan_snapshot or {}
+        factors, conditions = plan.get("factors") or [], plan.get("condition_params") or {}
+        doses = {step_id_of(row, position): row for position, row in enumerate(self.steps_of(batch))}
+
+        def amount(well: str, sample: Sample, ref: str) -> Decimal:
+            dose = doses.get(ref) or {}
+            param = str(dose.get("material_param") or "")
+            if physical:
+                value = step_condition(factors, ref, list(sample.levels or [])).get(param)
+            else:
+                value = ((conditions.get(ref) or {}).get(well) or {}).get(param)
+            if value is None:
+                value = (dose.get("params") or {}).get(param)
+            return decimal_of(value) or Decimal(0)
+
+        fixed = dict(step.get("params") or {})
+        covered: dict[str, dict] = {}
+        for well, sample in targets.items():
+            if covers(rule, lambda ref, well=well, sample=sample: amount(well, sample, ref)):
+                own = (step_condition(factors, step_id, list(sample.levels or [])) if physical
+                       else dict((frozen or {}).get(well) or {}))
+                covered[well] = {**fixed, **own}
+        return covered
+
+    def uncovered(self, batch: Batch, step_index: int) -> str:
+        """按瓶限定（`applies_to`）的步骤此刻一瓶都不用做时给出原因（推进器据此直接跳过这一步）；否则空串。"""
+        steps = self.steps_of(batch)
+        step = steps[step_index] if step_index < len(steps) else {}
+        rule = applies_to(step)
+        if rule is None or self._well_params(batch, step, step_index):
+            return ""
+        names = {step_id_of(row, position): row.get("name") or step_id_of(row, position)
+                 for position, row in enumerate(steps)}
+        dosed, later = rule
+        return f"只处理在「{names.get(dosed, dosed)}」加了料{'、之后还要再加料' if later else ''}的瓶子，本批没有这样的在用瓶子"
 
     def _step_targets(self, batch: Batch, step: dict) -> dict[str, Sample] | None:
         """这一步的处理对象：设备孔位 → 在用样本。与矩阵逐孔参数同一口径（见 `_step_projection`）。"""

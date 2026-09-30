@@ -2673,7 +2673,18 @@ export type FormulationRoute = {
   param: string;
   /** 不是阶段最后一个加料时是否紧跟搅拌；缺省是 */
   stir_after?: boolean;
+  /** 这类料不能是一瓶在本阶段加的最后一种；写文字就是原因（如 EC 常温是固体） */
+  not_last?: boolean | string;
   step: RecipeStep;
+};
+
+/** 分装量核对：每瓶总质量 ÷ density（g/mL）估算母液体积，分装瓶数 × 每瓶分装量 + 母瓶留样 reserve（mL）要放得下 */
+export type FormulationVolumeCheck = {
+  /** 实验参数的 key */
+  bottles: string;
+  volume: string;
+  density: number;
+  reserve?: number;
 };
 
 export type FormulationExperimentParam = {
@@ -2700,6 +2711,7 @@ export type FormulationTemplateConfig = {
   stir?: RecipeStep;
   suffix?: FormulationFixedStep[];
   experiment_params?: FormulationExperimentParam[];
+  volume_check?: FormulationVolumeCheck;
 };
 
 export type FormulationTemplate = {
