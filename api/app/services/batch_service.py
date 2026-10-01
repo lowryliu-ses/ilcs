@@ -958,7 +958,7 @@ class BatchService:
         snapshot = dict(version.snapshot or {})
         fields = (
             "name", "plan_type", "goal", "repeats", "layout", "seed", "factors", "control", "design_points",
-            "sample_count", "sample_ids", "required_metrics", "recipe_id",
+            "sample_count", "sample_ids", "sample_policy", "required_metrics", "recipe_id",
         )
         view = {key: getattr(plan, key) for key in (*fields, "id", "round_no", "project_id")}
         view.update({key: snapshot[key] for key in fields if key in snapshot})
@@ -974,6 +974,7 @@ class BatchService:
                 "factors": plan.factors, "control": plan.control,
                 "design_points": plan.design_points or [], "round_no": plan.round_no,
                 "sample_count": plan.sample_count, "sample_ids": plan.sample_ids,
+                "sample_policy": getattr(plan, "sample_policy", "fresh") or "fresh",
                 "required_metrics": plan.required_metrics, "version": plan.version,
             }
         )
@@ -1021,7 +1022,8 @@ class BatchService:
                 for a in assignments
             ]
             if listed:
-                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]])
+                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]],
+                                            continuing=(getattr(plan, "sample_policy", "") or "fresh") == "continue")
         else:
             listed = list((task.sample_ids if task is not None else None) or plan.sample_ids or [])
             count = len(listed) or int(portion.get("count") or 0) or plan.sample_count
@@ -1079,15 +1081,36 @@ class BatchService:
             sample_service.occupy_slot(container_id, row["well"], physical_id, assignment.id)
         return rows
 
-    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str]) -> None:
+    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str], continuing: bool = False) -> None:
         """矩阵方案指定的瓶子：一瓶一配方。
 
         瓶子已在别的批次里（未终止的——已完成的瓶子装过配方，同样不能再配一次），再建一个批次就是往同一瓶里
         二次投料、物料也预留两份；已处置、已用尽的瓶子不能再用。先于预留判，不必预留了再回滚。
         单条件方案按清单重复测已有样本是正当的，不走这里。
+
+        方案声明「接着用上一步的产物」（`sample_policy: continue`，多步合成）时，上一批已经跑完（完成或终止）的
+        样本可以再进新批次；还在别的批次里没跑完的、已处置用尽的照样不行——一个样本同一时刻只在一处。
         """
         from .formulation_service import UNUSABLE_SAMPLE
 
+        if continuing:
+            for physical_id in dict.fromkeys(physical_ids):
+                physical = self.physical.get(physical_id)
+                if physical is None:
+                    continue
+                if physical.lifecycle_state in UNUSABLE_SAMPLE:
+                    raise StateConflict(
+                        f"方案引用的样本 {physical_id} {UNUSABLE_SAMPLE[physical.lifecycle_state]}，不能再用于执行",
+                        {"blocked": [{"key": "sample", "label": physical_id}]}, code="sample_unusable",
+                    )
+                busy = self.sample_busy_in(physical_id, exclude=batch.id)
+                if busy:
+                    raise StateConflict(
+                        f"样本 {physical_id} 还在批次 {busy} 里没跑完，不能接着进新批次：等它完成或终止",
+                        {"blocked": [{"key": "sample", "label": f"{physical_id} → {busy}"}]},
+                        code="sample_in_use",
+                    )
+            return
         for physical_id in dict.fromkeys(physical_ids):
             physical = self.physical.get(physical_id)
             if physical is None:
@@ -1104,6 +1127,16 @@ class BatchService:
                     {"blocked": [{"key": "sample", "label": f"{physical_id} → {other}"}]},
                     code="sample_in_use",
                 )
+
+    def sample_busy_in(self, physical_id: str, exclude: str = "") -> str:
+        """这个样本此刻在哪个没跑完的批次里（计划、排程、运行、保持、故障）；不在返回空串。"""
+        for run in self.samples.for_physical(physical_id):
+            if run.batch_id == exclude:
+                continue
+            other = self.batches.get(run.batch_id)
+            if other is not None and other.state not in {"done", "aborted"}:
+                return other.id
+        return ""
 
     def bottle_used_by(self, physical_id: str, exclude: str = "") -> str:
         """这个瓶子被哪个批次用过（返回批次号，没有返回空串）。配方表导入与建批次共用这一条口径。

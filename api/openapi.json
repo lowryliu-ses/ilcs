@@ -4611,6 +4611,15 @@
             "title": "Sample Ids",
             "type": "array"
           },
+          "sample_policy": {
+            "default": "fresh",
+            "enum": [
+              "fresh",
+              "continue"
+            ],
+            "title": "Sample Policy",
+            "type": "string"
+          },
           "seed": {
             "default": 1,
             "title": "Seed",
@@ -4824,6 +4833,21 @@
               }
             ],
             "title": "Sample Ids"
+          },
+          "sample_policy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "fresh",
+                  "continue"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Policy"
           },
           "seed": {
             "anyOf": [

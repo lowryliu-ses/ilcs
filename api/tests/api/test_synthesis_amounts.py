@@ -68,3 +68,46 @@ def test_mmol_and_equivalent_factors_are_dosed_in_grams(admin, researcher, qa, o
     assert done["state"] == "done", done["failure_reason"]
     consumed = {row["material"]: row["consumed_qty"] for row in done["reservations"]}
     assert consumed == {substrate: "0.458700", base: "0.420000"}, "下发换算后的量，模拟回报的消耗与预留一致"
+
+
+def _bottle_plan(researcher, recipe_id: str, material: str, bottles: list[str], policy: str) -> str:
+    plan = researcher.post("/api/plans", {
+        "name": f"接续 {policy}", "recipe_id": recipe_id, "plan_type": "matrix", "repeats": 1,
+        "factors": [{"name": "加料", "unit": "g", "levels": [0.2, 0.3], "target": {"step_id": "s01", "param": "mass"},
+                     "material": {"name": material, "unit": "g", "per": 1}}],
+        "design_points": [[0.2], [0.3]], "sample_ids": bottles, "sample_policy": policy, "required_metrics": [CAPACITY],
+    })
+    assert plan.status_code == 201, plan.text
+    assert plan.json()["sample_policy"] == policy
+    return plan.json()["id"]
+
+
+def test_continue_policy_lets_a_next_step_reuse_finished_products(admin, researcher, qa, operator, reset_runtime, executor):
+    """多步合成：上一批的产物接着做下一步。缺省一瓶一配方照旧挡住；声明「接着用」后允许已跑完的样本，没跑完的仍挡住。"""
+    from test_step_materials import _sample
+
+    uid = uuid4().hex[:6]
+    reagent = f"试剂-{uid}"
+    _lot(operator, qa, reagent)
+    recipe_id = _released(researcher, qa, [_dose("s01", "加料", reagent, material_param="mass")])
+    bottles = [_sample(operator), _sample(operator)]
+    first = _bottle_plan(researcher, recipe_id, reagent, bottles, "fresh")
+    _approve(researcher, qa, first)
+    batch_id = operator.post("/api/batches", {"plan_id": first}).json()["id"]
+
+    # 第一批还没跑：接着用也不行（同一时刻只在一处）
+    waiting = _bottle_plan(researcher, recipe_id, reagent, bottles, "continue")
+    _approve(researcher, qa, waiting)
+    busy = operator.post("/api/batches", {"plan_id": waiting})
+    assert busy.status_code == 409 and busy.json()["detail"]["code"] == "sample_in_use" and "没跑完" in busy.text
+
+    _dispatch(operator, batch_id)
+    assert _run(operator, batch_id, executor)["state"] == "done"
+    strict = _bottle_plan(researcher, recipe_id, reagent, bottles, "fresh")
+    _approve(researcher, qa, strict)
+    refused = operator.post("/api/batches", {"plan_id": strict})
+    assert refused.status_code == 409 and "同一瓶不能再次配液" in refused.text, "缺省仍是一瓶一配方"
+    reused = operator.post("/api/batches", {"plan_id": waiting})
+    assert reused.status_code == 201, reused.text
+    samples = operator.get(f"/api/batches/{reused.json()['id']}").json()["samples"]
+    assert sorted(row["physical_sample_id"] for row in samples) == sorted(bottles), "新批次的样本就是上一批的产物"

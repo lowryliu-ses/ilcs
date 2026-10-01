@@ -255,7 +255,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 （写了 `then_any` 时）之后还要再加其中一种的样本——指令的 `params.wells` 只列这些孔位；一个都没有时推进器不下发、记为跳过。
 配液模板生成的「加料后搅拌」都带它，每瓶的搅拌因此只由自己的配方决定。
 
-**配液模板**（`services/formulation_service.py` + `domain/formulation.py`，`/formulation-templates`，迁移 `0042`）。把一张配方表（xlsx / csv，`core/spreadsheet.py` 解析）按模板生成流程草稿与矩阵方案草稿：每行一瓶，序列号写进方案的指定样本；同结构的配方表沿用已发布流程。模板不走发布，受控点仍是生成出来的流程与方案的评审审批。一瓶一配方：配过液、已处置或已用尽的瓶子导入拒绝，已分配给另一个未终止批次的瓶子建批次拒绝。电解液产线的用法见 `docs/电解液配液线.md`。结构上可以按线调整、不用改代码：加料后步骤按类别（`routes.{类别}.stir`）或阶段（`stages[].stir`）各写一份，覆盖全局 `stir`（锂盐加完冷藏搅拌、添加剂加完涡旋，各走各的设备；要搅又三处都没写才报缺）；逐瓶参数列（`row_params`：表头、作用的固定设备步骤与参数、单位、可选缺省值）把表格里用量以外的列（终混温度、每瓶分装量）变成按孔位下发的方案因子，同配方不同参数是不同条件，空白格用缺省值、没有缺省值就是问题；阶段 `chain: false` 只接它 `after` 写的步骤、不接上一个阶段的尾巴，没汇合的尾巴由后面的阶段或后段第一步一起接上；阶段 `order: routes` 按 routes 里类别的先后加料（缺省按表格列顺序）；分装量核对（`volume_check`）优先用物料主数据登记的密度（换算「1 mL = x g」），没登记的才用模板的 `density`，按体积填的列直接相加，分装瓶数 / 每瓶分装量可以是实验参数也可以是逐瓶参数。模板在「实验设计 → 配液模板」里可视化编辑（`features/formulations/FormulationTemplatesPage.tsx`）：前后段固定步骤、阶段、类别的加法、各级加料后步骤、实验参数与逐瓶参数、分装量核对都有表单，步骤按能力登记的参数类型给控件（数值、选项、程序表），设备方法只列该能力已发布的；每改一处按当前主数据核一次（`POST /formulation-templates/check`，不保存），也可以上传一张配方表（`POST /formulation-templates/table` 只读成表格）按还没保存的配置试算——与导入同一套生成规则，不写库、不登记瓶子；可以从现有模板复制一份再改。
+**配液模板**（`services/formulation_service.py` + `domain/formulation.py`，`/formulation-templates`，迁移 `0042`）。把一张配方表（xlsx / csv，`core/spreadsheet.py` 解析）按模板生成流程草稿与矩阵方案草稿：每行一瓶，序列号写进方案的指定样本；同结构的配方表沿用已发布流程。模板不走发布，受控点仍是生成出来的流程与方案的评审审批。一瓶一配方：配过液、已处置或已用尽的瓶子导入拒绝，已分配给另一个未终止批次的瓶子建批次拒绝。多步合成要把上一批的产物接着做下一步时，方案声明「接着用上一步的产物」（`plans.sample_policy = continue`，迁移 `0047`）：上一批已跑完（完成或终止）的样本可以再进新批次，还在别的批次里没跑完的、已处置用尽的照样拒绝（`sample_in_use` / `sample_unusable`）。电解液产线的用法见 `docs/电解液配液线.md`。结构上可以按线调整、不用改代码：加料后步骤按类别（`routes.{类别}.stir`）或阶段（`stages[].stir`）各写一份，覆盖全局 `stir`（锂盐加完冷藏搅拌、添加剂加完涡旋，各走各的设备；要搅又三处都没写才报缺）；逐瓶参数列（`row_params`：表头、作用的固定设备步骤与参数、单位、可选缺省值）把表格里用量以外的列（终混温度、每瓶分装量）变成按孔位下发的方案因子，同配方不同参数是不同条件，空白格用缺省值、没有缺省值就是问题；阶段 `chain: false` 只接它 `after` 写的步骤、不接上一个阶段的尾巴，没汇合的尾巴由后面的阶段或后段第一步一起接上；阶段 `order: routes` 按 routes 里类别的先后加料（缺省按表格列顺序）；分装量核对（`volume_check`）优先用物料主数据登记的密度（换算「1 mL = x g」），没登记的才用模板的 `density`，按体积填的列直接相加，分装瓶数 / 每瓶分装量可以是实验参数也可以是逐瓶参数。模板在「实验设计 → 配液模板」里可视化编辑（`features/formulations/FormulationTemplatesPage.tsx`）：前后段固定步骤、阶段、类别的加法、各级加料后步骤、实验参数与逐瓶参数、分装量核对都有表单，步骤按能力登记的参数类型给控件（数值、选项、程序表），设备方法只列该能力已发布的；每改一处按当前主数据核一次（`POST /formulation-templates/check`，不保存），也可以上传一张配方表（`POST /formulation-templates/table` 只读成表格）按还没保存的配置试算——与导入同一套生成规则，不写库、不登记瓶子；可以从现有模板复制一份再改。
 
 **维护工单**（`services/maintenance_service.py`）。建单即登记维护占用（排程让路），开工资产转入维护状态（开跑检查拦截），完工写记录并签名；合格恢复原状态，不合格保持维护状态，取消恢复开工前状态。
 
@@ -325,6 +325,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0044_material_master_edit` | 物料主数据可维护：`materials` 加 `row_version`（乐观锁，已有行记为 1）与 `updated_at`（可空）。只加列，已有数据不变 |
 | `0045_report_templates` | 组织报告模板：新表 `report_templates`（组织、模板键、版本、章节清单 JSON、状态 草稿 / 已发布 / 已退役、起草人与发布人），`(org_id, key, version)` 唯一。只加表，已有报告的模板快照不变 |
 | `0046_result_series` | 曲线型检测值：`result_values` 加 `value_series`（JSON，`{traces: [{name, x, y}]}`）。只加列，已有结果不变 |
+| `0047_plan_sample_policy` | 方案指定的样本可以接着用上一步的产物：`plans` 加 `sample_policy`（fresh 一瓶一配方 / continue 接着用），已有方案都是 fresh |
 
 规则：
 

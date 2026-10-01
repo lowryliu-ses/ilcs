@@ -42,10 +42,10 @@ SNAPSHOT_LABELS = {
     "name": "名称", "plan_type": "方案类型", "goal": "目的", "recipe_id": "实验流程", "method_version": "流程版本",
     "factors": "因子与水平", "control": "对照", "repeats": "重复次数", "layout": "布局", "seed": "随机种子",
     "design_points": "设计点", "design_space": "设计空间", "sample_count": "样本数", "sample_ids": "样本清单",
-    "required_metrics": "检测指标", "resource_requirements": "资源需求",
+    "sample_policy": "样本用法", "required_metrics": "检测指标", "resource_requirements": "资源需求",
 }
 RESTORABLE = ("name", "goal", "factors", "control", "repeats", "layout", "seed", "design_points", "design_space",
-              "sample_count", "sample_ids", "required_metrics", "resource_requirements")
+              "sample_count", "sample_ids", "sample_policy", "required_metrics", "resource_requirements")
 TEMPLATE_FIELDS = ("goal", "factors", "control", "repeats", "layout", "seed", "design_space", "sample_count",
                    "required_metrics", "resource_requirements")
 
@@ -600,6 +600,7 @@ class PlanService:
             "seed": plan.seed,
             "sample_count": self.sample_total(plan),
             "sample_ids": plan.sample_ids or [],
+            "sample_policy": plan.sample_policy or "fresh",
             "required_metrics": plan.required_metrics or [],
             "resource_requirements": plan.resource_requirements or [],
             "method_version": plan.method_version,
@@ -707,6 +708,7 @@ class PlanService:
             design_points=payload.get("design_points") or [],
             sample_count=payload.get("sample_count", 0),
             sample_ids=payload.get("sample_ids") or [],
+            sample_policy=payload.get("sample_policy") or "fresh",
             required_metrics=payload.get("required_metrics") or [],
             resource_requirements=payload.get("resource_requirements") or [],
             method_version=recipe.version,
@@ -1097,7 +1099,8 @@ class PlanService:
                 "layout": plan.layout, "seed": plan.seed, "factors": plan.factors,
                 "design_points": plan.design_points or [], "design_space": plan.design_space or {},
                 "control": plan.control, "sample_count": plan.sample_count,
-                "sample_ids": plan.sample_ids, "required_metrics": plan.required_metrics,
+                "sample_ids": plan.sample_ids, "sample_policy": plan.sample_policy or "fresh",
+                "required_metrics": plan.required_metrics,
                 "resource_requirements": plan.resource_requirements,
                 "recipe_id": plan.recipe_id, "method_version": plan.method_version,
             }

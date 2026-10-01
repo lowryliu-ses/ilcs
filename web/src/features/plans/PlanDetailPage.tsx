@@ -242,7 +242,8 @@ export function PlanDetailPage() {
             重复 {data.repeats} 次 · 布局 {data.layout === 'randomized' ? `随机化（种子 ${data.seed}）` : '顺序'} ·
             对照 {data.control?.label ?? '未设'} ·{' '}
             {data.sample_ids.length
-              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）`
+              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）${
+                data.sample_policy === 'continue' ? '，接着用上一步的产物' : '，一瓶一配方'}`
               : '未指定物理样本：每个运行登记新样本'}
           </div>
         </Panel>
@@ -1002,6 +1003,7 @@ function FactorEditor({
   /* 方案指定了物理样本时，瓶子按「条件顺序 × 重复号」对应；改了重复次数或因子水平，对应关系就变了，
      条数也可能对不上（锁定校验会拦）。给个清除的出口，免得只能重新导入配方表才能再锁定。 */
   const [clearSamples, setClearSamples] = useState(false);
+  const [samplePolicy, setSamplePolicy] = useState<'fresh' | 'continue'>(plan.sample_policy ?? 'fresh');
   const structureKey = (list: Factor[]) => JSON.stringify(list.map((factor) => factor.levels));
   /* 已保存的方案本身就对不上（例如之前改重复次数时没勾清除）：照样给出清除的出口，否则只能改回旧值再改 */
   const alreadyMismatched = plan.sample_ids.length > 0 && plan.sample_ids.length !== plan.conditions.length * Math.max(1, plan.repeats);
@@ -1061,6 +1063,7 @@ function FactorEditor({
         repeats: repeats === '' ? 1 : repeats,
         layout,
         seed: seed === '' ? 1 : seed,
+        sample_policy: samplePolicy,
         ...(mappingChanged && clearSamples ? { sample_ids: [] } : {}),
       })
       .catch((caught) => toast.push(caught.message));
@@ -1113,6 +1116,14 @@ function FactorEditor({
           <NumberInput value={seed} disabled={layout !== 'randomized'} onChange={setSeed} />
         </Field>
       </div>
+      {plan.sample_ids.length ? (
+        <Field label="指定样本的用法" hint="多步合成：上一批的产物接着做下一步反应时选「接着用」；没跑完的、已处置用尽的样本照样不能进新批次">
+          <select value={samplePolicy} onChange={(event) => setSamplePolicy(event.target.value as 'fresh' | 'continue')}>
+            <option value="fresh">一瓶一配方（用过的瓶子不能再进新批次）</option>
+            <option value="continue">接着用上一步的产物（允许上一批已跑完的样本）</option>
+          </select>
+        </Field>
+      ) : null}
 
       <div>
         <div className="small muted" style={{ marginBottom: 6 }}>

@@ -620,6 +620,8 @@ export type PlanSummary = {
   layout: string;
   seed: number;
   sample_ids: string[];
+  /** 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成） */
+  sample_policy?: 'fresh' | 'continue';
   required_metrics: string[];
   resource_requirements: Record<string, unknown>[];
   method_version: string;

@@ -458,6 +458,8 @@ class PlanCreateIn(BaseModel):
     design_points: list[list[Any]] = []
     sample_count: int = Field(default=0, ge=0, le=96)
     sample_ids: list[str] = []
+    # 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成）
+    sample_policy: Literal["fresh", "continue"] = "fresh"
     required_metrics: list[str] = []
     resource_requirements: list[dict[str, Any]] = []
 
@@ -478,6 +480,7 @@ class PlanPatchIn(Versioned):
     design_space: dict[str, Any] | None = None
     design_points: list[list[Any]] | None = None
     sample_count: int | None = Field(default=None, ge=0, le=96)
+    sample_policy: Literal["fresh", "continue"] | None = None
     sample_ids: list[str] | None = None
     required_metrics: list[str] | None = None
     resource_requirements: list[dict[str, Any]] | None = None
