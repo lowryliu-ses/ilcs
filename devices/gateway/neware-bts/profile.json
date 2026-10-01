@@ -1,0 +1,44 @@
+{
+  "format": "ilcs-device-template/1",
+  "code": "TPL-NEWARE-BTS",
+  "revision": 1,
+  "name": "Neware 充放电柜（BTS 8.0 接口网关）",
+  "model": "BTS 8.0",
+  "vendor": "Neware",
+  "driver": "http_json_v1",
+  "protocol": "HTTPS JSON（BTS 8.0 TCP XML 接口网关）",
+  "version": "neware-bts 0.1",
+  "config": {
+    "verify_tls": true,
+    "heartbeat_mode": "probe",
+    "connect_timeout_sec": 3,
+    "request_timeout_sec": 10,
+    "probe_interval_sec": 10,
+    "paths": {
+      "health": "/health",
+      "submit": "/commands",
+      "query": "/commands/{command_id}",
+      "hold": "/commands/{command_id}/hold",
+      "abort": "/commands/{command_id}/abort"
+    },
+    "idempotency_header": "Idempotency-Key"
+  },
+  "connection": {
+    "base_url": "https://neware-gw.lab.internal:8443/api/v1",
+    "ca_file": "/run/secrets/ilcs/gateway/<设备编号>.crt",
+    "expected_device_id": "<设备编号>"
+  },
+  "supports": {
+    "hold": false,
+    "abort": true,
+    "query": true,
+    "dedup": true
+  },
+  "acceptance": {
+    "capability": "cap.test",
+    "params": {}
+  },
+  "note": "设备模块 devices/gateway/neware-bts：网关跑在 BTS 那台 Windows 机器上，经 aurora-neware 走 BTS 8.0 的 TCP XML 接口；按 ILCS 指令号去重、可按指令号查询，条码 ILCS-<指令号摘要> 认作业。工步在 BTS 工步文件里定，指令只带通道（channel）。BTS 接口不做保持。动作级验收要在网关配置里打开 auto_channel、白名单只留装了假电池的通道。凭据是网关令牌文件（credential_ref）。",
+  "state": "draft",
+  "digest": "sha256:b2299f7e5222070f8a65f6e86e065e64691f189197a9265b95aa4596e9504582"
+}

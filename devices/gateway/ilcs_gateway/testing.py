@@ -40,8 +40,10 @@ def _ilcs_settings(credential_root: Path, state_root: Path):
 
 def acceptance(base_url: str, *, token_file: str | Path, ca_file: str | Path | None = None, capability: str,
                params: dict[str, Any], expected_device_id: str = "", physical: bool = True, faults: bool = True,
-               timeout: float = 15.0, state_root: str | Path | None = None):
-    """返回 ILCS 的验收报告（`app.adapters.acceptance.Report`）。`token_file`、`ca_file` 要在同一个目录里。"""
+               timeout: float = 15.0, state_root: str | Path | None = None, supports: dict[str, bool] | None = None):
+    """返回 ILCS 的验收报告（`app.adapters.acceptance.Report`）。`token_file`、`ca_file` 要在同一个目录里。
+
+    `supports` 与 profile.json 的同名字段一致（如 `{"hold": False}`）：声明不支持的项目验收记为跳过，缺省全支持。"""
     token_file = Path(token_file)
     credential_root = token_file.parent
     state = Path(state_root) if state_root else credential_root / "ilcs-ledger"
@@ -62,8 +64,9 @@ def acceptance(base_url: str, *, token_file: str | Path, ca_file: str | Path | N
             if faults else None
         template = CommandRequest(command_id="", station_id=record.station_id, capability=capability, params=params,
                                   type="dispatch", batch_id="ACCEPTANCE", step_index=0, step_id="acceptance")
-        contract = {"protocol": record.protocol, "version": record.version, "supports_hold": True,
-                    "supports_abort": True, "supports_query": True, "supports_dedup": True}
+        contract = {"protocol": record.protocol, "version": record.version,
+                    **{f"supports_{key}": bool((supports or {}).get(key, True))
+                       for key in ("hold", "abort", "query", "dedup")}}
         return run_acceptance(record, lambda: HttpJsonAdapter(record), template, contract=contract,
                               describe=lambda instance: describe(instance, record), physical=physical,
                               injector=injector, poll_timeout=timeout, poll_interval=0.1)

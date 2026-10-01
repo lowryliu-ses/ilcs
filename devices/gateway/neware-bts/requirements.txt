@@ -1,0 +1,6 @@
+# 网关跑在 BTS 那台 Windows 机器上要装的。ILCS 仓库的 api/ 不依赖这些。
+# aurora-neware（MIT，Empa）：BTS 8.0 TCP XML 接口的客户端。driver/bts.py 用到了它的内部细节，版本固定，
+# 升级前先跑 tests/test_bts_wire.py
+aurora-neware==0.2.3
+# 自签证书（现场签发证书时可以不装）
+cryptography==50.0.1
