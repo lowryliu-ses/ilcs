@@ -1139,7 +1139,7 @@ function FactorEditor({
                 <Field
                   label="单位"
                   hint={optionsOf(factor) ? '选项型参数没有单位'
-                    : '可以按 mmol 或 eq（当量）给：建批次时按物料登记的摩尔质量 / 密度 / 浓度换成设备参数的单位'}
+                    : 'mmol、eq 按物料登记的换算转成设备单位'}
                 >
                   <input
                     value={factor.unit ?? ''}
