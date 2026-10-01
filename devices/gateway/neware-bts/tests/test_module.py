@@ -4,14 +4,16 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 
 import pytest
 
-from ilcs_gateway import Job, Rejected, serve
+from ilcs_gateway import Job, ReceiptLost, Rejected, serve
 from ilcs_gateway.testing import acceptance
 
+from driver.bts_api import BtsRefused
 from driver.config import Config
 from driver.device import CAPABILITY, Instrument, barcode_of
 from simulator.fake_bts import FakeBts, default_config
@@ -218,3 +220,133 @@ def test_simulated_run_finishes():
     time.sleep(0.1)
     status = device.status(started)
     assert status.state == "done" and status.actuals["capacity"] > 0
+
+
+# ---------- 一条指令几颗电芯（ILCS 逐孔参数 wells） ----------
+
+def wells_job(command_id: str, wells: dict, **params) -> Job:
+    return Job(command_id=command_id, capability=CAPABILITY, params={"wells": wells, **params},
+               method={"program": "CC-CV"})
+
+
+def test_each_well_starts_its_own_channel_with_its_own_barcode():
+    device, bts = instrument(auto_channel=False)
+    started = wells_job("CMD-W", {"A1": {"channel": 3}, "A2": {"channel": 5.0}, "A3": {"channel": "1-1-1"}})
+    started.handle = device.start(started)
+    assert json.loads(started.handle) == {"A1": "1-1-3", "A2": "1-1-5", "A3": "1-1-1"}
+    rows = bts.channels(["1-1-3", "1-1-5", "1-1-1"])
+    assert {rows[p]["barcode"] for p in rows} == {barcode_of("CMD-W", w) for w in ("A1", "A2", "A3")}
+    assert bts.faults.motions == 3
+    status = device.status(started)
+    assert status.state == "running" and set(status.actuals["wells"]) == {"A1", "A2", "A3"}
+    assert status.actuals["wells"]["A2"]["channel"] == "1-1-5"
+    assert {point["metric"] for point in status.telemetry} >= {"voltage@A1", "current@A3"}
+
+
+def test_wells_fall_back_to_the_step_channel_but_never_share_one():
+    device, bts = instrument(auto_channel=False)
+    assert json.loads(device.start(wells_job("CMD-1", {"A1": {}}, channel=2))) == {"A1": "1-1-2"}
+    with pytest.raises(Rejected, match="一个通道只能放一颗电芯"):
+        device.start(wells_job("CMD-2", {"B1": {"channel": 4}, "B2": {"channel": 4}}))
+    with pytest.raises(Rejected, match="一个通道只能放一颗电芯"):
+        device.start(wells_job("CMD-3", {"C1": {"channel": 6}, "C2": {}}, channel=6))
+    with pytest.raises(Rejected, match="孔位 D2"):
+        device.start(wells_job("CMD-4", {"D1": {"channel": 7}, "D2": {}}))
+    assert bts.faults.motions == 1
+
+
+@pytest.mark.parametrize("wells", [{}, {"A1": 3}, {"A1": {"channel": 1, "rate": 1}}, {"": {"channel": 1}}])
+def test_malformed_wells_are_rejected(wells):
+    device, bts = instrument()
+    with pytest.raises(Rejected) as caught:
+        device.start(wells_job("CMD-X", wells))
+    assert caught.value.kind == "invalid" and bts.faults.motions == 0
+
+
+def test_one_busy_channel_blocks_the_whole_command():
+    device, bts = instrument(auto_channel=False)
+    device.start(job("CMD-A", channel=2))
+    with pytest.raises(Rejected) as busy:
+        device.start(wells_job("CMD-W", {"A1": {"channel": 1}, "A2": {"channel": 2}}))
+    assert busy.value.kind == "busy" and bts.faults.motions == 1, "一个都不启动"
+
+
+def test_auto_channel_gives_each_well_a_distinct_free_channel():
+    device, bts = instrument(channels=3)
+    device.start(job("CMD-A", channel=2))
+    layout = json.loads(device.start(wells_job("CMD-W", {"A1": {}, "A2": {"channel": 3}})))
+    assert layout == {"A1": "1-1-1", "A2": "1-1-3"}
+    with pytest.raises(Rejected, match="空闲的白名单通道只有 0 个"):
+        device.start(wells_job("CMD-X", {"B1": {}}))
+
+
+def test_partial_start_is_unknown_not_a_rejection():
+    """第二个通道被 BTS 拒：第一个已经在跑了，不能报「没动」，也不自动去停它。"""
+    device, bts = instrument(auto_channel=False)
+    original = bts.start
+
+    def refuse_second(pipeline, barcode, step_file, save_dir):
+        if pipeline == "1-1-2":
+            raise BtsRefused("通道保护中")
+        original(pipeline, barcode, step_file, save_dir)
+
+    bts.start = refuse_second
+    command = wells_job("CMD-P", {"A1": {"channel": 1}, "A2": {"channel": 2}})
+    with pytest.raises(RuntimeError, match="只做了一部分"):
+        device.start(command)
+    assert bts.channels(["1-1-1"])["1-1-1"]["workstatus"] == "working"
+    assert device.lookup(command) is None, "只找到一部分：不认，交人核查"
+
+
+def test_multi_well_status_waits_for_every_cell_and_names_the_failed_one():
+    device, bts = instrument(auto_channel=False)
+    started = wells_job("CMD-W", {"A1": {"channel": 1}, "A2": {"channel": 2}})
+    started.handle = device.start(started)
+    bts.manual("1-1-1", workstatus="finish")
+    assert device.status(started).state == "running"
+    bts.manual("1-1-2", workstatus="protect")
+    failed = device.status(started)
+    assert failed.state == "failed" and "孔位 A2 1-1-2 BTS 保护停机" in failed.error
+    bts.manual("1-1-2", workstatus="finish")
+    done = device.status(started)
+    assert done.state == "done" and done.error == ""
+    assert done.actuals["wells"]["A1"]["capacity"] >= 0 and done.actuals["wells"]["A2"]["bts_barcode"] == barcode_of("CMD-W", "A2")
+
+
+def test_multi_well_abort_stops_only_this_commands_cells():
+    device, bts = instrument(auto_channel=False)
+    started = wells_job("CMD-W", {"A1": {"channel": 1}, "A2": {"channel": 2}})
+    started.handle = device.start(started)
+    bts.manual("1-1-2", workstatus="working", barcode="MANUAL-CELL-09")
+    device.abort(started)
+    rows = bts.channels(["1-1-1", "1-1-2"])
+    assert rows["1-1-1"]["workstatus"] == "stop" and rows["1-1-2"]["workstatus"] == "working"
+
+
+def test_lost_receipt_on_a_multi_well_start_is_found_again_by_barcodes():
+    device, bts = instrument(auto_channel=False)
+    bts.faults.set_fault("lost_receipt")
+    command = wells_job("CMD-L", {"A1": {"channel": 4}, "A2": {"channel": 6}})
+    with pytest.raises(ReceiptLost) as lost:
+        device.start(command)
+    assert json.loads(lost.value.handle) == {"A1": "1-1-4", "A2": "1-1-6"} and bts.faults.motions == 2
+    assert device.lookup(command) == lost.value.handle
+
+
+def test_gateway_runs_a_multi_well_command_end_to_end(tmp_path: Path):
+    config = Config.parse({**default_config(), "auto_channel": False})
+    bts = FakeBts(list(config.channels), run_seconds=0.2)
+    server = serve(Instrument(bts, config), device_id=DEVICE_ID, state_dir=tmp_path / "state", address="127.0.0.1",
+                   port=0, token_file=tmp_path / "s" / "t.token", cert=tmp_path / "s" / "c.crt",
+                   key=tmp_path / "s" / "k.key", host_name="localhost")
+    try:
+        body = {"command_id": "CMD-E2E", "capability": CAPABILITY, "method": {"program": "CC-CV"},
+                "params": {"wells": {"A1": {"channel": 1.0}, "A2": {"channel": 2.0}}}}
+        assert server.gateway.submit(body)["state"] == "running"
+        time.sleep(0.3)
+        receipt = server.gateway.query("CMD-E2E")
+        assert receipt["state"] == "done", receipt
+        assert set(receipt["delivered"]["wells"]) == {"A1", "A2"}
+        assert server.gateway.submit(body)["state"] == "done" and bts.faults.motions == 2, "重投回放，不再启动"
+    finally:
+        server.stop()

@@ -1,0 +1,27 @@
+{
+  "device_id": "SIM-NW-BTS-01",
+  "model": "CT-4008T-5V6A",
+  "vendor": "Neware",
+  "channels": [
+    "21-1-1",
+    "21-1-2",
+    "21-1-3",
+    "21-1-4",
+    "21-1-5",
+    "21-1-6",
+    "21-1-7",
+    "21-1-8"
+  ],
+  "auto_channel": false,
+  "programs": {
+    "CC-CV": {
+      "name": "恒流恒压循环",
+      "file": "/opt/gateway/module/simulator/steps/CC-CV.xml"
+    },
+    "GITT": {
+      "name": "恒电流间歇滴定",
+      "file": "/opt/gateway/module/simulator/steps/GITT.xml"
+    }
+  },
+  "default_program": "CC-CV"
+}
