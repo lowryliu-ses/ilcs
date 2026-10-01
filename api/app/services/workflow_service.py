@@ -534,8 +534,11 @@ class WorkflowService:
                 continue
             latest[row.step_id] = row
         status = {step_id: row.state for step_id, row in latest.items()}
+        # 按样本分流的分支一次选中几个出口（form_data.cases）；其余分支只有一个出口（conclusion）
         chosen = {
-            step_id: row.conclusion for step_id, row in latest.items()
+            step_id: (list((row.form_data or {}).get("cases") or []) if (row.form_data or {}).get("per_sample") is not None
+                      else row.conclusion)
+            for step_id, row in latest.items()
             if row.kind == BRANCH and row.state == workflow.COMPLETED and row.conclusion
         }
         return status, chosen
@@ -1031,6 +1034,8 @@ class WorkflowService:
         if config.get("mode") == "manual":
             run.reason = "等待人工选择出口"
             return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_choice": True}
+        if config.get("per_sample"):
+            return self._evaluate_per_sample(batch, run, index)
         value, evidence = self._branch_value(batch, config)
         run.form_data = {"field": config.get("field"), "value": value, "evidence": evidence, "mode": config.get("mode")}
         case = match_case(step, value)
@@ -1041,6 +1046,66 @@ class WorkflowService:
             )
             return self._branch_hold(batch, run, f"{reason}，且没有默认出口")
         return self._take_branch(batch, run, index, case, auto=True)
+
+    def _sample_values(self, batch: Batch, config: dict) -> tuple[dict, str]:
+        """按样本分流的判据：来源设备步骤最近检查点里每个孔位的读数，孔位按这一步当时的处理对象换成样本。
+        某孔没有这项读数就用整批的读数（设备只报了一个值）。返回 ({运行分配: 值}, 检查点编号)。"""
+        from ..repositories.execution import CheckpointRepository
+        from .batch_service import BatchService
+
+        steps = self.steps_of(batch)
+        ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+        source = str(config.get("source_step_id") or "")
+        field = str(config.get("field") or "")
+        if source not in ids:
+            return {}, ""
+        checkpoint = CheckpointRepository(self.db).latest_for_step(batch.id, ids.index(source))
+        delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
+        wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
+        targets = BatchService(self.db, self.ctx)._step_targets(batch, steps[ids.index(source)]) or {}
+        values = {}
+        for well, sample in targets.items():
+            row = wells.get(well) if isinstance(wells.get(well), dict) else {}
+            values[sample.id] = row.get(field, delivered.get(field))
+        return values, checkpoint.id if checkpoint else ""
+
+    def _evaluate_per_sample(self, batch: Batch, run: StepRun, index: int, assign: dict[str, str] | None = None,
+                             reason: str = "") -> dict:
+        """按样本分流：每个样本按自己的读数选出口，有样本的出口都开出，各条路只处理分到它的样本。
+        有样本对不上任何出口、又没有默认出口时保持，待 QA 给这些样本选出口（`assign`）。"""
+        step = run.step_snapshot or {}
+        config = branch_config(step)
+        values, evidence = self._sample_values(batch, config)
+        routing: dict[str, list[str]] = {}
+        unrouted: list[str] = []
+        for sample_id, value in sorted(values.items()):
+            case = (assign or {}).get(sample_id) or match_case(step, value)
+            if case is None:
+                unrouted.append(sample_id)
+            else:
+                routing.setdefault(case, []).append(sample_id)
+        run.form_data = {**(run.form_data or {}), "field": config.get("field"), "mode": "measure", "evidence": evidence,
+                         "values": values, "per_sample": routing, "unrouted": unrouted}
+        if not values:
+            return self._branch_hold(batch, run, f"判据 {config.get('field')} 没有任何样本的读数，且没有默认出口")
+        if unrouted:
+            return self._branch_hold(
+                batch, run,
+                f"{len(unrouted)} 个样本（{'、'.join(unrouted[:4])}{'…' if len(unrouted) > 4 else ''}）的 {config.get('field')} "
+                f"没有取值或不满足任何出口条件，且没有默认出口",
+            )
+        cases = [str(case.get("key")) for case in branch_cases(step) if str(case.get("key")) in routing]
+        run.conclusion = "、".join(cases)
+        run.form_data = {**run.form_data, "cases": cases, "decision_reason": reason}
+        summary = "；".join(f"{case_label(step, case)} {len(routing[case])} 个" for case in cases)
+        self._close_run(run, workflow.COMPLETED, f"按样本分流：{summary}" + (f"（{reason}）" if reason else ""))
+        self.audit.record(
+            None, "条件分支按样本分流", batch.id, before="待判定", after=summary,
+            detail=f"{step.get('name') or '条件分支'}：判据 {config.get('field')}；没分到样本的出口不走",
+        )
+        outcome = self._advance(run, batch)
+        self._roll(batch, f"条件分支「{step.get('name') or ''}」按样本分流")
+        return outcome
 
     def _loops_done(self, batch_id: str, step_id: str, case: str) -> int:
         return len([
@@ -1225,6 +1290,12 @@ class WorkflowService:
                 batch.state = "running"
                 batch.held_at = None
                 batch.failure_reason = ""
+        if branch_config(step).get("per_sample"):
+            # 按样本分流：人工选的出口只给对不上的那些样本，其余样本照读数走
+            assign = {sample_id: case for sample_id in (run.form_data or {}).get("unrouted") or []}
+            outcome = self._evaluate_per_sample(batch, run, run.step_index, assign, reason)
+            self.db.commit()
+            return {"step_run": self.run_out(run), "advance": outcome}
         outcome = self._take_branch(batch, run, run.step_index, case, auto=False, reason=reason)
         self.db.commit()
         return {"step_run": self.run_out(run), "advance": outcome}

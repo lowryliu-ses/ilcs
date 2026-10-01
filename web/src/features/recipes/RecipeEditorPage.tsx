@@ -2427,6 +2427,13 @@ function BranchFields({
           <option value="form">上游人工记录字段</option>
         </select>
       </Field>
+      {mode === 'measure' ? (
+        <label className="check">
+          <input type="checkbox" checked={Boolean(config.per_sample)} disabled={readOnly}
+            onChange={(event) => set({ per_sample: event.target.checked || undefined })} />
+          按样本分流：每个样本按自己孔位上的读数走自己的出口，有样本的出口都走，各条路只处理分到的样本，汇合后又是全部样本（只往前走、不能回环）
+        </label>
+      ) : null}
       {mode !== 'manual' ? (
         <div className="grid cols-2">
           <Field label="判据来源（上游步骤）">

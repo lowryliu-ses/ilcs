@@ -9,6 +9,8 @@
   排列与执行顺序对得上。编辑器拖线建依赖时会自动按拓扑序重排列表。
 
 条件分支（`kind: branch`）让出边带条件：后继用 `when: {分支步骤: 出口}` 声明它在哪个出口上。
+按样本分流的分支（`branch.per_sample`）一次可以选中几个出口：每个样本按自己的读数走自己的出口，
+有样本的出口都开出，各条路上的步骤只处理分到这条路的样本（`sample_scopes`），汇合之后又是全部样本。
 推进按「死路剪除」判定每个步骤：
 
 - 入边**生效**：前驱已完成 / 已跳过，且（前驱不是分支，或分支选中的出口就是这条边的出口）；
@@ -241,7 +243,9 @@ def frontier(
                 if parent_state in PASSED:
                     case = conditions.get(ids[parent])
                     if kind_of(steps[parent]) == BRANCH and case is not None:
-                        edges.append("active" if chosen.get(ids[parent]) == case else "dead")
+                        picked = chosen.get(ids[parent])
+                        hit = case in picked if isinstance(picked, (list, tuple, set, frozenset)) else picked == case
+                        edges.append("active" if hit else "dead")
                     else:
                         edges.append("active")
                 elif parent_state == NOT_TAKEN:
@@ -262,6 +266,26 @@ def frontier(
                 status[step_id] = NOT_TAKEN
                 changed = True
     return to_open, to_prune
+
+
+def sample_scopes(steps: list[dict[str, Any]], index: int) -> dict[str, set[str]]:
+    """这一步只处理哪些出口的样本：{按样本分流的分支: 出口集合}。
+
+    从分支某个出口进来（`when: {分支: 出口}` 的步骤是这一步自己或它的祖先）才算这条路上；分支的全部
+    往前走的出口都汇到这一步（汇合之后）就不再限定，不出现在结果里。不在任何按样本分流的分支下游返回空。"""
+    from .steps import per_sample_branch
+
+    ids = [step_id_of(step, position) for position, step in enumerate(steps)]
+    lineage = ancestors(steps, index) | {index}
+    scopes: dict[str, set[str]] = {}
+    for position, step in enumerate(steps):
+        if kind_of(step) != BRANCH or not per_sample_branch(step) or position not in lineage or position == index:
+            continue
+        branch_id = ids[position]
+        reached = {when_of(steps[member]).get(branch_id) for member in lineage} - {None}
+        if reached and reached != set(forward_case_keys(step)):
+            scopes[branch_id] = reached
+    return scopes
 
 
 def ready_after(

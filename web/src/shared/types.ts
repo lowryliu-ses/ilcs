@@ -112,6 +112,8 @@ export type BranchConfig = {
   cases?: BranchCase[];
   default?: string;
   max_loops?: number;
+  /** 按样本分流：每个样本按自己孔位上的读数走自己的出口（只按测量值、不回环），各条路只处理分到的样本 */
+  per_sample?: boolean;
 };
 export type BranchCase = {
   key: string;

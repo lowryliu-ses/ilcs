@@ -31,7 +31,7 @@ from ..domain.permissions import ROLE_NAMES
 from ..domain.resources import Window, evaluate_steps
 from ..domain.scheduling import WORK
 from ..domain.steps import (
-    DEVICE, KIND_NAMES, applies_to, consumes_materials, kind_of, needs_station, normalize, resource_demand,
+    BRANCH, DEVICE, KIND_NAMES, applies_to, consumes_materials, kind_of, needs_station, normalize, resource_demand,
     step_id_of,
 )
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
@@ -1590,6 +1590,8 @@ class BatchService:
         rule = applies_to(step)
         if rule is not None:
             return self._covered_params(batch, step, step_id, rule, frozen)
+        if self._scope_filter(batch, step) is not None:
+            return self._scoped_params(batch, step, step_id, frozen)
         if not frozen:
             return None
         factors = (batch.plan_snapshot or {}).get("factors") or []
@@ -1603,6 +1605,73 @@ class BatchService:
             }
             return projected or None
         return {well: values for well, values in frozen.items() if well in targets}
+
+    def _scoped_params(self, batch: Batch, step: dict, step_id: str, frozen: dict | None) -> dict:
+        """按样本分流之后、汇合之前的步骤：只带分到这条路的样本的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
+        一个都没有时返回空 dict——不能退回「不带孔位 = 整批都做」。"""
+        from ..domain.matrix import step_condition
+
+        targets, physical = self._step_projection(batch, step)
+        if not targets:
+            return {}
+        factors = (batch.plan_snapshot or {}).get("factors") or []
+        fixed = dict(step.get("params") or {})
+        return {
+            well: {**fixed, **(step_condition(factors, step_id, list(sample.levels or [])) if physical
+                               else dict((frozen or {}).get(well) or {}))}
+            for well, sample in targets.items()
+        }
+
+    def _branch_routing(self, batch: Batch) -> dict[str, dict[str, str]]:
+        """按样本分流的分支把每个样本分到了哪个出口：{分支步骤: {运行分配: 出口}}，取每个分支最新一次完成的分流。"""
+        from ..domain import workflow as states
+        from ..models import StepRun
+
+        routing: dict[str, dict[str, str]] = {}
+        rows = self.db.query(StepRun).filter(StepRun.batch_id == batch.id, StepRun.kind == BRANCH,
+                                             StepRun.state == states.COMPLETED).order_by(StepRun.attempt).all()
+        for row in rows:
+            groups = (row.form_data or {}).get("per_sample")
+            if isinstance(groups, dict):
+                routing[row.step_id] = {sample: case for case, samples in groups.items() for sample in samples or []}
+        return routing
+
+    def _scope_filter(self, batch: Batch, step: dict):
+        """这一步在按样本分流的分支下游、汇合之前：返回「这个样本走不走这条路」的判定；不受限返回 None。
+        拆分出的子样本跟着母样走（按物理样本的谱系找到这批里的母样）。"""
+        steps = self.steps_of(batch)
+        step_id = step_id_of(step, 0) if step.get("step_id") else ""
+        position = next((index for index, row in enumerate(steps) if row is step
+                         or (step_id and step_id_of(row, index) == step_id)), None)
+        if position is None:
+            return None
+        scopes = dag.sample_scopes(steps, position)
+        if not scopes:
+            return None
+        routing = self._branch_routing(batch)
+        by_physical = {row.physical_sample_id: row.id for row in self.samples.for_batch(batch.id) if row.physical_sample_id}
+
+        def lineage(sample: Sample) -> list[str]:
+            names, physical_id, seen = [sample.id], sample.physical_sample_id, set()
+            while physical_id and physical_id not in seen:
+                seen.add(physical_id)
+                record = self.physical.get(physical_id)
+                physical_id = record.parent_id if record is not None else None
+                if physical_id and physical_id in by_physical:
+                    names.append(by_physical[physical_id])
+            return names
+
+        def allowed(sample: Sample) -> bool:
+            for branch_id, cases in scopes.items():
+                mapping = routing.get(branch_id)
+                if mapping is None:
+                    continue  # 分支还没分流（下游步骤要等分支完成才开，正常不会走到）
+                case = next((mapping[name] for name in lineage(sample) if name in mapping), None)
+                if case not in cases:
+                    return False
+            return True
+
+        return allowed
 
     def _covered_params(self, batch: Batch, step: dict, step_id: str, rule: tuple, frozen: dict | None) -> dict:
         """按瓶限定（`applies_to`）的步骤：只带在指定投料步骤真加了料的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
@@ -1656,6 +1725,16 @@ class BatchService:
         return self._step_projection(batch, step)[0]
 
     def _step_projection(self, batch: Batch, step: dict) -> tuple[dict[str, Sample] | None, bool]:
+        """这一步的处理对象（见 `_board_projection`），再按样本分流限定到分到这条路的样本。"""
+        targets, physical = self._board_projection(batch, step)
+        if not targets:
+            return targets, physical
+        allowed = self._scope_filter(batch, step)
+        if allowed is None:
+            return targets, physical
+        return {well: sample for well, sample in targets.items() if allowed(sample)}, physical
+
+    def _board_projection(self, batch: Batch, step: dict) -> tuple[dict[str, Sample] | None, bool]:
         """按这一步用的那块板上此刻在途的样本投影：返回（设备孔位 → 在用样本，是否来自实体占用）。
 
         板上有这批样本的在途占用就按实体孔位投影；板上有占用却没有一个在用样本、或这一步用另一块板而

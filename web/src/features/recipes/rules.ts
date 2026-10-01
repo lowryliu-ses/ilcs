@@ -605,6 +605,10 @@ function branchIssues(step: RecipeStep, steps: RecipeStep[], index: number): str
       issues.push(`${label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤`);
     }
   });
+  if (config.per_sample) {
+    if (config.mode !== 'measure') issues.push('按样本分流只能按上游设备的测量值：每个样本要有自己孔位上的读数');
+    if (cases.some((c) => c.loop_to)) issues.push('按样本分流的分支只能往前走、不能回环：各样本走的路不同，重做会把别的样本一起带回去');
+  }
   const fallback = config.default ?? '';
   if (fallback && !seen.has(fallback)) issues.push(`默认出口 ${fallback} 不存在`);
   if (fallback && cases.some((c) => c.key === fallback && c.loop_to)) issues.push('默认出口不能是回环：判据缺失时不应自动重做上游步骤');

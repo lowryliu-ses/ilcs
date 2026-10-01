@@ -404,6 +404,11 @@ def branch_config(step: dict[str, Any]) -> dict[str, Any]:
     return (step or {}).get("branch") or {}
 
 
+def per_sample_branch(step: dict[str, Any]) -> bool:
+    """按样本分流：每个样本按自己孔位上的读数走自己的出口（只往前走、不回环）。"""
+    return kind_of(step) == BRANCH and branch_config(step).get("per_sample") is True
+
+
 def branch_cases(step: dict[str, Any]) -> list[dict[str, Any]]:
     cases = branch_config(step).get("cases") or []
     return [case for case in cases if isinstance(case, dict)]
@@ -471,6 +476,11 @@ def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int)
             issues.append(f"{label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
         elif target:
             issues.extend(f"{label} {text}" for text in _irreversible_issues(steps, ids.index(target), index, "回环"))
+    if config.get("per_sample"):
+        if mode != "measure":
+            issues.append("按样本分流只能按上游设备的测量值：每个样本要有自己孔位上的读数")
+        if loop_cases(step):
+            issues.append("按样本分流的分支只能往前走、不能回环：各样本走的路不同，重做会把别的样本一起带回去")
     default = str(config.get("default") or "")
     if default and default not in seen:
         issues.append(f"默认出口 {default} 不存在")
