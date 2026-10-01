@@ -22,22 +22,24 @@ WAIT = "wait"
 REVIEW = "review"
 # 质检关卡：读上游设备步骤回执里的测量值按阈值自动判定，不合格按配置返工 / 报废 / 保持
 GATE = "gate"
-# 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系
+# 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系；N 可以按样本取（因子水平、上游读数）
 SPLIT = "split"
+# 样本合并：同一条件组（或全部）的在用样本合成一个新样本（合并馏分、拼批），谱系指回全部母样
+MERGE = "merge"
 # 条件分支：按上游测量值 / 人工记录字段 / 人工选择走一条出边；可带有上限的回环
 BRANCH = "branch"
 # 子流程：引用一个已发布方法，建批次时展开
 SUBFLOW = "subflow"
 # 消息通知：发一条 flow.notify 对外事件（Webhook 订阅方收到），立即继续
 NOTIFY = "notify"
-KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY)
+KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, MERGE, BRANCH, SUBFLOW, NOTIFY)
 KIND_NAMES = {
     DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核", GATE: "质检关卡", SPLIT: "样本拆分",
-    BRANCH: "条件分支", SUBFLOW: "子流程", NOTIFY: "消息通知",
+    MERGE: "样本合并", BRANCH: "条件分支", SUBFLOW: "子流程", NOTIFY: "消息通知",
 }
 GATE_ON_FAIL = {"rework": "返工", "scrap": "报废", "hold": "保持待人工判断"}
 # 系统即时判定 / 登记的节点：没有预定时长，也不占工位
-AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY}
+AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, MERGE, BRANCH, SUBFLOW, NOTIFY}
 BRANCH_MODES = {"measure": "按上游设备测量值", "form": "按上游人工记录字段", "manual": "人工选择"}
 TIMEOUT_ACTIONS = {"alarm": "只报警", "fail": "判为失败，进入恢复评估", "skip": "自动跳过"}
 # 设备步骤的超时已由指令超时守着（超过硬上限转结果未知、人工核查）：步骤级只允许加报警，
@@ -63,6 +65,7 @@ APPLICABLE: dict[str, set[str]] = {
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
     GATE: {"gate"},
     SPLIT: {"split"},
+    MERGE: {"merge"},
     BRANCH: {"branch", "timeout", "requires_signature"},
     SUBFLOW: {"subflow"},
     NOTIFY: {"notify"},
@@ -618,16 +621,42 @@ def split_mode(step: dict[str, Any]) -> str:
     return mode if mode in SPLIT_MODES else "logical"
 
 
+MERGE_BY = {"condition": "同一条件组合成一个", "all": "全部合成一个"}
+MAX_SPLIT = 96
+
+
+def split_count_source(step: dict[str, Any]) -> dict[str, str]:
+    """份数按样本取：`{"factor": 因子名}`（方案因子的水平）或 `{"source_step_id", "field"}`（上游设备每孔的读数）。"""
+    source = ((step or {}).get("split") or {}).get("count_from") or {}
+    return {key: str(value) for key, value in source.items() if value} if isinstance(source, dict) else {}
+
+
 def split_issues(step: dict[str, Any]) -> list[str]:
     split = (step or {}).get("split") or {}
     count = split.get("count")
     issues: list[str] = []
-    if not isinstance(count, int) or isinstance(count, bool) or not 2 <= count <= 96:
-        issues.append("拆分份数必须是 2–96 的整数")
+    source = split_count_source(step)
+    if split.get("count_from") not in (None, {}, ""):
+        if not source.get("factor") and not (source.get("source_step_id") and source.get("field")):
+            issues.append("按样本取份数要写方案因子（factor），或上游设备步骤与读数字段（source_step_id、field）")
+        if count not in (None, "") and (not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= MAX_SPLIT):
+            issues.append(f"按样本取份数时，缺省份数（取不到时用）要是 1–{MAX_SPLIT} 的整数")
+    elif not isinstance(count, int) or isinstance(count, bool) or not 2 <= count <= MAX_SPLIT:
+        issues.append(f"拆分份数必须是 2–{MAX_SPLIT} 的整数")
     if not str(split.get("child_type") or "").strip():
         issues.append("必须写明子样本类型（如 扣电、极片）")
     if split.get("mode") not in (None, "", *SPLIT_MODES):
         issues.append("拆分方式只能是 logical（系统内分组）或 physical（实体分装，确认孔位后推进）")
+    return issues
+
+
+def merge_issues(step: dict[str, Any]) -> list[str]:
+    merge = (step or {}).get("merge") or {}
+    issues: list[str] = []
+    if (merge.get("by") or "condition") not in MERGE_BY:
+        issues.append("合并方式只能是 condition（同一条件组合成一个）或 all（全部合成一个）")
+    if not str(merge.get("child_type") or "").strip():
+        issues.append("必须写明合并后的样本类型（如 合并液、粗品）")
     return issues
 
 

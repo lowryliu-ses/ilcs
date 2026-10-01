@@ -1040,6 +1040,7 @@ function stepContent(step: StepRow): string {
   }
   if (step.kind === 'gate') return '质检关卡';
   if (step.kind === 'split') return '样本拆分';
+  if (step.kind === 'merge') return '样本合并';
   return `审核角色 ${step.review_role || 'qa'}`;
 }
 
@@ -1087,7 +1088,7 @@ function BindingSummary({ records }: { records: BindingRecord[] }) {
 }
 
 /** 在用样本以外的状态：已拆分的母样与判为失败的样本不再是处理对象（与服务端 INACTIVE_SAMPLE_STATES 一致） */
-const INACTIVE_SAMPLES = new Set(['split', 'failed']);
+const INACTIVE_SAMPLES = new Set(['split', 'merged', 'failed']);
 
 function ManualSubmitDialog({
   run,
@@ -1857,8 +1858,11 @@ function SplitConfirmDialog({
 }) {
   const toast = useToast();
   const count = step.split?.count ?? 0;
-  const parents = samples.filter((row) => !['failed', 'split'].includes(row.state));
-  const keys = parents.flatMap((sample) => Array.from({ length: count }, (_, index) => ({ sample, number: index + 1 })));
+  // 份数按样本取时，开出分装节点时已按样本算好（form_data.counts）
+  const counts = ((run.form_data ?? {}) as { counts?: Record<string, number> }).counts ?? {};
+  const parents = samples.filter((row) => !['failed', 'split', 'merged'].includes(row.state));
+  const keys = parents.flatMap((sample) =>
+    Array.from({ length: counts[sample.id] ?? count }, (_, index) => ({ sample, number: index + 1 })));
   const [target, setTarget] = useState<string>('__none__');
   const plate = labware.find((row) => (row.role ?? '') === target);
   const suggest = (plateRow: LabwareRow | undefined) =>
@@ -1911,7 +1915,9 @@ function SplitConfirmDialog({
       }
     >
       <div className="note">
-        每个在用样本分装为 {count} 份{step.split?.child_type ? ` ${step.split.child_type}` : ''}。按实际分装结果填写孔位：
+        {Object.keys(counts).length && new Set(Object.values(counts)).size > 1
+          ? `按样本分装（${Math.min(...Object.values(counts))}–${Math.max(...Object.values(counts))} 份）`
+          : `每个在用样本分装为 ${Object.values(counts)[0] ?? count} 份`}{step.split?.child_type ? ` ${step.split.child_type}` : ''}。按实际分装结果填写孔位：
         系统不替人假设子样本落在了哪个孔，孔位落定后流程才推进。
       </div>
       <Field label="落到哪块载具">

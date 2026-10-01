@@ -15,8 +15,8 @@ from .environment import requirement_issues
 from .graph import ancestors, critical_path_min, graph_issues, graph_mode, predecessors
 from .params import spec_of, value_issues
 from .steps import (
-    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
-    applies_to_issues, assist_issues, branch_issues, notify_issues,
+    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
+    applies_to_issues, assist_issues, branch_issues, merge_issues, notify_issues,
     consumes_materials, gate_issues, holds_station, holds_station_issues, kind_of, manual_issues, material_issues,
     needs_station, qualification_issues, resource_demand, resource_issues, review_issues, step_material,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
@@ -111,6 +111,8 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(review_issues(step))
     elif kind == SPLIT:
         issues.extend(split_issues(step))
+    elif kind == MERGE:
+        issues.extend(merge_issues(step))
     elif kind == SUBFLOW:
         issues.extend(subflow_issues(step))
     elif kind == NOTIFY:

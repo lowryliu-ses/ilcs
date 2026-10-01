@@ -105,6 +105,8 @@ function blankStep(kind: Exclude<StepKind, 'device'>): RecipeStep {
       return { kind, name: '质检关卡', cap: '', params: {}, dur: 0, gate: { scope: 'batch', on_fail: 'hold', max_rework: 2 } };
     case 'split':
       return { kind, name: '样本拆分', cap: '', params: {}, dur: 0, split: { count: 4, child_type: '' } };
+    case 'merge':
+      return { kind, name: '样本合并', cap: '', params: {}, dur: 0, merge: { by: 'condition', child_type: '' } };
     case 'branch':
       return {
         kind, name: '条件分支', cap: '', params: {}, dur: 0,
@@ -128,6 +130,7 @@ const NON_DEVICE: [Exclude<StepKind, 'device'>, string][] = [
   ['review', '审核'],
   ['gate', '质检关卡'],
   ['split', '样本拆分'],
+  ['merge', '样本合并'],
   ['branch', '条件分支'],
   ['subflow', '子流程'],
   ['notify', '消息通知'],
@@ -725,7 +728,11 @@ function NodeCard({
           { rework: '返工', scrap: '报废', hold: '保持' }[step.gate?.on_fail ?? 'hold']
         }`
       : kind === 'split'
-      ? `每样本拆 ${step.split?.count ?? '?'} 个${step.split?.child_type || ''}`
+      ? step.split?.count_from?.factor || step.split?.count_from?.field
+        ? `按样本拆（${step.split.count_from.factor ? `因子 ${step.split.count_from.factor}` : `读数 ${step.split.count_from.field}`}）${step.split?.child_type || ''}`
+        : `每样本拆 ${step.split?.count ?? '?'} 个${step.split?.child_type || ''}`
+      : kind === 'merge'
+      ? `${step.merge?.by === 'all' ? '全部' : '同条件组'}合成一个${step.merge?.child_type || ''}`
       : kind === 'branch'
       ? `${{ measure: '按测量值', form: '按记录字段', manual: '人工选择' }[step.branch?.mode ?? 'manual']} · ${branchCases(step)
           .map((row) => row.label || row.key)
@@ -887,6 +894,7 @@ function StepProperties({
               if (next === 'review' && !current.review_role) current.review_role = 'qa';
               if (next === 'gate' && !current.gate) current.gate = blank?.gate;
               if (next === 'split' && !current.split) current.split = blank?.split;
+              if (next === 'merge' && !current.merge) current.merge = blank?.merge;
               if (next === 'branch' && !current.branch) current.branch = blank?.branch;
               if (next === 'subflow' && !current.subflow) current.subflow = { recipe_id: '' };
               if (next === 'notify' && !current.notify) current.notify = { message: '' };
@@ -1023,6 +1031,53 @@ function StepProperties({
               onChange={(event) => onSet((current) => void (current.split = { ...current.split, child_type: event.target.value }))}
             />
           </Field>
+          <Field label="份数按样本取（可选）" hint="合成后按产率分份、按方案因子分份：每个样本取自己的份数，取不到用上面的份数">
+            <select
+              value={step.split?.count_from?.factor ? 'factor' : step.split?.count_from?.source_step_id ? 'measure' : ''}
+              disabled={readOnly}
+              onChange={(event) =>
+                onSet((current) => {
+                  const value = event.target.value;
+                  const next = { ...current.split };
+                  if (value === 'factor') next.count_from = { factor: '' };
+                  else if (value === 'measure') next.count_from = { source_step_id: '', field: '' };
+                  else delete next.count_from;
+                  current.split = next;
+                })
+              }
+            >
+              <option value="">固定份数</option>
+              <option value="factor">按方案因子的水平</option>
+              <option value="measure">按上游设备每孔的读数</option>
+            </select>
+          </Field>
+          {step.split?.count_from && 'factor' in step.split.count_from ? (
+            <Field label="方案因子名" hint="建批次的方案里同名因子的水平就是份数（要是 1–96 的整数）">
+              <input value={step.split.count_from.factor ?? ''} readOnly={readOnly}
+                onChange={(event) => onSet((current) => void (current.split = { ...current.split, count_from: { factor: event.target.value } }))} />
+            </Field>
+          ) : null}
+          {step.split?.count_from && 'source_step_id' in step.split.count_from ? (
+            <>
+              <Field label="读数来源（上游设备步骤）">
+                <select value={step.split.count_from.source_step_id ?? ''} disabled={readOnly}
+                  onChange={(event) => onSet((current) => void (current.split = {
+                    ...current.split, count_from: { ...current.split?.count_from, source_step_id: event.target.value },
+                  }))}>
+                  <option value="">选择步骤</option>
+                  {steps.map((row, at) => ({ row, at, id: stepIdOf(row, at) }))
+                    .filter(({ at, row }) => ancestors(steps, index).has(at) && kindOf(row) === 'device')
+                    .map(({ row, at, id }) => <option key={id} value={id}>第 {at + 1} 步 · {row.name}</option>)}
+                </select>
+              </Field>
+              <Field label="读数字段" hint="设备回执里每孔的这个值就是份数">
+                <input value={step.split.count_from.field ?? ''} readOnly={readOnly} placeholder="如 aliquots"
+                  onChange={(event) => onSet((current) => void (current.split = {
+                    ...current.split, count_from: { ...current.split?.count_from, field: event.target.value },
+                  }))} />
+              </Field>
+            </>
+          ) : null}
           <Field label="拆分方式" hint="实体分装要在批次页按实际分装结果确认孔位后才推进；系统内分组立即完成">
             <select
               value={step.split?.mode ?? 'logical'}
@@ -1035,6 +1090,23 @@ function StepProperties({
               <option value="physical">实体分装（确认孔位后推进）</option>
             </select>
           </Field>
+        </div>
+      ) : null}
+
+      {kind === 'merge' ? (
+        <div className="grid cols-2">
+          <Field label="合并方式" hint="同一条件组合成一个：重复样合并；全部合成一个：整批拼成一份">
+            <select value={step.merge?.by ?? 'condition'} disabled={readOnly}
+              onChange={(event) => onSet((current) => void (current.merge = { ...current.merge, by: event.target.value as 'condition' | 'all' }))}>
+              <option value="condition">同一条件组合成一个</option>
+              <option value="all">全部合成一个</option>
+            </select>
+          </Field>
+          <Field label="合并后的样本类型">
+            <input value={step.merge?.child_type ?? ''} readOnly={readOnly} placeholder="合并液 / 粗品"
+              onChange={(event) => onSet((current) => void (current.merge = { ...current.merge, child_type: event.target.value }))} />
+          </Field>
+          <div className="small muted">合并样的谱系指回全部母样；母样标为已合并，之后的步骤、检测与统计都落在合并样上。</div>
         </div>
       ) : null}
 

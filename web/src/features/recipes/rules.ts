@@ -15,7 +15,7 @@ import { canonicalUnit, convertible, splitRatio } from '../../shared/units';
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
 
-export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
+export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'merge' | 'branch' | 'subflow' | 'notify';
 
 export const STEP_KINDS: [StepKind, string][] = [
   ['device', '设备'],
@@ -24,13 +24,14 @@ export const STEP_KINDS: [StepKind, string][] = [
   ['review', '审核'],
   ['gate', '质检关卡'],
   ['split', '样本拆分'],
+  ['merge', '样本合并'],
   ['branch', '条件分支'],
   ['subflow', '子流程'],
   ['notify', '消息通知'],
 ];
 
 /** 系统即时判定 / 执行的节点：没有预定时长，也不占工位。子流程的时长来自它引用的方法。 */
-export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'branch', 'subflow', 'notify'];
+export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'merge', 'branch', 'subflow', 'notify'];
 
 /** 被子流程引用的方法：编辑器用它校验引用、算关键路径。对应后端展开时查的那些字段。 */
 export type SubflowIndex = Record<string, { name: string; version: string; state: string; needs_revision: boolean; critical_path_min: number }>;
@@ -680,8 +681,24 @@ function splitIssues(step: RecipeStep): string[] {
   const split = step.split ?? {};
   const issues: string[] = [];
   const count = split.count;
-  if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 96) issues.push('拆分份数必须是 2–96 的整数');
+  const from = split.count_from;
+  if (from && (from.factor || from.source_step_id || from.field)) {
+    if (!from.factor && !(from.source_step_id && from.field)) {
+      issues.push('按样本取份数要写方案因子（factor），或上游设备步骤与读数字段（source_step_id、field）');
+    }
+    if (count !== undefined && (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > 96)) {
+      issues.push('按样本取份数时，缺省份数（取不到时用）要是 1–96 的整数');
+    }
+  } else if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 96) issues.push('拆分份数必须是 2–96 的整数');
   if (!split.child_type?.trim()) issues.push('必须写明子样本类型（如 扣电、极片）');
+  return issues;
+}
+
+function mergeIssues(step: RecipeStep): string[] {
+  const merge = step.merge ?? {};
+  const issues: string[] = [];
+  if (!['condition', 'all'].includes(merge.by ?? 'condition')) issues.push('合并方式只能是 condition（同一条件组合成一个）或 all（全部合成一个）');
+  if (!merge.child_type?.trim()) issues.push('必须写明合并后的样本类型（如 合并液、粗品）');
   return issues;
 }
 
@@ -914,6 +931,7 @@ export function stepIssues(
   else if (kind === 'wait') issues.push(...waitIssues(step));
   else if (kind === 'gate') issues.push(...gateIssues(step, steps, index));
   else if (kind === 'split') issues.push(...splitIssues(step));
+  else if (kind === 'merge') issues.push(...mergeIssues(step));
   else if (kind === 'branch') issues.push(...branchIssues(step, steps, index));
   else if (kind === 'subflow') issues.push(...subflowIssues(step, subflows, selfId));
   else if (kind === 'notify') issues.push(...notifyIssues(step));

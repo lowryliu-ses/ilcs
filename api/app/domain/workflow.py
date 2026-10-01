@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .steps import BRANCH, DEVICE, GATE, MANUAL, NOTIFY, REVIEW, SPLIT, WAIT, kind_of
+from .steps import BRANCH, DEVICE, GATE, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, WAIT, kind_of
 
 PENDING = "pending"
 READY = "ready"
@@ -79,11 +79,15 @@ ALLOWED: dict[str, dict[str, set[str]]] = {
         PENDING: {READY, CANCELLED},
         READY: {COMPLETED, CANCELLED},
     },
+    MERGE: {
+        PENDING: {READY, CANCELLED},
+        READY: {COMPLETED, CANCELLED},
+    },
 }
 
 INITIAL = {
-    DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY, GATE: READY, SPLIT: READY, BRANCH: READY,
-    NOTIFY: READY,
+    DEVICE: READY, MANUAL: READY, WAIT: WAITING, REVIEW: READY, GATE: READY, SPLIT: READY, MERGE: READY,
+    BRANCH: READY, NOTIFY: READY,
 }
 
 

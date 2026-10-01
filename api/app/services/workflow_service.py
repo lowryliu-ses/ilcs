@@ -24,7 +24,7 @@ from ..models.base import uid as uid_hex
 from ..domain import graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
-    BRANCH, DEVICE, GATE, MANUAL, NOTIFY, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
+    BRANCH, DEVICE, GATE, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
     case_label, kind_of, match_case, missing_form_values, needs_station, normalize, step_id_of,
 )
 from ..domain.permissions import ADMIN, ROLE_NAMES
@@ -654,6 +654,8 @@ class WorkflowService:
             return self._evaluate_gate(batch, run, index)
         if run.kind == SPLIT:
             return self._split_samples(batch, run)
+        if run.kind == MERGE:
+            return self._merge_samples(batch, run)
         if run.kind == BRANCH:
             return self._evaluate_branch(batch, run, index)
         if run.kind == NOTIFY:
@@ -1431,15 +1433,56 @@ class WorkflowService:
 
         if not self._active_samples(batch):
             return self._split_hold(batch, run, "没有可分装的在用样本（全部已拆分或已判为失败）")
+        counts, problem = self._split_counts(batch, run)
+        if problem:
+            return self._split_hold(batch, run, problem)
         if split_mode(run.step_snapshot or {}) == "physical":
             run.started_at = run.started_at or now()
+            run.form_data = {**(run.form_data or {}), "counts": counts}
             run.reason = "等待实体分装确认：按实际分装结果登记每个子样本的孔位后推进"
             return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_split": True}
-        return self._register_split(batch, run)
+        return self._register_split(batch, run, counts=counts)
+
+    def _split_counts(self, batch: Batch, run: StepRun) -> tuple[dict[str, int], str]:
+        """每个在用母样拆几份：固定份数，或按样本取（`split.count_from`：方案因子的水平 / 上游设备每孔的读数），
+        取不到用 `count`。份数要是 1–96 的整数；有样本取不到又没有缺省、或取到的不是这样的数，返回问题（拆分保持）。"""
+        from ..domain.steps import MAX_SPLIT, split_count_source
+
+        step = run.step_snapshot or {}
+        split = step.get("split") or {}
+        fallback = split.get("count")
+        source = split_count_source(step)
+        parents = self._active_samples(batch)
+        if not source:
+            return {sample.id: int(fallback or 0) for sample in parents}, ""
+        values: dict[str, object] = {}
+        if source.get("factor"):
+            factors = (batch.plan_snapshot or {}).get("factors") or []
+            position = next((index for index, row in enumerate(factors) if row.get("name") == source["factor"]), None)
+            if position is None:
+                return {}, f"按方案因子「{source['factor']}」取份数，但本批方案里没有这个因子"
+            values = {sample.id: (list(sample.levels or [])[position] if position < len(sample.levels or []) else None)
+                      for sample in parents}
+        else:
+            values, _ = self._sample_values(batch, {"source_step_id": source["source_step_id"], "field": source["field"]})
+        counts: dict[str, int] = {}
+        bad: list[str] = []
+        for sample in parents:
+            value = values.get(sample.id)
+            if value is None and isinstance(fallback, int) and not isinstance(fallback, bool):
+                value = fallback
+            whole = isinstance(value, (int, float)) and not isinstance(value, bool) and float(value).is_integer()
+            if not whole or not 1 <= int(value) <= MAX_SPLIT:
+                bad.append(f"{sample.id}（{value!r}）")
+                continue
+            counts[sample.id] = int(value)
+        if bad:
+            return {}, f"{len(bad)} 个样本的拆分份数不是 1–{MAX_SPLIT} 的整数：{'、'.join(bad[:4])}{'…' if len(bad) > 4 else ''}"
+        return counts, ""
 
     def _register_split(
         self, batch: Batch, run: StepRun, placements: dict[tuple[str, int], str] | None = None,
-        labware=None, container: str = "", note: str = "", user: User | None = None,
+        labware=None, container: str = "", note: str = "", user: User | None = None, counts: dict[str, int] | None = None,
     ) -> dict:
         """每个在用样本拆出 N 个子样本：登记子物理样本（谱系指向母样），生成子运行分配。
 
@@ -1451,14 +1494,19 @@ class WorkflowService:
         from .sample_service import SampleService
 
         split = (run.step_snapshot or {}).get("split") or {}
-        count = int(split.get("count") or 0)
         child_type = split.get("child_type") or ""
         suffix = "" if run.attempt == 1 else f"r{run.attempt}"
         parents = self._active_samples(batch)
+        if counts is None:
+            counts = {key: int(value) for key, value in ((run.form_data or {}).get("counts") or {}).items()} or {
+                sample.id: int(split.get("count") or 0) for sample in parents}
+        # 份数按样本不同时，序号按最大份数留位：子样的位置与重复号不撞
+        stride = max([*counts.values(), 1])
         children: list[str] = []
         slots = SampleService(self.db, self.ctx)
         for sample in parents:
             target = container or f"{sample.container_id}-{run.step_id}{suffix}"
+            count = counts.get(sample.id, 0)
             for number in range(1, count + 1):
                 well = placements[(sample.id, number)] if placements is not None else f"{sample.well}-{number}"
                 physical_id = f"{sample.physical_sample_id or sample.id}-{run.step_id}{suffix}-{number}"
@@ -1475,8 +1523,8 @@ class WorkflowService:
                 child = Sample(
                     id=f"{sample.id}-{number}{suffix}", org_id=batch.org_id, physical_sample_id=physical_id,
                     batch_id=batch.id, container_id=target, well=well,
-                    position=sample.position * count + number, condition_group=sample.condition_group,
-                    condition_label=sample.condition_label, repeat=(sample.repeat - 1) * count + number,
+                    position=sample.position * stride + number, condition_group=sample.condition_group,
+                    condition_label=sample.condition_label, repeat=(sample.repeat - 1) * stride + number,
                     levels=sample.levels, is_control=sample.is_control, state="running",
                 )
                 self.db.add(child)
@@ -1491,18 +1539,21 @@ class WorkflowService:
             sample.state = "split"
             sample.flag_note = f"第 {run.step_index + 1} 步拆分为 {count} 个{child_type}"
         self.db.flush()
+        varied = len(set(counts.values())) > 1
+        count = max(counts.values()) if counts else 0
         run.form_data = {
             "parents": len(parents), "parent_ids": [sample.id for sample in parents],
-            "count": count, "child_type": child_type, "children": children,
+            "count": count, "counts": counts, "child_type": child_type, "children": children,
             **({"physical": True, "labware": labware.barcode if labware is not None else "", "note": note}
                if placements is not None else {}),
         }
         if user is not None:
             run.submitted_by = user.id
+        each = f"按样本分为 {min(counts.values())}–{count} 个{child_type}（共 {len(children)} 个）" if varied else f"各{{verb}}为 {count} 个{child_type}"
         self._close_run(run, workflow.COMPLETED, (
-            f"{len(parents)} 个样本各分装为 {count} 个{child_type}"
+            f"{len(parents)} 个样本{each.replace('{verb}', '分装')}"
             + (f"，落在 {labware.barcode}" if labware is not None else "")
-            if placements is not None else f"{len(parents)} 个样本各拆分为 {count} 个{child_type}"
+            if placements is not None else f"{len(parents)} 个样本{each.replace('{verb}', '拆分')}"
         ))
         self.audit.record(
             user, "实体分装确认" if placements is not None else "样本拆分", batch.id,
@@ -1515,6 +1566,80 @@ class WorkflowService:
             ),
         )
         return self._advance(run, batch)
+
+    def _merge_samples(self, batch: Batch, run: StepRun) -> dict:
+        """样本合并节点：同一条件组（`merge.by: condition`，缺省）或全部（`all`）的在用样本合成一个新样本。
+
+        新物理样本的谱系指回全部母样（`parent_ids`；`parent_id` 是第一个），新运行分配继承条件组与水平（全部合成时
+        条件记为「合并样」、水平清空）；母样的运行分配标为已合并，之后的步骤、检测与统计都落在合并样上。
+        系统内登记（不搬孔位）：合并样记在「批次容器-步骤」下、孔位写 M1、M2……"""
+        from ..models import PhysicalSample
+
+        step = run.step_snapshot or {}
+        merge = step.get("merge") or {}
+        by = merge.get("by") or "condition"
+        child_type = str(merge.get("child_type") or "")
+        parents = self._active_samples(batch)
+        if not parents:
+            return self._split_hold(batch, run, "没有可合并的在用样本（全部已拆分、已合并或已判为失败）")
+        groups: dict[str, list[Sample]] = {}
+        for sample in parents:
+            groups.setdefault(sample.condition_group if by == "condition" else "ALL", []).append(sample)
+        suffix = "" if run.attempt == 1 else f"r{run.attempt}"
+        children: list[str] = []
+        for order, (group, members) in enumerate(sorted(groups.items()), start=1):
+            first = members[0]
+            physical_id = f"{batch.id}-{run.step_id}{suffix}-{group}"
+            parent_physicals = [member.physical_sample_id or member.id for member in members]
+            if self.db.get(PhysicalSample, physical_id) is None:
+                self.db.add(PhysicalSample(
+                    id=physical_id, org_id=batch.org_id, barcode=physical_id,
+                    source=f"批次 {batch.id} 第 {run.step_index + 1} 步合并 {len(members)} 个样本", sample_type=child_type,
+                    parent_id=first.physical_sample_id or None, parent_ids=parent_physicals,
+                    current_location=f"{first.container_id}-{run.step_id}{suffix}", custodian=batch.operator,
+                    lifecycle_state="in_use", origin="batch_generated", created_by=self.ctx.subject_id,
+                ))
+                self.db.flush()
+            same = by == "condition"
+            child = Sample(
+                id=f"{batch.id}-{run.step_id}{suffix}-{group}", org_id=batch.org_id, physical_sample_id=physical_id,
+                batch_id=batch.id, container_id=f"{first.container_id}-{run.step_id}{suffix}", well=f"M{order}",
+                position=order, condition_group=group if same else "ALL",
+                condition_label=first.condition_label if same else "合并样", repeat=1,
+                levels=first.levels if same else [], is_control=bool(first.is_control) if same else False, state="running",
+            )
+            self.db.add(child)
+            children.append(child.id)
+            for member in members:
+                member.state = "merged"
+                member.flag_note = f"第 {run.step_index + 1} 步并入 {child.id}"
+        self.db.flush()
+        run.form_data = {
+            "by": by, "child_type": child_type, "parents": len(parents), "parent_ids": [sample.id for sample in parents],
+            "groups": {child_id: [member.id for member in members] for child_id, (_, members)
+                       in zip(children, sorted(groups.items()))},
+            "children": children,
+        }
+        self._close_run(run, workflow.COMPLETED, f"{len(parents)} 个样本合并为 {len(children)} 个{child_type}")
+        self.audit.record(
+            None, "样本合并", batch.id, before=f"{len(parents)} 个样本", after=f"{len(children)} 个{child_type}",
+            detail=("同一条件组合成一个" if by == "condition" else "全部合成一个") + "；合并样谱系指回全部母样，母样运行分配标为已合并",
+        )
+        return self._advance(run, batch)
+
+    def _retire_merge(self, run: StepRun) -> None:
+        """返工 / 回环作废一次合并：合并样作废，母样恢复在用，重做时重新合并。"""
+        data = run.form_data or {}
+        for child_id in data.get("children") or []:
+            child = self.db.get(Sample, child_id)
+            if child is not None:
+                child.state = "failed"
+                child.flag_note = "所属合并步骤被返工或回环作废"
+        for parent_id in data.get("parent_ids") or []:
+            parent = self.db.get(Sample, parent_id)
+            if parent is not None and parent.state == "merged":
+                parent.state = "running"
+                parent.flag_note = "合并被返工或回环作废，恢复在用，重做时重新合并"
 
     def _hand_over_parent_well(self, parent: Sample, labware, well: str) -> None:
         """子样留在母样自己的孔里（整管分装）：母样的在途占用就此交接给子样，母样从这个孔位上解开。"""
@@ -1561,8 +1686,9 @@ class WorkflowService:
         if batch.state != "running":
             raise StateConflict(f"批次状态为 {batch.state}，不能确认分装")
         split = (run.step_snapshot or {}).get("split") or {}
-        count = int(split.get("count") or 0)
+        stored = (run.form_data or {}).get("counts") or {}
         parents = self._active_samples(batch)
+        counts = {sample.id: int(stored.get(sample.id) or split.get("count") or 0) for sample in parents}
         if not parents:
             # 空母样集合配空孔位集合看起来「完整」，但登记的是一次没有样本的分装，下游设备会空跑
             raise StateConflict(
@@ -1576,7 +1702,7 @@ class WorkflowService:
             if key in placements:
                 raise ValidationFailed(f"{key[0]} 的第 {key[1]} 份重复登记")
             placements[key] = well
-        expected = {(sample.id, number) for sample in parents for number in range(1, count + 1)}
+        expected = {(sample.id, number) for sample in parents for number in range(1, counts[sample.id] + 1)}
         missing = sorted(expected - placements.keys())
         extra = sorted(placements.keys() - expected)
         if missing or extra:
@@ -1622,6 +1748,9 @@ class WorkflowService:
         实体分装不可逆，返工与回环不会跨过已完成的实体分装（流程校验与运行期都挡住）。万一走到这里，
         子样照样作废，但孔位占用保留：实物还在孔里，释放占用会让别的样本被放进同一个孔。
         """
+        if run.kind == MERGE:
+            self._retire_merge(run)
+            return
         if run.kind != SPLIT:
             return
         data = run.form_data or {}

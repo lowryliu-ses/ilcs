@@ -23,6 +23,8 @@ class PhysicalSample(Base):
     source: Mapped[str] = mapped_column(String, default="")
     sample_type: Mapped[str] = mapped_column(String, default="")
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("physical_samples.id"), nullable=True)
+    # 合并出来的样本有几个母样：全部记在这里（parent_id 仍是第一个，只看单亲的地方照旧能用）
+    parent_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     quantity: Mapped[object | None] = mapped_column(Quantity, nullable=True)
     unit: Mapped[str] = mapped_column(String, default="")
     storage_condition: Mapped[str] = mapped_column(String, default="")

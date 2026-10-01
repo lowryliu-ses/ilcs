@@ -37,7 +37,12 @@ class PhysicalSampleRepository(ScopedRepository[PhysicalSample]):
         return self.query().filter(PhysicalSample.barcode == barcode).first()
 
     def children(self, parent_id: str) -> list[PhysicalSample]:
-        return list(self.query().filter(PhysicalSample.parent_id == parent_id).all())
+        """子样：单亲（parent_id）与合并出来的（parent_ids 里有它）。"""
+        from sqlalchemy import String, cast, or_
+
+        return list(self.query().filter(or_(
+            PhysicalSample.parent_id == parent_id, cast(PhysicalSample.parent_ids, String).like(f'%"{parent_id}"%'),
+        )).all())
 
     def lineage(self, sample: PhysicalSample) -> list[PhysicalSample]:
         """向上找来源谱系。跨组织父子关联在写入时就被拒，这里只沿本组织走。"""

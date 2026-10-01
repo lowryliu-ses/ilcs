@@ -14,7 +14,7 @@ TERMINAL_STATES = {"done", "aborted"}
 
 
 # 不再是处理对象的运行分配状态：已拆分（母样）与失败（剔除、报废、返工作废）
-INACTIVE_SAMPLE_STATES = frozenset({"split", "failed"})
+INACTIVE_SAMPLE_STATES = frozenset({"split", "merged", "failed"})
 
 
 class BatchRepository(ScopedRepository[Batch]):

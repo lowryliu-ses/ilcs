@@ -468,7 +468,7 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .fg-handle:hover { background: var(--accent); }
 .kind.branch { border-color: color-mix(in srgb, var(--s-paused) 55%, var(--border)); color: var(--s-paused); }
 .kind.subflow { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
-.kind.gate, .kind.split { border-color: color-mix(in srgb, var(--s-scheduled) 45%, var(--border)); color: var(--ink-2); }
+.kind.gate, .kind.split, .kind.merge { border-color: color-mix(in srgb, var(--s-scheduled) 45%, var(--border)); color: var(--ink-2); }
 .palette .cap[draggable="true"] { cursor: grab; }
 .case-row { display: grid; grid-template-columns: 70px 1fr 70px 70px 1fr 28px; gap: 4px; align-items: center; }
 .case-row.form { grid-template-columns: 70px 1fr 1fr 1fr 28px; }

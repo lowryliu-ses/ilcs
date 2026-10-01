@@ -102,7 +102,7 @@ export type BatchSummary = {
   delete_blockers: string[];
 };
 
-export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
+export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'merge' | 'branch' | 'subflow' | 'notify';
 
 /** 条件分支配置。出口按顺序匹配，第一个满足的生效；loop_to 表示回到上游某一步重做。 */
 export type BranchConfig = {
@@ -575,7 +575,13 @@ export type RecipeStep = {
     max_rework?: number;
   };
   /** 样本拆分：每个样本拆出 count 个子样本；physical 时要按实际分装孔位确认后才推进 */
-  split?: { count?: number; child_type?: string; mode?: 'logical' | 'physical' };
+  /** count_from：份数按样本取（方案因子的水平，或上游设备每孔的读数），取不到用 count */
+  split?: {
+    count?: number; child_type?: string; mode?: 'logical' | 'physical';
+    count_from?: { factor?: string; source_step_id?: string; field?: string };
+  };
+  /** 样本合并：同一条件组（condition）或全部（all）的在用样本合成一个新样本，谱系指回全部母样 */
+  merge?: { by?: 'condition' | 'all'; child_type?: string };
   /** 协同资源：执行期间与主设备一并占用的能力（机械臂、配套设备、放置位） */
   assist?: string[];
   /** 用哪块载具（按角色）；空为主载具 */
@@ -1600,6 +1606,8 @@ export type SampleRow = {
 
 export type SampleDetail = SampleRow & {
   lineage: SampleRow[];
+  /** 合并出来的样本：全部母样（谱系链只沿第一个母样往上走） */
+  parents?: SampleRow[];
   children: SampleRow[];
   assignments: {
     id: string;

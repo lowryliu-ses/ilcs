@@ -60,6 +60,7 @@ class SampleService:
             "source": sample.source,
             "sample_type": sample.sample_type,
             "parent_id": sample.parent_id,
+            "parent_ids": list(sample.parent_ids or ([sample.parent_id] if sample.parent_id else [])),
             "quantity": f"{dec(sample.quantity):f}" if sample.quantity is not None else None,
             "unit": sample.unit,
             "storage_condition": sample.storage_condition,
@@ -126,6 +127,8 @@ class SampleService:
             **self.out(sample),
             # 来源谱系、运行分配、流转历史分开呈现，不混成一条「位置」
             "lineage": [self.out(row) for row in reversed(self.samples.lineage(sample))],
+            # 合并出来的样本：全部母样（谱系链只沿第一个母样往上走）
+            "parents": [self.out(row) for row in (self.samples.get(pid) for pid in sample.parent_ids or []) if row],
             "children": [self.out(row) for row in self.samples.children(sample.id)],
             "assignments": [
                 {
