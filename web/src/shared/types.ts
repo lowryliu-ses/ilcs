@@ -405,11 +405,14 @@ export type MaterialRow = {
 
 export type Factor = {
   name: string;
+  /** 水平的单位；作用的设备参数单位不同时，建批次按物料登记的摩尔质量 / 密度 / 浓度换算（mmol → mg、eq → μL） */
   unit: string;
   levels: (number | string)[];
   material?: { name: string; unit: string; per: number };
   /** 作用的设备参数：水平按孔位覆盖该设备步骤的参数，随指令下发 */
   target?: { step_id: string; param: string };
+  /** unit 为 eq（当量）时的基准：另一个因子（限量试剂的物质的量），或一个固定的物质的量 */
+  basis?: { factor?: string; amount?: number; unit?: string };
 };
 
 export type FactorTargetOption = {

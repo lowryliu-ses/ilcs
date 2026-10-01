@@ -356,10 +356,13 @@ class PlanService:
             }
         from ..repositories.resources import CapabilityRepository
 
+        from ..repositories.materials import MaterialRepository
+
         recipe = self.recipes.get(plan.recipe_id)
         issues = matrix.target_issues(
             factors, normalize(recipe.steps if recipe else []), StationRepository(self.db, self.ctx).specs(),
             CapabilityRepository(self.db).specs(),
+            MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in factors),
         )
         return {
             "key": "targets", "label": "因子作用的设备参数",
@@ -498,9 +501,17 @@ class PlanService:
             from ..domain.plan_dosing import dosing_factors
             from ..repositories.resources import CapabilityRepository
 
-            factors = plan.factors or []
+            from ..domain.amounts import attach_doses
+            from ..repositories.materials import MaterialRepository
+
+            capabilities = CapabilityRepository(self.db).specs()
+            # 按 mmol / 当量给的因子先换成物料单位再估需求（换不过去的照原样估，方案检查另报）
+            factors, _ = attach_doses(
+                plan.factors or [], steps, capabilities,
+                MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in plan.factors or []),
+            )
             listed = {str(item.get("material") or "") for item in bom}
-            dosing = dosing_factors(steps, bom, factors, CapabilityRepository(self.db).specs())
+            dosing = dosing_factors(steps, bom, factors, capabilities)
             # material_demand 按因子顺序只给带物料的因子各出一行
             positions = [index for index, factor in enumerate(factors) if factor.get("material")]
             demand_rows = matrix.material_demand(factors, plan.repeats, plan.design_points or None)

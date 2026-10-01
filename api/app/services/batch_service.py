@@ -712,10 +712,12 @@ class BatchService:
         bom = list(batch.recipe_snapshot.get("bom") or [])
         capabilities = self.capabilities.specs()
         self._require_plan_dosing(content, bom, batch.recipe_snapshot.get("steps") or [], capabilities)
+        factors = self._dosed_factors(content, batch.recipe_snapshot.get("steps") or [], capabilities)
+        if factors != list(content.factors or []):
+            # 按 mmol / 当量给的因子：换算冻结进快照，之后物料主数据怎么改，这个批次下发的量都不变
+            batch.plan_snapshot = {**batch.plan_snapshot, "factors": factors}
         from_plan = (
-            self.plan_materials(
-                content.factors or [], rows, bom, batch.recipe_snapshot.get("steps") or [], capabilities,
-            )
+            self.plan_materials(factors, rows, bom, batch.recipe_snapshot.get("steps") or [], capabilities)
             if content.plan_type == "matrix" else []
         )
         if from_plan:
@@ -727,7 +729,7 @@ class BatchService:
             from ..domain.matrix import condition_params
 
             # 按孔位冻结因子作用参数：之后方案怎么改，这个批次的设备参数都不变
-            expanded = condition_params(content.factors or [], rows)
+            expanded = condition_params(factors, rows)
             if expanded:
                 batch.plan_snapshot = {**batch.plan_snapshot, "condition_params": expanded}
         self.plans.link_batch(plan.id, batch.id)
@@ -750,6 +752,26 @@ class BatchService:
         self.db.flush()
         return batch
 
+    def _dosed_factors(self, content, steps: list[dict], capabilities: dict[str, dict]) -> list[dict]:
+        """方案因子带上单位换算（按 mmol / 当量给、设备收 mg / μL）。换不过去就不建批次：原样下发会差出倍数。"""
+        from ..domain.amounts import attach_doses
+        from ..repositories.materials import MaterialRepository
+
+        factors = list(content.factors or []) if content.plan_type == "matrix" else []
+        if not factors:
+            return factors
+        materials = MaterialRepository(self.db, self.ctx).specs_by_name(
+            (factor.get("material") or {}).get("name") for factor in factors
+        )
+        dosed, problems = attach_doses(factors, steps, capabilities, materials)
+        if problems:
+            raise StateConflict(
+                f"方案的用量换不成设备的单位，不能建批次：{problems[0]}",
+                {"blocked": [{"key": "dose", "label": row} for row in problems]},
+                code="plan_dose_unconvertible",
+            )
+        return dosed
+
     @staticmethod
     def plan_materials(
         factors: list[dict], rows: list[dict], bom: list[dict], steps: list[dict],
@@ -768,6 +790,8 @@ class BatchService:
         from ..domain.params import decimal_of
         from ..domain.plan_dosing import dosing_factors
 
+        from ..domain.amounts import dosed_level
+
         factors = list(factors or [])
         totals: dict[tuple[str, str], Decimal] = {}
         for position, dosed in dosing_factors(steps, bom, factors, capabilities).items():
@@ -775,8 +799,9 @@ class BatchService:
             per = decimal_of(material.get("per")) or Decimal(0)
             key = (dosed.material, str(material.get("unit") or ""))
             for row in rows:
-                levels = row.get("levels") or []
-                level = decimal_of(levels[position]) if position < len(levels) else None
+                levels = list(row.get("levels") or [])
+                # 水平按 mmol / 当量给时（快照里冻结了换算）先换成物料单位
+                level = decimal_of(dosed_level(factors[position], levels, position)) if position < len(levels) else None
                 totals[key] = totals.get(key, Decimal(0)) + (level or Decimal(0)) * per
         return [
             {"material": name, "qty": f"{q(total):f}", "unit": unit, "source": "plan"}

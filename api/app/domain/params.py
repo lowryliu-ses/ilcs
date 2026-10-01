@@ -29,6 +29,8 @@ _UNITS: dict[str, tuple[str, Decimal | None]] = {
     "kg": ("mass", Decimal("1000")), "g": ("mass", Decimal("1")),
     "mg": ("mass", Decimal("0.001")), "μg": ("mass", Decimal("0.000001")),
     "L": ("volume", Decimal("1000")), "mL": ("volume", Decimal("1")), "μL": ("volume", Decimal("0.001")),
+    # 物质的量：合成类方案按 mmol / 当量给用量，经物料登记的摩尔质量、密度、浓度换成设备收的 mg、μL（domain/amounts.py）
+    "mol": ("amount", Decimal("1000")), "mmol": ("amount", Decimal("1")), "μmol": ("amount", Decimal("0.001")),
     "m": ("length", Decimal("1000")), "cm": ("length", Decimal("10")), "mm": ("length", Decimal("1")),
     "μm": ("length", Decimal("0.001")),
     "h": ("time", Decimal("3600")), "min": ("time", Decimal("60")), "s": ("time", Decimal("1")),
@@ -41,7 +43,7 @@ _UNITS: dict[str, tuple[str, Decimal | None]] = {
 }
 # 常见的另一种写法：ASCII 的 u 代替 μ、小写 l、°C
 _ALIASES = {
-    "ug": "μg", "ul": "μL", "ml": "mL", "l": "L", "um": "μm", "°c": "℃", "degc": "℃",
+    "ug": "μg", "ul": "μL", "ml": "mL", "l": "L", "um": "μm", "°c": "℃", "degc": "℃", "umol": "μmol",
     "sec": "s", "mah": "mAh", "ah": "Ah", "ma": "mA", "mv": "mV", "kpa": "kPa", "pa": "Pa",
 }
 

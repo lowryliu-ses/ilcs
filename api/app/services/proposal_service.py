@@ -173,9 +173,12 @@ class ProposalService:
                 {**factor, "levels": matrix.ordered_levels(point[index] for point in points)}
                 for index, factor in enumerate(factors)
             ]
+            from ..repositories.materials import MaterialRepository
+
             issues += matrix.target_issues(
                 proposed, normalize(recipe.steps or []), StationRepository(self.db, self.ctx).specs(),
                 CapabilityRepository(self.db).specs(),
+                MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in proposed),
             )
         return issues, points
 

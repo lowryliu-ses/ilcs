@@ -27,6 +27,21 @@ class MaterialRepository(ScopedRepository[Material]):
         rows = self.query().filter(Material.name == name, Material.base_unit == unit).order_by(Material.created_at).all()
         return next((row for row in rows if row.state == "active"), rows[0] if rows else None)
 
+    def specs_by_name(self, names) -> dict[str, dict]:
+        """按名称取单位换算（基础单位 + 登记的换算）：方案按 mmol / 当量给用量时据此换成设备单位。
+        同名多条时取在用的、登记了换算的那条。"""
+        wanted = sorted({str(name) for name in names if name})
+        if not wanted:
+            return {}
+        rows = self.query().filter(Material.name.in_(wanted)).order_by(Material.created_at).all()
+        picked: dict[str, Material] = {}
+        for row in rows:
+            current = picked.get(row.name)
+            rank = (row.state == "active", bool(row.conversions))
+            if current is None or rank > (current.state == "active", bool(current.conversions)):
+                picked[row.name] = row
+        return {name: {"base_unit": row.base_unit, "conversions": dict(row.conversions or {})} for name, row in picked.items()}
+
 
 class LotRepository(ScopedRepository[Lot]):
     model = Lot

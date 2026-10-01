@@ -1125,11 +1125,16 @@ function FactorEditor({
                 <Field label="因子名称">
                   <input value={factor.name} onChange={(event) => update(index, { name: event.target.value })} />
                 </Field>
-                <Field label="单位" hint={optionsOf(factor) ? '选项型参数没有单位' : '拼在水平值后面显示'}>
+                <Field
+                  label="单位"
+                  hint={optionsOf(factor) ? '选项型参数没有单位'
+                    : '可以按 mmol 或 eq（当量）给：建批次时按物料登记的摩尔质量 / 密度 / 浓度换成设备参数的单位'}
+                >
                   <input
                     value={factor.unit ?? ''}
+                    list="factor-units"
                     disabled={Boolean(optionsOf(factor))}
-                    onChange={(event) => update(index, { unit: event.target.value })}
+                    onChange={(event) => update(index, { unit: event.target.value, ...(event.target.value.trim() === 'eq' ? {} : { basis: undefined }) })}
                   />
                 </Field>
                 <div className="row-end" style={{ alignItems: 'end' }}>
@@ -1144,6 +1149,42 @@ function FactorEditor({
                   </button>
                 </div>
               </div>
+
+              {factor.unit?.trim() === 'eq' ? (
+                <div className="grid cols-3">
+                  <Field label="当量的基准" hint="限量试剂的物质的量：另一个按 mmol 给的因子，或一个固定的量">
+                    <select
+                      value={factor.basis?.factor ? `factor:${factor.basis.factor}` : factor.basis?.amount !== undefined ? 'amount' : ''}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        update(index, {
+                          basis: value.startsWith('factor:') ? { factor: value.slice(7) }
+                            : value === 'amount' ? { amount: factor.basis?.amount ?? 1, unit: factor.basis?.unit ?? 'mmol' } : undefined,
+                        });
+                      }}
+                    >
+                      <option value="">选基准…</option>
+                      {factors.filter((other, order) => order !== index && other.name.trim()).map((other) => (
+                        <option key={other.name} value={`factor:${other.name}`}>因子「{other.name}」{other.unit ? `（${other.unit}）` : ''}</option>
+                      ))}
+                      <option value="amount">固定的物质的量</option>
+                    </select>
+                  </Field>
+                  {factor.basis?.amount !== undefined ? (
+                    <>
+                      <Field label="基准量">
+                        <NumberInput value={factor.basis.amount} ariaLabel="当量基准量"
+                          onChange={(next) => update(index, { basis: { ...factor.basis, amount: next === '' ? 0 : next } })} />
+                      </Field>
+                      <Field label="基准量单位">
+                        <select value={factor.basis.unit ?? 'mmol'} onChange={(event) => update(index, { basis: { ...factor.basis, unit: event.target.value } })}>
+                          {['mmol', 'μmol', 'mol'].map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                        </select>
+                      </Field>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
 
               {optionsOf(factor) ? (
                 <Field label={`水平（${factor.levels.length} 个，从参数的选项里勾选）`}>
@@ -1273,6 +1314,9 @@ function FactorEditor({
             </div>
           ))}
         </div>
+        <datalist id="factor-units">
+          {['mmol', 'μmol', 'mol', 'eq', 'mg', 'g', 'μL', 'mL', '℃', 'min', 'h'].map((unit) => <option key={unit} value={unit} />)}
+        </datalist>
         <button
           className="btn sm"
           style={{ marginTop: 8 }}

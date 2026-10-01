@@ -337,12 +337,77 @@ function MaterialDialog({
             加一条换算
           </button>
         </div>
+        <PropertyHelper
+          baseUnit={form.base_unit}
+          onAdd={(unit, factor) => setConversions([...conversions.filter((row) => row.unit.trim() !== unit), { unit, factor }])}
+        />
         <span className="small muted">
           写实测或供应商给的精确值，如密度 1.32 g/mL 就写「1 mL = 1.32 g」。同量纲的公制换算（mg ↔ g、μL ↔ mL）不用登记。
-          改了只影响之后的入库与入账，已入账的流水不回溯。
+          合成方案按 mmol / 当量给用量时，就靠这里的摩尔质量、密度、浓度换成设备收的 mg、μL。
+          改了只影响之后的入库、入账与新建的批次，已入账的流水与已建批次的下发量不回溯。
         </span>
       </div>
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
+  );
+}
+
+/* 按化学性质算换算：摩尔质量（g/mol）→「1 mmol = ? 基础单位」，密度（g/mL）→「1 mL = ? 基础单位」，
+   溶液浓度（mol/L，基础单位是体积）→「1 mmol = ? 基础单位」。算出来的就是一条普通的换算，照样能改。 */
+const MASS: Record<string, number> = { kg: 1000, g: 1, mg: 0.001, 'μg': 0.000001 };
+const VOLUME: Record<string, number> = { L: 1000, mL: 1, 'μL': 0.001 };
+
+function exact(value: number): string {
+  return Number(value.toPrecision(10)).toString();
+}
+
+function PropertyHelper({ baseUnit, onAdd }: { baseUnit: string; onAdd: (unit: string, factor: string) => void }) {
+  const [molar, setMolar] = useState('');
+  const [density, setDensity] = useState('');
+  const [concentration, setConcentration] = useState('');
+  const mass = MASS[baseUnit];
+  const volume = VOLUME[baseUnit];
+  const number = (text: string) => (Number(text) > 0 && Number.isFinite(Number(text)) ? Number(text) : null);
+  const molarValue = number(molar);
+  const densityValue = number(density);
+  const concentrationValue = number(concentration);
+  return (
+    <div className="note small" style={{ display: 'grid', gap: 6 }}>
+      <b>按化学性质算换算</b>
+      <div className="row" style={{ gap: 6 }}>
+        <span>摩尔质量</span>
+        <input className="mono" style={{ width: 90 }} value={molar} aria-label="摩尔质量" onChange={(event) => setMolar(event.target.value)} />
+        <span>g/mol</span>
+        <button type="button" className="btn sm" disabled={!molarValue || !mass}
+          title={mass ? undefined : '基础单位是质量（g、mg）时才能按摩尔质量换算'}
+          onClick={() => molarValue && mass && onAdd('mmol', exact(molarValue / 1000 / mass))}>
+          加入「1 mmol = {molarValue && mass ? exact(molarValue / 1000 / mass) : '?'} {baseUnit}」
+        </button>
+      </div>
+      <div className="row" style={{ gap: 6 }}>
+        <span>密度</span>
+        <input className="mono" style={{ width: 90 }} value={density} aria-label="密度" onChange={(event) => setDensity(event.target.value)} />
+        <span>g/mL</span>
+        <button type="button" className="btn sm" disabled={!densityValue || (!mass && !volume)}
+          onClick={() => {
+            if (!densityValue) return;
+            if (mass) onAdd('mL', exact(densityValue / mass));
+            else if (volume) onAdd('g', exact(1 / densityValue / volume));
+          }}>
+          {mass ? `加入「1 mL = ${densityValue ? exact(densityValue / mass) : '?'} ${baseUnit}」`
+            : `加入「1 g = ${densityValue && volume ? exact(1 / densityValue / volume) : '?'} ${baseUnit}」`}
+        </button>
+      </div>
+      <div className="row" style={{ gap: 6 }}>
+        <span>溶液浓度</span>
+        <input className="mono" style={{ width: 90 }} value={concentration} aria-label="溶液浓度" onChange={(event) => setConcentration(event.target.value)} />
+        <span>mol/L</span>
+        <button type="button" className="btn sm" disabled={!concentrationValue || !volume}
+          title={volume ? undefined : '溶液的基础单位要是体积（mL、L）'}
+          onClick={() => concentrationValue && volume && onAdd('mmol', exact(1 / concentrationValue / volume))}>
+          加入「1 mmol = {concentrationValue && volume ? exact(1 / concentrationValue / volume) : '?'} {baseUnit}」
+        </button>
+      </div>
+    </div>
   );
 }
