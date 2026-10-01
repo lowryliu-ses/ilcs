@@ -11,7 +11,7 @@ from sqlalchemy.types import JSON
 from ..core.clock import now
 from .base import Base, uid
 
-VALUE_TYPES = ("number", "text", "enum")
+VALUE_TYPES = ("number", "text", "enum", "series")
 QUALITIES = ("unassessed", "valid", "suspect", "invalid")
 REVIEW_STATES = ("pending", "approved", "rejected")
 
@@ -69,6 +69,8 @@ class ResultValue(Base):
     ingest_event_id: Mapped[str] = mapped_column(String, default="")
     value_num: Mapped[float | None] = mapped_column(nullable=True)
     value_text: Mapped[str] = mapped_column(String, default="")
+    # 曲线型指标的值：{"traces": [{"name", "x": [...], "y": [...]}]}（domain/series.py）；其他类型为空
+    value_series: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     unit: Mapped[str] = mapped_column(String, default="")
     collected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     raw_file_id: Mapped[str] = mapped_column(String, default="")

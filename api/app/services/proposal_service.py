@@ -460,6 +460,8 @@ def _exclusion(value: ResultValue) -> str:
     原因用正式统计的同一套措辞。"""
     if value.superseded_by_id:
         return "superseded"
+    if value.value_series:
+        return "series"
     if any(isinstance(flag, dict) and flag.get("code") == "simulated" for flag in value.flags or []):
         return "simulated"
     if value.review_state == "pending":

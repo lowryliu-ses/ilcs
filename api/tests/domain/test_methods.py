@@ -78,7 +78,7 @@ def test_outputs_linked_to_metrics_must_match_the_metric():
                for issue in issues([{"key": "moisture_ppm", "unit": "%", "metric_id": "M-moist"}]))
     assert any("不存在" in issue for issue in issues([{"key": "a", "unit": "ppm", "metric_id": "M-none"}]))
     assert any("已停用" in issue for issue in issues([{"key": "a", "unit": "ppm", "metric_id": "M-old"}]))
-    assert any("不是数值型" in issue for issue in issues([{"key": "a", "metric_id": "M-look"}]))
+    assert any("不是数值或曲线型" in issue for issue in issues([{"key": "a", "metric_id": "M-look"}]))
     assert any("关联了同一个指标" in issue for issue in issues([
         {"key": "a", "unit": "ppm", "metric_id": "M-moist"}, {"key": "b", "unit": "ppm", "metric_id": "M-moist"},
     ]))

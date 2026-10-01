@@ -991,6 +991,8 @@ export type MethodOutputRule = {
   required?: boolean;
   /** 关联的检测指标：设备回报这个值时按样本写成该指标的检测结果（进数据审核）；空 = 只进检查点 */
   metric_id?: string;
+  /** series：设备回报一条曲线（{x, y}），上下限对 y；空 = 一个数 */
+  kind?: '' | 'series';
 };
 
 /** 设备方法：能力 + 适用型号 + 设备端程序 + 参数范围 + 输出规则，按版本管理 */
@@ -1920,16 +1922,24 @@ export type WorkflowEventRow = {
 
 /* ---------- 指标与检测 ---------- */
 
+/** 从曲线派生数值：取法见后端 domain/series.py 的 REDUCERS */
+export type SeriesReducer = 'last_y' | 'first_y' | 'max_y' | 'min_y' | 'last_x' | 'max_x' | 'area';
+
 export type MetricRow = {
   id: string;
   code: string;
   name: string;
   version: string;
-  value_type: 'number' | 'text' | 'enum';
+  /** series：一组 x–y 点（充放电曲线、谱图），单位是 y 的单位 */
+  value_type: 'number' | 'text' | 'enum' | 'series';
   unit: string;
   method_version: string;
   sample_types: string[];
-  rules: { min?: number; max?: number; options?: (string | number)[] };
+  rules: {
+    min?: number; max?: number; options?: (string | number)[];
+    x_label?: string; x_unit?: string; max_points?: number;
+    derived?: { metric: string; of: SeriesReducer }[];
+  };
   state: string;
   referenced_by: number;
   numeric: boolean;
@@ -1938,6 +1948,17 @@ export type MetricRow = {
 };
 
 export type DataFlag = { code: string; message: string; rule_id?: string; key?: string; well?: string };
+
+/** 一条曲线（或一个结果里的几条之一） */
+export type CurveTrace = { name: string; x: number[]; y: number[] };
+
+/** 曲线概要：条数、点数、x / y 范围 */
+export type CurveSummary = {
+  trace_count: number;
+  points: number;
+  x_range: [number, number] | null;
+  y_range: [number, number] | null;
+};
 
 export type DataRuleRow = {
   id: string;
@@ -1967,6 +1988,8 @@ export type ResultValueRow = {
   value_type: string;
   value: number | string | null;
   display: string;
+  /** 曲线：概要 + 几百点的缩略；完整的点用 /result-values/{id}/series 取 */
+  series?: (CurveSummary & { preview: CurveTrace[]; x_label: string; x_unit: string }) | null;
   unit: string;
   collected_at: string | null;
   raw_file_id: string;
@@ -2019,9 +2042,11 @@ export type AnalysisTaskRow = {
     code: string;
     name: string;
     unit: string;
-    /** 录入控件按它给：number 以数值回传，enum 从 options 里选 */
-    value_type?: 'number' | 'text' | 'enum';
+    /** 录入控件按它给：number 以数值回传，enum 从 options 里选，series 按两列粘贴 */
+    value_type?: 'number' | 'text' | 'enum' | 'series';
     options?: string[];
+    x_label?: string;
+    x_unit?: string;
     collected: boolean;
     not_measured: boolean;
   }[];
@@ -2168,6 +2193,17 @@ export type ReportContent = {
   results: { metric_name: string; unit: string; rows: Record<string, unknown>[] }[];
   exclusions: Record<string, string | number>[];
   statistics: Record<string, unknown>[];
+  /** 曲线型指标的正式结果：每个指标一张按样本叠加的图（点已抽稀，条数封顶） */
+  curves?: {
+    metric_name: string;
+    unit: string;
+    x_label: string;
+    x_unit: string;
+    total: number;
+    shown: number;
+    excluded: number;
+    traces: { label: string; group: string; x: number[]; y: number[] }[];
+  }[];
   conclusion: string;
   batch_id: string;
   /** 父任务的多批合并报告：引用的全部批次、父任务，以及「分批情况」一节 */
@@ -2366,10 +2402,12 @@ export type AnalysisView = {
   state: string;
   official: boolean;
   scope_label: string;
-  available_metrics: { id: string; code: string; name: string; unit: string; numeric: boolean }[];
+  available_metrics: { id: string; code: string; name: string; unit: string; numeric: boolean; value_type?: string }[];
   selected_metrics: string[];
   metrics: MetricBlock[];
   non_numeric_metrics: { metric_id: string; metric_name: string; value_type: string }[];
+  /** 曲线指标：不进数值统计，按样本叠加画（/results/{batch}/series） */
+  series_metrics?: { metric_id: string; metric_name: string; unit: string; x_label: string; x_unit: string }[];
   show_factor_effects: boolean;
   /** 历史批次没有类型化结果时回落到旧视图 */
   legacy?: boolean;
@@ -2377,6 +2415,53 @@ export type AnalysisView = {
   groups?: unknown[];
   summary?: Record<string, unknown>;
   samples?: unknown[];
+};
+
+/** 曲线叠加：一个曲线指标在批次（或父任务各批次）里每个样本的当前曲线，纳入口径与数值统计相同 */
+export type SeriesView = {
+  batch_id?: string;
+  task_id?: string;
+  metric_id: string;
+  metric_code: string;
+  metric_name: string;
+  unit: string;
+  x_label: string;
+  x_unit: string;
+  official: boolean;
+  scope_label: string;
+  samples: (CurveSummary & {
+    assignment_id: string;
+    batch_id: string;
+    analysis_task_id: string;
+    result_value_id: string;
+    result_version: number;
+    condition_group: string;
+    condition_label: string;
+    is_control: boolean;
+    well: string;
+    quality: string;
+    review_state: string;
+    traces: CurveTrace[];
+  })[];
+  excluded: {
+    assignment_id: string;
+    condition_label: string;
+    result_version: number;
+    reason: string;
+    reason_label: string;
+  }[];
+};
+
+/** 一条曲线结果的完整数据点 */
+export type SeriesDetail = CurveSummary & {
+  id: string;
+  metric_code: string;
+  metric_name: string;
+  result_version: number;
+  unit: string;
+  x_label: string;
+  x_unit: string;
+  traces: CurveTrace[];
 };
 
 /* ---------- 库存 ---------- */

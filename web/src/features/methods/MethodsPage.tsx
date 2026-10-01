@@ -197,10 +197,11 @@ function MethodDialog({
   );
   const [outputs, setOutputs] = useState<MethodOutputRule[]>(method?.outputs ?? []);
   const capability = capabilities.find((row) => row.id === capabilityId);
-  /* 输出项能关联的指标：在用的数值型指标（设备回报的是数）。已关联、后来停用的仍列出，发布检查会报出来 */
+  /* 输出项能关联的指标：在用的数值型或曲线型指标（设备回报的是数或曲线）。已关联、后来停用的仍列出，发布检查会报出来 */
   const metrics = useQuery<MetricRow[]>('metrics', () => api.get<MetricRow[]>('/metrics'));
   const linkable = (metrics.data ?? []).filter(
-    (row) => (row.state === 'active' && row.value_type === 'number') || outputs.some((output) => output.metric_id === row.id),
+    (row) => (row.state === 'active' && (row.value_type === 'number' || row.value_type === 'series'))
+      || outputs.some((output) => output.metric_id === row.id),
   );
 
   const payload = () => ({
@@ -422,6 +423,7 @@ function MethodDialog({
           <tr>
             <th>指标键</th>
             <th>名称</th>
+            <th>类型</th>
             <th>单位</th>
             <th>下限</th>
             <th>上限</th>
@@ -443,6 +445,14 @@ function MethodDialog({
                   <input value={row.label ?? ''} readOnly={readOnly} onChange={(event) => update({ label: event.target.value })} />
                 </td>
                 <td>
+                  <select value={row.kind ?? ''} disabled={readOnly} aria-label={`${row.key || '输出'} 类型`}
+                    title="曲线：设备回报 {x, y}，上下限对 y"
+                    onChange={(event) => update({ kind: event.target.value as MethodOutputRule['kind'] })}>
+                    <option value="">数值</option>
+                    <option value="series">曲线</option>
+                  </select>
+                </td>
+                <td>
                   <input value={row.unit ?? ''} readOnly={readOnly} style={{ width: 70 }} onChange={(event) => update({ unit: event.target.value })} />
                 </td>
                 <td>
@@ -461,14 +471,18 @@ function MethodDialog({
                     aria-label={`${row.key || '输出'} 关联指标`}
                     onChange={(event) => {
                       const metric = linkable.find((item) => item.id === event.target.value);
-                      // 选了指标、输出项还没写单位：带上指标的单位（两者必须一致）
-                      update({ metric_id: event.target.value, ...(metric && !(row.unit ?? '').trim() ? { unit: metric.unit } : {}) });
+                      // 选了指标、输出项还没写单位：带上指标的单位（两者必须一致）；曲线指标的输出就是曲线
+                      update({
+                        metric_id: event.target.value,
+                        ...(metric && !(row.unit ?? '').trim() ? { unit: metric.unit } : {}),
+                        ...(metric ? { kind: metric.value_type === 'series' ? 'series' : '' } : {}),
+                      });
                     }}
                   >
                     <option value="">不关联（只进检查点）</option>
                     {linkable.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.name}（{item.code}，{item.unit || '无单位'}）{item.state !== 'active' ? ' · 已停用' : ''}
+                        {item.name}（{item.code}，{item.unit || '无单位'}{item.value_type === 'series' ? '，曲线' : ''}）{item.state !== 'active' ? ' · 已停用' : ''}
                       </option>
                     ))}
                   </select>

@@ -985,7 +985,7 @@ class MetricCreateIn(BaseModel):
     code: str
     name: str
     version: str = "v1"
-    value_type: Literal["number", "text", "enum"] = "number"
+    value_type: Literal["number", "text", "enum", "series"] = "number"
     unit: str = ""
     method_version: str = ""
     sample_types: list[str] = []
@@ -996,7 +996,7 @@ class MetricPatchIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
-    value_type: Literal["number", "text", "enum"] | None = None
+    value_type: Literal["number", "text", "enum", "series"] | None = None
     unit: str | None = None
     method_version: str | None = None
     sample_types: list[str] | None = None

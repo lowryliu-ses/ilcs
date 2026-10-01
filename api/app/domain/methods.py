@@ -57,7 +57,8 @@ def definition_issues(
     """方法定义本身的问题。发布前必须为空。
 
     `metrics` 是本组织的指标定义 {id: {code, unit, value_type, state}}：输出项关联了指标时，指标要存在、在用、
-    是数值型、单位与输出项相同——设备回报的数是按输出项的单位原样写成结果的，单位不同就差出倍数。没给就不查关联。
+    是数值型（或曲线型，输出项 `kind: "series"`）、单位与输出项相同——设备回报的数是按输出项的单位原样写成结果的，
+    单位不同就差出倍数。没给就不查关联。
     """
     issues: list[str] = []
     if not str(name or "").strip():
@@ -119,8 +120,11 @@ def definition_issues(
                 issues.append(f"输出 {key} 关联的指标 {metric_id} 不存在")
             elif metric.get("state") != "active":
                 issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 已停用")
-            elif metric.get("value_type") != "number":
-                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 不是数值型：设备回报的是数")
+            elif metric.get("value_type") not in ("number", "series"):
+                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 不是数值或曲线型：设备回报的是数或曲线")
+            elif (metric.get("value_type") == "series") != (row.get("kind") == "series"):
+                wanted = "曲线" if metric.get("value_type") == "series" else "数值"
+                issues.append(f"输出 {key} 关联的是{wanted}指标 {metric.get('code')}，输出类型要选{wanted}")
             elif canonical_unit(row.get("unit")) != canonical_unit(metric.get("unit")):
                 issues.append(
                     f"输出 {key} 的单位 {row.get('unit') or '（未填）'} 与指标 {metric.get('code')} 的单位 "

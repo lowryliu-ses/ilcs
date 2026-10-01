@@ -12,7 +12,7 @@ import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { DataRuleRow, MetricRow } from '../../shared/types';
+import type { DataRuleRow, MetricRow, SeriesReducer } from '../../shared/types';
 import {
   ConfirmDialog, Field, ListState, Modal, Panel, Pill, useToast,
 } from '../../shared/ui';
@@ -21,6 +21,18 @@ const VALUE_TYPES: [MetricRow['value_type'], string][] = [
   ['number', '数值'],
   ['text', '文本'],
   ['enum', '枚举'],
+  ['series', '曲线'],
+];
+
+/* 从曲线派生数值的取法（与后端 domain/series.py 的 REDUCERS 一致） */
+const REDUCERS: [SeriesReducer, string][] = [
+  ['last_x', '最后一点的 x（如截止时的容量）'],
+  ['max_x', 'x 的最大值'],
+  ['last_y', '最后一点的 y'],
+  ['first_y', '第一点的 y'],
+  ['max_y', 'y 的最大值'],
+  ['min_y', 'y 的最小值'],
+  ['area', '曲线下面积'],
 ];
 
 const TYPE_LABEL = Object.fromEntries(VALUE_TYPES) as Record<string, string>;
@@ -182,6 +194,11 @@ function describeRules(row: MetricRow): string {
   if (row.value_type === 'enum') {
     return (row.rules.options ?? []).join('、') || '未定义可选值';
   }
+  if (row.value_type === 'series') {
+    const axis = `x：${row.rules.x_label || '未命名'}${row.rules.x_unit ? `（${row.rules.x_unit}）` : ''}`;
+    const derived = (row.rules.derived ?? []).map((item) => `派生 ${item.metric}`).join('、');
+    return [axis, row.rules.max_points ? `≤ ${row.rules.max_points} 点` : '', derived].filter(Boolean).join('；');
+  }
   if (row.value_type !== 'number') return '—';
   const { min, max } = row.rules;
   if (min === undefined && max === undefined) return '不限';
@@ -212,11 +229,27 @@ function MetricForm({
     min: metric?.rules.min ?? '',
     max: metric?.rules.max ?? '',
     options: (metric?.rules.options ?? []).join('、'),
+    x_label: metric?.rules.x_label ?? '',
+    x_unit: metric?.rules.x_unit ?? '',
+    max_points: metric?.rules.max_points ?? '',
   });
+  const [derived, setDerived] = useState<{ metric: string; of: SeriesReducer }[]>(metric?.rules.derived ?? []);
+  // 可派生成的数值指标（按代码；派生写到在用版本）
+  const all = useQuery<MetricRow[]>('metrics:all', () => api.get<MetricRow[]>('/metrics'));
+  const numericCodes = [...new Set((all.data ?? []).filter((row) => row.value_type === 'number' && row.state === 'active').map((row) => row.code))];
 
   const rules = () => {
     if (form.value_type === 'enum') {
       return { options: splitList(form.options) };
+    }
+    if (form.value_type === 'series') {
+      const out: Record<string, unknown> = {};
+      if (form.x_label.trim()) out.x_label = form.x_label.trim();
+      if (form.x_unit.trim()) out.x_unit = form.x_unit.trim();
+      if (form.max_points !== '' && Number.isInteger(Number(form.max_points))) out.max_points = Number(form.max_points);
+      const rows = derived.filter((row) => row.metric);
+      if (rows.length) out.derived = rows;
+      return out;
     }
     if (form.value_type !== 'number') return {};
     const out: Record<string, number> = {};
@@ -327,7 +360,10 @@ function MetricForm({
         </Field>
         <Field
           label="标准单位"
-          hint={form.value_type === 'number' ? '数值指标必填：没有单位的数字无法比较' : '非数值指标可留空'}
+          hint={
+            form.value_type === 'number' ? '数值指标必填：没有单位的数字无法比较'
+              : form.value_type === 'series' ? '曲线的 y 单位（如 V）；x 轴单位写在下面' : '非数值指标可留空'
+          }
         >
           <input
             value={form.unit}
@@ -365,8 +401,52 @@ function MetricForm({
             </Field>
           </div>
           <div className="note">
-            这是**录入校验**：超出范围的回传会被整条拒绝。它不代表质量合格——范围内的值
-            同样要经过数据复核才算有效。
+            这是校验规则，不是质量判定：超出范围的值照常入库、自动打标并置为可疑，交数据复核下结论；
+            范围内的值同样要经过复核才算有效。
+          </div>
+        </>
+      ) : null}
+      {form.value_type === 'series' ? (
+        <>
+          <div className="grid cols-3">
+            <Field label="x 轴名称" hint="如 比容量、波数、时间">
+              <input value={form.x_label} onChange={(event) => setForm({ ...form, x_label: event.target.value })} />
+            </Field>
+            <Field label="x 轴单位" hint="如 mAh/g、cm⁻¹、s">
+              <input value={form.x_unit} onChange={(event) => setForm({ ...form, x_unit: event.target.value })} />
+            </Field>
+            <Field label="每条曲线最多点数" hint="缺省 20000，最多 100000；更密的先在解析器里抽稀">
+              <input value={String(form.max_points)} inputMode="numeric"
+                onChange={(event) => setForm({ ...form, max_points: event.target.value })} />
+            </Field>
+          </div>
+          <div className="note">
+            曲线不进数值统计、逻辑规则与闭环训练数据，在结果分析里按样本叠加画、报告里出「曲线」一节。
+            要统计或给闭环用，就在下面声明从曲线派生的数值指标：回传曲线时一并算出、写成那个指标的结果，同样要复核；
+            曲线更正后派生值跟着出新版本。设备或解析器自己报了那个数时以报的为准。
+          </div>
+          <div className="stack">
+            {derived.map((row, index) => (
+              <div key={index} className="row">
+                <select value={row.metric} aria-label="派生的数值指标"
+                  onChange={(event) => setDerived(derived.map((item, at) => (at === index ? { ...item, metric: event.target.value } : item)))}>
+                  <option value="">选数值指标…</option>
+                  {row.metric && !numericCodes.includes(row.metric) ? <option value={row.metric}>{row.metric}（未登记或已停用）</option> : null}
+                  {numericCodes.map((code) => <option key={code} value={code}>{code}</option>)}
+                </select>
+                <span className="small muted">取</span>
+                <select value={row.of} aria-label="取法"
+                  onChange={(event) => setDerived(derived.map((item, at) => (at === index ? { ...item, of: event.target.value as SeriesReducer } : item)))}>
+                  {REDUCERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <button type="button" className="btn sm" onClick={() => setDerived(derived.filter((_, at) => at !== index))}>删</button>
+              </div>
+            ))}
+            <div>
+              <button type="button" className="btn sm" onClick={() => setDerived([...derived, { metric: '', of: 'last_x' }])}>
+                ＋ 派生一个数值指标
+              </button>
+            </div>
           </div>
         </>
       ) : null}

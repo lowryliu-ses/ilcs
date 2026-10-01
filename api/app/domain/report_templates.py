@@ -2,7 +2,8 @@
 所以换模板不会让同一个批次在两份报告里出现两种数。模板带版本，发布时写进固化快照。
 
 「分批情况」只在一个方案分多批执行、在父任务上出合并报告时有内容（各批样本数与状态、按批统计与批次差异、
-短缺与放弃记录）；单批报告渲染时跳过这一节，章节编号照常连续。
+短缺与放弃记录）；单批报告渲染时跳过这一节，章节编号照常连续。「曲线」同理：只有曲线型指标（充放电曲线、谱图）
+有正式结果时才有内容，每个曲线指标一张按样本叠加的图；没有就跳过。
 
 组织自己的模板（`models.ReportTemplate`）章节清单写成 `[{key, title?}, {kind: "text", key: "text:…", title, body}]`：
 内置章节可以改标题，固定文字章节（声明、方法说明）原样印出。报告内容里的模板快照（`snapshot`）仍用
@@ -24,21 +25,22 @@ SECTION_TITLES = {
     "data_flags": "数据质量标记",
     "raw_files": "原始数据文件",
     "statistics": "统计",
+    "curves": "曲线",
     "conclusion": "结论",
     "approval": "复核与批准",
 }
 
 TEMPLATES: dict[str, dict] = {
     "standard": {
-        "name": "完整实验报告", "version": "2.1",
-        "description": "方案、流程、样本、分批情况、人员物料、仪器、执行、结果、排除、数据标记、原始文件、统计与结论",
+        "name": "完整实验报告", "version": "2.2",
+        "description": "方案、流程、样本、分批情况、人员物料、仪器、执行、结果、排除、数据标记、原始文件、统计、曲线与结论",
         "sections": ["plan", "method", "samples", "batches", "resources", "instruments", "execution", "results",
-                     "exclusions", "data_flags", "raw_files", "statistics", "conclusion", "approval"],
+                     "exclusions", "data_flags", "raw_files", "statistics", "curves", "conclusion", "approval"],
     },
     "summary": {
-        "name": "结果摘要", "version": "1.1",
-        "description": "给项目方看的短报告：方案、流程版本、分批情况、结果表、统计与结论",
-        "sections": ["plan", "method", "batches", "results", "statistics", "conclusion", "approval"],
+        "name": "结果摘要", "version": "1.2",
+        "description": "给项目方看的短报告：方案、流程版本、分批情况、结果表、统计、曲线与结论",
+        "sections": ["plan", "method", "batches", "results", "statistics", "curves", "conclusion", "approval"],
     },
     "audit": {
         "name": "质量审计报告", "version": "1.1",

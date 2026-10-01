@@ -7,7 +7,8 @@
 - 步骤声明了投料物料（`request.material`）时，按用量参数回报消耗（逐孔位时取各孔之和，单位是该参数登记的单位），
   和真实设备一样经消耗入账——模拟阶段也能看到预留、消耗与对账是否对得上。
 - 工位配置 `simulate_outputs: true` 时，给方法输出规则里没回显的检测项生成确定性的示意值，
-  否则每一步都是「缺必报项」。缺省关闭：不打开就和以前一样只回显参数。
+  否则每一步都是「缺必报项」。缺省关闭：不打开就和以前一样只回显参数。曲线型输出（`kind: "series"`）给一条
+  落在上下限里的示意曲线（像放电曲线：先缓降、末端陡降），逐孔各一条，不写整批的「均值」。
 """
 from __future__ import annotations
 
@@ -52,6 +53,26 @@ def sample_output(rule: dict, seed: str) -> float:
     else:
         value = 1.0
     return _within(value, lo, hi)
+
+
+CURVE_POINTS = 41
+
+
+def sample_curve(rule: dict, seed: str) -> dict:
+    """示意曲线：x 0–100（进度 %），y 从上限缓降、末端陡降到下限附近，平台斜率按种子略有不同。
+    没有上下限按 [0, 1]。点都落在规则范围内，不会被判出界。"""
+    lo, hi = rule.get("lo"), rule.get("hi")
+    low = float(lo) if _number(lo) else 0.0
+    high = float(hi) if _number(hi) else (low + 1.0 if _number(lo) else 1.0)
+    span = high - low
+    tilt = 0.12 + 0.10 * (hash_str(seed) % 1000) / 999
+    x, y = [], []
+    for index in range(CURVE_POINTS):
+        t = index / (CURVE_POINTS - 1)
+        drop = tilt * t + (0.92 - tilt) * t ** 8
+        x.append(round(100 * t, 4))
+        y.append(_within(high - span * (0.04 + drop), lo, hi))
+    return {"x": x, "y": y}
 
 
 class SimulationAdapter:
@@ -140,6 +161,13 @@ class SimulationAdapter:
         for rule in request.outputs:
             key = str((rule or {}).get("key") or "")
             if not key or key in delivered or key == "materials":
+                continue
+            if (rule or {}).get("kind") == "series":
+                if wells:
+                    for well, row in wells.items():
+                        row.setdefault(key, sample_curve(rule, f"{request.command_id}:{key}:{well}"))
+                else:
+                    delivered[key] = sample_curve(rule, f"{request.command_id}:{key}")
                 continue
             if wells:
                 values = []

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
 import { LineChart } from '../../shared/chart';
+import { CurveOverlay } from '../../shared/curves';
 import { num, signed } from '../../shared/format';
 import { useQuery } from '../../shared/query';
 import type { Analysis, AnalysisView, MetricBlock } from '../../shared/types';
@@ -146,9 +147,9 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
               }
             >
               {view.available_metrics.map((row) => (
-                <option key={row.id} value={row.id} disabled={!row.numeric}>
+                <option key={row.id} value={row.id} disabled={!row.numeric && row.value_type !== 'series'}>
                   {row.name}
-                  {row.numeric ? '' : '（非数值，不进统计）'}
+                  {row.numeric ? '' : row.value_type === 'series' ? '（曲线，叠加画）' : '（非数值，不进统计）'}
                 </option>
               ))}
             </select>
@@ -181,11 +182,18 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
         ) : null}
       </Panel>
 
+      {(view.series_metrics ?? []).map((row) => (
+        <Panel key={row.metric_id} title={`曲线 · ${row.metric_name}`}
+          aside={<span className="small muted">按样本叠加，同一条件组同色；不进数值统计</span>}>
+          <CurveOverlay url={`/results/${batchId}/series${pageQuery({ metric_id: row.metric_id, official })}`} />
+        </Panel>
+      ))}
+
       {view.metrics.length ? (
         view.metrics.map((block) => (
           <MetricPanel key={block.metric_id} block={block} showEffects={view.show_factor_effects} />
         ))
-      ) : (
+      ) : (view.series_metrics ?? []).length ? null : (
         <Panel title="统计">
           <Empty>
             当前范围内没有可统计的数值结果

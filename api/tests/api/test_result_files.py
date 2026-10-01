@@ -111,3 +111,51 @@ def test_unmatched_files_are_left_alone(tmp_path, client, lims):
     (receiver.inbox / "notes.txt").write_text("不是导出文件", encoding="utf-8")
     assert receiver.run_once() == {"archived": 0, "rejected": 0, "waiting": 0, "retry": 0, "ignored": 1}
     assert (receiver.inbox / "notes.txt").exists()
+
+
+def test_curve_columns_become_a_curve_result_split_by_cycle(tmp_path, client, lims, admin, operator, researcher, reset_runtime):
+    """曲线型指标取整列：x、y 两列按「圈数」分成几条；单位行这类不是数的行跳过；同一文件的最后一行照样给数值指标。"""
+    from uuid import uuid4
+
+    suffix = uuid4().hex[:6]
+    curve = admin.post("/api/metrics", {"code": f"rf_curve_{suffix}", "name": "充放电曲线", "value_type": "series",
+                                        "unit": "V", "rules": {"x_label": "比容量", "x_unit": "mAh/g"}})
+    assert curve.status_code == 201, curve.text
+    sample_id = f"PS-RFC-{suffix}"
+    assert operator.post("/api/samples", {"id": sample_id, "source": "曲线用例", "sample_type": "扣电",
+                                          "quantity": "1", "unit": "pcs"}).status_code == 201
+    analysis = researcher.post("/api/analysis-tasks", {
+        "physical_sample_id": sample_id, "method": "充放电", "method_version": "CYC-01",
+        "required_metrics": [curve.json()["id"], CAPACITY],
+    })
+    assert analysis.status_code == 201, analysis.text
+    task_id = analysis.json()["id"]
+    receiver = _receiver(tmp_path, client, lims, profile={"metrics": {
+        "曲线": {"metric_version_id": curve.json()["id"], "unit": "V",
+                 "series": {"x": "容量(mAh/g)", "y": "电压(V)", "trace": "圈数"}},
+        "容量(mAh/g)": {"metric_version_id": CAPACITY, "unit": "mAh/g"},
+    }})
+    name = f"{task_id}__{sample_id}__cycle.csv"
+    (receiver.inbox / name).write_text(
+        "圈数,容量(mAh/g),电压(V)\n-,mAh/g,V\n1,0,4.2\n1,100,3.8\n1,198,3.0\n2,0,4.2\n2,95,3.8\n2,190,3.0\n",
+        encoding="utf-8",
+    )
+    assert receiver.run_once()["archived"] == 1
+    detail = researcher.get(f"/api/analysis-tasks/{task_id}").json()
+    assert detail["state"] == "collected", detail["missing_metrics"]
+    values = {row["metric_definition_id"]: row for row in detail["values"]}
+    stored = values[curve.json()["id"]]
+    assert stored["series"]["trace_count"] == 2 and stored["series"]["points"] == 6, "单位行跳过，按圈分两条"
+    full = researcher.get(f"/api/result-values/{stored['id']}/series").json()
+    assert [trace["name"] for trace in full["traces"]] == ["1", "2"] and full["traces"][1]["x"] == [0, 95, 190]
+    assert float(values[CAPACITY]["value"]) == 190.0, "数值指标照旧取最后一行"
+
+
+def test_curve_profile_needs_csv_and_both_columns():
+    from connectors.result_files.receiver import Profile
+
+    base = {"name": "x", "pattern": r"(?P<task_id>.+)\.txt", "metrics": {"曲线": {"metric_version_id": "M", "series": {"x": "a"}}}}
+    with pytest.raises(ValueError, match="要写"):
+        Profile(base)
+    with pytest.raises(ValueError, match="只有 csv"):
+        Profile({**base, "format": "key_value", "metrics": {"曲线": {"metric_version_id": "M", "series": {"x": "a", "y": "b"}}}})

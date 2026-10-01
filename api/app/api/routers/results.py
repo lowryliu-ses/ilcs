@@ -44,6 +44,12 @@ def analysis(
     return ReportService(db, ctx).analysis_view(batch_id, selected, official)
 
 
+@router.get("/results/{batch_id}/series")
+def series(db: DbSession, ctx: Ctx, batch_id: str, metric_id: str, official: bool = True):
+    """曲线叠加：这个批次里选定曲线指标的样本曲线（抽稀），纳入口径与数值统计相同，没纳入的列出原因。"""
+    return ReportService(db, ctx).batch_series_view(batch_id, metric_id, official)
+
+
 @router.get("/results/{batch_id}/export")
 def export(db: DbSession, ctx: Ctx, batch_id: str, official: bool = True):
     scope = "official" if official else "exploratory"

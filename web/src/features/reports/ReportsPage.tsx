@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
+import { XYChart } from '../../shared/chart';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -699,6 +700,25 @@ function ReportExtras({ content }: { content: ReportContent }) {
             <div key={key} style={{ marginBottom: 8 }}>
               <b className="small">{row.title}</b>
               <div className="small" style={{ whiteSpace: 'pre-wrap' }}>{row.body}</div>
+            </div>
+          ))}
+        </Panel>
+      ) : null}
+      {show('curves') && content.curves?.length ? (
+        <Panel title="曲线">
+          {content.curves.map((chart) => (
+            <div key={chart.metric_name} className="stack" style={{ marginBottom: 12 }}>
+              <div className="small">
+                <b>{chart.metric_name}</b>：正式结果 {chart.total} 条
+                {chart.shown < chart.total ? `，图中画前 ${chart.shown} 条` : ''}
+                {chart.excluded ? `；另有 ${chart.excluded} 条没纳入` : ''}
+              </div>
+              <XYChart
+                traces={chart.traces.map((trace, index) => ({ key: `${index}`, label: trace.label, group: trace.group, x: trace.x, y: trace.y }))}
+                xLabel={`${chart.x_label || 'x'}${chart.x_unit ? `（${chart.x_unit}）` : ''}`}
+                yLabel={`${chart.metric_name}${chart.unit ? `（${chart.unit}）` : ''}`}
+                height={240}
+              />
             </div>
           ))}
         </Panel>

@@ -77,6 +77,9 @@ def output_flags(outputs: list[dict], delivered: dict) -> list[dict]:
                 if rule.get("required"):
                     flags.append(flag("output_missing", f"{where}必报输出 {label} 设备没有回报", key=key, well=well))
                 continue
+            if rule.get("kind") == "series":
+                flags.extend(_curve_flags(raw, where, label, low, high, unit, key, well))
+                continue
             number = _num(raw)
             if number is None:
                 flags.append(flag("output_invalid", f"{where}{label} 回报值 {raw!r} 不是数值", key=key, well=well))
@@ -86,6 +89,24 @@ def output_flags(outputs: list[dict], delivered: dict) -> list[dict]:
             elif high is not None and number > high:
                 flags.append(flag("out_of_range", f"{where}{label} {number:g}{unit} 高于方法上限 {high:g}", key=key, well=well))
     return flags
+
+
+def _curve_flags(raw: Any, where: str, label: str, low: float | None, high: float | None, unit: str,
+                 key: str, well: str) -> list[dict]:
+    """曲线型输出：写法不成立打标；给了上下限就看 y 有没有出界（报出界的点数与最值）。"""
+    from .series import normalize
+
+    curve, problems = normalize(raw)
+    if problems:
+        return [flag("output_invalid", f"{where}{label} 回报的不是曲线：{problems[0]}", key=key, well=well)]
+    ys = [value for trace in curve["traces"] for value in trace["y"]]
+    if low is not None and min(ys) < low:
+        outside = sum(1 for value in ys if value < low)
+        return [flag("out_of_range", f"{where}{label} 有 {outside} 个点低于方法下限 {low:g}{unit}（最低 {min(ys):g}）", key=key, well=well)]
+    if high is not None and max(ys) > high:
+        outside = sum(1 for value in ys if value > high)
+        return [flag("out_of_range", f"{where}{label} 有 {outside} 个点高于方法上限 {high:g}{unit}（最高 {max(ys):g}）", key=key, well=well)]
+    return []
 
 
 @dataclass(frozen=True)

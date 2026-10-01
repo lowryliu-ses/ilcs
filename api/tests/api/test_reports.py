@@ -498,7 +498,7 @@ def test_report_templates_add_instruments_operation_log_and_raw_files(admin, ope
     switched = admin.patch(f"/api/reports/{report['id']}", {"template": "summary", "row_version": report["row_version"]})
     assert switched.status_code == 200, switched.text
     assert switched.json()["content"]["template"]["key"] == "summary"
-    assert switched.json()["template_version"] == "summary-1.1"
+    assert switched.json()["template_version"] == "summary-1.2"
     assert render(switched.json()["content"]).startswith(b"%PDF")
 
 

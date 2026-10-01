@@ -105,6 +105,12 @@ def pending_reviews(db: DbSession, ctx: Ctx):
     return AnalysisService(db, ctx).review_queue()
 
 
+@router.get("/result-values/{value_id}/series")
+def result_series(value_id: str, db: DbSession, ctx: Ctx):
+    """曲线结果的完整数据点。结果列表里只带概要与几百点的缩略。"""
+    return AnalysisService(db, ctx).series_out(value_id)
+
+
 @router.post("/result-values/{value_id}/review")
 def review_result(
     value_id: str, payload: ResultReviewIn, db: DbSession, guard: IdempotencyGuard,

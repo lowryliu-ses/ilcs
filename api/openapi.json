@@ -4058,7 +4058,8 @@
             "enum": [
               "number",
               "text",
-              "enum"
+              "enum",
+              "series"
             ],
             "title": "Value Type",
             "type": "string"
@@ -4143,7 +4144,8 @@
                 "enum": [
                   "number",
                   "text",
-                  "enum"
+                  "enum",
+                  "series"
                 ],
                 "type": "string"
               },
@@ -16232,6 +16234,87 @@
         ]
       }
     },
+    "/api/experiment-tasks/{task_id}/results/series": {
+      "get": {
+        "description": "父任务的曲线叠加：各子任务批次里这个曲线指标的样本曲线（终止的批次不画，与合并统计同一口径）。",
+        "operationId": "task_result_series_api_experiment_tasks__task_id__results_series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric_id",
+            "required": true,
+            "schema": {
+              "title": "Metric Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "official",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Official",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Task Result Series",
+        "tags": [
+          "task"
+        ]
+      }
+    },
     "/api/experiment-tasks/{task_id}/retest": {
       "post": {
         "description": "补测：在父任务下新建补测子任务，补现有的样本短缺。",
@@ -25259,6 +25342,68 @@
         ]
       }
     },
+    "/api/result-values/{value_id}/series": {
+      "get": {
+        "description": "曲线结果的完整数据点。结果列表里只带概要与几百点的缩略。",
+        "operationId": "result_series_api_result_values__value_id__series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "value_id",
+            "required": true,
+            "schema": {
+              "title": "Value Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Result Series",
+        "tags": [
+          "analysis"
+        ]
+      }
+    },
     "/api/results": {
       "get": {
         "operationId": "list_result_batches_api_results_get",
@@ -25540,6 +25685,87 @@
           }
         ],
         "summary": "Export",
+        "tags": [
+          "result"
+        ]
+      }
+    },
+    "/api/results/{batch_id}/series": {
+      "get": {
+        "description": "曲线叠加：这个批次里选定曲线指标的样本曲线（抽稀），纳入口径与数值统计相同，没纳入的列出原因。",
+        "operationId": "series_api_results__batch_id__series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric_id",
+            "required": true,
+            "schema": {
+              "title": "Metric Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "official",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Official",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Series",
         "tags": [
           "result"
         ]

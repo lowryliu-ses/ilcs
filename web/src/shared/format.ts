@@ -63,7 +63,19 @@ export function signed(value: number | null | undefined, digits = 1): string {
 export function params(record: Record<string, unknown>): string {
   return Object.entries(record)
     .filter(([key]) => key !== 'wells')
-    // 程序表（充放电工步、升温程序）只说几步；具体工步在批次页、流程编辑器里看
-    .map(([key, value]) => (Array.isArray(value) ? `${key} 程序表 ${value.length} 步` : `${key} ${String(value)}`))
+    .map(([key, value]) => `${key} ${brief(value)}`)
     .join(' · ');
+}
+
+/* 程序表（充放电工步、升温程序）只说几步、曲线只说几点；具体内容在批次页、流程编辑器、数据审核里看 */
+function brief(value: unknown): string {
+  if (Array.isArray(value)) return `程序表 ${value.length} 步`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.x) && Array.isArray(record.y)) return `曲线 ${record.x.length} 点`;
+    if (Array.isArray(record.traces)) return `曲线 ${record.traces.length} 条`;
+    const text = JSON.stringify(value);
+    return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+  }
+  return String(value);
 }

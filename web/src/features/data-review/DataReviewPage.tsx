@@ -1,13 +1,15 @@
 import { useState } from 'react';
 
 import { api, pageQuery } from '../../shared/api';
+import { CurveThumb } from '../../shared/chart';
+import { CurveDialog, CurveInput, curveText, parseCurveText } from '../../shared/curves';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
 import { FlagList } from '../../shared/flags';
 import type {
-  AnalysisTaskRow, MetricRow, Paged, ResultValueRow, SampleRow,
+  AnalysisTaskRow, MetricRow, Paged, ResultValueRow, SampleRow, SeriesDetail,
 } from '../../shared/types';
 import {
   Blocked, ConfirmDialog, Empty, Field, ListState, Modal, NumberInput, Pager, Panel, Pill, useToast,
@@ -42,6 +44,7 @@ export function DataReviewPage() {
   const [creatingTask, setCreatingTask] = useState(false);
   const [entering, setEntering] = useState<AnalysisTaskRow | null>(null);
   const [retesting, setRetesting] = useState<AnalysisTaskRow | null>(null);
+  const [curve, setCurve] = useState<ResultValueRow | null>(null);
   const [taskPage, setTaskPage] = useState(1);
 
   const query = pageQuery({ page, page_size: 20, review_state: reviewState, quality });
@@ -126,6 +129,11 @@ export function DataReviewPage() {
                         <span className="tag warn">未测</span>
                         <div className="tiny muted">{row.not_measured_reason}</div>
                       </>
+                    ) : row.series ? (
+                      <button type="button" className="curve-cell" title="看完整曲线" onClick={() => setCurve(row)}>
+                        <CurveThumb traces={row.series.preview} />
+                        <span className="tiny">{row.display}</span>
+                      </button>
                     ) : (
                       row.display
                     )}
@@ -281,6 +289,10 @@ export function DataReviewPage() {
       {creatingTask ? <CreateTaskDialog onClose={() => setCreatingTask(false)} /> : null}
       {entering ? <ManualEntryDialog task={entering} onClose={() => setEntering(null)} /> : null}
       {retesting ? <RetestDialog task={retesting} onClose={() => setRetesting(null)} /> : null}
+      {curve ? (
+        <CurveDialog valueId={curve.id} title={`${curve.metric_name} · ${curve.assignment_id || curve.physical_sample_id} · v${curve.result_version}`}
+          onClose={() => setCurve(null)} />
+      ) : null}
     </div>
   );
 }
@@ -405,8 +417,9 @@ function CreateTaskDialog({ onClose }: { onClose: () => void }) {
 }
 
 /* 数值指标以数值回传：服务端按类型校验，字符串 '3.02' 会被整次拒收。填的不是数就原样交给服务端，
-   让它逐项说清哪一项不是数值，而不是在这里悄悄丢掉或当成 0。 */
-function typed(valueType: string | undefined, raw: string): string | number {
+   让它逐项说清哪一项不是数值，而不是在这里悄悄丢掉或当成 0。曲线按粘贴的两列解析成 {x, y}。 */
+function typed(valueType: string | undefined, raw: string): unknown {
+  if (valueType === 'series') return parseCurveText(raw).value;
   if (valueType !== 'number') return raw;
   const text = raw.trim();
   const parsed = Number(text);
@@ -450,6 +463,11 @@ function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: 
   const filled = task.required_metrics.filter(
     (row) => entries[row.id]?.value !== '' || entries[row.id]?.missing,
   ).length;
+  // 粘贴的曲线解析不出来就先别提交：服务端会整次拒收
+  const unparsed = task.required_metrics.some(
+    (row) => row.value_type === 'series' && !entries[row.id]?.missing && entries[row.id]?.value.trim()
+      && parseCurveText(entries[row.id].value).problems.length,
+  );
 
   return (
     <Modal
@@ -462,7 +480,8 @@ function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: 
           </button>
           <button
             className="btn primary"
-            disabled={!filled || enter.pending}
+            disabled={!filled || unparsed || enter.pending}
+            title={unparsed ? '有曲线没解析出来，先改好' : undefined}
             onClick={() => enter.run().catch(() => undefined)}
           >
             录入
@@ -491,7 +510,15 @@ function ManualEntryDialog({ task, onClose }: { task: AnalysisTaskRow; onClose: 
                 {row.collected ? <div className="tiny muted">已有记录</div> : null}
               </td>
               <td>
-                {row.value_type === 'enum' && row.options?.length ? (
+                {row.value_type === 'series' ? (
+                  <CurveInput
+                    value={entries[row.id]?.value ?? ''}
+                    xLabel={`${row.x_label || 'x'}${row.x_unit ? `（${row.x_unit}）` : ''}`}
+                    yLabel={`${row.name}${row.unit ? `（${row.unit}）` : ''}`}
+                    disabled={Boolean(entries[row.id]?.missing)}
+                    onChange={(value) => setEntries({ ...entries, [row.id]: { value, missing: '' } })}
+                  />
+                ) : row.value_type === 'enum' && row.options?.length ? (
                   <select
                     value={entries[row.id]?.value ?? ''}
                     disabled={Boolean(entries[row.id]?.missing)}
@@ -708,13 +735,20 @@ function ReviseDialog({ value, onClose }: { value: ResultValueRow; onClose: () =
   const [text, setText] = useState(typeof value.value === 'string' ? value.value : '');
   const [reason, setReason] = useState('');
   const [notMeasured, setNotMeasured] = useState('');
+  // 曲线：取完整的点预填成两列，改完再整条提交
+  const isCurve = value.value_type === 'series';
+  const [curveTextValue, setCurveText] = useState<string | null>(isCurve ? null : '');
+  const full = useQuery<SeriesDetail>(isCurve && value.series ? `result-series:${value.id}` : null,
+    () => api.get<SeriesDetail>(`/result-values/${value.id}/series`));
+  const curveDraft = curveTextValue ?? (full.data ? curveText(full.data.traces) : '');
+  const parsedCurve = isCurve ? parseCurveText(curveDraft) : null;
 
   const revise = useMutation(
     () =>
       api.post(
         `/result-values/${value.id}/revisions`,
         {
-          value: notMeasured ? null : value.value_type === 'number' ? numeric : text,
+          value: notMeasured ? null : isCurve ? parsedCurve?.value ?? null : value.value_type === 'number' ? numeric : text,
           unit: value.unit,
           not_measured_reason: notMeasured,
           reason,
@@ -741,7 +775,7 @@ function ReviseDialog({ value, onClose }: { value: ResultValueRow; onClose: () =
           </button>
           <button
             className="btn primary"
-            disabled={!reason.trim() || revise.pending}
+            disabled={!reason.trim() || revise.pending || (isCurve && !notMeasured && !!parsedCurve?.problems.length)}
             onClick={() => revise.run().catch(() => undefined)}
           >
             生成新版本
@@ -753,7 +787,13 @@ function ReviseDialog({ value, onClose }: { value: ResultValueRow; onClose: () =
         更正会生成新的结果版本并显式引用原版本（v{value.result_version}）。旧记录不会被覆盖，
         已发布的报告也不受影响。
       </div>
-      {notMeasured ? null : value.value_type === 'number' ? (
+      {notMeasured ? null : isCurve ? (
+        <Field label="新曲线" hint={value.series ? '已按原曲线预填；从这条曲线派生的数值会跟着出新版本' : undefined}>
+          <CurveInput value={curveDraft} onChange={setCurveText}
+            xLabel={`${value.series?.x_label || 'x'}${value.series?.x_unit ? `（${value.series.x_unit}）` : ''}`}
+            yLabel={`${value.metric_name}${value.unit ? `（${value.unit}）` : ''}`} />
+        </Field>
+      ) : value.value_type === 'number' ? (
         <Field label={`新值（${value.unit}）`}>
           <NumberInput value={numeric} onChange={setNumeric} />
         </Field>
