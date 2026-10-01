@@ -276,7 +276,7 @@ export function SampleDetailPage() {
       <div className="split">
         <div className="stack">
           <Panel title="来源谱系与分样" flush>
-            {sample.lineage.length || sample.children.length ? (
+            {sample.lineage.length || sample.children.length || (sample.parents?.length ?? 0) > 1 ? (
               <table>
                 <thead>
                   <tr>
@@ -297,6 +297,18 @@ export function SampleDetailPage() {
                       </td>
                     </tr>
                   ))}
+                  {(sample.parents?.length ?? 0) > 1
+                    ? (sample.parents ?? []).map((row) => (
+                      <tr key={`merged-${row.id}`} className="clickable" onClick={() => navigate(`/samples/${row.id}`)}>
+                        <td className="small muted">合并自</td>
+                        <td className="mono">{row.id}</td>
+                        <td className="mono small">{row.quantity ? `${row.quantity} ${row.unit}` : '—'}</td>
+                        <td>
+                          <Pill state={row.lifecycle_state} label={row.lifecycle_label} />
+                        </td>
+                      </tr>
+                    ))
+                    : null}
                   {sample.children.map((row) => (
                     <tr key={row.id} className="clickable" onClick={() => navigate(`/samples/${row.id}`)}>
                       <td className="small muted">子样</td>

@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
+import { XYChart } from '../../shared/chart';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -42,6 +44,9 @@ export function ReportsPage() {
           正式报告只纳入审核通过且质量有效的结果；无效或可疑的结果作为已审核的排除说明出现，
           不进入正式结论统计。发布后只读，源结果修订要发布新版本并标明替代关系。
         </span>
+        <Link className="btn" to="/report-templates">
+          报告模板
+        </Link>
       </div>
 
       <Panel
@@ -235,7 +240,7 @@ function DetailDialog({ versionId, onClose }: { versionId: string; onClose: () =
                 >
                   {(templates.data ?? []).map((row) => (
                     <option key={row.key} value={row.key}>
-                      模板：{row.name} {row.version}
+                      模板：{templateLabel(row)}
                     </option>
                   ))}
                 </select>
@@ -624,7 +629,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         <select value={template} onChange={(event) => setTemplate(event.target.value)}>
           {(templates.data ?? []).map((row) => (
             <option key={row.key} value={row.key}>
-              {row.name} {row.version}
+              {templateLabel(row)}
             </option>
           ))}
         </select>
@@ -677,11 +682,47 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** 模板 2.0 起的补充章节：仪器与设备方法、原始数据文件、数据质量标记、操作记录。 */
+/* 内置模板版本号是「2.1」这种；组织模板按整数版本递增，标成「v3 · 本组织」以便区分。 */
+function templateLabel(row: ReportTemplate) {
+  return row.builtin === false ? `${row.name} v${row.version} · 本组织` : `${row.name} ${row.version}`;
+}
+
 function ReportExtras({ content }: { content: ReportContent }) {
   const sections = content.template?.sections;
   const show = (key: string) => !sections || sections.includes(key);
+  const texts = Object.entries(content.template?.texts ?? {});
   return (
     <>
+      {texts.length ? (
+        // 组织报告模板里的固定文字章节（声明、方法说明）：PDF 按模板顺序插在对应位置，这里集中列出
+        <Panel title="模板文字章节">
+          {texts.map(([key, row]) => (
+            <div key={key} style={{ marginBottom: 8 }}>
+              <b className="small">{row.title}</b>
+              <div className="small" style={{ whiteSpace: 'pre-wrap' }}>{row.body}</div>
+            </div>
+          ))}
+        </Panel>
+      ) : null}
+      {show('curves') && content.curves?.length ? (
+        <Panel title="曲线">
+          {content.curves.map((chart) => (
+            <div key={chart.metric_name} className="stack" style={{ marginBottom: 12 }}>
+              <div className="small">
+                <b>{chart.metric_name}</b>：正式结果 {chart.total} 条
+                {chart.shown < chart.total ? `，图中画前 ${chart.shown} 条` : ''}
+                {chart.excluded ? `；另有 ${chart.excluded} 条没纳入` : ''}
+              </div>
+              <XYChart
+                traces={chart.traces.map((trace, index) => ({ key: `${index}`, label: trace.label, group: trace.group, x: trace.x, y: trace.y }))}
+                xLabel={`${chart.x_label || 'x'}${chart.x_unit ? `（${chart.x_unit}）` : ''}`}
+                yLabel={`${chart.metric_name}${chart.unit ? `（${chart.unit}）` : ''}`}
+                height={240}
+              />
+            </div>
+          ))}
+        </Panel>
+      ) : null}
       {show('instruments') && content.instruments ? (
         <Panel title="仪器与设备方法" flush>
           {content.instruments.length ? (

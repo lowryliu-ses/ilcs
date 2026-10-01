@@ -206,7 +206,10 @@ class ExecutionService:
         for key in sorted({station.asset_id or station.id for station in stations}):
             serialize(self.db, f"occupancy:{key}")
         exempt = {command.id, command.target_command_id}
-        if any(self._channels_full(station, exempt, units_of(command, station.id)) for station in stations):
+        if any(
+            self._channels_full(station, exempt, units_of(command, station.id), command.batch_id or "")
+            for station in stations
+        ):
             return True
         demand: dict[str, int] = {}
         for station in stations:
@@ -214,10 +217,22 @@ class ExecutionService:
                 demand[station.asset_id] = demand.get(station.asset_id, 0) + units_of(command, station.id)
         return any(self._asset_full(asset_id, units, exempt) for asset_id, units in demand.items())
 
-    def _channels_full(self, station: Station, exempt: set[str], demand: int = 1) -> bool:
+    def _channels_full(self, station: Station, exempt: set[str], demand: int = 1, batch_id: str = "") -> bool:
         on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
         load = sum(units_of(c, station.id) for c in on_station)
-        return load + demand > max(1, int(station.channels or 1))
+        return load + self._held_by_steps(station.id, batch_id) + demand > max(1, int(station.channels or 1))
+
+    def _held_by_steps(self, station_id: str, batch_id: str = "") -> int:
+        """人工步骤正在占用、等待期间样本还留在里面的份数：没有指令，但这台设备此刻腾不出来。
+        本批次自己的不算——它的下一个设备动作本来就要等这一步结束才开出。"""
+        from ..domain import workflow
+        from ..models import StepRun
+
+        rows = self.db.query(StepRun).filter(
+            StepRun.station_id == station_id, StepRun.kind.in_(["manual", "wait"]),
+            StepRun.state.in_(sorted(workflow.OPEN_STATES)),
+        ).all()
+        return sum(1 for row in rows if row.batch_id != batch_id)
 
     def _asset_full(self, asset_id: str, demand: int, exempt: set[str]) -> bool:
         """资产此刻压着的份数加上新动作要的份数，是否超过容量。"""

@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from .capability import StationSpec, station_fits
+from .capability import StationSpec, resource_fits, station_fits
 from .graph import predecessors
-from .steps import assist_capabilities, labware_role, needs_station
+from .steps import MANUAL, assist_capabilities, held_after, kind_of, labware_role, needs_station
 
 WORK = "work"
 TRANSFER = "transfer"
@@ -170,7 +170,9 @@ def _occupy(context: SchedulingContext, allocation: PlannedAllocation) -> None:
 
 
 def _candidates(context: SchedulingContext, step: dict[str, Any], index: int, samples: int = 1) -> list[StationSpec]:
-    able = [s for s in context.stations if station_fits(s, step)]
+    # 声明了工位资源的人工步骤按指定工位或能力找，不看参数范围、设备健康与清洁：人工操作不给设备下发指令
+    manual = kind_of(step) == MANUAL
+    able = [s for s in context.stations if (resource_fits(s, step) if manual else station_fits(s, step))]
     if not able:
         raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」没有可承接工位", index)
     # 按样本计通道的工位：一批的样本数超过它的通道数就永远排不上，不当作候选
@@ -184,7 +186,7 @@ def _candidates(context: SchedulingContext, step: dict[str, Any], index: int, sa
         )
     usable = [
         s for s in able
-        if s.healthy and (context.allow_unclean or s.clean)
+        if (manual or (s.healthy and (context.allow_unclean or s.clean)))
         and s.id not in context.held_station_ids and s.id not in context.unavailable_station_ids
     ]
     if not usable:
@@ -337,6 +339,12 @@ def plan_steps(
         role: station for role, (_, station) in (plate_state or {}).items() if role in roles
     }
 
+    # 占着工位的等待步骤：样本留在前驱那台设备里。前驱排程时连同等待一起找空档、一起占上，
+    # 清洗排在等待之后——否则别的批次会插进「设备做完、样本还在里面」的这一段
+    holders = held_after(steps)
+    hold_for = {device: steps[wait] for wait, device in holders.items()}
+    placed: dict[int, PlannedAllocation] = {}
+
     clean_span = timedelta(minutes=context.clean_min or 0)
     # 每台工位上本批次最后一次用完后预留的清洗窗口，以及它跟在哪一步后面；后继接手时撤销
     pending_clean: dict[str, tuple[PlannedAllocation, int]] = {}
@@ -367,11 +375,32 @@ def plan_steps(
         else:
             previous_end, previous_station = tail_end, tail_station
         duration = timedelta(minutes=float(step.get("dur", 0) or 0))
+        if index in placed:
+            # 占着工位的等待：随前驱一起排好了
+            ends[index], where[index] = placed[index].ends_at, placed[index].station_id
+            continue
+        if index in holders:
+            # 前驱这次不排（已开出或已判定）：样本就在它所在的那台设备里，紧接着占上，占不上就是排不了
+            if previous_station is None:
+                raise SchedulingError(f"第 {index + 1} 步「{step.get('name')}」等待期间占着工位，但不知道样本在哪台设备里", index)
+            spec = next((row for row in context.stations if row.id == previous_station), None)
+            begin = earliest_free(context, previous_station, previous_end, duration, units_on(spec, samples))
+            if begin > previous_end:
+                raise SchedulingError(
+                    f"第 {index + 1} 步「{step.get('name')}」等待期间样本留在 {previous_station} 里，"
+                    f"但 {previous_station} 在 {previous_end:%m-%d %H:%M} 之后已被占用", index,
+                )
+            held = PlannedAllocation(index, previous_station, begin, begin + duration, WORK, units_on(spec, samples))
+            allocations.append(held)
+            _occupy(context, held)
+            ends[index], where[index] = held.ends_at, previous_station
+            continue
         if not needs_station(step):
             ends[index] = max(previous_end, not_before) + duration
             where[index] = previous_station
             continue
         candidates = _candidates(context, step, index, samples)
+        hold = timedelta(minutes=float((hold_for.get(index) or {}).get("dur", 0) or 0))
         # 硬时限从前驱结束起算；独占载具时开工还要等板从上一次设备动作上空出来，并从那台设备搬过来
         gap_from = previous_end
         ready_from = previous_end
@@ -406,14 +435,14 @@ def plan_steps(
                 probe = [row for row in busy if not (row.start == clean.starts_at and row.end == clean.ends_at)]
                 context.busy[station.id] = probe
                 try:
-                    begin = earliest_free(context, station.id, ready_at, duration + clean_span, station_units)
+                    begin = earliest_free(context, station.id, ready_at, duration + hold + clean_span, station_units)
                 finally:
                     context.busy[station.id] = busy
                 takeover = begin < clean.ends_at
             if not takeover:
-                begin = earliest_free(context, station.id, ready_at, duration + clean_span, station_units)
+                begin = earliest_free(context, station.id, ready_at, duration + hold + clean_span, station_units)
             expiry = context.calibration_expiry.get((station.id, capability))
-            if expiry is not None and begin + duration > expiry:
+            if expiry is not None and begin + duration + hold > expiry:
                 excluded.append(f"{station.id} 的校准 {expiry:%m-%d %H:%M} 到期，覆盖不了最早可开工的时段")
                 continue
             if best is None or begin < best[0] or (begin == best[0] and station.id < best[1].id):
@@ -440,7 +469,7 @@ def plan_steps(
             _occupy(context, transfer)
             # 设备工作开始不得早于实际转运完成：不是画面上画一个区间就算（清洗窗口一样要空着）
             if transfer.ends_at > begin:
-                begin = earliest_free(context, station.id, transfer.ends_at, duration + clean_span, station_units)
+                begin = earliest_free(context, station.id, transfer.ends_at, duration + hold + clean_span, station_units)
 
         helpers: list[StationSpec] = []
         if assist_capabilities(step):
@@ -466,10 +495,18 @@ def plan_steps(
             assist = PlannedAllocation(index, helper.id, begin, begin + duration, ASSIST, units_on(helper, samples))
             allocations.append(assist)
             _occupy(context, assist)
+        released_at = work.ends_at
+        if index in hold_for:
+            wait_index = next(wait for wait, device in holders.items() if device == index)
+            held = PlannedAllocation(wait_index, station.id, work.ends_at, work.ends_at + hold, WORK, station_units)
+            allocations.append(held)
+            _occupy(context, held)
+            placed[wait_index] = held
+            released_at = held.ends_at
 
         if context.clean_min:
             clean = PlannedAllocation(
-                index, station.id, work.ends_at, work.ends_at + clean_span, CLEAN, station_units,
+                index, station.id, released_at, released_at + clean_span, CLEAN, station_units,
             )
             allocations.append(clean)
             _occupy(context, clean)
@@ -478,7 +515,8 @@ def plan_steps(
         ends[index] = work.ends_at
         where[index] = station.id
         if role in roles:
-            plate_free[role], plate_at[role] = work.ends_at, station.id
+            # 样本留在设备里等待时，板在等待结束前也还在这台设备上
+            plate_free[role], plate_at[role] = released_at, station.id
 
     if step_ends is not None:
         step_ends.update(ends)

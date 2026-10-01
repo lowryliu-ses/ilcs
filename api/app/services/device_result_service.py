@@ -8,6 +8,8 @@
 - 每个样本一张「设备回报」检测任务，要求指标 = 这个批次快照里所有输出项关联的指标（建任务时冻结）。
 - 按「指令 + 孔位」去重（回传事件表的同一唯一键）：回执重放不重复写；同一步重做（返工、续跑）的新读数取代上一版，
   留版本链，重新待复核。
+- 曲线型输出（`{"x": [...], "y": [...]}` 或几条 `traces`）按曲线指标记；曲线声明了派生的数值指标时一并写
+  （要求指标里含这些派生指标，建任务时一起冻结）。回传事件里只留曲线的概要，完整的点在结果里。
 - 值不成立（类型、单位不对）不写并报警；越界照写、置可疑、打标，与回传同一口径。内置模拟给的是示意值：
   打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。
 - 与设备步骤完成同一个事务，不自己提交；出错只报警，不挡流程推进——值留在检查点上，可以人工补录。
@@ -22,13 +24,14 @@ from sqlalchemy.orm import Session
 from ..core.clock import now
 from ..core.context import AccessContext
 from ..domain import dataquality
+from ..domain import series as curves
 from ..domain.metrics import check_value
 from ..domain.steps import normalize
 from ..models import AnalysisTask, Batch, Command, IngestEvent, ResultValue, Sample
 from ..repositories.batches import AnalysisTaskRepository
 from ..repositories.metrics import IngestEventRepository, MetricRepository, ResultValueRepository
 from .alarm_service import AlarmService
-from .analysis_service import AnalysisService, digest
+from .analysis_service import AnalysisService, digest, stored_value, value_columns
 
 METHOD = "设备回报"
 SIMULATED = "simulated"
@@ -75,7 +78,7 @@ class DeviceResultService:
         if not targets:
             return {"written": 0, "samples": 0, "problems": []}
         definitions = self.metrics.many([str(rule["metric_id"]).strip() for rule in rules])
-        required = linked_metrics(batch.recipe_snapshot or {})
+        required = self._required(batch.recipe_snapshot or {})
         wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
         source = f"device:{command.station_id}"
         collected_at = command.updated_at if isinstance(command.updated_at, datetime) else now()
@@ -109,24 +112,29 @@ class DeviceResultService:
                     problems.append(f"样本 {sample.id} 的 {definition.code}：{'；'.join(errors)}")
                     continue
                 flags = dataquality.range_flags(definition.value_type, definition.rules or {}, value, definition.code)
-                prepared.append({"definition": definition, "value": value, "unit": unit, "flags": flags,
-                                 "batch_level": batch_level, "key": key})
+                prepared.append({"definition": definition, "value": stored_value(definition, value), "unit": unit,
+                                 "flags": flags, "batch_level": batch_level, "key": key})
             if not prepared:
                 continue
             current = self.values.current_for_task(task.id)
+            derived, _ = self.analysis._derived_rows(prepared, list(task.required_metrics or []), current)
+            for row in derived:
+                row.update({"batch_level": any(item["batch_level"] for item in prepared), "key": row["definition"].code})
+            prepared.extend(derived)
             others = {metric: value for metric, value in current.items()
                       if metric not in {row["definition"].id for row in prepared}}
             # 前后逻辑规则：设备值不因冲突拒收（值是设备真实回报的），拒收级也只打标，交审核下结论
             for problem in self.analysis._logic_check(others, prepared):
                 for row in prepared:
                     row["flags"] = [*row["flags"], dataquality.flag("logic", problem["label"])]
+            # 曲线在事件里只留概要：完整的点已经在结果里，也还在设备回执里
+            recorded = {row["key"]: curves.summary(row["value"]) if row["definition"].value_type == "series" else row["value"]
+                        for row in prepared}
             event = IngestEvent(
                 org_id=batch.org_id, source=source, analysis_task_id=task.id, event_id=event_id,
-                digest=digest({"command": command.id, "well": well,
-                               "values": {row["key"]: row["value"] for row in prepared}}),
+                digest=digest({"command": command.id, "well": well, "values": recorded}),
                 payload={"batch_id": batch.id, "command_id": command.id, "step_index": command.step_index,
-                         "station_id": command.station_id, "well": well, "origin": origin,
-                         "values": {row["key"]: row["value"] for row in prepared}},
+                         "station_id": command.station_id, "well": well, "origin": origin, "values": recorded},
                 state="accepted",
             )
             self.db.add(event)
@@ -143,6 +151,18 @@ class DeviceResultService:
                 owner="数据审核员", origin="system", condition_key=f"data:{batch.id}:{command.id}:results",
             )
         return {"written": written, "samples": samples, "problems": problems}
+
+    def _required(self, snapshot: dict) -> list[str]:
+        """「设备回报」任务的要求指标：输出项关联的指标，加上其中曲线指标声明派生的（在用的）数值指标。"""
+        required = linked_metrics(snapshot)
+        for definition in self.metrics.many(required).values():
+            if definition.value_type != "series":
+                continue
+            for spec in (definition.rules or {}).get("derived") or []:
+                target = self.metrics.by_code(str(spec.get("metric") or ""))
+                if target is not None and target.value_type == "number" and target.state == "active" and target.id not in required:
+                    required.append(target.id)
+        return required
 
     def _task_for(self, batch: Batch, sample: Sample, required: list[str]) -> AnalysisTask:
         """这个样本的「设备回报」检测任务：有就沿用，没有就建（要求指标冻结为批次快照里关联的指标）。"""
@@ -167,7 +187,7 @@ class DeviceResultService:
                collected_at: datetime) -> int:
         for row in prepared:
             definition = row["definition"]
-            flags = list(row["flags"])
+            flags = [*row["flags"], *(row.get("marks") or [])]
             if row["batch_level"]:
                 flags.append(dataquality.flag("batch_level", "设备只回报了批次级读数，按每个样本各记一份"))
             if origin == "simulation":
@@ -176,7 +196,7 @@ class DeviceResultService:
             value = ResultValue(
                 org_id=task.org_id, analysis_task_id=task.id, physical_sample_id=task.physical_sample_id,
                 assignment_id=task.sample_id or sample.id, metric_definition_id=definition.id,
-                ingest_event_id=event.id, value_num=float(row["value"]), unit=row["unit"],
+                ingest_event_id=event.id, **value_columns(definition, row["value"]), unit=row["unit"],
                 collected_at=collected_at, parser_version=self._parser(command),
                 result_version=self.values.max_version(task.id, definition.id) + 1,
                 revises_id=previous.id if previous is not None else "",

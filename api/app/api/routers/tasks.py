@@ -49,6 +49,17 @@ def task_results(task_id: str, db: DbSession, ctx: Ctx, official: bool = True, m
     return ReportService(db, ctx).task_analysis_view(task_id, selected, official)
 
 
+@router.get("/{task_id}/results/series")
+def task_result_series(task_id: str, metric_id: str, db: DbSession, ctx: Ctx, official: bool = True):
+    """父任务的曲线叠加：各子任务批次里这个曲线指标的样本曲线（终止的批次不画，与合并统计同一口径）。"""
+    from ...services.report_service import ReportService
+
+    service = ReportService(db, ctx)
+    task, leaves = service.task_batches(task_id)
+    batch_ids = [batch.id for _, batch in leaves if batch.state != "aborted"] or [batch.id for _, batch in leaves]
+    return {"task_id": task.id, **service.series_view(batch_ids, metric_id, official)}
+
+
 @router.post("", status_code=201)
 def create_task(
     payload: TaskCreateIn, db: DbSession, guard: IdempotencyGuard, user: CurrentUser,

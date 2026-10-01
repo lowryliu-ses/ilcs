@@ -144,7 +144,7 @@
     {"key": "aliquot", "name": "电解液分装", "capability": "cap.ely.aliquot", "station": "EL-T-ALQ",
      "program": "ALIQUOT",
      "params": {"bottles": {"default": 2, "min": 1, "max": 6, "unit": "瓶"},
-                "volume": {"default": 30, "min": 1, "max": 50, "unit": "mL"}}, "dur_min": 10},
+                "volume": {"default": 20, "min": 1, "max": 50, "unit": "mL"}}, "dur_min": 10},
     {"key": "cnd", "name": "电导率检测", "capability": "cap.ely.conductivity", "station": "EL-T-CND",
      "program": "CND",
      "params": {"temp": {"default": 25, "min": 0, "max": 60, "unit": "℃"},
@@ -238,6 +238,7 @@
       ],
       "routes": {
         "预热溶剂": {"stage": "liquid", "param": "mass", "stir_after": false,
+                 "not_last": "EC 常温是固体，加完要紧接着加下一种溶剂，单独制冷会凝固",
                  "step": {"kind": "device", "name": "{material} 预热移液加注", "sop_step": "溶剂与预热溶剂加注", "cap": "cap.ely.dose_liquid",
                           "method": "dose_preheated", "params": {"mass": 0}, "dur": 5}},
         "溶剂": {"stage": "liquid", "param": "mass",
@@ -256,7 +257,7 @@
         {"key": "t_open", "kind": "device", "name": "测试段开盖", "sop_step": "拧盖、开盖与关盖", "cap": "cap.ely.capper", "method": "t_cap_open",
          "params": {"torque": 10}, "dur": 1},
         {"key": "aliquot", "kind": "device", "name": "电解液分装", "sop_step": "电解液分装", "cap": "cap.ely.aliquot", "method": "aliquot",
-         "params": {"bottles": 2, "volume": 30}, "dur": 10},
+         "params": {"bottles": 2, "volume": 20}, "dur": 10},
         {"key": "keep_cap", "kind": "device", "name": "母瓶与备用瓶关盖", "sop_step": "拧盖、开盖与关盖", "cap": "cap.ely.capper",
          "method": "t_cap_close", "params": {"torque": 10}, "dur": 1, "after": ["aliquot"]},
         {"key": "keep_store", "kind": "device", "name": "母瓶与备用瓶入库", "sop_step": "入库暂存", "cap": "cap.ely.store", "method": "store",
@@ -274,8 +275,9 @@
       ],
       "experiment_params": [
         {"key": "bottles", "label": "分装瓶数", "step": "aliquot", "param": "bottles", "unit": "瓶", "default": 2},
-        {"key": "volume", "label": "每瓶分装量", "step": "aliquot", "param": "volume", "unit": "mL", "default": 30}
-      ]
+        {"key": "volume", "label": "每瓶分装量", "step": "aliquot", "param": "volume", "unit": "mL", "default": 20}
+      ],
+      "volume_check": {"bottles": "bottles", "volume": "volume", "density": 1.35, "reserve": 5}
     }
   }
 }

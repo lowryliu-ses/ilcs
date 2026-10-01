@@ -82,6 +82,17 @@ def test_driver_catalog_describes_every_registered_driver(admin):
     limits = next(row for row in admin.get("/api/stations").json() if row["id"] == "ST-05")["limits"]
     assert set(line["template"]["capabilities"]) == set(limits)
     assert not {"sql_table_v1", "composite_v1", "mt_sics_v1"} & {row["key"] for row in drivers}, "删掉的驱动不再登记"
+    # 表单用的嵌套结构说明与每项能力的起步写法（不给工位时按能力字典的参数生成）
+    status = next(item for item in line["fields"] if item["name"] == "status")
+    assert {item["name"] for item in status["fields"]} >= {"send", "pattern", "states"}
+    plain = {row["key"]: row for row in admin.get("/api/drivers").json()}
+    capabilities = {row["id"]: row for row in admin.get("/api/capabilities").json() if not row["retired"]}
+    examples = plain["opcua_map_v1"]["capability_examples"]
+    assert set(examples) == set(capabilities)
+    some = next(key for key, row in capabilities.items() if row["params"])
+    assert set(examples[some]["write"]) == set(capabilities[some]["params"])
+    assert plain["opcua_map_v1"]["template"]["capabilities"] == {}, "起步模板本身不塞进全部能力"
+    assert plain["sila2_v1"]["capability_examples"] == {}, "按 ILCS 契约接的驱动没有能力映射"
 
 
 def test_invalid_config_is_rejected_when_saving(admin, station):

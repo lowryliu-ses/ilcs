@@ -7,12 +7,15 @@
    判据按步骤类型分支：设备步骤看能力与参数，人工步骤看记录表单，
    等待步骤看等待方式，审核步骤看审核角色。不适用的字段不提示缺失——
    否则一个纯人工流程会被「没有可承接工位」挡住。 */
-import type { BomItem, BranchCase, CapabilityRow, Check, ParamBinding, RecipeStep, StationRow } from '../../shared/types';
+import { isOptionWindow, paramSpec, programProblems, programRefs, valueProblem, windowFits } from '../../shared/params';
+import type {
+  BomItem, BranchCase, CapabilityRow, Check, ParamBinding, ProgramRow, RecipeStep, StationRow,
+} from '../../shared/types';
 import { canonicalUnit, convertible, splitRatio } from '../../shared/units';
 
 export type CapabilityIndex = Record<string, CapabilityRow>;
 
-export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
+export type StepKind = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'merge' | 'branch' | 'subflow' | 'notify';
 
 export const STEP_KINDS: [StepKind, string][] = [
   ['device', '设备'],
@@ -21,13 +24,14 @@ export const STEP_KINDS: [StepKind, string][] = [
   ['review', '审核'],
   ['gate', '质检关卡'],
   ['split', '样本拆分'],
+  ['merge', '样本合并'],
   ['branch', '条件分支'],
   ['subflow', '子流程'],
   ['notify', '消息通知'],
 ];
 
 /** 系统即时判定 / 执行的节点：没有预定时长，也不占工位。子流程的时长来自它引用的方法。 */
-export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'branch', 'subflow', 'notify'];
+export const AUTOMATIC_KINDS: StepKind[] = ['review', 'gate', 'split', 'merge', 'branch', 'subflow', 'notify'];
 
 /** 被子流程引用的方法：编辑器用它校验引用、算关键路径。对应后端展开时查的那些字段。 */
 export type SubflowIndex = Record<string, { name: string; version: string; state: string; needs_revision: boolean; critical_path_min: number }>;
@@ -108,14 +112,57 @@ export function paramRange(
 ): [number, number] | null {
   const windows = (stations ?? [])
     .map((station) => station.limits?.[cap]?.[key])
-    .filter((window): window is [number, number] => Array.isArray(window) && window.length === 2);
+    .filter((window): window is [number, number] =>
+      Array.isArray(window) && window.length === 2 && !isOptionWindow(window));
   if (!windows.length) return null;
   return [Math.min(...windows.map((w) => w[0])), Math.max(...windows.map((w) => w[1]))];
 }
 
-export function defaultParams(stations: StationRow[] | undefined, capability: CapabilityRow): Record<string, number | ''> {
+/** 程序表参数：全部工位在各列上的极限并集（数值取最宽的区间，选项取并集）；没写极限的列不在结果里 */
+export function programLimits(
+  stations: StationRow[] | undefined, cap: string, key: string,
+): Record<string, [number, number] | string[]> {
+  const out: Record<string, [number, number] | string[]> = {};
+  (stations ?? []).forEach((station) => {
+    const window = station.limits?.[cap]?.[key];
+    if (typeof window !== 'object' || window === null || Array.isArray(window)) return;
+    Object.entries(window).forEach(([column, limit]) => {
+      const current = out[column];
+      if (isOptionWindow(limit)) {
+        out[column] = [...new Set([...(isOptionWindow(current) ? current : []), ...limit])];
+      } else if (Array.isArray(limit) && limit.length === 2) {
+        const [low, high] = limit as [number, number];
+        out[column] = current && !isOptionWindow(current)
+          ? [Math.min((current as [number, number])[0], low), Math.max((current as [number, number])[1], high)]
+          : [low, high];
+      }
+    });
+  });
+  return out;
+}
+
+/** 选项型参数：全部工位允许的选项的并集。没有工位允许的选项排不上。 */
+export function paramOptions(stations: StationRow[] | undefined, cap: string, key: string): string[] {
+  const allowed = new Set<string>();
+  (stations ?? []).forEach((station) => {
+    const window = station.limits?.[cap]?.[key];
+    if (isOptionWindow(window)) window.forEach((option) => allowed.add(option));
+  });
+  return [...allowed];
+}
+
+export function defaultParams(
+  stations: StationRow[] | undefined, capability: CapabilityRow,
+): Record<string, number | string | ProgramRow[]> {
   return Object.fromEntries(
     Object.keys(capability.params ?? {}).map((key) => {
+      const spec = paramSpec(capability, key);
+      if (spec.type === 'program') return [key, [] as ProgramRow[]]; // 程序表从空表开始编辑（或用设备方法的缺省程序表）
+      if (spec.type === 'enum') {
+        // 选项型：取第一个有工位允许的选项
+        const allowed = paramOptions(stations, capability.id, key);
+        return [key, spec.options.find((option) => allowed.includes(option)) ?? spec.options[0] ?? ''];
+      }
       const range = paramRange(stations, capability.id, key);
       return [key, range ? Number(((range[0] + range[1]) / 2).toFixed(2)) : 0];
     }),
@@ -137,37 +184,52 @@ export function methodBlocksStation(station: StationRow, step: RecipeStep): stri
   return reasons;
 }
 
-export function stationsForStep(stations: StationRow[] | undefined, step: RecipeStep): StationRow[] {
+/** 人工步骤声明占用的工位：指定一台，或实现了某能力的任一台（不看参数范围）。对应后端 capability.resource_fits */
+function resourceFits(station: StationRow, step: RecipeStep): boolean {
+  if (station.retired) return false;
+  const resource = step.resource ?? {};
+  if (resource.station) return station.id === resource.station;
+  if (resource.capability) return Boolean(station.limits?.[resource.capability]);
+  return false;
+}
+
+/** 等待期间样本留在上一步的设备里：它占的就是能承接那个设备前驱的工位。 */
+export function holdsStation(step: RecipeStep): boolean {
+  return kindOf(step) === 'wait' && Boolean(step.resource?.holds_station);
+}
+
+export function stationsForStep(
+  stations: StationRow[] | undefined, step: RecipeStep, steps?: RecipeStep[], index?: number,
+): StationRow[] {
   if (!needsStation(step)) return [];
+  if (kindOf(step) === 'manual') return (stations ?? []).filter((station) => resourceFits(station, step));
+  if (holdsStation(step)) {
+    if (!steps || index === undefined) return [];
+    const parent = predecessors(steps)[index];
+    const source = parent.length === 1 ? steps[parent[0]] : undefined;
+    return source && kindOf(source) === 'device' ? stationsForStep(stations, source) : [];
+  }
   return (stations ?? []).filter((station) => {
     const implemented = station.limits?.[step.cap];
     if (!implemented) return false;
     if (methodBlocksStation(station, step).length) return false;
-    const fixed = Object.entries(step.params ?? {}).every(([key, value]) => {
-      const window = implemented[key];
-      if (!window) return false;
-      return typeof value === 'number' && value >= window[0] && value <= window[1];
-    });
+    const fixed = Object.entries(step.params ?? {}).every(([key, value]) => windowFits(value, implemented[key]));
     // 取自上游结果的参数排程时还没有值：工位极限要覆盖整个预期范围（与服务端 bindings.window_holds 同一判据）
     return fixed && Object.entries(step.bindings ?? {}).every(([key, binding]) => {
       const window = implemented[key];
       const expect = expectOf(binding);
-      return Boolean(window && expect && expect[0] >= window[0] && expect[1] <= window[1]);
+      if (!window || !expect || isOptionWindow(window)) return false;
+      const [low, high] = window as [number, number];
+      return expect[0] >= low && expect[1] <= high;
     });
   });
 }
 
 /* ---------- 参数规格与前馈（对应后端 domain/params.py 与 domain/bindings.py） ---------- */
 
-/** 参数规格：没登记的按「数值、单位未登记、必填」——有规格之前的行为。 */
+/** 参数规格：没登记的按「数值、单位未登记、必填」——有规格之前的行为。选项型带 options */
 export function specOf(capability: CapabilityRow | undefined, key: string) {
-  const raw = capability?.param_specs?.[key] ?? {};
-  return {
-    label: capability?.params?.[key] || key,
-    type: raw.type === 'integer' ? 'integer' : 'number',
-    unit: canonicalUnit(raw.unit),
-    required: raw.required !== false,
-  };
+  return paramSpec(capability, key);
 }
 
 
@@ -290,11 +352,28 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (bound.has(key)) return; // 取自上游结果，由 bindingIssues 核对
     const spec = specOf(capability, key);
     const value = step.params?.[key];
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
+    if (
+      value === undefined || value === '' || (Array.isArray(value) && !value.length) ||
+      (typeof value === 'number' && !Number.isFinite(value))
+    ) {
       if (spec.required) issues.push(`${spec.label} 未填写`);
       return;
     }
-    if (spec.type === 'integer' && !Number.isInteger(value)) issues.push(`${spec.label} 必须是整数`);
+    if (spec.type === 'program') {
+      issues.push(...programProblems(spec, value));
+      // 引用本步参数的格子：引用的要是本能力的数值参数、单位相同，而且这一步给了它值（与服务端 program.ref_issues 对应）
+      programRefs(value).forEach((ref) => {
+        const target = specOf(capability, ref);
+        if (ref === key || !(ref in defined)) issues.push(`${spec.label} 引用的参数 ${ref} 不是本能力的另一个参数`);
+        else if (target.type !== 'number' && target.type !== 'integer') issues.push(`${spec.label} 引用的 ${target.label} 不是数值参数`);
+        else if (!bound.has(ref) && (step.params?.[ref] === undefined || step.params?.[ref] === '')) {
+          issues.push(`${spec.label} 引用的 ${target.label} 没有值：程序表下发时要代入它`);
+        }
+      });
+      return;
+    }
+    const problem = valueProblem(spec, value);
+    if (problem) issues.push(problem);
   });
   if (capability) {
     Object.keys(step.params ?? {}).forEach((key) => {
@@ -305,6 +384,8 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
     if (materialParam != null && materialParam !== '') {
       if (typeof materialParam !== 'string' || !(materialParam in defined)) {
         issues.push(`用量参数 ${String(materialParam)} 不是该能力的参数`);
+      } else if (specOf(capability, materialParam).type === 'enum' || specOf(capability, materialParam).type === 'program') {
+        issues.push(`用量参数 ${materialParam} 不是数值参数，不能当投料量`);
       } else if (!specOf(capability, materialParam).unit) {
         issues.push(`用量参数 ${materialParam} 没有登记单位，无法与物料单位对账`);
       }
@@ -314,7 +395,15 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
   const rules = step.method?.params ?? {};
   Object.entries(step.params ?? {}).forEach(([key, value]) => {
     const rule = rules[key];
-    if (!rule || typeof value !== 'number') return;
+    if (!rule) return;
+    if (typeof value === 'string') {
+      const allowed = rule.options ?? [];
+      if (value && allowed.length && !allowed.includes(value)) {
+        issues.push(`参数 ${key}=${value} 不在设备方法允许的选项 ${allowed.join('、')} 里`);
+      }
+      return;
+    }
+    if (typeof value !== 'number') return;
     if ((rule.min != null && value < rule.min) || (rule.max != null && value > rule.max)) {
       issues.push(`参数 ${key}=${value} 超出设备方法允许的 [${rule.min ?? '−∞'}, ${rule.max ?? '∞'}]`);
     }
@@ -337,6 +426,73 @@ function manualIssues(step: RecipeStep): string[] {
       issues.push(`表单字段 ${key} 是枚举但没有可选值`);
     }
     if (field.per_sample && field.type !== 'number') issues.push(`表单字段 ${key} 按样本录入时必须是数值字段`);
+  });
+  return issues;
+}
+
+/* ---------- 工位资源、资质、按瓶执行（对应后端 steps.resource_issues / qualification_issues /
+   holds_station_issues / applies_to_issues） ---------- */
+
+function resourceIssues(step: RecipeStep): string[] {
+  const resource = step.resource;
+  if (!resource || !Object.keys(resource).length) return [];
+  const kind = kindOf(step);
+  if (kind === 'manual') {
+    if (resource.station && resource.capability) {
+      return ['人工步骤占用的工位要么指定一台（station），要么按能力任一台（capability），不能两个都写'];
+    }
+    if (!resource.station && !resource.capability) {
+      return ['人工步骤声明了工位资源，但没写占哪台工位（station）或哪种能力的工位（capability）'];
+    }
+    return [];
+  }
+  if (kind === 'wait') return [];
+  if (kind === 'device') return [];
+  return [`${STEP_KINDS.find(([value]) => value === kind)?.[1] ?? kind}步骤不占工位，不写工位资源`];
+}
+
+function qualificationIssues(step: RecipeStep): string[] {
+  const required = step.qualification;
+  if (!required || !Object.keys(required).length) return [];
+  if (kindOf(step) !== 'manual') return ['只有人工步骤能声明执行人资质要求（设备步骤按能力自动要求）'];
+  if (!required.sop?.trim() && !required.safety?.trim()) return ['声明了资质要求，但 SOP 与安全操作资质都没写'];
+  return [];
+}
+
+function holdsStationIssues(steps: RecipeStep[], index: number): string[] {
+  if (!holdsStation(steps[index])) return [];
+  const before = predecessors(steps);
+  const parent = before[index];
+  if (parent.length !== 1) return ['等待期间占着工位：样本留在上一步的设备里，所以前驱只能有一个，而且要是设备步骤'];
+  const source = steps[parent[0]];
+  if (kindOf(source) !== 'device') {
+    return [`等待期间占着工位：前驱「${source.name || stepIdOf(source, parent[0])}」不是设备步骤，样本不在设备里`];
+  }
+  const twins = steps.some(
+    (other, at) => at !== index && holdsStation(other) && before[at].length === 1 && before[at][0] === parent[0],
+  );
+  return twins ? [`「${source.name || stepIdOf(source, parent[0])}」之后已经有一个等待步骤占着这台设备：样本只能在一处`] : [];
+}
+
+/** 能作按瓶执行依据的投料步骤：指定了投料物料与用量参数的设备步骤 */
+export function isDosingStep(step: RecipeStep): boolean {
+  return kindOf(step) === 'device' && Boolean(step.material?.trim()) && Boolean(step.material_param);
+}
+
+function appliesToIssues(step: RecipeStep, steps: RecipeStep[], index: number): string[] {
+  const rule = step.applies_to;
+  if (!rule) return [];
+  if (kindOf(step) !== 'device') return ['只有设备步骤能按瓶限定处理对象（applies_to）'];
+  const ids = steps.map(stepIdOf);
+  const dosed = ids.indexOf(rule.dosed ?? '');
+  const issues: string[] = [];
+  if (dosed < 0 || dosed >= index) issues.push(`applies_to 引用的投料步骤 ${rule.dosed || '（未选）'} 不存在或不在本步之前`);
+  else if (!isDosingStep(steps[dosed])) issues.push(`applies_to 引用的 ${rule.dosed} 不是指定了投料物料与用量参数的设备步骤`);
+  (rule.then_any ?? []).forEach((ref) => {
+    const at = ids.indexOf(ref);
+    if (at < 0) issues.push(`applies_to 的 then_any 引用的步骤 ${ref} 不存在`);
+    else if (dosed >= 0 && at <= dosed) issues.push(`applies_to 的 then_any 引用的 ${ref} 要排在 ${rule.dosed} 之后`);
+    else if (!isDosingStep(steps[at])) issues.push(`applies_to 的 then_any 引用的 ${ref} 不是指定了投料物料与用量参数的设备步骤`);
   });
   return issues;
 }
@@ -450,6 +606,10 @@ function branchIssues(step: RecipeStep, steps: RecipeStep[], index: number): str
       issues.push(`${label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤`);
     }
   });
+  if (config.per_sample) {
+    if (config.mode !== 'measure') issues.push('按样本分流只能按上游设备的测量值：每个样本要有自己孔位上的读数');
+    if (cases.some((c) => c.loop_to)) issues.push('按样本分流的分支只能往前走、不能回环：各样本走的路不同，重做会把别的样本一起带回去');
+  }
   const fallback = config.default ?? '';
   if (fallback && !seen.has(fallback)) issues.push(`默认出口 ${fallback} 不存在`);
   if (fallback && cases.some((c) => c.key === fallback && c.loop_to)) issues.push('默认出口不能是回环：判据缺失时不应自动重做上游步骤');
@@ -521,8 +681,24 @@ function splitIssues(step: RecipeStep): string[] {
   const split = step.split ?? {};
   const issues: string[] = [];
   const count = split.count;
-  if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 96) issues.push('拆分份数必须是 2–96 的整数');
+  const from = split.count_from;
+  if (from && (from.factor || from.source_step_id || from.field)) {
+    if (!from.factor && !(from.source_step_id && from.field)) {
+      issues.push('按样本取份数要写方案因子（factor），或上游设备步骤与读数字段（source_step_id、field）');
+    }
+    if (count !== undefined && (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > 96)) {
+      issues.push('按样本取份数时，缺省份数（取不到时用）要是 1–96 的整数');
+    }
+  } else if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 96) issues.push('拆分份数必须是 2–96 的整数');
   if (!split.child_type?.trim()) issues.push('必须写明子样本类型（如 扣电、极片）');
+  return issues;
+}
+
+function mergeIssues(step: RecipeStep): string[] {
+  const merge = step.merge ?? {};
+  const issues: string[] = [];
+  if (!['condition', 'all'].includes(merge.by ?? 'condition')) issues.push('合并方式只能是 condition（同一条件组合成一个）或 all（全部合成一个）');
+  if (!merge.child_type?.trim()) issues.push('必须写明合并后的样本类型（如 合并液、粗品）');
   return issues;
 }
 
@@ -755,16 +931,21 @@ export function stepIssues(
   else if (kind === 'wait') issues.push(...waitIssues(step));
   else if (kind === 'gate') issues.push(...gateIssues(step, steps, index));
   else if (kind === 'split') issues.push(...splitIssues(step));
+  else if (kind === 'merge') issues.push(...mergeIssues(step));
   else if (kind === 'branch') issues.push(...branchIssues(step, steps, index));
   else if (kind === 'subflow') issues.push(...subflowIssues(step, subflows, selfId));
   else if (kind === 'notify') issues.push(...notifyIssues(step));
   else issues.push(...reviewIssues(step));
   issues.push(...materialIssues(step));
+  issues.push(...resourceIssues(step));
+  issues.push(...qualificationIssues(step));
   issues.push(...timeoutIssues(step));
   issues.push(...skippableIssues(step));
   issues.push(...environmentIssues(step));
   issues.push(...graphIssues(steps, index));
   issues.push(...bindingIssues(step, steps, index, capabilities));
+  issues.push(...appliesToIssues(step, steps, index));
+  issues.push(...holdsStationIssues(steps, index));
   if (kind === 'gate' && graphMode(steps)) {
     const target = steps.map(stepIdOf).indexOf(step.gate?.rework_to ?? '');
     if (target >= 0 && !ancestors(steps, index).has(target)) issues.push('返工目标必须是本关卡的上游步骤（依赖链上的前驱）');
@@ -796,7 +977,7 @@ export function editorChecks(
 ): Check[] {
   const issues = steps.map((step, index) => stepIssues(step, capabilities, steps, index, subflows, selfId));
   const noStation = steps
-    .map((step, index) => (!needsStation(step) || stationsForStep(stations, step).length ? null : index + 1))
+    .map((step, index) => (!needsStation(step) || stationsForStep(stations, step, steps, index).length ? null : index + 1))
     .filter((index): index is number => index !== null);
   const incomplete = issues
     .map((list, index) => (list.length ? index + 1 : null))

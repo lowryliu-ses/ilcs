@@ -242,7 +242,8 @@ export function PlanDetailPage() {
             重复 {data.repeats} 次 · 布局 {data.layout === 'randomized' ? `随机化（种子 ${data.seed}）` : '顺序'} ·
             对照 {data.control?.label ?? '未设'} ·{' '}
             {data.sample_ids.length
-              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）`
+              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）${
+                data.sample_policy === 'continue' ? '，接着用上一步的产物' : '，一瓶一配方'}`
               : '未指定物理样本：每个运行登记新样本'}
           </div>
         </Panel>
@@ -685,7 +686,7 @@ function CampaignPanel({ plan, invalidates }: { plan: PlanDetail; invalidates: s
             <ul className="tight">
               {bounds.map(([name, bound]) => (
                 <li key={name}>
-                  {name}：{bound.min ?? '−∞'} … {bound.max ?? '+∞'}
+                  {name}：{bound.options ? `允许 ${bound.options.map(String).join('、')}` : `${bound.min ?? '−∞'} … ${bound.max ?? '+∞'}`}
                 </li>
               ))}
               {(space.forbidden ?? []).map((rule, index) => (
@@ -845,11 +846,13 @@ function DesignSpaceDialog({
 }) {
   const toast = useToast();
   const initial = plan.design_space ?? {};
-  const [bounds, setBounds] = useState<Record<string, { min: number | ''; max: number | '' }>>(() =>
+  const [bounds, setBounds] = useState<Record<string, { min: number | ''; max: number | ''; options: (number | string)[] }>>(() =>
     Object.fromEntries(
       plan.factors.map((factor) => {
         const bound = initial.bounds?.[factor.name] ?? {};
-        return [factor.name, { min: bound.min ?? '', max: bound.max ?? '' }];
+        // 类别因子缺省允许全部选项
+        const options = bound.options ?? categorical(plan, factor) ?? [];
+        return [factor.name, { min: bound.min ?? '', max: bound.max ?? '', options }];
       }),
     ),
   );
@@ -874,10 +877,15 @@ function DesignSpaceDialog({
     }
     const design_space: DesignSpace = {
       bounds: Object.fromEntries(
-        Object.entries(bounds).map(([name, bound]) => [
-          name,
-          { min: bound.min === '' ? null : bound.min, max: bound.max === '' ? null : bound.max },
-        ]),
+        plan.factors.map((factor) => {
+          const bound = bounds[factor.name];
+          return [
+            factor.name,
+            categorical(plan, factor)
+              ? { options: bound.options }
+              : { min: bound.min === '' ? null : bound.min, max: bound.max === '' ? null : bound.max },
+          ];
+        }),
       ),
       forbidden: rules,
       ...(maxPoints === '' ? {} : { max_points: maxPoints }),
@@ -900,7 +908,34 @@ function DesignSpaceDialog({
       }
     >
       <div className="note">外部优化器的提案必须落在这里的边界内、且不命中禁止组合；超出的整份提案被拒绝并留档。</div>
-      {plan.factors.map((factor) => (
+      {plan.factors.map((factor) => {
+        const choices = categorical(plan, factor);
+        if (choices) {
+          return (
+            <Field key={factor.name} label={`${factor.name}：允许的选项`} hint="提案里这个因子只能取勾选的选项">
+              <div className="dep-list">
+                {choices.map((option) => (
+                  <label key={String(option)} className="check">
+                    <input
+                      type="checkbox"
+                      checked={bounds[factor.name]?.options.includes(option) ?? false}
+                      onChange={(event) =>
+                        setBounds((current) => {
+                          const kept = new Set(current[factor.name]?.options ?? []);
+                          if (event.target.checked) kept.add(option);
+                          else kept.delete(option);
+                          return { ...current, [factor.name]: { ...current[factor.name], options: choices.filter((item) => kept.has(item)) } };
+                        })
+                      }
+                    />
+                    {String(option)}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          );
+        }
+        return (
         <div className="grid cols-3" key={factor.name}>
           <Field label="因子">
             <input readOnly value={`${factor.name}${factor.unit ? `（${factor.unit.trim()}）` : ''}`} />
@@ -920,7 +955,8 @@ function DesignSpaceDialog({
             />
           </Field>
         </div>
-      ))}
+        );
+      })}
       <Field label="每轮最多设计点数（可选）">
         <NumberInput value={maxPoints} ariaLabel="最多设计点数" onChange={(next) => setMaxPoints(next)} />
       </Field>
@@ -930,6 +966,20 @@ function DesignSpaceDialog({
       {error ? <div className="note bad">{error}</div> : null}
     </Modal>
   );
+}
+
+/** 因子作用的那个设备参数（流程里的步骤 + 参数），没作用于设备或找不到时为 undefined */
+function targetParam(plan: PlanDetail, factor: Factor) {
+  if (!factor.target) return undefined;
+  const option = (plan.target_options ?? []).find((row) => row.step_id === factor.target?.step_id);
+  return option?.params.find((param) => param.name === factor.target?.param);
+}
+
+/** 类别因子：作用于选项型参数，或水平里有文字（溶剂、催化剂、协议）——设计空间写允许的选项，不写上下限 */
+function categorical(plan: PlanDetail, factor: Factor): (number | string)[] | null {
+  const param = targetParam(plan, factor);
+  if (param?.type === 'enum') return param.options ?? [];
+  return factor.levels.some((level) => typeof level === 'string' && level !== '') ? factor.levels.filter((level) => level !== '') : null;
 }
 
 /* 结构化因子编辑。因子 × 水平决定条件矩阵，所以这里改一个值，右侧矩阵与孔位预览随之重算；
@@ -953,6 +1003,7 @@ function FactorEditor({
   /* 方案指定了物理样本时，瓶子按「条件顺序 × 重复号」对应；改了重复次数或因子水平，对应关系就变了，
      条数也可能对不上（锁定校验会拦）。给个清除的出口，免得只能重新导入配方表才能再锁定。 */
   const [clearSamples, setClearSamples] = useState(false);
+  const [samplePolicy, setSamplePolicy] = useState<'fresh' | 'continue'>(plan.sample_policy ?? 'fresh');
   const structureKey = (list: Factor[]) => JSON.stringify(list.map((factor) => factor.levels));
   /* 已保存的方案本身就对不上（例如之前改重复次数时没勾清除）：照样给出清除的出口，否则只能改回旧值再改 */
   const alreadyMismatched = plan.sample_ids.length > 0 && plan.sample_ids.length !== plan.conditions.length * Math.max(1, plan.repeats);
@@ -980,6 +1031,11 @@ function FactorEditor({
 
   const update = (index: number, change: Partial<Factor>) =>
     setFactors((current) => current.map((factor, order) => (order === index ? { ...factor, ...change } : factor)));
+  /* 因子作用的设备参数是选项型时，水平只能从它的选项里挑（勾选），没有单位、也不换算物料 */
+  const optionsOf = (factor: Factor): string[] | null => {
+    const param = targetParam(plan, factor);
+    return param?.type === 'enum' ? param.options ?? [] : null;
+  };
 
   const setLevel = (index: number, position: number, raw: string) => {
     const value: number | string = raw.trim() !== '' && Number.isFinite(Number(raw)) ? Number(raw) : raw;
@@ -1007,6 +1063,7 @@ function FactorEditor({
         repeats: repeats === '' ? 1 : repeats,
         layout,
         seed: seed === '' ? 1 : seed,
+        sample_policy: samplePolicy,
         ...(mappingChanged && clearSamples ? { sample_ids: [] } : {}),
       })
       .catch((caught) => toast.push(caught.message));
@@ -1059,6 +1116,14 @@ function FactorEditor({
           <NumberInput value={seed} disabled={layout !== 'randomized'} onChange={setSeed} />
         </Field>
       </div>
+      {plan.sample_ids.length ? (
+        <Field label="指定样本的用法" hint="多步合成：上一批的产物接着做下一步反应时选「接着用」；没跑完的、已处置用尽的样本照样不能进新批次">
+          <select value={samplePolicy} onChange={(event) => setSamplePolicy(event.target.value as 'fresh' | 'continue')}>
+            <option value="fresh">一瓶一配方（用过的瓶子不能再进新批次）</option>
+            <option value="continue">接着用上一步的产物（允许上一批已跑完的样本）</option>
+          </select>
+        </Field>
+      ) : null}
 
       <div>
         <div className="small muted" style={{ marginBottom: 6 }}>
@@ -1071,8 +1136,17 @@ function FactorEditor({
                 <Field label="因子名称">
                   <input value={factor.name} onChange={(event) => update(index, { name: event.target.value })} />
                 </Field>
-                <Field label="单位" hint="拼在水平值后面显示">
-                  <input value={factor.unit ?? ''} onChange={(event) => update(index, { unit: event.target.value })} />
+                <Field
+                  label="单位"
+                  hint={optionsOf(factor) ? '选项型参数没有单位'
+                    : 'mmol、eq 按物料登记的换算转成设备单位'}
+                >
+                  <input
+                    value={factor.unit ?? ''}
+                    list="factor-units"
+                    disabled={Boolean(optionsOf(factor))}
+                    onChange={(event) => update(index, { unit: event.target.value, ...(event.target.value.trim() === 'eq' ? {} : { basis: undefined }) })}
+                  />
                 </Field>
                 <div className="row-end" style={{ alignItems: 'end' }}>
                   <button
@@ -1087,6 +1161,62 @@ function FactorEditor({
                 </div>
               </div>
 
+              {factor.unit?.trim() === 'eq' ? (
+                <div className="grid cols-3">
+                  <Field label="当量的基准" hint="限量试剂的物质的量：另一个按 mmol 给的因子，或一个固定的量">
+                    <select
+                      value={factor.basis?.factor ? `factor:${factor.basis.factor}` : factor.basis?.amount !== undefined ? 'amount' : ''}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        update(index, {
+                          basis: value.startsWith('factor:') ? { factor: value.slice(7) }
+                            : value === 'amount' ? { amount: factor.basis?.amount ?? 1, unit: factor.basis?.unit ?? 'mmol' } : undefined,
+                        });
+                      }}
+                    >
+                      <option value="">选基准…</option>
+                      {factors.filter((other, order) => order !== index && other.name.trim()).map((other) => (
+                        <option key={other.name} value={`factor:${other.name}`}>因子「{other.name}」{other.unit ? `（${other.unit}）` : ''}</option>
+                      ))}
+                      <option value="amount">固定的物质的量</option>
+                    </select>
+                  </Field>
+                  {factor.basis?.amount !== undefined ? (
+                    <>
+                      <Field label="基准量">
+                        <NumberInput value={factor.basis.amount} ariaLabel="当量基准量"
+                          onChange={(next) => update(index, { basis: { ...factor.basis, amount: next === '' ? 0 : next } })} />
+                      </Field>
+                      <Field label="基准量单位">
+                        <select value={factor.basis.unit ?? 'mmol'} onChange={(event) => update(index, { basis: { ...factor.basis, unit: event.target.value } })}>
+                          {['mmol', 'μmol', 'mol'].map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                        </select>
+                      </Field>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {optionsOf(factor) ? (
+                <Field label={`水平（${factor.levels.length} 个，从参数的选项里勾选）`}>
+                  <div className="dep-list">
+                    {(optionsOf(factor) ?? []).map((option) => (
+                      <label key={option} className="check">
+                        <input
+                          type="checkbox"
+                          checked={factor.levels.includes(option)}
+                          onChange={(event) => {
+                            const chosen = new Set(factor.levels.filter((level) => event.target.checked || level !== option));
+                            if (event.target.checked) chosen.add(option);
+                            update(index, { levels: (optionsOf(factor) ?? []).filter((item) => chosen.has(item)) });
+                          }}
+                        />
+                        {option}
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+              ) : (
               <Field label={`水平（${factor.levels.length} 个）`}>
                 <div className="row">
                   {factor.levels.map((level, position) => (
@@ -1114,6 +1244,7 @@ function FactorEditor({
                   </button>
                 </div>
               </Field>
+              )}
 
               <Field
                 label="作用于设备参数（可选）"
@@ -1123,7 +1254,18 @@ function FactorEditor({
                   value={factor.target ? `${factor.target.step_id}|${factor.target.param}` : ''}
                   onChange={(event) => {
                     const [stepId, param] = event.target.value.split('|');
-                    update(index, { target: event.target.value ? { step_id: stepId, param } : undefined });
+                    const target = event.target.value ? { step_id: stepId, param } : undefined;
+                    const picked = targetParam(plan, { ...factor, target });
+                    if (picked?.type === 'enum') {
+                      // 换到选项型参数：只保留是它选项的水平，单位与物料换算没有意义
+                      const options = picked.options ?? [];
+                      update(index, {
+                        target, unit: '', material: undefined,
+                        levels: factor.levels.filter((level): level is string => typeof level === 'string' && options.includes(level)),
+                      });
+                    } else {
+                      update(index, { target });
+                    }
                   }}
                 >
                   <option value="">不作用于设备（仅区分样本）</option>
@@ -1132,7 +1274,7 @@ function FactorEditor({
                       // 说明文字与登记单位分开给；说明里已写了单位就不重复
                       const label = param.label && param.label !== param.name ? param.label : '';
                       const unit = param.unit && !label.includes(param.unit) ? param.unit : '';
-                      const note = [label, unit].filter(Boolean).join('，');
+                      const note = [label, unit, param.type === 'enum' ? '选项' : ''].filter(Boolean).join('，');
                       return (
                         <option key={`${option.step_id}|${param.name}`} value={`${option.step_id}|${param.name}`}>
                           {option.step_name} · {param.name}
@@ -1145,9 +1287,10 @@ function FactorEditor({
               </Field>
 
               <div className="grid cols-3">
-                <Field label="物料换算（可选）">
+                <Field label="物料换算（可选）" hint={optionsOf(factor) ? '选项型参数的水平不是数量，不换算物料' : undefined}>
                   <select
                     value={factor.material?.name ?? ''}
+                    disabled={Boolean(optionsOf(factor))}
                     onChange={(event) =>
                       update(index, {
                         material: event.target.value
@@ -1182,6 +1325,9 @@ function FactorEditor({
             </div>
           ))}
         </div>
+        <datalist id="factor-units">
+          {['mmol', 'μmol', 'mol', 'eq', 'mg', 'g', 'μL', 'mL', '℃', 'min', 'h'].map((unit) => <option key={unit} value={unit} />)}
+        </datalist>
         <button
           className="btn sm"
           style={{ marginTop: 8 }}

@@ -94,20 +94,38 @@ def layout(
     return sorted(assignments, key=lambda a: wells.index(a.well))
 
 
+def ordered_levels(values) -> list:
+    """一组水平去重排序：数值按大小，选项按文字；两类混在一起时数值在前（校验另报），不让排序本身出错。"""
+    unique: list = []
+    for value in values:
+        if value not in unique:
+            unique.append(value)
+    return sorted(unique, key=lambda value: (0, value, "") if isinstance(value, (int, float)) and not isinstance(value, bool)
+                  else (1, 0, str(value)))
+
+
 def material_demand(factors: list[dict], repeats: int, points: list | None = None) -> list[dict]:
     """因子水平换算到物料需求，用于计划页的物料预览。
 
     全因子矩阵里，一个因子的每个水平会出现在「其他因子水平数之积」个条件里：
     2×3 的矩阵中，第一个因子的每个水平各出现 3 次，不是 1 次。
     """
+    from .amounts import dosed_level
+
     rows = []
     level_counts = [len(factor.get("levels") or []) for factor in factors]
     for position, factor in enumerate(factors):
         material = factor.get("material")
         if not material:
             continue
+        if any(not isinstance(level, (int, float)) or isinstance(level, bool) for level in factor.get("levels") or []):
+            continue  # 带物料的因子水平是用量；选项型的水平不是数量，估不了需求（方案检查另报）
         per = float(material.get("per", 0) or 0)
-        if points:
+        if factor.get("dose"):
+            # 水平按 mmol / 当量给（`domain/amounts.py`）：逐个条件换成物料单位再累加（当量还乘基准因子的水平）
+            combos = [list(point) for point in points] if points else [row.levels for row in conditions(factors, None)]
+            total = sum(float(dosed_level(factor, levels, position) or 0) * per for levels in combos) * max(1, repeats)
+        elif points:
             # 显式设计点：逐点累加该因子的水平
             total = sum(float(point[position]) * per for point in points if position < len(point)) * max(1, repeats)
         else:
@@ -132,14 +150,18 @@ def material_demand(factors: list[dict], repeats: int, points: list | None = Non
 
 def target_issues(
     factors: list[dict], steps: list[dict], stations, capabilities: dict[str, dict] | None = None,
+    materials: dict[str, dict] | None = None,
 ) -> list[str]:
     """因子声明的「作用参数」能否真的下发到设备。
 
     因子可以写 `target: {"step_id": "s03", "param": "electrolyte"}`：这个因子的水平会按孔位
     覆盖该设备步骤的参数。这里逐项核对步骤存在且是设备步骤、同一参数不被两个因子争用、
     每个水平都在至少一个可承接工位的参数范围内——否则批次开跑后才会被设备拒绝。
-    参数登记了单位时，因子单位必须与它相同：水平是原样下发的，mL 的水平当 μL 用会差一千倍。
+    参数登记了单位时，因子单位与它不同就要换得过去：同量纲按比例（mL ↔ μL），跨量纲（mmol → mg、当量 → μL）
+    经物料登记的摩尔质量、密度、浓度（`materials` = {物料名: {base_unit, conversions}}，见 `domain/amounts.py`）；
+    换不过去就报出来——水平原样下发会差出倍数。核对工位范围用换算后的数。
     """
+    from .amounts import dose_spec, dosed_level
     from .bindings import bindings_of
     from .capability import station_fits
     from .params import canonical_unit, spec_of
@@ -148,7 +170,7 @@ def target_issues(
     by_id = {step_id_of(step, index): step for index, step in enumerate(steps)}
     issues: list[str] = []
     claimed: dict[tuple[str, str], str] = {}
-    for factor in factors:
+    for position, factor in enumerate(factors):
         target = factor.get("target") or {}
         if not target:
             continue
@@ -167,33 +189,65 @@ def target_issues(
         if param in bindings_of(step):
             issues.append(f"「{step.get('name')}」的 {param} 已声明取自上游结果，因子「{name}」不能再作用于它")
             continue
-        if capabilities is not None:
-            unit = spec_of(capabilities.get(step.get("cap") or ""), param)["unit"]
+        spec = spec_of(capabilities.get(step.get("cap") or ""), param) if capabilities is not None else None
+        if spec is not None and spec["type"] == "program":
+            issues.append(
+                f"因子「{name}」不能作用于程序表参数 {step.get('name')}.{param}：把要变的量做成这一步的数值参数，"
+                f"在程序表里引用它，因子作用于那个参数"
+            )
+            continue
+        dose = None
+        if spec is not None and spec["type"] != "enum":
+            unit = spec["unit"]
             factor_unit = canonical_unit(factor.get("unit"))
             if unit and factor_unit and factor_unit != unit:
-                issues.append(
-                    f"因子「{name}」的单位 {factor_unit} 与参数 {step.get('name')}.{param} 的单位 {unit} 不同："
-                    f"水平会原样下发，请把因子单位改成 {unit}"
-                )
+                dose, problem = dose_spec(factor, factors, unit, materials or {})
+                if problem:
+                    issues.append(f"{problem}（参数 {step.get('name')}.{param} 的单位是 {unit}）")
+                    continue
         key = (step_id, param)
         if key in claimed:
             issues.append(f"因子「{name}」与「{claimed[key]}」作用于同一参数 {step.get('name')}.{param}")
             continue
         claimed[key] = name
+        basis = (dose or {}).get("basis")
+        # 当量按基准因子的每个水平各算一遍：设备收到的量是两者的乘积
+        basis_levels = (factors[basis].get("levels") or [None]) if basis is not None else [None]
         for level in factor.get("levels") or []:
-            if not isinstance(level, (int, float)) or isinstance(level, bool):
+            if spec is not None and spec["type"] == "enum":
+                # 选项型参数：水平是登记的选项之一，原样作为文字下发
+                if not isinstance(level, str) or level not in spec["options"]:
+                    issues.append(
+                        f"因子「{name}」的水平 {level!r} 不是参数 {step.get('name')}.{param} 的选项"
+                        f"（{'、'.join(spec['options'])}）"
+                    )
+                    continue
+            elif not isinstance(level, (int, float)) or isinstance(level, bool):
                 issues.append(f"因子「{name}」的水平 {level!r} 不是数值，不能作为设备参数")
                 continue
-            trial = {**step, "params": {**(step.get("params") or {}), param: level}}
-            if not any(station_fits(station, trial) for station in stations):
-                issues.append(
-                    f"因子「{name}」的水平 {level} 超出所有可承接「{step.get('name')}」工位的 {param} 范围"
-                )
+            for basis_level in basis_levels:
+                levels = [None] * len(factors)
+                levels[position] = level
+                if basis is not None:
+                    levels[basis] = basis_level
+                value = dosed_level({**factor, "dose": dose}, levels, position) if dose else level
+                if value is None:
+                    continue
+                trial = {**step, "params": {**(step.get("params") or {}), param: value}}
+                if not any(station_fits(station, trial) for station in stations):
+                    shown = f"{level}（换算后 {value:g} {spec['unit'] if spec else ''}）" if dose else f"{level} "
+                    issues.append(
+                        f"因子「{name}」的水平 {shown}超出所有可承接「{step.get('name')}」工位的 {param} 范围"
+                    )
     return issues
 
 
 def condition_params(factors: list[dict], rows: list[dict]) -> dict[str, dict[str, dict]]:
-    """按孔位展开作用参数：{step_id: {孔位: {参数: 水平}}}。建批次时冻结进快照。"""
+    """按孔位展开作用参数：{step_id: {孔位: {参数: 水平}}}。建批次时冻结进快照。
+
+    因子带了单位换算（`dose`，按 mmol / 当量给、设备收 mg / μL，见 `domain/amounts.py`）就下发换算后的数。"""
+    from .amounts import dosed_level
+
     result: dict[str, dict[str, dict]] = {}
     for position, factor in enumerate(factors):
         target = factor.get("target") or {}
@@ -204,7 +258,7 @@ def condition_params(factors: list[dict], rows: list[dict]) -> dict[str, dict[st
             levels = row.get("levels") or []
             if position >= len(levels):
                 continue
-            result.setdefault(step_id, {}).setdefault(row["well"], {})[param] = levels[position]
+            result.setdefault(step_id, {}).setdefault(row["well"], {})[param] = dosed_level(factor, levels, position)
     return result
 
 
@@ -214,12 +268,14 @@ def step_condition(factors: list[dict], step_id: str, levels: list) -> dict:
     与 condition_params 同一条规则，只是按样本而不按布局孔位：拆分出的子样本继承母样的水平，
     落到哪个孔都带着自己的条件。
     """
+    from .amounts import dosed_level
+
     result: dict = {}
     for position, factor in enumerate(factors):
         target = factor.get("target") or {}
         if target.get("step_id") != step_id or not target.get("param") or position >= len(levels or []):
             continue
-        result[target["param"]] = levels[position]
+        result[target["param"]] = dosed_level(factor, list(levels), position)
     return result
 
 
@@ -244,10 +300,16 @@ def point_issues(factors: list[dict], points: list, design_space: dict) -> list[
             issues.append(f"第 {number} 个点与前面的点重复")
         seen.add(key)
         for name, value in zip(names, point):
+            bound = bounds.get(name) or {}
+            options = bound.get("options")
+            if isinstance(options, list) and options:
+                # 类别因子（溶剂、催化剂、协议）：设计空间写允许的选项
+                if value not in options:
+                    issues.append(f"第 {number} 个点的 {name} = {value!r} 不在设计空间允许的选项（{'、'.join(map(str, options))}）内")
+                continue
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 issues.append(f"第 {number} 个点的 {name} = {value!r} 不是数值")
                 continue
-            bound = bounds.get(name) or {}
             low, high = bound.get("min"), bound.get("max")
             if isinstance(low, (int, float)) and value < low:
                 issues.append(f"第 {number} 个点的 {name} = {value} 低于设计空间下限 {low}")

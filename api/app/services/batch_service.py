@@ -21,15 +21,17 @@ from ..core.context import AccessContext
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import graph as dag
 from ..domain import preflight, recovery, sop_steps
+from ..domain.dosing import covers
 from ..domain.labware import container_of
 from ..domain.lifecycle import batch_delete_blockers
 from ..domain.matrix import layout as well_layout
 from ..domain.methods import command_method
+from ..domain.params import decimal_of
 from ..domain.permissions import ROLE_NAMES
 from ..domain.resources import Window, evaluate_steps
 from ..domain.scheduling import WORK
 from ..domain.steps import (
-    DEVICE, KIND_NAMES, consumes_materials, kind_of, needs_station, normalize, resource_demand,
+    BRANCH, DEVICE, KIND_NAMES, applies_to, consumes_materials, kind_of, needs_station, normalize, resource_demand,
     step_id_of,
 )
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
@@ -710,10 +712,12 @@ class BatchService:
         bom = list(batch.recipe_snapshot.get("bom") or [])
         capabilities = self.capabilities.specs()
         self._require_plan_dosing(content, bom, batch.recipe_snapshot.get("steps") or [], capabilities)
+        factors = self._dosed_factors(content, batch.recipe_snapshot.get("steps") or [], capabilities)
+        if factors != list(content.factors or []):
+            # 按 mmol / 当量给的因子：换算冻结进快照，之后物料主数据怎么改，这个批次下发的量都不变
+            batch.plan_snapshot = {**batch.plan_snapshot, "factors": factors}
         from_plan = (
-            self.plan_materials(
-                content.factors or [], rows, bom, batch.recipe_snapshot.get("steps") or [], capabilities,
-            )
+            self.plan_materials(factors, rows, bom, batch.recipe_snapshot.get("steps") or [], capabilities)
             if content.plan_type == "matrix" else []
         )
         if from_plan:
@@ -725,7 +729,7 @@ class BatchService:
             from ..domain.matrix import condition_params
 
             # 按孔位冻结因子作用参数：之后方案怎么改，这个批次的设备参数都不变
-            expanded = condition_params(content.factors or [], rows)
+            expanded = condition_params(factors, rows)
             if expanded:
                 batch.plan_snapshot = {**batch.plan_snapshot, "condition_params": expanded}
         self.plans.link_batch(plan.id, batch.id)
@@ -748,6 +752,26 @@ class BatchService:
         self.db.flush()
         return batch
 
+    def _dosed_factors(self, content, steps: list[dict], capabilities: dict[str, dict]) -> list[dict]:
+        """方案因子带上单位换算（按 mmol / 当量给、设备收 mg / μL）。换不过去就不建批次：原样下发会差出倍数。"""
+        from ..domain.amounts import attach_doses
+        from ..repositories.materials import MaterialRepository
+
+        factors = list(content.factors or []) if content.plan_type == "matrix" else []
+        if not factors:
+            return factors
+        materials = MaterialRepository(self.db, self.ctx).specs_by_name(
+            (factor.get("material") or {}).get("name") for factor in factors
+        )
+        dosed, problems = attach_doses(factors, steps, capabilities, materials)
+        if problems:
+            raise StateConflict(
+                f"方案的用量换不成设备的单位，不能建批次：{problems[0]}",
+                {"blocked": [{"key": "dose", "label": row} for row in problems]},
+                code="plan_dose_unconvertible",
+            )
+        return dosed
+
     @staticmethod
     def plan_materials(
         factors: list[dict], rows: list[dict], bom: list[dict], steps: list[dict],
@@ -766,6 +790,8 @@ class BatchService:
         from ..domain.params import decimal_of
         from ..domain.plan_dosing import dosing_factors
 
+        from ..domain.amounts import dosed_level
+
         factors = list(factors or [])
         totals: dict[tuple[str, str], Decimal] = {}
         for position, dosed in dosing_factors(steps, bom, factors, capabilities).items():
@@ -773,8 +799,9 @@ class BatchService:
             per = decimal_of(material.get("per")) or Decimal(0)
             key = (dosed.material, str(material.get("unit") or ""))
             for row in rows:
-                levels = row.get("levels") or []
-                level = decimal_of(levels[position]) if position < len(levels) else None
+                levels = list(row.get("levels") or [])
+                # 水平按 mmol / 当量给时（快照里冻结了换算）先换成物料单位
+                level = decimal_of(dosed_level(factors[position], levels, position)) if position < len(levels) else None
                 totals[key] = totals.get(key, Decimal(0)) + (level or Decimal(0)) * per
         return [
             {"material": name, "qty": f"{q(total):f}", "unit": unit, "source": "plan"}
@@ -931,7 +958,7 @@ class BatchService:
         snapshot = dict(version.snapshot or {})
         fields = (
             "name", "plan_type", "goal", "repeats", "layout", "seed", "factors", "control", "design_points",
-            "sample_count", "sample_ids", "required_metrics", "recipe_id",
+            "sample_count", "sample_ids", "sample_policy", "required_metrics", "recipe_id",
         )
         view = {key: getattr(plan, key) for key in (*fields, "id", "round_no", "project_id")}
         view.update({key: snapshot[key] for key in fields if key in snapshot})
@@ -947,6 +974,7 @@ class BatchService:
                 "factors": plan.factors, "control": plan.control,
                 "design_points": plan.design_points or [], "round_no": plan.round_no,
                 "sample_count": plan.sample_count, "sample_ids": plan.sample_ids,
+                "sample_policy": getattr(plan, "sample_policy", "fresh") or "fresh",
                 "required_metrics": plan.required_metrics, "version": plan.version,
             }
         )
@@ -994,7 +1022,8 @@ class BatchService:
                 for a in assignments
             ]
             if listed:
-                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]])
+                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]],
+                                            continuing=(getattr(plan, "sample_policy", "") or "fresh") == "continue")
         else:
             listed = list((task.sample_ids if task is not None else None) or plan.sample_ids or [])
             count = len(listed) or int(portion.get("count") or 0) or plan.sample_count
@@ -1052,15 +1081,36 @@ class BatchService:
             sample_service.occupy_slot(container_id, row["well"], physical_id, assignment.id)
         return rows
 
-    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str]) -> None:
+    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str], continuing: bool = False) -> None:
         """矩阵方案指定的瓶子：一瓶一配方。
 
         瓶子已在别的批次里（未终止的——已完成的瓶子装过配方，同样不能再配一次），再建一个批次就是往同一瓶里
         二次投料、物料也预留两份；已处置、已用尽的瓶子不能再用。先于预留判，不必预留了再回滚。
         单条件方案按清单重复测已有样本是正当的，不走这里。
+
+        方案声明「接着用上一步的产物」（`sample_policy: continue`，多步合成）时，上一批已经跑完（完成或终止）的
+        样本可以再进新批次；还在别的批次里没跑完的、已处置用尽的照样不行——一个样本同一时刻只在一处。
         """
         from .formulation_service import UNUSABLE_SAMPLE
 
+        if continuing:
+            for physical_id in dict.fromkeys(physical_ids):
+                physical = self.physical.get(physical_id)
+                if physical is None:
+                    continue
+                if physical.lifecycle_state in UNUSABLE_SAMPLE:
+                    raise StateConflict(
+                        f"方案引用的样本 {physical_id} {UNUSABLE_SAMPLE[physical.lifecycle_state]}，不能再用于执行",
+                        {"blocked": [{"key": "sample", "label": physical_id}]}, code="sample_unusable",
+                    )
+                busy = self.sample_busy_in(physical_id, exclude=batch.id)
+                if busy:
+                    raise StateConflict(
+                        f"样本 {physical_id} 还在批次 {busy} 里没跑完，不能接着进新批次：等它完成或终止",
+                        {"blocked": [{"key": "sample", "label": f"{physical_id} → {busy}"}]},
+                        code="sample_in_use",
+                    )
+            return
         for physical_id in dict.fromkeys(physical_ids):
             physical = self.physical.get(physical_id)
             if physical is None:
@@ -1077,6 +1127,16 @@ class BatchService:
                     {"blocked": [{"key": "sample", "label": f"{physical_id} → {other}"}]},
                     code="sample_in_use",
                 )
+
+    def sample_busy_in(self, physical_id: str, exclude: str = "") -> str:
+        """这个样本此刻在哪个没跑完的批次里（计划、排程、运行、保持、故障）；不在返回空串。"""
+        for run in self.samples.for_physical(physical_id):
+            if run.batch_id == exclude:
+                continue
+            other = self.batches.get(run.batch_id)
+            if other is not None and other.state not in {"done", "aborted"}:
+                return other.id
+        return ""
 
     def bottle_used_by(self, physical_id: str, exclude: str = "") -> str:
         """这个瓶子被哪个批次用过（返回批次号，没有返回空串）。配方表导入与建批次共用这一条口径。
@@ -1433,6 +1493,12 @@ class BatchService:
             bound = BindingResolver(self.db, self.ctx).resolve(batch, step, self._step_targets(batch, step), limits)
             if not bound.problems:
                 params = bound.apply(params)
+        program_problems: list[str] = []
+        if step and command_type in DISPATCHING and capability is None:
+            # 程序表里引用本步参数的格子：按孔位（方案因子、前馈）代成具体的数，设备不认识引用
+            from ..domain.program import resolve_command
+
+            params, program_problems = resolve_command(params)
         from ..domain.steps import assist_capabilities
 
         # 协同资源：排程时与主设备同一时段预约的其他工位，随这条动作一起取得、一起释放
@@ -1470,8 +1536,16 @@ class BatchService:
         )
         self.db.add(command)
         self.db.flush()
+        if command_type in DISPATCHING and capability is None and applies_to(step) is not None and not wells:
+            # 推进器会先跳过一瓶都不用做的步骤；续跑 / 重试时覆盖的瓶子都已剔除才会走到这里。
+            # 不带孔位下发等于整批都做，宁可挂起让人看
+            self._refuse_unsent(batch, command, f"第 {step_index + 1} 步{self.uncovered(batch, step_index)}：指令不下发")
+            return command
         if bound is not None and bound.problems:
             self._refuse_unsent(batch, command, "前馈参数不能下发：" + "；".join(bound.problems[:5]))
+            return command
+        if program_problems:
+            self._refuse_unsent(batch, command, "程序表不能下发：" + "；".join(program_problems[:5]))
             return command
         if per_sample_station is not None and units > max(1, int(per_sample_station.channels or 1)):
             self._refuse_unsent(
@@ -1507,11 +1581,17 @@ class BatchService:
         别的孔上，布局放不进板型时实体孔位也与布局孔位不同。子样本继承母样的水平，条件跟着样本走。
         板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
         只投影在用样本：已拆分的母样、被剔除的样本仍占着孔位（实物还在），但不再是下游处理对象。
+        声明了 `applies_to` 的步骤按瓶限定处理对象，见 `_covered_params`。
         """
         from ..domain.matrix import step_condition
 
         step_id = step_id_of(step, step_index)
         frozen = ((batch.plan_snapshot or {}).get("condition_params") or {}).get(step_id)
+        rule = applies_to(step)
+        if rule is not None:
+            return self._covered_params(batch, step, step_id, rule, frozen)
+        if self._scope_filter(batch, step) is not None:
+            return self._scoped_params(batch, step, step_id, frozen)
         if not frozen:
             return None
         factors = (batch.plan_snapshot or {}).get("factors") or []
@@ -1526,11 +1606,135 @@ class BatchService:
             return projected or None
         return {well: values for well, values in frozen.items() if well in targets}
 
+    def _scoped_params(self, batch: Batch, step: dict, step_id: str, frozen: dict | None) -> dict:
+        """按样本分流之后、汇合之前的步骤：只带分到这条路的样本的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
+        一个都没有时返回空 dict——不能退回「不带孔位 = 整批都做」。"""
+        from ..domain.matrix import step_condition
+
+        targets, physical = self._step_projection(batch, step)
+        if not targets:
+            return {}
+        factors = (batch.plan_snapshot or {}).get("factors") or []
+        fixed = dict(step.get("params") or {})
+        return {
+            well: {**fixed, **(step_condition(factors, step_id, list(sample.levels or [])) if physical
+                               else dict((frozen or {}).get(well) or {}))}
+            for well, sample in targets.items()
+        }
+
+    def _branch_routing(self, batch: Batch) -> dict[str, dict[str, str]]:
+        """按样本分流的分支把每个样本分到了哪个出口：{分支步骤: {运行分配: 出口}}，取每个分支最新一次完成的分流。"""
+        from ..domain import workflow as states
+        from ..models import StepRun
+
+        routing: dict[str, dict[str, str]] = {}
+        rows = self.db.query(StepRun).filter(StepRun.batch_id == batch.id, StepRun.kind == BRANCH,
+                                             StepRun.state == states.COMPLETED).order_by(StepRun.attempt).all()
+        for row in rows:
+            groups = (row.form_data or {}).get("per_sample")
+            if isinstance(groups, dict):
+                routing[row.step_id] = {sample: case for case, samples in groups.items() for sample in samples or []}
+        return routing
+
+    def _scope_filter(self, batch: Batch, step: dict):
+        """这一步在按样本分流的分支下游、汇合之前：返回「这个样本走不走这条路」的判定；不受限返回 None。
+        拆分出的子样本跟着母样走（按物理样本的谱系找到这批里的母样）。"""
+        steps = self.steps_of(batch)
+        step_id = step_id_of(step, 0) if step.get("step_id") else ""
+        position = next((index for index, row in enumerate(steps) if row is step
+                         or (step_id and step_id_of(row, index) == step_id)), None)
+        if position is None:
+            return None
+        scopes = dag.sample_scopes(steps, position)
+        if not scopes:
+            return None
+        routing = self._branch_routing(batch)
+        by_physical = {row.physical_sample_id: row.id for row in self.samples.for_batch(batch.id) if row.physical_sample_id}
+
+        def lineage(sample: Sample) -> list[str]:
+            names, physical_id, seen = [sample.id], sample.physical_sample_id, set()
+            while physical_id and physical_id not in seen:
+                seen.add(physical_id)
+                record = self.physical.get(physical_id)
+                physical_id = record.parent_id if record is not None else None
+                if physical_id and physical_id in by_physical:
+                    names.append(by_physical[physical_id])
+            return names
+
+        def allowed(sample: Sample) -> bool:
+            for branch_id, cases in scopes.items():
+                mapping = routing.get(branch_id)
+                if mapping is None:
+                    continue  # 分支还没分流（下游步骤要等分支完成才开，正常不会走到）
+                case = next((mapping[name] for name in lineage(sample) if name in mapping), None)
+                if case not in cases:
+                    return False
+            return True
+
+        return allowed
+
+    def _covered_params(self, batch: Batch, step: dict, step_id: str, rule: tuple, frozen: dict | None) -> dict:
+        """按瓶限定（`applies_to`）的步骤：只带在指定投料步骤真加了料的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
+
+        没列出的瓶子这一步不做——配液线「加料后搅拌」按瓶执行，某瓶这种料是 0 就连搅拌一起跳过。一瓶都没有时
+        返回空 dict：不能退回「不带孔位 = 整批都做」。用量与逐孔参数同一口径（布局孔位或实体占用）。
+        """
+        from ..domain.matrix import step_condition
+
+        targets, physical = self._step_projection(batch, step)
+        if not targets:
+            return {}
+        plan = batch.plan_snapshot or {}
+        factors, conditions = plan.get("factors") or [], plan.get("condition_params") or {}
+        doses = {step_id_of(row, position): row for position, row in enumerate(self.steps_of(batch))}
+
+        def amount(well: str, sample: Sample, ref: str) -> Decimal:
+            dose = doses.get(ref) or {}
+            param = str(dose.get("material_param") or "")
+            if physical:
+                value = step_condition(factors, ref, list(sample.levels or [])).get(param)
+            else:
+                value = ((conditions.get(ref) or {}).get(well) or {}).get(param)
+            if value is None:
+                value = (dose.get("params") or {}).get(param)
+            return decimal_of(value) or Decimal(0)
+
+        fixed = dict(step.get("params") or {})
+        covered: dict[str, dict] = {}
+        for well, sample in targets.items():
+            if covers(rule, lambda ref, well=well, sample=sample: amount(well, sample, ref)):
+                own = (step_condition(factors, step_id, list(sample.levels or [])) if physical
+                       else dict((frozen or {}).get(well) or {}))
+                covered[well] = {**fixed, **own}
+        return covered
+
+    def uncovered(self, batch: Batch, step_index: int) -> str:
+        """按瓶限定（`applies_to`）的步骤此刻一瓶都不用做时给出原因（推进器据此直接跳过这一步）；否则空串。"""
+        steps = self.steps_of(batch)
+        step = steps[step_index] if step_index < len(steps) else {}
+        rule = applies_to(step)
+        if rule is None or self._well_params(batch, step, step_index):
+            return ""
+        names = {step_id_of(row, position): row.get("name") or step_id_of(row, position)
+                 for position, row in enumerate(steps)}
+        dosed, later = rule
+        return f"只处理在「{names.get(dosed, dosed)}」加了料{'、之后还要再加料' if later else ''}的瓶子，本批没有这样的在用瓶子"
+
     def _step_targets(self, batch: Batch, step: dict) -> dict[str, Sample] | None:
         """这一步的处理对象：设备孔位 → 在用样本。与矩阵逐孔参数同一口径（见 `_step_projection`）。"""
         return self._step_projection(batch, step)[0]
 
     def _step_projection(self, batch: Batch, step: dict) -> tuple[dict[str, Sample] | None, bool]:
+        """这一步的处理对象（见 `_board_projection`），再按样本分流限定到分到这条路的样本。"""
+        targets, physical = self._board_projection(batch, step)
+        if not targets:
+            return targets, physical
+        allowed = self._scope_filter(batch, step)
+        if allowed is None:
+            return targets, physical
+        return {well: sample for well, sample in targets.items() if allowed(sample)}, physical
+
+    def _board_projection(self, batch: Batch, step: dict) -> tuple[dict[str, Sample] | None, bool]:
         """按这一步用的那块板上此刻在途的样本投影：返回（设备孔位 → 在用样本，是否来自实体占用）。
 
         板上有这批样本的在途占用就按实体孔位投影；板上有占用却没有一个在用样本、或这一步用另一块板而

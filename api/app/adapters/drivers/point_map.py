@@ -14,7 +14,7 @@
   "capabilities": {"cap.coat": {
       "constants": {"operation": 1},
       "recipe": {"point": "recipe_no", "map": {"COAT-STD": 1, "COAT-180": 12}, "default": "COAT-STD"},
-      "write": {"thickness": "sp_thickness", "temp": "sp_temp"},
+      "write": {"thickness": "sp_thickness", "temp": "sp_temp", "mode": {"point": "sp_mode", "map": {"快涂": 1, "慢涂": 2}}},
       "start": {"point": "cmd_start", "value": true, "pulse_ms": 300},
       "actuals": {"thickness": "pv_thickness", "temp": "pv_temp"}}},
   "status": {"point": "state", "states": {"0": "idle", "1": "running", "2": "held", "3": "done", "4": "failed"}},
@@ -25,7 +25,7 @@
 ```
 
 `recipe` 把设备方法的设备端程序（步骤没引用设备方法时用 `default`）换成 PLC 的程序号；`map` 里没有的程序
-直接拒绝。下发顺序：就绪 / 联锁检查 → 常量 → 程序号 → 设定值 → 指令号（可选）→ 启动信号。启动信号之前的任何写入
+直接拒绝。选项型参数同理：`write` 里写成 `{"point": …, "map": {选项: 代码}}`，下发时换成设备代码，没登记的选项拒绝。下发顺序：就绪 / 联锁检查 → 常量 → 程序号 → 设定值 → 指令号（可选）→ 启动信号。启动信号之前的任何写入
 失败都说明设备没动（明确失败）；启动信号本身被拒是明确失败，没拿到结论是结果未知。PLC 回显指令号时
 （`job_id.echo`），启动未确认的作业可以按回显找回。
 """
@@ -96,6 +96,22 @@ class PointMapAdapter(MappedJobAdapter):
     @staticmethod
     def _point_name(item) -> str:
         return item if isinstance(item, str) else str((item or {}).get("point") or "")
+
+    @staticmethod
+    def _coded(parameter: str, item, value):
+        """选项型参数下发的是文字（THF、CCCV-4.2），PLC 点多半只收数：`{"point": …, "map": {"THF": 1}}` 换成代码。
+        map 里没有的值直接拒绝——写进去一个 PLC 不认识的代码，比不下发更糟。"""
+        if isinstance(value, (list, dict)):
+            raise AdapterError(
+                f"参数 {parameter} 是程序表，写不进单个点：程序表参数请用按 ILCS 契约接的驱动或设备网关下发"
+            )
+        mapping = item.get("map") if isinstance(item, dict) else None
+        if not isinstance(mapping, dict):
+            return value
+        key = str(value)
+        if key not in mapping:
+            raise AdapterError(f"参数 {parameter} 的值 {value!r} 没有在 write.{parameter}.map 里登记设备代码")
+        return mapping[key]
 
     # ---------- 子类 I/O ----------
 
@@ -196,7 +212,7 @@ class PointMapAdapter(MappedJobAdapter):
         for parameter, item in (spec.get("write") or {}).items():
             if parameter not in values:
                 raise AdapterError(f"参数 {parameter} 指令里没有、配置也没有缺省值")
-            writes.append((self._point_name(item), values[parameter]))
+            writes.append((self._point_name(item), self._coded(parameter, item, values[parameter])))
         job_id = self.config.get("job_id") or {}
         if job_id.get("write"):
             writes.append((job_id["write"], job["id"]))

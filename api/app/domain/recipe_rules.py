@@ -8,16 +8,17 @@
 """
 from typing import Any
 
+from . import program
 from .bindings import binding_issues, bindings_of
 from .capability import StationSpec, out_of_range, stations_for_step
 from .environment import requirement_issues
-from .graph import ancestors, critical_path_min, graph_issues, graph_mode
+from .graph import ancestors, critical_path_min, graph_issues, graph_mode, predecessors
 from .params import spec_of, value_issues
 from .steps import (
-    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
-    assist_issues, branch_issues, notify_issues,
-    consumes_materials, gate_issues, kind_of, manual_issues, material_issues, needs_station, resource_demand,
-    review_issues, step_material,
+    AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
+    applies_to_issues, assist_issues, branch_issues, merge_issues, notify_issues,
+    consumes_materials, gate_issues, holds_station, holds_station_issues, kind_of, manual_issues, material_issues,
+    needs_station, qualification_issues, resource_demand, resource_issues, review_issues, step_material,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
 
@@ -60,11 +61,19 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
         if key in bound:
             continue
         value = params.get(key)
-        if value is None or value == "" or not isinstance(value, (int, float)) or isinstance(value, bool):
+        if value is None or value == "" or value == []:
             if rule["required"]:
                 issues.append(f"{rule['label']} 未填写")
             continue
         issues.extend(value_issues(rule, value))
+        if rule["type"] == "program":
+            # 程序表里引用本步参数的格子：引用的要是本能力的数值参数、单位相同，而且这一步给了它值
+            issues.extend(program.ref_issues(rule, value, spec, rule["label"], key))
+            issues.extend(
+                f"{rule['label']} 引用的 {spec_of(spec, ref)['label']} 没有值：程序表下发时要代入它"
+                for ref in sorted(program.refs(value))
+                if ref in defined and ref not in bound and params.get(ref) in (None, "")
+            )
     for key in params:
         if defined and key not in defined:
             issues.append(f"参数 {key} 不属于该能力")
@@ -73,6 +82,8 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
     if material_param not in (None, "") and spec is not None:
         if not isinstance(material_param, str) or material_param not in defined:
             issues.append(f"用量参数 {material_param} 不是该能力的参数")
+        elif spec_of(spec, material_param)["type"] in ("enum", "program"):
+            issues.append(f"用量参数 {material_param} 不是数值参数，不能当投料量")
         elif not spec_of(spec, material_param)["unit"]:
             issues.append(f"用量参数 {material_param} 没有登记单位，无法与物料单位对账")
     return issues
@@ -100,11 +111,15 @@ def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str
         issues.extend(review_issues(step))
     elif kind == SPLIT:
         issues.extend(split_issues(step))
+    elif kind == MERGE:
+        issues.extend(merge_issues(step))
     elif kind == SUBFLOW:
         issues.extend(subflow_issues(step))
     elif kind == NOTIFY:
         issues.extend(notify_issues(step))
     issues.extend(material_issues(step))
+    issues.extend(resource_issues(step))
+    issues.extend(qualification_issues(step))
     issues.extend(timeout_issues(step))
     issues.extend(skippable_issues(step))
     issues.extend(requirement_issues(step, needs_zone=not needs_station(step)))
@@ -151,8 +166,10 @@ def validate_steps(
                 issues.append("返工目标必须是本关卡的上游步骤（依赖链上的前驱）")
         if kind == BRANCH:
             issues.extend(branch_issues(step, steps, index))
-        # 前馈来源要看上游步骤，同样只能在整条流程上校验
+        # 前馈来源、按瓶限定引用的投料步骤都要看上下游步骤，同样只能在整条流程上校验
         issues.extend(binding_issues(step, steps, index, capabilities))
+        issues.extend(applies_to_issues(step, steps, index))
+        issues.extend(holds_station_issues(steps, index))
         if kind == SUBFLOW:
             issues.extend((subflow_problems or {}).get(step_id, []))
         issues.extend((method_problems or {}).get(step_id, []))
@@ -161,10 +178,22 @@ def validate_steps(
         seen_ids[step_id] = index
 
         requires_station = needs_station(step)
-        fits = stations_for_step(stations, step) if requires_station else []
+        if holds_station(step):
+            # 样本留在前驱那台设备里：能承接前驱的工位就是它会占的工位
+            parent = predecessors(steps)[index]
+            source = steps[parent[0]] if len(parent) == 1 and kind_of(steps[parent[0]]) == DEVICE else None
+            fits = stations_for_step(stations, source) if source is not None else []
+        else:
+            fits = stations_for_step(stations, step) if requires_station else []
         blockers: list[str] = list(issues)
-        if requires_station and not fits:
-            for station in stations:
+        if requires_station and not fits and not holds_station(step):
+            station_ref = ((step.get("resource") or {}).get("station") or "") if kind == MANUAL else ""
+            if station_ref:
+                blockers.append(f"指定占用的工位 {station_ref} 不存在或已停用")
+            # 实现了这项能力、只差参数范围的工位最有参考价值，排在前面；没实现能力的、已停用的放后面
+            wanted = step.get("cap") or ((step.get("resource") or {}).get("capability") or "")
+            ranked = sorted(stations, key=lambda row: (row.retired, wanted not in row.limits, row.id))
+            for station in ranked:
                 blockers.extend(out_of_range(station, step))
         rows.append(
             {
@@ -186,6 +215,8 @@ def validate_steps(
                 "split": step.get("split") or {},
                 "assist": step.get("assist") or [],
                 "labware": step.get("labware") or "",
+                "resource": step.get("resource") or {},
+                "qualification": step.get("qualification") or {},
                 "branch": step.get("branch") or {},
                 "subflow": step.get("subflow") or {},
                 "method": step.get("method") or {},

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..core.clock import today_iso
+from ..core.clock import now, today_iso
 from ..core.config import settings
 from ..core.context import AccessContext
 from ..core.db import dec
@@ -14,6 +15,7 @@ from ..domain import inventory
 from ..domain.lifecycle import (
     lot_delete_blockers, lot_editable_fields, reject_uneditable, waste_delete_blockers,
 )
+from ..domain.params import canonical_unit, decimal_of
 from ..models import InventoryEvent, InventoryLedger, Lot, Material, User, WasteTank
 from ..repositories.governance import AlarmRepository
 from ..repositories.materials import (
@@ -24,6 +26,12 @@ from .identity_service import IdentityService
 from .inventory_service import InventoryService
 
 WASTE_WARN_PCT = 75
+
+
+def _factor_text(factor: Any) -> str:
+    """换算系数按十进制文字给出，去掉多余的尾零（1.32，不是 1.320000）。"""
+    value = decimal_of(factor)
+    return f"{value.normalize():f}" if value is not None else str(factor)
 
 
 class MaterialService:
@@ -41,8 +49,9 @@ class MaterialService:
 
     # ---------- 物料主数据 ----------
 
-    def material_out(self, material: Material) -> dict:
-        lots = [row for row in self.lots.list() if row.material_id == material.id]
+    def material_out(self, material: Material, lot_count: int | None = None) -> dict:
+        if lot_count is None:
+            lot_count = sum(1 for row in self.lots.list() if row.material_id == material.id)
         return {
             "id": material.id,
             "code": material.code,
@@ -50,15 +59,23 @@ class MaterialService:
             "base_unit": material.base_unit,
             "category": material.category,
             "cas": material.cas,
-            "conversions": material.conversions or {},
+            "conversions": {unit: _factor_text(factor) for unit, factor in (material.conversions or {}).items()},
             "external_ref": material.external_ref,
             "ghs": material.ghs or [],
             "state": material.state,
-            "lot_count": len(lots),
+            "lot_count": lot_count,
+            # 已有批号时名称与基础单位锁定：批号、预留与设备回报的消耗按名称与单位对账
+            "locked_fields": ["name", "base_unit"] if lot_count else [],
+            "row_version": material.row_version,
+            "updated_at": material.updated_at.isoformat() if material.updated_at else "",
         }
 
     def list_materials(self) -> list[dict]:
-        return [self.material_out(row) for row in self.materials.list()]
+        counts: dict[str, int] = {}
+        for lot in self.lots.list():
+            if lot.material_id:
+                counts[lot.material_id] = counts.get(lot.material_id, 0) + 1
+        return [self.material_out(row, counts.get(row.id, 0)) for row in self.materials.list()]
 
     def create_material(self, payload: dict, user: User) -> dict:
         code = (payload.get("code") or "").strip()
@@ -66,11 +83,16 @@ class MaterialService:
             raise ValidationFailed("物料编码必填")
         if self.materials.by_code(code):
             raise StateConflict(f"物料编码 {code} 已存在")
+        name = (payload.get("name") or "").strip()
+        base_unit = canonical_unit(payload.get("base_unit"))
+        if not name or not base_unit:
+            raise ValidationFailed("物料名称与基础单位必填", code="material_invalid")
+        self._require_unique_name(name, base_unit)
         material = Material(
-            code=code, name=payload["name"], base_unit=payload["base_unit"],
-            category=payload.get("category", ""), cas=payload.get("cas", ""),
-            conversions=payload.get("conversions") or {},
-            external_ref=payload.get("external_ref", ""), ghs=payload.get("ghs") or [],
+            code=code, name=name, base_unit=base_unit,
+            category=(payload.get("category") or "").strip(), cas=(payload.get("cas") or "").strip(),
+            conversions=self._conversions(payload.get("conversions"), base_unit),
+            external_ref=payload.get("external_ref", ""), ghs=self._ghs(payload.get("ghs")),
         )
         self.materials.add(material)
         self.audit.record(
@@ -78,7 +100,146 @@ class MaterialService:
             detail=f"{code}；基础单位 {material.base_unit}",
         )
         self.db.commit()
+        return self.material_out(material, 0)
+
+    def update_material(self, material_id: str, changes: dict, expected: int | None, user: User) -> dict:
+        """改物料主数据。没传的字段不动；已有批号的物料不能改名称与基础单位。
+
+        类别决定配液模板怎么加这种料、单位换算决定入库与设备回报怎么折成基础单位——改了只影响之后的导入与入账，
+        已生成的流程、已入账的流水不回溯。"""
+        material = self._require_material(material_id)
+        self.materials.check_version(material, expected, "物料主数据")
+        values = {key: value for key, value in changes.items() if value is not None}
+        lot_count = sum(1 for row in self.lots.list() if row.material_id == material.id)
+        if "name" in values:
+            values["name"] = str(values["name"]).strip()
+            if not values["name"]:
+                raise ValidationFailed("物料名称不能为空", code="material_invalid")
+        if "base_unit" in values:
+            values["base_unit"] = canonical_unit(values["base_unit"])
+            if not values["base_unit"]:
+                raise ValidationFailed("基础单位不能为空", code="material_invalid")
+        renamed = [key for key in ("name", "base_unit") if key in values and values[key] != getattr(material, key)]
+        if renamed and lot_count:
+            labels = "、".join({"name": "名称", "base_unit": "基础单位"}[key] for key in renamed)
+            raise StateConflict(
+                f"物料 {material.code} 已有 {lot_count} 个批号，不能改{labels}：批号、预留与设备回报的消耗按名称与单位对账；"
+                f"要换请登记一条新物料",
+                code="material_locked",
+            )
+        name = values.get("name", material.name)
+        base_unit = values.get("base_unit", material.base_unit)
+        if renamed:
+            self._require_unique_name(name, base_unit, exclude=material.id)
+        if "conversions" in values or "base_unit" in values:
+            values["conversions"] = self._conversions(values.get("conversions", material.conversions), base_unit)
+        for key in ("category", "cas", "external_ref"):
+            if key in values:
+                values[key] = str(values[key]).strip()
+        if "ghs" in values:
+            values["ghs"] = self._ghs(values["ghs"])
+        changed = {key: value for key, value in values.items() if getattr(material, key) != value}
+        before = {key: getattr(material, key) for key in changed}
+        for key, value in changed.items():
+            setattr(material, key, value)
+        if changed:
+            material.updated_at = now()
+            self.materials.bump(material)
+            self.audit.record(
+                user, "修改物料主数据", material.id, before=self._describe(before), after=self._describe(changed),
+                detail=material.code, object_version=material.row_version,
+            )
+        self.db.commit()
+        return self.material_out(material, lot_count)
+
+    def retire_material(self, material_id: str, expected: int | None, user: User) -> dict:
+        """停用：不能再按它入库新批号，配液模板导入不再认它；已有批号照常可用、可消耗。不删除——流水指回它。"""
+        material = self._require_material(material_id)
+        self.materials.check_version(material, expected, "物料主数据")
+        if material.state != "active":
+            raise StateConflict(f"物料 {material.code} 已停用", code="material_retired")
+        material.state = "retired"
+        material.updated_at = now()
+        self.materials.bump(material)
+        self.audit.record(user, "停用物料", material.id, before="在用", after="已停用",
+                          detail=material.code, object_version=material.row_version)
+        self.db.commit()
         return self.material_out(material)
+
+    def restore_material(self, material_id: str, expected: int | None, user: User) -> dict:
+        material = self._require_material(material_id)
+        self.materials.check_version(material, expected, "物料主数据")
+        if material.state == "active":
+            raise StateConflict(f"物料 {material.code} 在用，不需要恢复", code="material_active")
+        self._require_unique_name(material.name, material.base_unit, exclude=material.id)
+        material.state = "active"
+        material.updated_at = now()
+        self.materials.bump(material)
+        self.audit.record(user, "恢复物料", material.id, before="已停用", after="在用",
+                          detail=material.code, object_version=material.row_version)
+        self.db.commit()
+        return self.material_out(material)
+
+    def _require_material(self, material_id: str) -> Material:
+        material = self.materials.get(material_id)
+        if material is None:
+            raise NotFound("物料主数据不存在")
+        return material
+
+    def _require_unique_name(self, name: str, base_unit: str, exclude: str = "") -> None:
+        """同名同单位只能有一条在用：入库按（名称，单位）找主数据，两条就分不清入到哪条。"""
+        for row in self.materials.list():
+            if row.id != exclude and row.state == "active" and row.name == name and row.base_unit == base_unit:
+                raise StateConflict(
+                    f"已有在用的物料 {row.code} 叫 {name}、基础单位 {base_unit}：入库按名称与单位找主数据，不能重复",
+                    code="material_duplicate",
+                )
+
+    @staticmethod
+    def _conversions(raw: Any, base_unit: str) -> dict[str, str]:
+        """单位换算 {单位: 1 单位折合多少基础单位}。系数必须是正的十进制数；不能写基础单位自己。"""
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict):
+            raise ValidationFailed("单位换算要写成 {单位: 系数}", code="material_invalid")
+        out: dict[str, str] = {}
+        problems: list[str] = []
+        for unit, factor in raw.items():
+            key = canonical_unit(unit)
+            if not key:
+                problems.append("换算的单位不能为空")
+                continue
+            if key == base_unit:
+                problems.append(f"{key} 就是基础单位，不用登记换算")
+                continue
+            if key in out:
+                problems.append(f"单位 {key} 重复")
+                continue
+            value = decimal_of(factor)
+            if value is None or value <= 0:
+                problems.append(f"1 {key} 折合的 {base_unit} 数必须是正数（现在是 {factor!r}）")
+                continue
+            out[key] = f"{value.normalize():f}"
+        if problems:
+            raise ValidationFailed("单位换算有问题：" + "；".join(problems), code="material_invalid")
+        return out
+
+    @staticmethod
+    def _ghs(raw: Any) -> list[str]:
+        return [str(item).strip() for item in (raw or []) if str(item).strip()]
+
+    @staticmethod
+    def _describe(values: dict) -> str:
+        labels = {"name": "名称", "base_unit": "基础单位", "category": "类别", "cas": "CAS", "conversions": "单位换算",
+                  "external_ref": "外部编号", "ghs": "GHS"}
+        parts = []
+        for key, value in values.items():
+            if isinstance(value, dict):
+                value = "、".join(f"{unit}={factor}" for unit, factor in value.items()) or "无"
+            elif isinstance(value, list):
+                value = "、".join(value) or "无"
+            parts.append(f"{labels.get(key, key)} {value or '空'}")
+        return "；".join(parts) or "—"
 
     # ---------- 批号 ----------
 
@@ -163,7 +324,7 @@ class MaterialService:
         if material_id and not material:
             raise NotFound("物料主数据不存在")
         if material is None:
-            # 没指定主数据时按（名称，单位）找或建，保持旧入口可用
+            # 没指定主数据时按（名称，单位）找或建，保持旧入口可用；同名同单位有停用的也有在用的，入到在用的那条
             material = self.materials.by_name_unit(payload["material"], payload["unit"])
             if material is None:
                 material = Material(
@@ -172,6 +333,11 @@ class MaterialService:
                     category=payload.get("type", ""), cas=payload.get("cas", ""),
                 )
                 self.materials.add(material)
+        if material.state != "active":
+            raise StateConflict(
+                f"物料 {material.code}（{material.name}）已停用，不能入库新批号；要用请先在物料主数据里恢复",
+                code="material_retired",
+            )
         if payload["unit"] != material.base_unit and payload["unit"] not in (
             material.conversions or {}
         ):

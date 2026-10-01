@@ -9,7 +9,7 @@ from ..domain.access import service_may_use_station
 from ..domain.adapter_rules import ACTING_LABELS, busy_blocked_changes
 from ..domain.gate import adapter_status
 from ..domain.lifecycle import capability_delete_blockers, station_delete_blockers, station_retire_blockers
-from ..domain.params import clean_specs, spec_issues
+from ..domain.params import clean_specs, limit_issues, spec_issues, spec_of
 from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
 from ..models import Adapter, Capability, Island, Station, User
@@ -30,6 +30,20 @@ from .template_service import (
 from .audit_service import AuditService
 from .gate_service import GateService
 from .identity_service import IdentityService
+
+
+def _kind(spec: dict) -> str:
+    """参数的大类：数值与整数的极限写法相同（区间），选项、程序表各是一种写法。"""
+    return "numeric" if spec["type"] in ("number", "integer") else spec["type"]
+
+
+def _default_window(spec: dict):
+    """新接一项能力时的缺省极限：选项型全部允许，程序表不约束列，数值 [0, 100]。"""
+    if spec["type"] == "enum":
+        return list(spec["options"])
+    if spec["type"] == "program":
+        return {}
+    return [0, 100]
 
 
 class StationService:
@@ -283,10 +297,9 @@ class StationService:
         """改能力极限：`limits` 只列要改的能力（合并写入），`remove` 列这台工位不再承接的能力（整项移除）。"""
         station = self._require_station(station_id)
         self.stations.check_version(station, expected_version, "工位")
-        for capability_id, params in limits.items():
-            for name, window in params.items():
-                if len(window) != 2 or not window[0] < window[1]:
-                    raise DomainError(f"{name} 下限必须小于上限")
+        problems = self._limit_problems(limits)
+        if problems:
+            raise DomainError("；".join(problems))
         removed = list(dict.fromkeys(remove or []))
         both = [capability_id for capability_id in removed if capability_id in limits]
         if both:
@@ -318,6 +331,19 @@ class StationService:
         )
         self.db.commit()
         return {"station": station_id, "limits": station.limits, "broken_recipes": broken}
+
+    def _limit_problems(self, limits: dict) -> list[str]:
+        """能力极限的写法按参数规格核：数值参数 [下限, 上限]，选项型参数写允许的选项（登记选项的子集）。"""
+        specs = self.capabilities.specs()
+        problems: list[str] = []
+        for capability_id, params in (limits or {}).items():
+            capability = specs.get(capability_id)
+            if not isinstance(params, dict):
+                problems.append(f"能力 {capability_id} 的极限格式不正确")
+                continue
+            for name, window in params.items():
+                problems.extend(limit_issues(spec_of(capability, name), window, name))
+        return problems
 
     def _require_capabilities_idle(self, station_id: str, capabilities: set[str]) -> None:
         """工位上还有未结束批次的时间窗在用这些能力时不能移除：已排下的工步会落到一台不再承接它的工位上。"""
@@ -384,7 +410,8 @@ class StationService:
             if not station:
                 continue
             limits = dict(station.limits or {})
-            limits[capability_id] = {key: [0, 100] for key in params}
+            spec = {"params": params, "param_specs": clean_specs(params, param_specs)}
+            limits[capability_id] = {key: _default_window(spec_of(spec, key)) for key in params}
             station.limits = limits
             self.stations.bump(station)
         self.audit.record(
@@ -486,6 +513,9 @@ class StationService:
         self._require_channels_fit(
             payload["id"], max(1, int(payload.get("channels") or 1)), payload.get("asset_id", ""),
         )
+        problems = self._limit_problems(payload.get("limits") or {})
+        if problems:
+            raise DomainError("；".join(problems))
         signature = self.identity.consume_signature(signature_id, user, "登记新工位")
         station = Station(
             id=payload["id"], org_id=self.ctx.org_id, asset_id=payload.get("asset_id", ""),
@@ -727,9 +757,22 @@ class StationService:
         ).as_dict()
 
     def drivers(self, station_id: str | None = None) -> list[dict]:
-        """已登记的驱动与各自的配置说明、起步模板（按工位能力极限生成）。"""
+        """已登记的驱动与各自的配置说明、起步模板（按工位能力极限生成）。
+
+        `capability_examples`：每项能力在这个驱动里的起步写法（点表驱动的设定值 / 实测点 / 启动信号、命令驱动的
+        设定命令……），按能力字典的参数生成——表单里加一项能力时照它起步。给了工位时以工位的能力极限为准。"""
         limits = (self._require_station(station_id).limits or {}) if station_id else {}
-        return [info.as_dict(limits) for info in DRIVERS.values()]
+        dictionary = {
+            key: {param: None for param in (spec.get("params") or {})}
+            for key, spec in self.capabilities.specs().items() if not spec.get("retired")
+        }
+        rows = []
+        for info in DRIVERS.values():
+            row = info.as_dict(limits)
+            examples = info.template({**dictionary, **limits}).get("capabilities")
+            row["capability_examples"] = examples if isinstance(examples, dict) else {}
+            rows.append(row)
+        return rows
 
     def template_options(self, station_id: str) -> list[dict]:
         station = self._require_station(station_id)
@@ -1057,15 +1100,39 @@ class StationService:
             key for key in set(before_specs) | set(capability.param_specs)
             if before_specs.get(key) != capability.param_specs.get(key)
         )
-        if removed:
-            # 工位极限里残留已删参数会让匹配永远不通过，顺手清掉
+        before_spec = {"params": {**{key: key for key in before_params}}, "param_specs": before_specs}
+        after_spec = {"params": capability.params or {}, "param_specs": capability.param_specs}
+        retyped = {
+            key for key in spec_changed if key in (capability.params or {}) and key in before_params
+            and _kind(spec_of(before_spec, key)) != _kind(spec_of(after_spec, key))
+        }
+        narrowed = {key for key in spec_changed if spec_of(after_spec, key)["type"] == "enum"} - retyped
+        reshaped = {key for key in spec_changed if spec_of(after_spec, key)["type"] == "program"} - retyped
+        if removed or retyped or narrowed or reshaped:
+            # 工位极限里残留已删参数会让匹配永远不通过，顺手清掉；数值与选项互换了的参数，原来的区间或选项
+            # 对新类型没有意义，清掉让工位重填（不替工位放宽能做的范围）；选项减少了的，去掉已经没有的选项
             for station in self.stations.list():
                 limits = dict(station.limits or {})
                 slot = limits.get(capability_id)
                 if not slot:
                     continue
-                limits[capability_id] = {k: v for k, v in slot.items() if k not in removed}
-                station.limits = limits
+                kept = {k: v for k, v in slot.items() if k not in removed and k not in retyped}
+                for key in narrowed & set(kept):
+                    options = spec_of(after_spec, key)["options"]
+                    window = [item for item in kept[key] if item in options] if isinstance(kept[key], list) else []
+                    if window:
+                        kept[key] = window
+                    else:
+                        kept.pop(key)
+                for key in reshaped & set(kept):
+                    # 程序表删了的列，它的列极限一并去掉
+                    columns = {column.get("key") for column in spec_of(after_spec, key)["columns"]}
+                    kept[key] = {column: window for column, window in (kept[key] or {}).items() if column in columns} \
+                        if isinstance(kept[key], dict) else {}
+                if kept != slot:
+                    limits[capability_id] = kept
+                    station.limits = limits
+                    self.stations.bump(station)
         broken = self.revalidate_recipes({capability_id})
         self.audit.record(
             user, "修改能力定义", capability_id, sign=True, meaning=signature.meaning,

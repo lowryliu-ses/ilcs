@@ -34,6 +34,8 @@ class Material(Base):
     ghs: Mapped[list] = mapped_column(JSON, default=list)
     state: Mapped[str] = mapped_column(String, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
     __table_args__ = (UniqueConstraint("org_id", "code", name="uq_material_org_code"),)
 
 

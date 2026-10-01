@@ -3,8 +3,8 @@
 
     api/.venv/bin/python scripts/lines/c-electrolyte/render-sop.py
 
-生成的 SOP-ELY-01-v1.pdf 随仓库提交，load-electrolyte-line.py 登记 SOP 时上传它（导入脚本只用标准库，
-不在部署机上生成 PDF）。改了 sop.json 就重新生成并提交。
+生成的 SOP-ELY-01-<版本>.pdf 随仓库提交，load-electrolyte-line.py 登记 SOP 时上传它（导入脚本只用标准库，
+不在部署机上生成 PDF）。改了 sop.json 就升版本号、重新生成并提交；旧版本的 PDF 已随那一版登记进系统，仓库里删掉。
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ sys.path.insert(0, str(HERE.parents[2] / "api"))
 
 from app.seed.sop_document import render  # noqa: E402
 
-NOTE = "产线草案（按产线定义与客户确认的工艺起草，现场审定前以现场规程为准）"
+NOTE = "产线草案（按产线定义、客户确认的工艺与配液经验起草，工艺规则待客户确认，现场审定前以现场规程为准）"
 
 
 def main() -> int:

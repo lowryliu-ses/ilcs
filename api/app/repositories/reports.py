@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..models import Report, ReportVersion
+from ..models import Report, ReportTemplate, ReportVersion
 from .base import ScopedRepository
 
 
@@ -52,3 +52,13 @@ class ReportVersionRepository(ScopedRepository[ReportVersion]):
         total = query.count()
         rows = query.order_by(ReportVersion.created_at.desc()).offset(offset).limit(limit).all()
         return list(rows), total
+
+
+class ReportTemplateRepository(ScopedRepository[ReportTemplate]):
+    model = ReportTemplate
+
+    def list(self) -> list[ReportTemplate]:
+        return list(self.query().order_by(ReportTemplate.key, ReportTemplate.version).all())
+
+    def for_key(self, key: str) -> list[ReportTemplate]:
+        return list(self.query().filter(ReportTemplate.key == key).order_by(ReportTemplate.version).all())

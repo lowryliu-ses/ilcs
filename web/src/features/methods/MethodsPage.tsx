@@ -7,9 +7,13 @@ import { useState } from 'react';
 
 import { api } from '../../shared/api';
 import { clock } from '../../shared/format';
+import { paramSpec } from '../../shared/params';
+import { ProgramTableEditor } from '../../shared/program';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
-import type { CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule, MetricRow } from '../../shared/types';
+import type {
+  CapabilityRow, DeviceMethodRow, MethodOutputRule, MethodParamRule, MetricRow, ProgramRow,
+} from '../../shared/types';
 import { Field, ListState, Modal, Panel, Pill, useToast } from '../../shared/ui';
 
 const STATE_PILL: Record<string, string> = { draft: 'scheduled', released: 'running', retired: 'done' };
@@ -144,7 +148,14 @@ export function MethodsPage() {
   );
 }
 
-type ParamDraft = Record<string, { on: boolean; default: string; min: string; max: string; unit: string }>;
+/** 编辑中的参数规则。数值参数用 default / min / max / unit；选项型参数用 default（一个选项）与 options（允许的选项）；
+    程序表参数用 program（缺省程序表） */
+type ParamDraft = Record<
+  string,
+  { on: boolean; default: string; min: string; max: string; unit: string; options: string[]; program: ProgramRow[] }
+>;
+
+const BLANK_RULE: ParamDraft[string] = { on: false, default: '', min: '', max: '', unit: '', options: [], program: [] };
 
 function toNumber(value: string): number | null {
   if (value.trim() === '') return null;
@@ -176,16 +187,21 @@ function MethodDialog({
     Object.fromEntries(
       Object.entries(method?.params ?? {}).map(([key, rule]) => [
         key,
-        { on: true, default: String(rule.default ?? ''), min: String(rule.min ?? ''), max: String(rule.max ?? ''), unit: rule.unit ?? '' },
+        {
+          on: true, default: Array.isArray(rule.default) ? '' : String(rule.default ?? ''),
+          min: String(rule.min ?? ''), max: String(rule.max ?? ''),
+          unit: rule.unit ?? '', options: rule.options ?? [], program: Array.isArray(rule.default) ? rule.default : [],
+        },
       ]),
     ),
   );
   const [outputs, setOutputs] = useState<MethodOutputRule[]>(method?.outputs ?? []);
   const capability = capabilities.find((row) => row.id === capabilityId);
-  /* 输出项能关联的指标：在用的数值型指标（设备回报的是数）。已关联、后来停用的仍列出，发布检查会报出来 */
+  /* 输出项能关联的指标：在用的数值型或曲线型指标（设备回报的是数或曲线）。已关联、后来停用的仍列出，发布检查会报出来 */
   const metrics = useQuery<MetricRow[]>('metrics', () => api.get<MetricRow[]>('/metrics'));
   const linkable = (metrics.data ?? []).filter(
-    (row) => (row.state === 'active' && row.value_type === 'number') || outputs.some((output) => output.metric_id === row.id),
+    (row) => (row.state === 'active' && (row.value_type === 'number' || row.value_type === 'series'))
+      || outputs.some((output) => output.metric_id === row.id),
   );
 
   const payload = () => ({
@@ -200,7 +216,13 @@ function MethodDialog({
         .filter(([key, rule]) => rule.on && key in (capability?.params ?? {}))
         .map(([key, rule]): [string, MethodParamRule] => [
           key,
-          { default: toNumber(rule.default), min: toNumber(rule.min), max: toNumber(rule.max), unit: rule.unit },
+          paramSpec(capability, key).type === 'enum'
+            ? // 选项型：缺省选项与允许的选项；不写上下限与单位
+              { default: rule.default || null, ...(rule.options.length ? { options: rule.options } : {}) }
+            : paramSpec(capability, key).type === 'program'
+            ? // 程序表：只给缺省程序表（标准化成工步、标准升温程序）
+              { default: rule.program.length ? rule.program : null }
+            : { default: toNumber(rule.default), min: toNumber(rule.min), max: toNumber(rule.max), unit: rule.unit },
         ]),
     ),
     outputs: outputs.filter((row) => row.key.trim()),
@@ -218,10 +240,10 @@ function MethodDialog({
       },
     },
   );
-  const setParam = (key: string, field: keyof ParamDraft[string], value: string | boolean) =>
+  const setParam = (key: string, field: keyof ParamDraft[string], value: string | boolean | string[] | ProgramRow[]) =>
     setParams((current) => ({
       ...current,
-      [key]: { ...(current[key] ?? { on: false, default: '', min: '', max: '', unit: '' }), [field]: value },
+      [key]: { ...(current[key] ?? BLANK_RULE), [field]: value },
     }));
 
   return (
@@ -284,7 +306,82 @@ function MethodDialog({
           </thead>
           <tbody>
             {Object.entries(capability?.params ?? {}).map(([key, label]) => {
-              const rule = params[key] ?? { on: false, default: '', min: '', max: '', unit: '' };
+              const rule = params[key] ?? BLANK_RULE;
+              const spec = paramSpec(capability, key);
+              if (spec.type === 'program') {
+                // 程序表：这条方法的缺省程序表（流程步骤没写时补进去）；引用只能指向本能力的数值参数
+                const refs = Object.keys(capability?.params ?? {})
+                  .map((name) => ({ name, spec: paramSpec(capability, name) }))
+                  .filter((row) => row.name !== key && (row.spec.type === 'number' || row.spec.type === 'integer'))
+                  .map((row) => ({ key: row.name, label: row.spec.label, unit: row.spec.unit }));
+                return (
+                  <tr key={key}>
+                    <td>
+                      <input type="checkbox" checked={rule.on} disabled={readOnly} onChange={(event) => setParam(key, 'on', event.target.checked)} />
+                    </td>
+                    <td className="small">
+                      {label} <span className="tiny muted mono">{key} · 程序表</span>
+                    </td>
+                    <td colSpan={4}>
+                      {rule.on ? (
+                        <ProgramTableEditor
+                          spec={spec}
+                          value={rule.program}
+                          refs={refs}
+                          readOnly={readOnly}
+                          onChange={(rows) => setParam(key, 'program', rows)}
+                        />
+                      ) : (
+                        <span className="tiny muted">不给缺省程序表</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              }
+              if (spec.type === 'enum') {
+                // 选项型：缺省选项 + 这条方法允许的选项（不勾 = 能力登记的全部选项）
+                const allowed = rule.options.length ? rule.options : spec.options;
+                return (
+                  <tr key={key}>
+                    <td>
+                      <input type="checkbox" checked={rule.on} disabled={readOnly} onChange={(event) => setParam(key, 'on', event.target.checked)} />
+                    </td>
+                    <td className="small">
+                      {label} <span className="tiny muted mono">{key} · 选项</span>
+                    </td>
+                    <td>
+                      <select value={rule.default} disabled={readOnly || !rule.on} onChange={(event) => setParam(key, 'default', event.target.value)}>
+                        <option value="">无缺省</option>
+                        {allowed.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td colSpan={3}>
+                      <div className="dep-list" title="只允许勾选的选项；都不勾就是能力登记的全部选项">
+                        {spec.options.map((option) => (
+                          <label key={option} className="check">
+                            <input
+                              type="checkbox"
+                              disabled={readOnly || !rule.on}
+                              checked={rule.options.includes(option)}
+                              onChange={(event) =>
+                                setParam(
+                                  key, 'options',
+                                  spec.options.filter((item) => (item === option ? event.target.checked : rule.options.includes(item))),
+                                )
+                              }
+                            />
+                            {option}
+                          </label>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
               return (
                 <tr key={key}>
                   <td>
@@ -326,6 +423,7 @@ function MethodDialog({
           <tr>
             <th>指标键</th>
             <th>名称</th>
+            <th>类型</th>
             <th>单位</th>
             <th>下限</th>
             <th>上限</th>
@@ -347,6 +445,14 @@ function MethodDialog({
                   <input value={row.label ?? ''} readOnly={readOnly} onChange={(event) => update({ label: event.target.value })} />
                 </td>
                 <td>
+                  <select value={row.kind ?? ''} disabled={readOnly} aria-label={`${row.key || '输出'} 类型`}
+                    title="曲线：设备回报 {x, y}，上下限对 y"
+                    onChange={(event) => update({ kind: event.target.value as MethodOutputRule['kind'] })}>
+                    <option value="">数值</option>
+                    <option value="series">曲线</option>
+                  </select>
+                </td>
+                <td>
                   <input value={row.unit ?? ''} readOnly={readOnly} style={{ width: 70 }} onChange={(event) => update({ unit: event.target.value })} />
                 </td>
                 <td>
@@ -365,14 +471,18 @@ function MethodDialog({
                     aria-label={`${row.key || '输出'} 关联指标`}
                     onChange={(event) => {
                       const metric = linkable.find((item) => item.id === event.target.value);
-                      // 选了指标、输出项还没写单位：带上指标的单位（两者必须一致）
-                      update({ metric_id: event.target.value, ...(metric && !(row.unit ?? '').trim() ? { unit: metric.unit } : {}) });
+                      // 选了指标、输出项还没写单位：带上指标的单位（两者必须一致）；曲线指标的输出就是曲线
+                      update({
+                        metric_id: event.target.value,
+                        ...(metric && !(row.unit ?? '').trim() ? { unit: metric.unit } : {}),
+                        ...(metric ? { kind: metric.value_type === 'series' ? 'series' : '' } : {}),
+                      });
                     }}
                   >
                     <option value="">不关联（只进检查点）</option>
                     {linkable.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.name}（{item.code}，{item.unit || '无单位'}）{item.state !== 'active' ? ' · 已停用' : ''}
+                        {item.name}（{item.code}，{item.unit || '无单位'}{item.value_type === 'series' ? '，曲线' : ''}）{item.state !== 'active' ? ' · 已停用' : ''}
                       </option>
                     ))}
                   </select>

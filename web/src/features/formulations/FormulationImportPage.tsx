@@ -15,7 +15,8 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { PLAN_STATE_LABEL, RECIPE_STATE_LABEL } from '../../shared/types';
 import type {
-  CapabilityRow, FormulationImportResult, FormulationPreview, FormulationTemplate, FormulationTemplateConfig, RecipeStep,
+  CapabilityRow, FormulationImportResult, FormulationPreview, FormulationTemplate, FormulationTemplateConfig,
+  FormulationVolumeCheck, RecipeStep,
 } from '../../shared/types';
 import { Blocked, Empty, Field, ListState, Metric, NumberInput, Panel, useToast } from '../../shared/ui';
 import { STEP_KINDS, kindOf } from '../recipes/rules';
@@ -38,11 +39,16 @@ type Sheet = {
 /** 当前参数下的预览：上传时那份、刷新回来的那份，或刷新失败的原因 */
 type Current = { preview?: FormulationPreview; error?: ApiError };
 
-const COLUMN_KIND: Record<string, string> = { serial: '序列号', reagent: '试剂', ignored: '忽略' };
+const COLUMN_KIND: Record<string, string> = { serial: '序列号', reagent: '试剂', param: '逐瓶参数', ignored: '忽略' };
 const kindLabel = (step: RecipeStep) => STEP_KINDS.find(([value]) => value === kindOf(step))?.[1] ?? String(step.kind);
 
-function defaultsOf(config: FormulationTemplateConfig | undefined): Record<string, number> {
+function defaultsOf(config: FormulationTemplateConfig | undefined): Record<string, number | string> {
   return Object.fromEntries((config?.experiment_params ?? []).map((row) => [row.key, row.default]));
+}
+
+/** 逐瓶参数列的表头 → 参数 key（瓶子表里按 key 存） */
+function rowParamKey(config: FormulationTemplateConfig | undefined, header: string): string | undefined {
+  return (config?.row_params ?? []).find((row) => row.header === header)?.key;
 }
 
 /** 服务端 422 带回的问题清单（模板配置、表格或生成结果的全部问题） */
@@ -54,12 +60,15 @@ function problemsOf(error: ApiError | undefined): string[] {
 
 /* 解析结果里没带原始表格时，从列识别与瓶子表拼回一份：被忽略的列内容丢了，
    但它们本来就不参与生成，服务端重新生成的结果一致。 */
-function tableOf(preview: FormulationPreview): Cell[][] {
+function tableOf(preview: FormulationPreview, config?: FormulationTemplateConfig): Cell[][] {
   const header: Cell[] = preview.columns.map((column) => column.header);
   const body = preview.rows.map((row) =>
-    preview.columns.map((column): Cell =>
-      column.kind === 'serial' ? row.serial : column.kind === 'reagent' ? row.amounts[column.name] ?? null : null,
-    ),
+    preview.columns.map((column): Cell => {
+      if (column.kind === 'serial') return row.serial;
+      if (column.kind === 'reagent') return row.amounts[column.name] ?? null;
+      if (column.kind === 'param') return row.params?.[rowParamKey(config, column.name) ?? ''] ?? null;
+      return null;
+    }),
   );
   return [header, ...body];
 }
@@ -97,7 +106,7 @@ export function FormulationImportPage() {
   }, [picked, firstActive, templates.data, pickedActive]);
 
   const [sheet, setSheet] = useState<Sheet | null>(null);
-  const [params, setParams] = useState<Record<string, number | ''>>({});
+  const [params, setParams] = useState<Record<string, number | string | ''>>({});
   const [planName, setPlanName] = useState('');
   const [result, setResult] = useState<FormulationImportResult | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -107,7 +116,7 @@ export function FormulationImportPage() {
   const defaults = useMemo(() => defaultsOf(config), [config]);
   const defaultsKey = JSON.stringify(defaults);
   useEffect(() => {
-    setParams(JSON.parse(defaultsKey) as Record<string, number>);
+    setParams(JSON.parse(defaultsKey) as Record<string, number | string>);
   }, [templateId, defaultsKey]);
 
   /* 留空的参数按缺省值：发给服务端的永远是完整的一组数，预览与导入用的是同一组 */
@@ -173,7 +182,7 @@ export function FormulationImportPage() {
           templateId: parsedWith,
           // 预览与导入的请求体限 200 字符；文件名只用于命名与审计，截断无妨
           filename: (parsed.filename || file.name).slice(0, 200),
-          table: parsed.table ?? tableOf(parsed),
+          table: parsed.table ?? tableOf(parsed, config),
           base: parsed,
           // 服务端解析时用的是模板缺省值
           paramsKey: JSON.stringify(defaults),
@@ -255,6 +264,7 @@ export function FormulationImportPage() {
           <h1>配方导入</h1>
           <span className="small muted">
             上传配方表（一行一瓶：瓶身序列号 + 各试剂每瓶用量），按配液模板生成流程草稿与方案草稿；量变了流程可以沿用，只新建方案。
+            模板在 <Link to="/formulation-templates">配液模板</Link> 里建和改。
           </span>
         </div>
         <div className="filters">
@@ -301,7 +311,7 @@ export function FormulationImportPage() {
         loading={templates.loading && !templates.data}
         error={templates.error}
         empty={!!templates.data && !active.length}
-        emptyText="还没有可用的配液模板：模板决定各类试剂怎么加、前后有哪些固定步骤，由流程负责人登记"
+        emptyText="还没有可用的配液模板：模板决定各类试剂怎么加、前后有哪些固定步骤，在「配液模板」里建"
       />
       {template?.check?.problems.length ? (
         <div className="note bad">
@@ -322,7 +332,7 @@ export function FormulationImportPage() {
             <Panel title="配方表">
               <Empty>
                 {templateId
-                  ? '上传 .xlsx 或 .csv：第一行表头，一列是瓶身序列号，其余列表头写试剂名与单位，如 EC (g)；空单元格按 0（这一瓶不加这种料）'
+                  ? '上传 .xlsx 或 .csv：第一行表头，一列是瓶身序列号，其余列表头写试剂名与单位，如 EC (g)；这一瓶不加的料填 0——同一列有的填了、有的空着不能导入，整列空白表示这次不用这种料'
                   : '先选配液模板'}
               </Empty>
             </Panel>
@@ -341,16 +351,34 @@ export function FormulationImportPage() {
             <Panel title="生成流程与方案">
               {(config?.experiment_params ?? []).length ? (
                 <div className="grid cols-3">
-                  {(config?.experiment_params ?? []).map((row) => (
-                    <Field key={row.key} label={`${row.label} ${row.unit}`} hint={`缺省 ${row.default}；留空按缺省值`}>
-                      <NumberInput
-                        value={params[row.key] ?? ''}
-                        ariaLabel={row.label}
-                        disabled={commit.pending}
-                        onChange={(next) => setParams((values) => ({ ...values, [row.key]: next }))}
-                      />
-                    </Field>
-                  ))}
+                  {(config?.experiment_params ?? []).map((row) => {
+                    const spec = template?.param_specs?.[row.key];
+                    return spec?.type === 'enum' ? (
+                      <Field key={row.key} label={row.label} hint={`缺省 ${row.default}`}>
+                        <select
+                          value={String(params[row.key] ?? row.default)}
+                          aria-label={row.label}
+                          disabled={commit.pending}
+                          onChange={(event) => setParams((values) => ({ ...values, [row.key]: event.target.value }))}
+                        >
+                          {spec.options.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    ) : (
+                      <Field key={row.key} label={`${row.label} ${row.unit}`} hint={`缺省 ${row.default}；留空按缺省值`}>
+                        <NumberInput
+                          value={typeof params[row.key] === 'number' ? (params[row.key] as number) : ''}
+                          ariaLabel={row.label}
+                          disabled={commit.pending}
+                          onChange={(next) => setParams((values) => ({ ...values, [row.key]: next }))}
+                        />
+                      </Field>
+                    );
+                  })}
                 </div>
               ) : null}
               <Field label="方案名称" hint={`留空为「${template?.name ?? '模板名'} · ${sheet.filename}」`}>
@@ -422,6 +450,7 @@ function PreviewPanels({
   const stageLabel = Object.fromEntries((config?.stages ?? []).map((row) => [row.key, row.label]));
   const capName = Object.fromEntries(capabilities.map((row) => [row.id, row.name]));
   const reagentColumns = shown.columns.filter((column) => column.kind === 'reagent');
+  const paramColumns = shown.columns.filter((column) => column.kind === 'param');
   const position = Object.fromEntries(shown.steps.map((step, at) => [step.step_id ?? '', at + 1]));
   const plan = shown.plan;
 
@@ -518,7 +547,13 @@ function PreviewPanels({
                   <span className={column.kind === 'ignored' ? 'tag warn' : 'tag'}>{COLUMN_KIND[column.kind] ?? column.kind}</span>
                 </td>
                 <td className="small">
-                  {column.kind === 'reagent' ? `${column.name} · ${column.unit}` : column.kind === 'serial' ? '瓶身序列号' : '—'}
+                  {column.kind === 'reagent'
+                    ? `${column.name} · ${column.unit}`
+                    : column.kind === 'serial'
+                    ? '瓶身序列号'
+                    : column.kind === 'param'
+                    ? `每瓶的 ${column.name}${column.unit ? ` · ${column.unit}` : ''}`
+                    : '—'}
                 </td>
                 <td className="small">{column.category || '—'}</td>
                 <td className="small">{column.stage ? stageLabel[column.stage] ?? column.stage : '—'}</td>
@@ -541,6 +576,12 @@ function PreviewPanels({
                     <div className="tiny muted">{column.unit}</div>
                   </th>
                 ))}
+                {paramColumns.map((column) => (
+                  <th key={`p-${column.name}`} className="num" title="逐瓶参数：按孔位下发给它指向的步骤">
+                    {column.name}
+                    <div className="tiny muted">{column.unit || '逐瓶参数'}</div>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -556,6 +597,11 @@ function PreviewPanels({
                       </td>
                     );
                   })}
+                  {paramColumns.map((column) => (
+                    <td key={`p-${column.name}`} className="num mono small">
+                      {String(row.params?.[rowParamKey(config, column.name) ?? ''] ?? '—')}
+                    </td>
+                  ))}
                 </tr>
               ))}
               {shown.reagents.length ? (
@@ -721,12 +767,15 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
             const categories = routes.filter(([, route]) => route.stage === stage.key).map(([category]) => category);
             return (
               <li key={stage.key}>
-                {stage.label}：按表格列顺序逐个加 {categories.join('、') || '（没有类别进这一阶段）'}
+                {stage.label}：{stage.order === 'routes' ? '按类别先后' : '按表格列顺序'}逐个加 {categories.join('、') || '（没有类别进这一阶段）'}
                 {stage.after?.length ? (
-                  <span className="muted">；等「{stage.after.map((key) => fixedName[key] ?? key).join('」「')}」完成后开始</span>
+                  <span className="muted">
+                    ；{stage.chain === false ? '不接上一个阶段，只' : ''}等「{stage.after.map((key) => fixedName[key] ?? key).join('」「')}」完成后开始
+                  </span>
                 ) : null}
                 <div className="tiny muted">
-                  最后一个加料后{stage.stir_after_last === false ? '不' : ''}紧跟搅拌；之后：{names(stage.then)}
+                  最后一个加料后{stage.stir_after_last === false ? '不' : ''}紧跟搅拌
+                  {stage.stir ? `（本阶段的加料后步骤：${stage.stir.name?.replace('{material}', '…')}）` : ''}；之后：{names(stage.then)}
                 </div>
               </li>
             );
@@ -754,14 +803,23 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
                 <div className="tiny muted">
                   用量写到 <span className="mono">{route.param}</span>
                 </div>
+                {route.not_last ? (
+                  <div className="tiny muted">
+                    不能是一瓶在本阶段加的最后一种{typeof route.not_last === 'string' ? `：${route.not_last}` : ''}
+                  </div>
+                ) : null}
               </td>
-              <td className="small">{route.stir_after === false ? '否' : '是'}</td>
+              <td className="small">
+                {route.stir_after === false ? '否' : '是'}
+                {route.stir ? <div className="tiny muted">用 {route.stir.name?.replace('{material}', '…')}</div> : null}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
       <div className="tiny muted">
-        「紧跟搅拌」指不是本阶段最后一个加料时；最后一个按阶段规则。搅拌步骤：{config.stir?.name?.replace('{material}', '…') ?? '未配置'}
+        「紧跟搅拌」指不是本阶段最后一个加料时；最后一个按阶段规则。搅拌步骤：{config.stir?.name?.replace('{material}', '…') ?? '未配置'}。
+        搅拌按瓶执行：某瓶这种料是 0，这瓶跳过加料和随后的搅拌，「最后一个」也按这瓶自己加的料算。
       </div>
 
       {config.experiment_params?.length ? (
@@ -777,9 +835,41 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
           </ul>
         </div>
       ) : null}
+      {config.row_params?.length ? (
+        <div>
+          <div className="small muted">逐瓶参数列（表格里每瓶一个值，按孔位下发）</div>
+          <ul className="small">
+            {config.row_params.map((row) => (
+              <li key={row.key}>
+                表头「{row.header}」{row.unit ? `（${row.unit}）` : ''}
+                <span className="tiny muted mono"> → {fixedName[row.step] ?? row.step}.{row.param}</span>
+                {row.default !== undefined && row.default !== null ? <span className="tiny muted">；空白按 {String(row.default)}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {config.volume_check ? <VolumeCheckNote config={config} check={config.volume_check} /> : null}
       {config.required_metrics?.length ? (
         <div className="tiny muted">必测指标：{config.required_metrics.join('、')}</div>
       ) : null}
     </Panel>
+  );
+}
+
+/** 分装量核对的说明：参数写成实验参数的名称，与上面的「实验参数」对得上 */
+function VolumeCheckNote({ config, check }: { config: FormulationTemplateConfig; check: FormulationVolumeCheck }) {
+  const label = (key: string) =>
+    config.experiment_params?.find((row) => row.key === key)?.label ??
+    config.row_params?.find((row) => row.key === key)?.label ??
+    config.row_params?.find((row) => row.key === key)?.header ??
+    key;
+  return (
+    <div className="tiny muted">
+      分装量核对：按物料主数据登记的密度估算每瓶母液体积
+      {check.density ? `（没登记的按 ${check.density} g/mL）` : '（没登记密度的物料估算不了，只提醒）'}，
+      {label(check.bottles)} × {label(check.volume)}
+      {check.reserve ? ` + 母瓶留样 ${check.reserve} mL` : ''} 放不下就不能导入
+    </div>
   );
 }

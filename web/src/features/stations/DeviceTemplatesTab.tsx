@@ -6,7 +6,7 @@
    设备模块交付的 profile.json 就是这里的导出文件：导入一律成草稿，文件摘要对不上（导出后被改过）直接拒绝。
 
    它是「工位与接入」的一个页签（/stations/templates）：只在工位的设备连接里用得到，不单独占一个菜单。 */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
@@ -14,8 +14,9 @@ import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
-import type { DeviceTemplateRow, DriverInfo } from '../../shared/types';
+import type { DeviceTemplateRow, DriverField, DriverInfo } from '../../shared/types';
 import { Field, ListState, Modal, Panel, Pill, useToast } from '../../shared/ui';
+import { ConfigEditor, useFormContext } from './ConfigForm';
 
 const STATE_PILL: Record<string, string> = { draft: 'scheduled', released: 'running', retired: 'done' };
 const SUPPORTS = [['hold', '保持'], ['abort', '终止'], ['query', '按指令查询'], ['dedup', '设备端去重']] as const;
@@ -180,8 +181,14 @@ export function DeviceTemplatesTab() {
   );
 }
 
-function json(value: unknown): string {
-  return JSON.stringify(value ?? {}, null, 2);
+type Obj = Record<string, unknown>;
+
+/** 驱动示例配置拆成两半：连接参数（每台设备自己填）与映射（模板里写死）；加一项能力时照 capability_examples 起步 */
+function splitExample(info: DriverInfo): { mapping: Obj; connection: Obj; example: Obj } {
+  const connection = Object.fromEntries(info.connection_keys.filter((name) => name in info.template).map((name) => [name, info.template[name]]));
+  const mapping = Object.fromEntries(Object.entries(info.template).filter(([name]) => !info.connection_keys.includes(name)));
+  const capabilities = { ...(info.capability_examples ?? {}), ...((info.template.capabilities as Obj | undefined) ?? {}) };
+  return { mapping, connection, example: { ...mapping, capabilities } };
 }
 
 function TemplateDialog({
@@ -201,37 +208,41 @@ function TemplateDialog({
   const draft = !templateId || row?.state === 'draft';
   const readOnly = !editable || !draft;
   const [form, setForm] = useState<Record<string, string> | null>(null);
+  const [config, setConfig] = useState<Obj>({});
+  const [connection, setConnection] = useState<Obj>({});
+  const [acceptance, setAcceptance] = useState<Obj>({});
+  // 哪一块的 JSON 写错了：改好之前不能保存
+  const [invalid, setInvalid] = useState<Record<string, string>>({});
   const [supports, setSupports] = useState<Record<string, boolean>>({ hold: true, abort: true, query: true, dedup: true });
   const [error, setError] = useState('');
+  const context = useFormContext();
 
   useEffect(() => {
     if (form || (templateId && !row)) return;
     setForm({
       code: row?.code ?? '', name: row?.name ?? '', driver: row?.driver ?? 'line_command_v1', model: row?.model ?? '',
       vendor: row?.vendor ?? '', protocol: row?.protocol ?? '', version: row?.version ?? '', note: row?.note ?? '',
-      config: json(row?.config), connection: json(row?.connection), acceptance: json(row?.acceptance ?? { capability: '', params: {} }),
     });
+    setConfig(row?.config ?? {});
+    setConnection(row?.connection ?? {});
+    setAcceptance(row?.acceptance ?? { capability: '', params: {} });
     if (row?.supports) setSupports({ hold: true, abort: true, query: true, dedup: true, ...row.supports });
   }, [form, row, templateId]);
   const info = drivers.data?.find((item) => item.key === form?.driver);
+  const split = useMemo(() => (info ? splitExample(info) : null), [info]);
+  const mappingFields = useMemo(() => (info?.fields ?? []).filter((field) => !field.connection && field.name !== 'acceptance'), [info]);
+  const connectionFields = useMemo(() => (info?.fields ?? []).filter((field) => field.connection), [info]);
+  const acceptanceFields = useMemo<DriverField[]>(() => info?.fields.find((field) => field.name === 'acceptance')?.fields ?? [], [info]);
+  const markInvalid = (part: string) => (message: string) => setInvalid((current) => ({ ...current, [part]: message }));
 
   const save = useMutation(
     async () => {
       if (!form) return null;
-      const parse = (label: string, text: string) => {
-        try {
-          const value = JSON.parse(text || '{}');
-          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('必须是 JSON 对象');
-          return value as Record<string, unknown>;
-        } catch (caught) {
-          throw new Error(`${label}：${caught instanceof Error ? caught.message : caught}`);
-        }
-      };
+      const broken = Object.values(invalid).find(Boolean);
+      if (broken) throw new Error(broken);
       const payload = {
         name: form.name, driver: form.driver, model: form.model, vendor: form.vendor, protocol: form.protocol,
-        version: form.version, note: form.note, supports,
-        config: parse('映射配置', form.config), connection: parse('连接参数示例', form.connection),
-        acceptance: parse('验收缺省', form.acceptance),
+        version: form.version, note: form.note, supports, config, connection, acceptance,
       };
       return row
         ? api.patch<DeviceTemplateRow>(`/device-templates/${row.id}`, { ...payload, row_version: row.row_version })
@@ -248,10 +259,10 @@ function TemplateDialog({
   );
 
   const startFromDriver = () => {
-    if (!info || !form) return;
-    const connection = Object.fromEntries(info.connection_keys.filter((name) => name in info.template).map((name) => [name, info.template[name]]));
-    const config = Object.fromEntries(Object.entries(info.template).filter(([name]) => !info.connection_keys.includes(name)));
-    setForm({ ...form, protocol: form.protocol || info.protocol, config: json(config), connection: json(connection) });
+    if (!info || !form || !split) return;
+    setForm({ ...form, protocol: form.protocol || info.protocol });
+    setConfig(split.mapping);
+    setConnection(split.connection);
     setSupports({ ...info.supports });
   };
 
@@ -315,17 +326,32 @@ function TemplateDialog({
           <span className="small muted">连接参数（{info.connection_keys.join('、') || '无'}）放进「连接参数示例」，其余放进映射配置</span>
         </div>
       ) : null}
-      <Field label="映射配置" hint="不含每台设备的连接参数；点表、命令模板、状态映射、故障码按设备手册写">
-        <textarea className="mono" rows={12} value={form.config} readOnly={readOnly} onChange={(event) => set('config', event.target.value)} />
-      </Field>
-      <div className="grid cols-2">
-        <Field label="连接参数示例" hint="套用时由工位填写；示例里的 <占位> 必须换掉">
-          <textarea className="mono" rows={5} value={form.connection} readOnly={readOnly} onChange={(event) => set('connection', event.target.value)} />
-        </Field>
-        <Field label="验收缺省" hint='{"capability": "cap.x", "params": {…}}：动作级验收的能力与参数'>
-          <textarea className="mono" rows={5} value={form.acceptance} readOnly={readOnly} onChange={(event) => set('acceptance', event.target.value)} />
-        </Field>
-      </div>
+      {info ? (
+        <>
+          <ConfigEditor
+            label="映射配置"
+            hint="不含每台设备的连接参数；点表、命令模板、状态映射、故障码按设备手册写"
+            fields={mappingFields}
+            known={info.fields}
+            value={config}
+            onChange={setConfig}
+            onInvalid={markInvalid('config')}
+            readOnly={readOnly}
+            context={context}
+            example={split?.example}
+            elsewhere={(name) => (name === 'acceptance' ? '写在下面的「验收缺省」里' : '连接参数写在下面的「连接参数示例」里，套用时由工位填')}
+          />
+          <div className="grid cols-2">
+            <ConfigEditor label="连接参数示例" hint="套用时由工位填写；示例里的 <占位> 必须换掉" fields={connectionFields} showAll
+              value={connection} onChange={setConnection} onInvalid={markInvalid('connection')} readOnly={readOnly} context={context}
+              example={split?.connection} rows={6} />
+            <ConfigEditor label="验收缺省" hint="动作级验收用的能力与参数" fields={acceptanceFields} showAll
+              value={acceptance} onChange={setAcceptance} onInvalid={markInvalid('acceptance')} readOnly={readOnly} context={context} rows={6} />
+          </div>
+        </>
+      ) : (
+        <div className="muted">{drivers.error?.message ?? '正在读取驱动目录…'}</div>
+      )}
       <Field label="支持的控制动作" hint="只有设备真实支持时才勾选；不支持的动作在执行界面禁用并说明原因">
         <div className="row">
           {SUPPORTS.map(([name, label]) => (

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -50,3 +51,14 @@ def commanded_quantity(params: dict[str, Any] | None, param: str) -> Decimal:
     else:
         total = top
     return total.quantize(QUANTUM)
+
+
+def covers(rule: tuple[str, tuple[str, ...]], amount_of: Callable[[str], Decimal]) -> bool:
+    """一瓶在不在 `steps.applies_to` 的范围里：在 dosed 那一步加了料（> 0），then_any 非空时之后至少还加其中一种。
+
+    `amount_of(步骤标识)` 给这一瓶在那一步的用量（没有就是 0）。0 表示这一瓶跳过这种料，与下发的语义一致。
+    """
+    dosed, later = rule
+    if amount_of(dosed) <= 0:
+        return False
+    return not later or any(amount_of(step_id) > 0 for step_id in later)

@@ -15,11 +15,12 @@ def list_reports(db: DbSession, ctx: Ctx, paging: Paging, state: str | None = No
 
 
 @router.get("/templates")
-def report_templates(ctx: Ctx):
-    """可选报告模板与各自包含的章节。取数只有一套，模板只决定章节与顺序。"""
-    from ...domain.report_templates import catalog
+def report_templates(db: DbSession, ctx: Ctx):
+    """生成报告时可选的模板与各自包含的章节：内置的，加上组织模板各键最新的已发布版本。
+    取数只有一套，模板只决定章节、顺序与标题（组织模板还可以有固定文字章节）。"""
+    from ...services.report_template_service import ReportTemplateService
 
-    return catalog()
+    return ReportTemplateService(db, ctx).catalog()
 
 
 @router.get("/{version_id}")

@@ -2,7 +2,8 @@
 
    - 按模板：选一份已发布的设备接入模板（一类设备怎么接），只填这台设备自己的连接参数（地址、证书、设备编号）；
      同型号的几台设备共用一份模板，模板出新修订时这里提示，由人逐台切换；
-   - 手工配置：选驱动，从驱动登记的示例配置开始改完整配置 JSON。配置项说明来自驱动自己（后端驱动目录），不写死在页面里。
+   - 手工配置：选驱动，从驱动登记的示例配置开始改。表单按驱动自己声明的配置项出（后端驱动目录，含点表、能力映射、
+     命令列表这类嵌套结构），不写死在页面里；完整 JSON 随时可以切过去直接改。
 
    保存要签名：配置版本递增、强制离线重新握手，并按驱动检查配置——配错了当场拒绝，不用等到测试连接；
    设备上还有可能在动作的指令时，换驱动、换连接目标、改状态映射会被拒绝。
@@ -22,6 +23,7 @@ import type {
 } from '../../shared/types';
 import { Field, Modal, useToast } from '../../shared/ui';
 import { AcceptancePanel } from './AcceptancePanel';
+import { ConfigEditor, ConfigForm, useFormContext } from './ConfigForm';
 
 type Issues = { message: string; problems: string[]; warnings: string[]; blocked: string[] };
 
@@ -62,23 +64,20 @@ function CheckNote({ check }: { check: ConfigCheck | null }) {
   );
 }
 
-function textOf(value: unknown, type: DriverField['type']): string {
-  if (value === undefined || value === null) return '';
-  if (type === 'object' || type === 'array') return JSON.stringify(value, null, 2);
-  return String(value);
+type Obj = Record<string, unknown>;
+
+/** 连接参数里还留着示例占位（`<设备>`）的第一处：套用模板时必须换成这台设备的值 */
+function placeholderIn(value: unknown): string {
+  if (typeof value === 'string') return /<[^>]+>/.test(value) ? value : '';
+  if (Array.isArray(value)) return value.map(placeholderIn).find(Boolean) ?? '';
+  if (value && typeof value === 'object') return Object.values(value).map(placeholderIn).find(Boolean) ?? '';
+  return '';
 }
 
-function valueOf(text: string, field: DriverField): unknown {
-  const trimmed = text.trim();
-  if (trimmed === '') return undefined;
-  if (field.type === 'object' || field.type === 'array') return JSON.parse(trimmed);
-  if (field.type === 'integer' || field.type === 'number') {
-    const number = Number(trimmed);
-    if (!Number.isFinite(number)) throw new Error(`「${field.label}」应是数值`);
-    return number;
-  }
-  if (field.type === 'boolean') return trimmed === 'true';
-  return trimmed;
+/** 驱动示例配置 + 每项能力的起步写法：表单里加一项能力时照它起步 */
+function exampleOf(info?: DriverInfo): Obj | undefined {
+  if (!info) return undefined;
+  return { ...info.template, capabilities: { ...(info.capability_examples ?? {}), ...((info.template.capabilities as Obj | undefined) ?? {}) } };
 }
 
 /** 还没接设备的工位：表单从这份空白开始，缺省是内置模拟，选了驱动的示例配置就切到真实设备 */
@@ -106,7 +105,10 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
   );
   const [mode, setMode] = useState<'template' | 'manual'>(creating ? 'template' : 'manual');
   const [draft, setDraft] = useState<AdapterRow | null>(null);
-  const [configText, setConfigText] = useState('');
+  const [config, setConfig] = useState<Obj>({});
+  // 完整 JSON 写错时的说明：改好之前不能检查、不能保存
+  const [configInvalid, setConfigInvalid] = useState('');
+  const context = useFormContext(station.limits);
   const [issues, setIssues] = useState<Issues | null>(null);
   const [check, setCheck] = useState<ConfigCheck | null>(null);
   const [testResult, setTestResult] = useState<AdapterTestResult | null>(null);
@@ -114,12 +116,11 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
   useEffect(() => {
     if (creating) {
       setDraft((current) => current ?? blankAdapter());
-      setConfigText((current) => current || '{}');
       return;
     }
     if (!detail.data) return;
     setDraft(detail.data);
-    setConfigText(JSON.stringify(detail.data.config ?? {}, null, 2));
+    setConfig(detail.data.config ?? {});
     setMode(detail.data.template ? 'template' : 'manual');
   }, [creating, detail.data]);
   // 接入时没有可套用的已发布模板：直接落到手工配置
@@ -171,19 +172,16 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
       ...current, kind: 'real', driver: info.key, protocol: info.protocol, version: '1.0',
       credential_ref: info.credential.replace('<工位>', station.id), capabilities: { ...info.supports },
     } : current);
-    setConfigText(JSON.stringify(info.template, null, 2));
+    setConfig(info.template);
     setCheck(null);
   };
 
-  const parsedConfig = (): Record<string, unknown> | null => {
-    try {
-      const parsed = JSON.parse(configText || '{}');
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('配置必须是 JSON 对象');
-      return parsed as Record<string, unknown>;
-    } catch (caught) {
-      setIssues({ message: caught instanceof Error ? `配置 JSON 无效：${caught.message}` : '配置 JSON 无效', problems: [], warnings: [], blocked: [] });
+  const parsedConfig = (): Obj | null => {
+    if (configInvalid) {
+      setIssues({ message: configInvalid, problems: [], warnings: [], blocked: [] });
       return null;
     }
+    return config;
   };
 
   const runCheck = async () => {
@@ -341,9 +339,17 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
               <input value={draft.version} onChange={(event) => update('version', event.target.value)} />
             </Field>
           </div>
-          <Field label="连接配置 JSON" hint="配置项说明见下方「驱动配置项」；保存前可以先「检查配置」">
-            <textarea className="mono" rows={10} value={configText} onChange={(event) => { setConfigText(event.target.value); setCheck(null); }} />
-          </Field>
+          <ConfigEditor
+            label="连接配置"
+            hint={driverInfo && draft.kind === 'real' ? '按驱动的配置项填；保存前可以先「检查配置」' : '内置模拟没有登记配置项，按 JSON 写'}
+            fields={driverInfo && draft.kind === 'real' ? driverInfo.fields : []}
+            jsonOnly={!(driverInfo && draft.kind === 'real')}
+            value={config}
+            onChange={(next) => { setConfig(next); setCheck(null); }}
+            onInvalid={setConfigInvalid}
+            context={context}
+            example={exampleOf(driverInfo)}
+          />
           <CheckNote check={check} />
           {driverInfo && draft.kind === 'real' ? <DriverFields info={driverInfo} /> : null}
           <Field label="凭据引用" hint="只接受 vault://、env://、file://；不要填写密码、token 或私钥原文">
@@ -429,14 +435,15 @@ function TemplateForm({
       ?? { name, label: name, type: 'string' as const, type_label: '文本', required: false, connection: true, hint: '' }),
     [option, info],
   );
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [connection, setConnection] = useState<Obj>({});
   const [credential, setCredential] = useState(adapter.credential_ref);
+  const context = useFormContext(station.limits);
   useEffect(() => {
     if (!option) return;
     const stored = adapter.template_connection ?? {};
-    setValues(Object.fromEntries(fields.map((field) => [
-      field.name, textOf(field.name in stored ? stored[field.name] : option.connection?.[field.name], field.type),
-    ])));
+    setConnection(Object.fromEntries(fields
+      .map((field) => [field.name, field.name in stored ? stored[field.name] : option.connection?.[field.name]] as const)
+      .filter(([, value]) => value !== undefined)));
   }, [option, fields, adapter.template_connection]);
 
   if (!options.length && !current) {
@@ -449,22 +456,24 @@ function TemplateForm({
   }
 
   const submit = async () => {
-    const connection: Record<string, unknown> = {};
-    try {
-      for (const field of fields) {
-        const value = valueOf(values[field.name] ?? '', field);
-        if (value === undefined) {
-          if (field.required) throw new Error(`请填写「${field.label}」`);
-          continue;
+    const values: Obj = {};
+    for (const field of fields) {
+      const value = connection[field.name];
+      if (value === undefined || value === '' || value === null) {
+        if (field.required) {
+          onIssues({ message: `请填写「${field.label}」`, problems: [], warnings: [], blocked: [] });
+          return;
         }
-        if (typeof value === 'string' && /<[^>]+>/.test(value)) throw new Error(`「${field.label}」还是示例占位（${value}），请换成这台设备的值`);
-        connection[field.name] = value;
+        continue;
       }
-    } catch (caught) {
-      onIssues({ message: caught instanceof Error ? caught.message : String(caught), problems: [], warnings: [], blocked: [] });
-      return;
+      const placeholder = placeholderIn(value);
+      if (placeholder) {
+        onIssues({ message: `「${field.label}」还是示例占位（${placeholder}），请换成这台设备的值`, problems: [], warnings: [], blocked: [] });
+        return;
+      }
+      values[field.name] = value;
     }
-    await onSave({ template_id: selected, template_connection: connection, credential_ref: credential.trim() });
+    await onSave({ template_id: selected, template_connection: values, credential_ref: credential.trim() });
   };
 
   return (
@@ -494,19 +503,11 @@ function TemplateForm({
         </select>
       </Field>
       {option && info ? <div className="small muted">驱动 {info.label}：{info.summary}；指令号与去重：{info.ledger}</div> : null}
-      <div className="grid cols-2">
-        {fields.map((field) => (
-          <Field key={field.name} label={`${field.label}${field.required ? ' *' : ''}`} hint={field.hint || field.name}>
-            {field.type === 'object' || field.type === 'array' ? (
-              <textarea className="mono" rows={4} value={values[field.name] ?? ''}
-                onChange={(event) => setValues((prev) => ({ ...prev, [field.name]: event.target.value }))} />
-            ) : (
-              <input className="mono" value={values[field.name] ?? ''}
-                onChange={(event) => setValues((prev) => ({ ...prev, [field.name]: event.target.value }))} />
-            )}
-          </Field>
-        ))}
-      </div>
+      {fields.length ? (
+        <ConfigForm fields={fields} showAll value={connection} onChange={setConnection} context={context} example={option?.connection} />
+      ) : (
+        <div className="small muted">这份模板没有要按工位填的连接参数</div>
+      )}
       <Field label="凭据引用" hint={info?.credential ? `如 ${info.credential.replace('<工位>', station.id)}；不写密码原文` : '只接受 vault://、env://、file://'}>
         <input className="mono" value={credential} onChange={(event) => setCredential(event.target.value)} />
       </Field>

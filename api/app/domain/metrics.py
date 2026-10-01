@@ -1,10 +1,15 @@
-"""指标值的类型与规则校验。纯函数，回传与人工录入共用。"""
+"""指标值的类型与规则校验。纯函数，回传与人工录入共用。
+
+曲线（`series`）型指标的值是一组 x–y 点，写法与规则见 `domain/series.py`；指标的单位是 y 的单位。
+"""
 from __future__ import annotations
 
 import math
 from typing import Any
 
-VALUE_TYPES = ("number", "text", "enum")
+from . import series
+
+VALUE_TYPES = ("number", "text", "enum", "series")
 
 
 def validate_rules(value_type: str, rules: dict) -> list[str]:
@@ -20,6 +25,8 @@ def validate_rules(value_type: str, rules: dict) -> list[str]:
         options = rules.get("options")
         if not isinstance(options, list) or not options:
             problems.append("枚举指标必须在规则里给出 options")
+    if value_type == "series":
+        problems.extend(series.rule_issues(rules))
     return problems
 
 
@@ -45,6 +52,8 @@ def check_value(
         options = rules.get("options") or []
         if value not in options:
             problems.append(f"值 {value!r} 不在可选值 {options} 中")
+    elif value_type == "series":
+        problems.extend(series.issues(value, rules))
     return problems
 
 

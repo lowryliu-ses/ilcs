@@ -1081,6 +1081,20 @@
         "title": "Body_parse_table_api_formulation_templates__template_id__parse_post",
         "type": "object"
       },
+      "Body_read_table_api_formulation_templates_table_post": {
+        "properties": {
+          "file": {
+            "format": "binary",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_read_table_api_formulation_templates_table_post",
+        "type": "object"
+      },
       "Body_upload_file_api_files_post": {
         "properties": {
           "file": {
@@ -2482,6 +2496,80 @@
         "title": "FlagIn",
         "type": "object"
       },
+      "FormulationCheckIn": {
+        "additionalProperties": false,
+        "description": "模板编辑器：按还没保存的配置核对问题；带了表格就顺便按它试算一次（不写库、不登记瓶子）。",
+        "properties": {
+          "config": {
+            "title": "Config",
+            "type": "object"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "filename": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Filename",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "table": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table"
+          }
+        },
+        "required": [
+          "config"
+        ],
+        "title": "FormulationCheckIn",
+        "type": "object"
+      },
       "FormulationImportIn": {
         "description": "导入：服务端重新生成（不信任前端预览），一个事务里登记样本、建流程草稿（或沿用）与方案草稿。",
         "properties": {
@@ -2493,7 +2581,14 @@
           },
           "params": {
             "additionalProperties": {
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
             },
             "default": {},
             "title": "Params",
@@ -2533,7 +2628,7 @@
         "type": "object"
       },
       "FormulationPreviewIn": {
-        "description": "按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。",
+        "description": "按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。\n实验参数是数，选项型的实验参数是选项文字。",
         "properties": {
           "filename": {
             "default": "",
@@ -2543,7 +2638,14 @@
           },
           "params": {
             "additionalProperties": {
-              "type": "number"
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
             },
             "default": {},
             "title": "Params",
@@ -2996,10 +3098,39 @@
           "limits": {
             "additionalProperties": {
               "additionalProperties": {
-                "items": {
-                  "type": "number"
-                },
-                "type": "array"
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "items": {
+                            "type": "number"
+                          },
+                          "type": "array"
+                        },
+                        {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  }
+                ]
               },
               "type": "object"
             },
@@ -3678,6 +3809,117 @@
         "title": "MaterialCreateIn",
         "type": "object"
       },
+      "MaterialPatchIn": {
+        "description": "改物料主数据。没传的字段不动；名称与基础单位在已有批号时锁定（服务端判）。",
+        "properties": {
+          "base_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Unit"
+          },
+          "cas": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cas"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "conversions": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversions"
+          },
+          "external_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Ref"
+          },
+          "ghs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ghs"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          }
+        },
+        "title": "MaterialPatchIn",
+        "type": "object"
+      },
       "MethodOutputRule": {
         "description": "数据输出规则：设备这一步应该回报哪些值、单位与合理范围。越界的值入库打标，不拒收。",
         "properties": {
@@ -3816,7 +4058,8 @@
             "enum": [
               "number",
               "text",
-              "enum"
+              "enum",
+              "series"
             ],
             "title": "Value Type",
             "type": "string"
@@ -3901,7 +4144,8 @@
                 "enum": [
                   "number",
                   "text",
-                  "enum"
+                  "enum",
+                  "series"
                 ],
                 "type": "string"
               },
@@ -3993,8 +4237,37 @@
         "type": "object"
       },
       "ParamSpecIn": {
-        "description": "能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。",
+        "description": "能力参数的规格：数值、整数、选项或程序表、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。\n\n选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。\n程序表（program）写 `columns` 与 `max_rows`：值是行的列表（充放电工步、升温程序），见 domain/program.py。",
         "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/ProgramColumnIn"
+            },
+            "maxItems": 20,
+            "title": "Columns",
+            "type": "array"
+          },
+          "max_rows": {
+            "anyOf": [
+              {
+                "maximum": 200.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Rows"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Options",
+            "type": "array"
+          },
           "required": {
             "default": true,
             "title": "Required",
@@ -4004,7 +4277,9 @@
             "default": "number",
             "enum": [
               "number",
-              "integer"
+              "integer",
+              "enum",
+              "program"
             ],
             "title": "Type",
             "type": "string"
@@ -4336,6 +4611,15 @@
             "title": "Sample Ids",
             "type": "array"
           },
+          "sample_policy": {
+            "default": "fresh",
+            "enum": [
+              "fresh",
+              "continue"
+            ],
+            "title": "Sample Policy",
+            "type": "string"
+          },
           "seed": {
             "default": 1,
             "title": "Seed",
@@ -4549,6 +4833,21 @@
               }
             ],
             "title": "Sample Ids"
+          },
+          "sample_policy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "fresh",
+                  "continue"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Policy"
           },
           "seed": {
             "anyOf": [
@@ -4769,6 +5068,56 @@
           "name"
         ],
         "title": "PlanTemplateIn",
+        "type": "object"
+      },
+      "ProgramColumnIn": {
+        "description": "程序表的一列：标识、显示名、类型（数值 / 整数 / 选项）、单位、选项、每行是否必填。",
+        "properties": {
+          "key": {
+            "maxLength": 32,
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "maxLength": 60,
+            "title": "Label",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Options",
+            "type": "array"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "type": {
+            "default": "number",
+            "enum": [
+              "number",
+              "integer",
+              "enum"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "unit": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "ProgramColumnIn",
         "type": "object"
       },
       "ProposalDismissIn": {
@@ -5181,11 +5530,7 @@
           },
           "template": {
             "default": "standard",
-            "enum": [
-              "standard",
-              "summary",
-              "audit"
-            ],
+            "maxLength": 32,
             "title": "Template",
             "type": "string"
           },
@@ -5230,11 +5575,7 @@
           "template": {
             "anyOf": [
               {
-                "enum": [
-                  "standard",
-                  "summary",
-                  "audit"
-                ],
+                "maxLength": 32,
                 "type": "string"
               },
               {
@@ -5245,6 +5586,107 @@
           }
         },
         "title": "ReportPatchIn",
+        "type": "object"
+      },
+      "ReportTemplateIn": {
+        "additionalProperties": false,
+        "description": "新建组织报告模板草稿。sections 不给而给了 copy_from（内置模板键或组织模板 id）时以它的章节为起点。",
+        "properties": {
+          "copy_from": {
+            "default": "",
+            "title": "Copy From",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "key": {
+            "maxLength": 32,
+            "title": "Key",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sections"
+          }
+        },
+        "required": [
+          "key",
+          "name"
+        ],
+        "title": "ReportTemplateIn",
+        "type": "object"
+      },
+      "ReportTemplatePatchIn": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "row_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Version"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sections"
+          }
+        },
+        "title": "ReportTemplatePatchIn",
         "type": "object"
       },
       "RerunFromIn": {
@@ -6690,10 +7132,39 @@
           "limits": {
             "additionalProperties": {
               "additionalProperties": {
-                "items": {
-                  "type": "number"
-                },
-                "type": "array"
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "number"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "items": {
+                            "type": "number"
+                          },
+                          "type": "array"
+                        },
+                        {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  }
+                ]
               },
               "type": "object"
             },
@@ -15787,6 +16258,87 @@
         ]
       }
     },
+    "/api/experiment-tasks/{task_id}/results/series": {
+      "get": {
+        "description": "父任务的曲线叠加：各子任务批次里这个曲线指标的样本曲线（终止的批次不画，与合并统计同一口径）。",
+        "operationId": "task_result_series_api_experiment_tasks__task_id__results_series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric_id",
+            "required": true,
+            "schema": {
+              "title": "Metric Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "official",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Official",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Task Result Series",
+        "tags": [
+          "task"
+        ]
+      }
+    },
     "/api/experiment-tasks/{task_id}/retest": {
       "post": {
         "description": "补测：在父任务下新建补测子任务，补现有的样本短缺。",
@@ -16397,6 +16949,132 @@
           }
         ],
         "summary": "Create Template",
+        "tags": [
+          "recipe"
+        ]
+      }
+    },
+    "/api/formulation-templates/check": {
+      "post": {
+        "description": "模板编辑器：按还没保存的配置列出问题；带了表格就按它试算（与导入同一套规则，不写库）。",
+        "operationId": "check_template_api_formulation_templates_check_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormulationCheckIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Template",
+        "tags": [
+          "recipe"
+        ]
+      }
+    },
+    "/api/formulation-templates/table": {
+      "post": {
+        "description": "模板编辑器试算用：只把上传的 .xlsx / .csv 读成表格（与导入同一个读取器），不涉及任何模板、不写库。",
+        "operationId": "read_table_api_formulation_templates_table_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_read_table_api_formulation_templates_table_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Table",
         "tags": [
           "recipe"
         ]
@@ -19090,6 +19768,221 @@
           }
         ],
         "summary": "Create Material",
+        "tags": [
+          "material"
+        ]
+      }
+    },
+    "/api/materials/{material_id}": {
+      "patch": {
+        "description": "改物料主数据。已有批号的物料不能改名称与基础单位（按名称与单位对账）。",
+        "operationId": "update_material_api_materials__material_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "material_id",
+            "required": true,
+            "schema": {
+              "title": "Material Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaterialPatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Material",
+        "tags": [
+          "material"
+        ]
+      }
+    },
+    "/api/materials/{material_id}/restore": {
+      "post": {
+        "operationId": "restore_material_api_materials__material_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "material_id",
+            "required": true,
+            "schema": {
+              "title": "Material Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Versioned"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Restore Material",
+        "tags": [
+          "material"
+        ]
+      }
+    },
+    "/api/materials/{material_id}/retire": {
+      "post": {
+        "description": "停用：不再按它入库新批号、配液模板导入不再认它；已有批号照常可用。",
+        "operationId": "retire_material_api_materials__material_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "material_id",
+            "required": true,
+            "schema": {
+              "title": "Material Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Versioned"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retire Material",
         "tags": [
           "material"
         ]
@@ -22751,6 +23644,393 @@
         ]
       }
     },
+    "/api/report-templates": {
+      "get": {
+        "description": "内置模板、组织模板的全部版本与可选的内置章节。",
+        "operationId": "list_report_templates_api_report_templates_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Report Templates",
+        "tags": [
+          "report"
+        ]
+      },
+      "post": {
+        "operationId": "create_report_template_api_report_templates_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportTemplateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Report Template",
+        "tags": [
+          "report"
+        ]
+      }
+    },
+    "/api/report-templates/{template_id}": {
+      "patch": {
+        "operationId": "update_report_template_api_report_templates__template_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportTemplatePatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Report Template",
+        "tags": [
+          "report"
+        ]
+      }
+    },
+    "/api/report-templates/{template_id}/release": {
+      "post": {
+        "operationId": "release_report_template_api_report_templates__template_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Versioned"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Release Report Template",
+        "tags": [
+          "report"
+        ]
+      }
+    },
+    "/api/report-templates/{template_id}/retire": {
+      "post": {
+        "operationId": "retire_report_template_api_report_templates__template_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Versioned"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retire Report Template",
+        "tags": [
+          "report"
+        ]
+      }
+    },
+    "/api/report-templates/{template_id}/revise": {
+      "post": {
+        "operationId": "revise_report_template_api_report_templates__template_id__revise_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revise Report Template",
+        "tags": [
+          "report"
+        ]
+      }
+    },
     "/api/reports": {
       "get": {
         "operationId": "list_reports_api_reports_get",
@@ -22917,7 +24197,7 @@
     },
     "/api/reports/templates": {
       "get": {
-        "description": "可选报告模板与各自包含的章节。取数只有一套，模板只决定章节与顺序。",
+        "description": "生成报告时可选的模板与各自包含的章节：内置的，加上组织模板各键最新的已发布版本。\n取数只有一套，模板只决定章节、顺序与标题（组织模板还可以有固定文字章节）。",
         "operationId": "report_templates_api_reports_templates_get",
         "parameters": [
           {
@@ -24086,6 +25366,68 @@
         ]
       }
     },
+    "/api/result-values/{value_id}/series": {
+      "get": {
+        "description": "曲线结果的完整数据点。结果列表里只带概要与几百点的缩略。",
+        "operationId": "result_series_api_result_values__value_id__series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "value_id",
+            "required": true,
+            "schema": {
+              "title": "Value Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Result Series",
+        "tags": [
+          "analysis"
+        ]
+      }
+    },
     "/api/results": {
       "get": {
         "operationId": "list_result_batches_api_results_get",
@@ -24367,6 +25709,87 @@
           }
         ],
         "summary": "Export",
+        "tags": [
+          "result"
+        ]
+      }
+    },
+    "/api/results/{batch_id}/series": {
+      "get": {
+        "description": "曲线叠加：这个批次里选定曲线指标的样本曲线（抽稀），纳入口径与数值统计相同，没纳入的列出原因。",
+        "operationId": "series_api_results__batch_id__series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric_id",
+            "required": true,
+            "schema": {
+              "title": "Metric Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "official",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Official",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Series",
         "tags": [
           "result"
         ]

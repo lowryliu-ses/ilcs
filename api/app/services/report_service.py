@@ -15,8 +15,9 @@ from ..core.context import AccessContext
 from ..core.db import dec
 from ..core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from ..domain import report_templates, statistics
+from ..domain import series as curves
 from ..domain.access import same_person
-from ..domain.statistics import EXCLUSION_REASONS, Observation, build_dataset
+from ..domain.statistics import EXCLUSION_REASONS, Observation, build_dataset, exclusion_reason
 from ..domain.steps import KIND_NAMES
 from ..models import Report, ReportVersion, User
 from ..repositories.batches import AnalysisTaskRepository, BatchRepository, SampleRepository
@@ -30,11 +31,16 @@ from ..repositories.resources import station_model
 from ..repositories.samples import PhysicalSampleRepository
 from ..repositories.workflow import StepRunRepository
 from .audit_service import AuditService
+from .report_template_service import ReportTemplateService
 from .file_service import FileService, FileStore
 from .identity_service import IdentityService, admin_self_approval
 from .inventory_service import InventoryService
 
 ALGORITHM_VERSION = "stats-1.0"
+# 曲线叠加图：每个样本抽到这么多点（LTTB，形状不变）；报告里一张图最多画这么多条
+CURVE_POINTS = 400
+REPORT_CURVE_POINTS = 240
+REPORT_CURVE_LIMIT = 24
 TEMPLATE_VERSION = report_templates.template_version(report_templates.DEFAULT)
 OPERATION_LOG_LIMIT = 300
 STATE_LABEL = {
@@ -77,6 +83,7 @@ class ReportService:
         self.inventory = InventoryService(db, ctx)
         self.audit = AuditService(db, ctx)
         self.identity = IdentityService(db, ctx)
+        self.report_templates = ReportTemplateService(db, ctx)
 
     # ---------- 数据集 ----------
 
@@ -219,7 +226,17 @@ class ReportService:
                 "value_type": definitions[metric_id].value_type if metric_id in definitions else "text",
             }
             for metric_id in chosen
-            if metric_id in definitions and definitions[metric_id].value_type != "number"
+            if metric_id in definitions and definitions[metric_id].value_type not in ("number", "series")
+        ]
+        # 曲线不进数值统计，另按样本叠加画（`series_view`）
+        series_metrics = [
+            {
+                "metric_id": metric_id, "metric_name": definitions[metric_id].name, "unit": definitions[metric_id].unit,
+                "x_label": str((definitions[metric_id].rules or {}).get("x_label") or ""),
+                "x_unit": str((definitions[metric_id].rules or {}).get("x_unit") or ""),
+            }
+            for metric_id in chosen
+            if metric_id in definitions and definitions[metric_id].value_type == "series"
         ]
         scope = {}
         if multi:
@@ -266,14 +283,91 @@ class ReportService:
                         definitions[metric_id].value_type == "number"
                         if metric_id in definitions else True
                     ),
+                    "value_type": definitions[metric_id].value_type if metric_id in definitions else "number",
                 }
                 for metric_id in available
             ],
             "selected_metrics": chosen,
             "metrics": blocks,
             "non_numeric_metrics": text_metrics,
+            "series_metrics": series_metrics,
             "show_factor_effects": plan_type == "matrix" and bool(factors),
         }
+
+    def series_view(self, batch_ids: list[str], metric_id: str, official: bool = True,
+                    points: int = CURVE_POINTS) -> dict:
+        """曲线叠加：选定曲线指标在这些批次里每个样本的当前曲线（抽稀到 points 点），按条件组着色。
+
+        纳入口径与数值统计同一套（`statistics.exclusion_reason`）：正式范围只要审核通过且质量有效的当前版本；
+        没纳入的列出原因，不悄悄少画。"""
+        definition = self.metrics.get(metric_id)
+        if definition is None or definition.value_type != "series":
+            raise StateConflict("选的指标不是曲线型", code="not_series")
+        rules = definition.rules or {}
+        samples, excluded = [], []
+        for batch_id in batch_ids:
+            assignments = {row.id: row for row in self.assignments.for_batch(batch_id)}
+            for task in self.analysis.for_batch(batch_id):
+                for value in self.values.for_task(task.id):
+                    if value.metric_definition_id != metric_id:
+                        continue
+                    assignment = assignments.get(value.assignment_id)
+                    info = curves.summary(value.value_series)
+                    probe = Observation(
+                        assignment_id=value.assignment_id, analysis_task_id=task.id, round_no=task.round_no,
+                        metric_id=metric_id, result_version=value.result_version,
+                        value=float(info["points"]) if info["points"] else None, unit=value.unit,
+                        quality=value.quality, review_state=value.review_state, superseded=bool(value.superseded_by_id),
+                        not_measured_reason=value.not_measured_reason,
+                    )
+                    reason = exclusion_reason(probe, official)
+                    base = {
+                        "assignment_id": value.assignment_id, "batch_id": batch_id, "analysis_task_id": task.id,
+                        "result_value_id": value.id, "result_version": value.result_version,
+                        "condition_group": assignment.condition_group if assignment else "",
+                        "condition_label": assignment.condition_label if assignment else "",
+                        "is_control": bool(assignment.is_control) if assignment else False,
+                        "well": assignment.well if assignment else "",
+                        "quality": value.quality, "review_state": value.review_state,
+                    }
+                    if reason is not None:
+                        if reason != "superseded":
+                            excluded.append({**base, "reason": reason, "reason_label": EXCLUSION_REASONS.get(reason, reason)})
+                        continue
+                    samples.append({**base, **info, "traces": curves.preview(value.value_series, points)})
+        samples.sort(key=lambda row: (row["condition_group"], row["assignment_id"]))
+        return {
+            "metric_id": metric_id, "metric_code": definition.code, "metric_name": definition.name,
+            "unit": definition.unit, "x_label": str(rules.get("x_label") or ""), "x_unit": str(rules.get("x_unit") or ""),
+            "official": official,
+            "scope_label": "正式范围（审核通过且质量有效）" if official else "探索性范围（含未审核、可疑、无效）",
+            "samples": samples, "excluded": excluded,
+        }
+
+    def batch_series_view(self, batch_id: str, metric_id: str, official: bool = True) -> dict:
+        if not self.batches.get(batch_id):
+            raise NotFound("批次不存在")
+        return {"batch_id": batch_id, **self.series_view([batch_id], metric_id, official)}
+
+    def _report_curves(self, batch_ids: list[str], series_metrics: list[dict]) -> list[dict]:
+        """报告里的「曲线」一节：每个曲线指标一张叠加图（正式范围），点抽稀、条数封顶，说明画了几条。"""
+        out = []
+        for row in series_metrics:
+            view = self.series_view(batch_ids, row["metric_id"], True, REPORT_CURVE_POINTS)
+            if not view["samples"]:
+                continue
+            shown = view["samples"][:REPORT_CURVE_LIMIT]
+            out.append({
+                "metric_name": view["metric_name"], "unit": view["unit"], "x_label": view["x_label"],
+                "x_unit": view["x_unit"], "total": len(view["samples"]), "shown": len(shown),
+                "excluded": len(view["excluded"]),
+                "traces": [
+                    {"label": f"{sample['assignment_id']}{(' · ' + trace['name']) if trace['name'] else ''}",
+                     "group": sample["condition_label"] or sample["condition_group"], "x": trace["x"], "y": trace["y"]}
+                    for sample in shown for trace in sample["traces"]
+                ],
+            })
+        return out
 
     def compare(self, batch_ids: list[str], metric_id: str, official: bool = True) -> dict:
         """跨批次比较。指标语义、单位与方法版本不可比就拒绝比，不看条件组编号。"""
@@ -459,10 +553,11 @@ class ReportService:
             "results": results,
             "exclusions": exclusions,
             "statistics": stats,
+            "curves": self._report_curves([batch_id], view.get("series_metrics") or []),
             "conclusion": conclusion,
             "plan_type": view["plan_type"],
             "batch_id": batch_id,
-            "template": report_templates.template(template_key),
+            "template": self.report_templates.resolve(template_key),
         }
 
     def build_task_content(self, task_id: str, conclusion: str = "", template_key: str | None = None) -> dict:
@@ -543,6 +638,8 @@ class ReportService:
             "results": results,
             "exclusions": exclusions,
             "statistics": stats,
+            "curves": self._report_curves(view.get("batch_ids") or [batch.id for batch in batches],
+                                          view.get("series_metrics") or []),
             "batches": {
                 "rows": view.get("batches") or [],
                 "progress": {key: progress[key] for key in (
@@ -570,7 +667,7 @@ class ReportService:
             "batch_id": "",
             # 报告引用的批次：终止的批次只在「分批情况」里列出，不进结果、不参与发布前校验与固化
             "batch_ids": view.get("batch_ids") or [batch.id for batch in batches],
-            "template": report_templates.template(template_key),
+            "template": self.report_templates.resolve(template_key),
         }
 
     def _effect_out(self, effect: dict | None) -> dict | None:
@@ -585,6 +682,18 @@ class ReportService:
         return list(content.get("batch_ids") or ([content["batch_id"]] if content.get("batch_id") else []))
 
     def _rebuild(self, content: dict, conclusion: str, template_key: str | None) -> dict:
+        """重新取数。报告原来用的组织模板后来停用了（没有已发布版本）：取数照旧，章节沿用原来的快照。"""
+        try:
+            self.report_templates.resolve(template_key)
+        except ValidationFailed:
+            if template_key != (content.get("template") or {}).get("key"):
+                raise
+            rebuilt = self._rebuild_with(content, conclusion, None)
+            rebuilt["template"] = content["template"]
+            return rebuilt
+        return self._rebuild_with(content, conclusion, template_key)
+
+    def _rebuild_with(self, content: dict, conclusion: str, template_key: str | None) -> dict:
         """按报告原来的范围重新取数：多批合并报告按父任务，单批报告按批次。"""
         if content.get("batch_ids") and content.get("task_id"):
             return self.build_task_content(content["task_id"], conclusion, template_key)
@@ -897,7 +1006,7 @@ class ReportService:
         task = self.tasks.get(task_id) if task_id else None
         if task_id and task is None:
             raise NotFound("实验任务不存在")
-        template = report_templates.template(payload.get("template"))
+        template = self.report_templates.resolve(payload.get("template"))
         if task is not None and not batch_id and self.tasks.children(task.id):
             # 一个方案分多批执行：在父任务上出一份合并报告，子任务不必各出一份
             self._require_task_reportable(task.id)
@@ -928,7 +1037,7 @@ class ReportService:
         self.reports.add(report)
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=report.id, version=1, state="draft",
-            template_version=report_templates.template_version(template["key"]), algorithm_version=ALGORITHM_VERSION,
+            template_version=self.report_templates.version_label(content["template"]), algorithm_version=ALGORITHM_VERSION,
             author_id=user.id, content=content,
         )
         self.versions.add(version)
@@ -960,11 +1069,11 @@ class ReportService:
                 payload.get("template") or (content.get("template") or {}).get("key"),
             )
             content = refreshed
-            version.template_version = report_templates.template_version(content["template"]["key"])
+            version.template_version = self.report_templates.version_label(content["template"])
         elif payload.get("template"):
             # 换模板不重新取数：只换章节选择
-            content["template"] = report_templates.template(payload["template"])
-            version.template_version = report_templates.template_version(content["template"]["key"])
+            content["template"] = self.report_templates.resolve(payload["template"])
+            version.template_version = self.report_templates.version_label(content["template"])
         version.content = content
         self.versions.bump(version)
         self.audit.record(
@@ -1168,7 +1277,7 @@ class ReportService:
         version = ReportVersion(
             org_id=self.ctx.org_id, report_id=published.report_id,
             version=published.version + 1, state="draft",
-            template_version=report_templates.template_version(content["template"]["key"]),
+            template_version=self.report_templates.version_label(content["template"]),
             algorithm_version=ALGORITHM_VERSION, author_id=user.id, content=content,
             supersedes_id=published.id,
         )

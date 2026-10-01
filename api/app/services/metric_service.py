@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..core.context import AccessContext
 from ..core.errors import NotFound, StateConflict, ValidationFailed
 from ..domain.metrics import VALUE_TYPES, validate_rules
+from ..domain.params import canonical_unit
 from ..models import MetricDefinition, User
 from ..repositories.metrics import MetricRepository
 from .audit_service import AuditService
@@ -32,7 +33,7 @@ class MetricService:
             "rules": metric.rules or {},
             "state": metric.state,
             "referenced_by": referenced,
-            # 只有数值指标进入数值统计
+            # 只有数值指标进入数值统计；曲线另画，可以声明派生的数值指标
             "numeric": metric.value_type == "number",
             "editable": referenced == 0,
             "created_at": metric.created_at.isoformat(timespec="seconds"),
@@ -53,6 +54,8 @@ class MetricService:
         if value_type not in VALUE_TYPES:
             raise ValidationFailed(f"值类型只能是 {'、'.join(VALUE_TYPES)}")
         problems = validate_rules(value_type, payload.get("rules") or {})
+        if not problems and value_type == "series":
+            problems = self._derived_issues(payload.get("rules") or {}, payload.get("unit") or "")
         if problems:
             raise ValidationFailed("；".join(problems))
         if value_type == "number" and not (payload.get("unit") or "").strip():
@@ -107,9 +110,11 @@ class MetricService:
         before = {key: getattr(metric, key) for key in changes}
         if "value_type" in changes and changes["value_type"] not in VALUE_TYPES:
             raise ValidationFailed(f"值类型只能是 {'、'.join(VALUE_TYPES)}")
-        problems = validate_rules(
-            changes.get("value_type", metric.value_type), changes.get("rules", metric.rules) or {}
-        )
+        value_type = changes.get("value_type", metric.value_type)
+        rules = changes.get("rules", metric.rules) or {}
+        problems = validate_rules(value_type, rules)
+        if not problems and value_type == "series":
+            problems = self._derived_issues(rules, changes.get("unit", metric.unit) or "")
         if problems:
             raise ValidationFailed("；".join(problems))
         for key, value in changes.items():
@@ -120,6 +125,30 @@ class MetricService:
         )
         self.db.commit()
         return self.out(metric)
+
+    def _derived_issues(self, rules: dict, unit: str) -> list[str]:
+        """曲线声明派生的数值指标：要已登记、是数值型，单位对得上取法（取 x 的对 x 轴单位，取 y 的对曲线单位）。"""
+        problems = []
+        for spec in rules.get("derived") or []:
+            target = self.metrics.by_code(str(spec.get("metric") or ""))
+            if target is None:
+                problems.append(f"派生的数值指标 {spec.get('metric')} 还没登记：先登记它，再在曲线上声明派生")
+                continue
+            if target.value_type != "number":
+                problems.append(f"派生的指标 {target.code} 不是数值型")
+                continue
+            reducer = spec.get("of")
+            if reducer in {"last_x", "max_x"}:
+                axis, expected = "x 轴", str(rules.get("x_unit") or "")
+            elif reducer in {"last_y", "first_y", "max_y", "min_y"}:
+                axis, expected = "y", unit
+            else:
+                continue  # 面积的单位是 x × y，不在这里核
+            if canonical_unit(expected) != canonical_unit(target.unit):
+                problems.append(
+                    f"派生的 {target.code} 单位是 {target.unit or '（未填）'}，曲线的{axis}单位是 {expected or '（未填）'}：取出来的数对不上"
+                )
+        return problems
 
     def retire(self, metric_id: str, user: User) -> dict:
         metric = self.metrics.get(metric_id)

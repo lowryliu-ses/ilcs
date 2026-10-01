@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -22,6 +23,7 @@ from ..core.errors import (
 )
 from ..domain.access import same_person, service_may_submit_task
 from ..domain import dataquality
+from ..domain import series as curves
 from ..domain.metrics import check_value, collected
 from ..models import (
     AnalysisTask, Batch, IngestEvent, MetricDefinition, ResultReview, ResultValue, Sample, User,
@@ -51,6 +53,24 @@ def digest(payload: dict) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()
     ).hexdigest()
+
+
+def stored_value(definition: MetricDefinition, value):
+    """入库前的写法：曲线统一成 {"traces": [...]}，其余原样。"""
+    if definition.value_type == "series" and value is not None:
+        return curves.normalize(value)[0]
+    return value
+
+
+def value_columns(definition: MetricDefinition, value) -> dict:
+    """按指标类型写到哪一列：数值 value_num、曲线 value_series、文本与枚举 value_text。"""
+    if value is None:
+        return {"value_num": None, "value_text": "", "value_series": None}
+    if definition.value_type == "number":
+        return {"value_num": float(value), "value_text": "", "value_series": None}
+    if definition.value_type == "series":
+        return {"value_num": None, "value_text": "", "value_series": stored_value(definition, value)}
+    return {"value_num": None, "value_text": str(value), "value_series": None}
 
 
 class AnalysisService:
@@ -335,7 +355,7 @@ class AnalysisService:
                 )
                 continue
             prepared.append(
-                {"definition": definition, "value": row["value"], "reason": "",
+                {"definition": definition, "value": stored_value(definition, row["value"]), "reason": "",
                  "unit": row.get("unit") or definition.unit,
                  # 越界不拒收：入库打标，质量置可疑，交审核下结论
                  "flags": dataquality.range_flags(
@@ -343,7 +363,10 @@ class AnalysisService:
                  )}
             )
 
+        derived_notes: list[str] = []
         if not problems:
+            derived, derived_notes = self._derived_rows(prepared, list(required), current)
+            prepared.extend(derived)
             problems.extend(self._logic_check(current, prepared))
 
         if problems:
@@ -380,19 +403,15 @@ class AnalysisService:
                 org_id=self.ctx.org_id, analysis_task_id=task.id,
                 physical_sample_id=task.physical_sample_id, assignment_id=task.sample_id or "",
                 metric_definition_id=definition.id, ingest_event_id=event.id,
-                value_num=float(row["value"]) if (
-                    definition.value_type == "number" and row["value"] is not None
-                ) else None,
-                value_text=str(row["value"]) if (
-                    definition.value_type != "number" and row["value"] is not None
-                ) else "",
+                **value_columns(definition, row["value"]),
                 unit=row["unit"], collected_at=payload.get("collected_at") or now(),
                 raw_file_id=raw_file_id, parser_version=payload.get("parser_version", ""),
                 result_version=version, not_measured_reason=row["reason"],
                 quality="suspect" if row.get("flags") else "unassessed", review_state="pending",
                 provenance="device" if self.ctx.subject_kind == SERVICE else "manual",
                 entered_by="" if self.ctx.subject_kind == SERVICE else self.ctx.subject_id,
-                flags=list(row.get("flags") or []), station_id=station_id,
+                # 「由曲线派生」只是来历说明，不让值变可疑
+                flags=[*(row.get("flags") or []), *(row.get("marks") or [])], station_id=station_id,
                 instrument=(payload.get("instrument_serial") or "").strip(),
             )
             self.db.add(value)
@@ -421,6 +440,7 @@ class AnalysisService:
             "replayed": False,
             # 采集完成不等于审核通过，响应里说清楚
             "note": "已采集入账；质量与审核状态仍待复核，未进入正式统计",
+            "derived_notes": derived_notes,
         }
         event.response = response
         self.audit.record(
@@ -472,6 +492,49 @@ class AnalysisService:
                     *(fresh[code].get("flags") or []), dataquality.flag("logic", message, rule_id=rule.id),
                 ]
         return problems
+
+    def _derived_rows(self, prepared: list[dict], required_ids: list[str],
+                      current: dict[str, ResultValue]) -> tuple[list[dict], list[str]]:
+        """曲线指标在规则里声明了 `derived`（[{metric: 数值指标代码, of: 取法}]）：从这次的曲线算出数值，
+        写成任务要求里同代码的数值指标。同一事件里已经显式给了那个指标就以显式值为准；任务里已有当前值的不覆盖。
+        返回 (要写的行, 没派生的说明)。"""
+        sources = [row for row in prepared
+                   if row["definition"].value_type == "series" and row.get("value") is not None]
+        if not sources:
+            return [], []
+        targets: dict[str, MetricDefinition] = {}
+        for definition in self.metrics.many(required_ids).values():
+            if definition.value_type == "number":
+                targets.setdefault(definition.code, definition)
+        provided = {row["definition"].id for row in prepared}
+        rows: list[dict] = []
+        notes: list[str] = []
+        for source in sources:
+            code = source["definition"].code
+            for spec in (source["definition"].rules or {}).get("derived") or []:
+                target = targets.get(str(spec.get("metric") or ""))
+                if target is None:
+                    notes.append(f"曲线 {code} 派生的 {spec.get('metric')} 不在这个检测任务的要求指标里，没有写")
+                    continue
+                if target.id in provided:
+                    continue
+                existing = current.get(target.id)
+                if existing is not None and not existing.not_measured_reason:
+                    notes.append(f"{target.code} 已有当前值（v{existing.result_version}），没有用曲线 {code} 派生的值覆盖")
+                    continue
+                number = curves.derive(source["value"], spec.get("of"))
+                if number is None or not math.isfinite(number):
+                    continue
+                provided.add(target.id)
+                rows.append({
+                    "definition": target, "value": round(number, 9), "reason": "", "unit": target.unit,
+                    "flags": dataquality.range_flags("number", target.rules or {}, number, target.code),
+                    "marks": [dataquality.flag(
+                        "derived", f"由曲线 {code} 的{curves.REDUCERS.get(spec.get('of'), spec.get('of'))}派生",
+                        source=code, reducer=spec.get("of"),
+                    )],
+                })
+        return rows, notes
 
     def _reject(self, code: str, reason: str) -> None:
         """拒绝事件另写访问日志，不制造成功业务审计。"""
@@ -560,12 +623,7 @@ class AnalysisService:
             org_id=self.ctx.org_id, analysis_task_id=source.analysis_task_id,
             physical_sample_id=source.physical_sample_id, assignment_id=source.assignment_id,
             metric_definition_id=definition.id, ingest_event_id="",
-            value_num=float(payload["value"]) if (
-                definition.value_type == "number" and payload.get("value") is not None
-            ) else None,
-            value_text=str(payload.get("value")) if (
-                definition.value_type != "number" and payload.get("value") is not None
-            ) else "",
+            **value_columns(definition, payload.get("value") if measured else None),
             unit=payload.get("unit") or definition.unit,
             collected_at=payload.get("collected_at") or source.collected_at,
             raw_file_id=payload.get("raw_file_id", "") or source.raw_file_id,
@@ -580,6 +638,7 @@ class AnalysisService:
         self.db.flush()
         source.superseded_by_id = revision.id
         source.row_version = int(source.row_version or 0) + 1
+        rederived = self._rederive(definition, revision, user, reason) if definition.value_type == "series" else []
         task = self.tasks.get(source.analysis_task_id)
         if task is not None:
             self._refresh_task_state(task)
@@ -587,11 +646,55 @@ class AnalysisService:
             user, "更正检测结果", revision.id,
             before=f"v{source.result_version}={self._display(source)}",
             after=f"v{version}={self._display(revision)}",
-            detail=f"原记录 {source.id} 保留；原因：{reason}",
+            detail=f"原记录 {source.id} 保留；原因：{reason}"
+            + (f"；按更正后的曲线重新派生 {'、'.join(rederived)}" if rederived else ""),
             object_version=version,
         )
         self.db.commit()
-        return {**self.value_out(revision), "revises": self.value_out(source)}
+        return {**self.value_out(revision), "revises": self.value_out(source), "rederived": rederived}
+
+    def _rederive(self, definition: MetricDefinition, revision: ResultValue, user: User, reason: str) -> list[str]:
+        """曲线更正后，当初从这条曲线派生的数值跟着出新版本（显式回报的数值不动）。返回重新派生的指标代码。"""
+        specs = (definition.rules or {}).get("derived") or []
+        if not specs:
+            return []
+        current = self.values.current_for_task(revision.analysis_task_id)
+        done: list[str] = []
+        for spec in specs:
+            for metric_id, value in current.items():
+                target = self.metrics.get(metric_id)
+                if target is None or target.code != spec.get("metric") or target.value_type != "number":
+                    continue
+                marks = [item for item in value.flags or [] if isinstance(item, dict) and item.get("code") == "derived"]
+                if not marks or marks[0].get("source") != definition.code:
+                    continue
+                number = curves.derive(revision.value_series, spec.get("of")) if not revision.not_measured_reason else None
+                flags = dataquality.range_flags("number", target.rules or {}, number, target.code) if number is not None else []
+                fresh = ResultValue(
+                    org_id=self.ctx.org_id, analysis_task_id=value.analysis_task_id,
+                    physical_sample_id=value.physical_sample_id, assignment_id=value.assignment_id,
+                    metric_definition_id=target.id, ingest_event_id="",
+                    value_num=round(number, 9) if number is not None else None, unit=value.unit,
+                    collected_at=revision.collected_at, raw_file_id=revision.raw_file_id,
+                    parser_version=revision.parser_version,
+                    result_version=self.values.max_version(value.analysis_task_id, target.id) + 1,
+                    revises_id=value.id,
+                    not_measured_reason="" if number is not None else f"曲线 {definition.code} 更正为无法测得",
+                    quality="suspect" if flags else "unassessed", review_state="pending", provenance="correction",
+                    entered_by=user.id, flags=[*flags, *marks], station_id=value.station_id, instrument=value.instrument,
+                )
+                self.db.add(fresh)
+                self.db.flush()
+                value.superseded_by_id = fresh.id
+                value.row_version = int(value.row_version or 0) + 1
+                self.audit.record(
+                    user, "更正检测结果", fresh.id, before=f"v{value.result_version}={self._display(value)}",
+                    after=f"v{fresh.result_version}={self._display(fresh)}",
+                    detail=f"曲线 {definition.code} 更正后重新派生（{spec.get('of')}）；原记录 {value.id} 保留；原因：{reason}",
+                    object_version=fresh.result_version,
+                )
+                done.append(target.code)
+        return done
 
     def review(self, value_id: str, payload: dict, user: User) -> dict:
         """复核。本人不能审核本人录入的记录；管理员也不例外。"""
@@ -656,12 +759,14 @@ class AnalysisService:
 
     # ---------- 输出 ----------
 
-    @staticmethod
-    def _display(value: ResultValue) -> str:
+    def _display(self, value: ResultValue) -> str:
         if value.not_measured_reason:
             return f"未测（{value.not_measured_reason}）"
         if value.value_num is not None:
             return f"{value.value_num:g}{value.unit}"
+        if value.value_series:
+            definition = self.metrics.get(value.metric_definition_id)
+            return curves.display(value.value_series, value.unit, ((definition.rules if definition else None) or {}).get("x_unit", ""))
         return value.value_text or "—"
 
     def value_out(self, value: ResultValue) -> dict:
@@ -679,6 +784,12 @@ class AnalysisService:
             "value_type": definition.value_type if definition else "number",
             "value": value.value_num if value.value_num is not None else (value.value_text or None),
             "display": self._display(value),
+            # 曲线：列表里只给概要与缩略（几百点），完整的点用 /result-values/{id}/series 取
+            "series": {
+                **curves.summary(value.value_series), "preview": curves.preview(value.value_series),
+                "x_label": str((definition.rules or {}).get("x_label") or ""),
+                "x_unit": str((definition.rules or {}).get("x_unit") or ""),
+            } if value.value_series and definition is not None else None,
             "unit": value.unit,
             "collected_at": value.collected_at.isoformat(timespec="seconds") if value.collected_at else None,
             "raw_file_id": value.raw_file_id,
@@ -746,6 +857,11 @@ class AnalysisService:
                     "value_type": definitions[metric_id].value_type if metric_id in definitions else "number",
                     "options": list((definitions[metric_id].rules or {}).get("options") or [])
                     if metric_id in definitions and definitions[metric_id].value_type == "enum" else [],
+                    # 曲线：录入时按两列（x、y）粘贴，列名用这里的轴名称与单位
+                    "x_label": str((definitions[metric_id].rules or {}).get("x_label") or "")
+                    if metric_id in definitions and definitions[metric_id].value_type == "series" else "",
+                    "x_unit": str((definitions[metric_id].rules or {}).get("x_unit") or "")
+                    if metric_id in definitions and definitions[metric_id].value_type == "series" else "",
                     "collected": metric_id in current,
                     "not_measured": bool(
                         metric_id in current and current[metric_id].not_measured_reason
@@ -779,3 +895,19 @@ class AnalysisService:
 
     def review_queue(self) -> list[dict]:
         return [self.value_out(row) for row in self.values.pending_review()]
+
+    def series_out(self, value_id: str) -> dict:
+        """一条曲线结果的完整数据点（列表里只有缩略）。"""
+        value = self.values.get(value_id)
+        if value is None:
+            raise NotFound("结果记录不存在")
+        definition = self.metrics.get(value.metric_definition_id)
+        if definition is None or definition.value_type != "series":
+            raise StateConflict("这条结果不是曲线", code="not_series")
+        rules = definition.rules or {}
+        return {
+            "id": value.id, "metric_code": definition.code, "metric_name": definition.name,
+            "result_version": value.result_version, "unit": value.unit,
+            "x_label": str(rules.get("x_label") or ""), "x_unit": str(rules.get("x_unit") or ""),
+            **curves.summary(value.value_series), "traces": (value.value_series or {}).get("traces") or [],
+        }

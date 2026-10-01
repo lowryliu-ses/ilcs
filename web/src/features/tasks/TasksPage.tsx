@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
+import { CurveOverlay } from '../../shared/curves';
 import { clock, num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -789,9 +790,15 @@ function TaskResults({ taskId }: { taskId: string }) {
                 ) : null}
               </div>
             ))
-          ) : (
+          ) : (data.series_metrics ?? []).length ? null : (
             <Empty>还没有正式结果：检测结果回传并复核通过后在这里合并</Empty>
           )}
+          {(data.series_metrics ?? []).map((row) => (
+            <div key={row.metric_id} className="stack">
+              <div className="small"><b>{row.metric_name}</b>（曲线，各批样本叠加）</div>
+              <CurveOverlay compact url={`/experiment-tasks/${taskId}/results/series?metric_id=${encodeURIComponent(row.metric_id)}`} />
+            </div>
+          ))}
           {can('report.edit') ? (
             <div className="row">
               <button className="btn sm primary" disabled={report.pending} onClick={() => report.run().catch(() => undefined)}>

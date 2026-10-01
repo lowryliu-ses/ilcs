@@ -6,7 +6,7 @@ export function FlagList({ flags }: { flags?: DataFlag[] }) {
   return (
     <div>
       {flags.map((flag, index) => (
-        <div key={index} className="tiny warn-text" title={flag.message}>
+        <div key={index} className={`tiny ${NOTES.has(flag.code) ? 'muted' : 'warn-text'}`} title={flag.message}>
           {FLAG_LABEL[flag.code] ?? flag.code}：{flag.message}
         </div>
       ))}
@@ -15,7 +15,10 @@ export function FlagList({ flags }: { flags?: DataFlag[] }) {
 }
 
 const FLAG_LABEL: Record<string, string> = {
-  out_of_range: '越界', logic: '逻辑冲突', output_missing: '缺必报项', output_invalid: '非数值',
-  // 设备回报写成的结果：来历说明，不是质量问题（不置可疑）
-  simulated: '模拟示意值', batch_level: '批次级读数',
+  out_of_range: '越界', logic: '逻辑冲突', output_missing: '缺必报项', output_invalid: '写法不成立',
+  // 来历说明，不是质量问题（不置可疑）：设备回报写成的结果、从曲线派生的数值
+  simulated: '模拟示意值', batch_level: '批次级读数', derived: '由曲线派生',
 };
+
+/* 只说来历、不是质量问题的标记：灰字显示，不用警示色 */
+const NOTES = new Set(['simulated', 'batch_level', 'derived']);

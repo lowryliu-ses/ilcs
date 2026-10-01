@@ -102,7 +102,7 @@ export type BatchSummary = {
   delete_blockers: string[];
 };
 
-export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'branch' | 'subflow' | 'notify';
+export type StepKindName = 'device' | 'manual' | 'wait' | 'review' | 'gate' | 'split' | 'merge' | 'branch' | 'subflow' | 'notify';
 
 /** 条件分支配置。出口按顺序匹配，第一个满足的生效；loop_to 表示回到上游某一步重做。 */
 export type BranchConfig = {
@@ -112,6 +112,8 @@ export type BranchConfig = {
   cases?: BranchCase[];
   default?: string;
   max_loops?: number;
+  /** 按样本分流：每个样本按自己孔位上的读数走自己的出口（只按测量值、不回环），各条路只处理分到的样本 */
+  per_sample?: boolean;
 };
 export type BranchCase = {
   key: string;
@@ -390,27 +392,37 @@ export type MaterialRow = {
   base_unit: string;
   category: string;
   cas: string;
-  conversions: Record<string, unknown>;
+  /** 单位 → 1 单位折合多少基础单位（十进制文字） */
+  conversions: Record<string, string>;
   external_ref: string;
   ghs: string[];
+  /** active | retired */
   state: string;
   lot_count: number;
+  /** 已有批号时锁定的字段（name、base_unit）：批号、预留与消耗按名称与单位对账 */
+  locked_fields: string[];
+  row_version: number;
+  updated_at: string;
 };
 
 export type Factor = {
   name: string;
+  /** 水平的单位；作用的设备参数单位不同时，建批次按物料登记的摩尔质量 / 密度 / 浓度换算（mmol → mg、eq → μL） */
   unit: string;
   levels: (number | string)[];
   material?: { name: string; unit: string; per: number };
   /** 作用的设备参数：水平按孔位覆盖该设备步骤的参数，随指令下发 */
   target?: { step_id: string; param: string };
+  /** unit 为 eq（当量）时的基准：另一个因子（限量试剂的物质的量），或一个固定的物质的量 */
+  basis?: { factor?: string; amount?: number; unit?: string };
 };
 
 export type FactorTargetOption = {
   step_id: string;
   step_name: string;
   capability: string;
-  params: { name: string; label?: string; unit: string }[];
+  /** type 为 enum 时是选项型参数：因子水平只能从 options 里挑 */
+  params: { name: string; label?: string; unit: string; type?: 'number' | 'integer' | 'enum'; options?: string[] }[];
 };
 
 export type RecipeSummary = {
@@ -531,7 +543,8 @@ export type RecipeStep = {
   /** 由 SOP 生成流程时抄下的说明 */
   sop_instructions?: string;
   cap: string;
-  params: Record<string, number | ''>;
+  /** 固定参数：数值、选项型参数的选项文字，或程序表的行；'' 是界面上还没填 */
+  params: Record<string, number | string | ProgramRow[]>;
   dur: number;
   hard?: { from: string; maxGapMin: number };
   form?: FormField[];
@@ -544,8 +557,12 @@ export type RecipeStep = {
   material?: string;
   /** 投料用量取自哪个能力参数（仅设备步骤）；不填时执行器按物料单位推断 */
   material_param?: string;
+  /** 人工步骤占哪台工位（指定一台，或某能力的任一台）；等待步骤 holds_station：样本留在上一步的设备里 */
   resource?: { station?: string; capability?: string; holds_station?: boolean };
+  /** 人工步骤要求执行人具备的资质：SOP 编号、安全操作资质编号 */
   qualification?: { sop?: string; safety?: string };
+  /** 按瓶执行：只处理在 dosed 那一步真加了料的样本；写了 then_any 时之后还要再加其中一种 */
+  applies_to?: { dosed?: string; then_any?: string[] };
   /** 质检关卡：读测量来源步骤回执里的 field，按 min/max 判定 */
   gate?: {
     source_step_id?: string;
@@ -558,7 +575,13 @@ export type RecipeStep = {
     max_rework?: number;
   };
   /** 样本拆分：每个样本拆出 count 个子样本；physical 时要按实际分装孔位确认后才推进 */
-  split?: { count?: number; child_type?: string; mode?: 'logical' | 'physical' };
+  /** count_from：份数按样本取（方案因子的水平，或上游设备每孔的读数），取不到用 count */
+  split?: {
+    count?: number; child_type?: string; mode?: 'logical' | 'physical';
+    count_from?: { factor?: string; source_step_id?: string; field?: string };
+  };
+  /** 样本合并：同一条件组（condition）或全部（all）的在用样本合成一个新样本，谱系指回全部母样 */
+  merge?: { by?: 'condition' | 'all'; child_type?: string };
   /** 协同资源：执行期间与主设备一并占用的能力（机械臂、配套设备、放置位） */
   assist?: string[];
   /** 用哪块载具（按角色）；空为主载具 */
@@ -605,6 +628,8 @@ export type PlanSummary = {
   layout: string;
   seed: number;
   sample_ids: string[];
+  /** 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成） */
+  sample_policy?: 'fresh' | 'continue';
   required_metrics: string[];
   resource_requirements: Record<string, unknown>[];
   method_version: string;
@@ -733,7 +758,7 @@ export type StationRow = {
   channel_unit: ChannelUnit;
   clean: boolean;
   dirty_batch_id: string;
-  limits: Record<string, Record<string, [number, number]>>;
+  limits: Record<string, Record<string, LimitWindow>>;
   retired: boolean;
   retire_blockers: string[];
   asset_id: string;
@@ -853,12 +878,33 @@ export type AcceptanceListing = {
 export type DriverField = {
   name: string;
   label: string;
-  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array';
+  /** scalar：文本 / 数值 / 是否都行（写入值、常量）；any：任意 JSON（REST 请求体） */
+  type: 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array' | 'scalar' | 'any';
   type_label: string;
   required: boolean;
   /** 每台设备自己的连接参数：设备模板里不写死，套用时由工位填 */
   connection: boolean;
   hint: string;
+  /** object：固定的几个键 */
+  fields?: DriverField[];
+  /** object：任意键 → 同一种值（点表、能力映射、状态映射） */
+  entries?: DriverField;
+  /** array：每一项 */
+  items?: DriverField;
+  /** 只能取这几个值 */
+  options?: string[];
+  /** 值是别处登记的名字：points（点名）/ capabilities（能力） */
+  ref?: 'points' | 'capabilities';
+  /** 表的键从哪来：points / capabilities / params（当前能力的参数）/ options（当前参数的选项） */
+  key_ref?: 'points' | 'capabilities' | 'params' | 'options';
+  key_options?: string[];
+  key_label?: string;
+  /** 往下走时记住表的键是哪项能力 / 哪个参数，给下层的 key_ref 用 */
+  scope?: 'capability' | 'param';
+  /** 只填这一个键时可以简写成它的值（"sp_temp" 就是 {"point": "sp_temp"}） */
+  shorthand?: string;
+  /** array：只有一项时也可以不写成列表 */
+  single?: boolean;
 };
 
 export type DriverInfo = {
@@ -872,6 +918,8 @@ export type DriverInfo = {
   credential: string;
   supports: { hold: boolean; abort: boolean; query: boolean; dedup: boolean };
   template: Record<string, unknown>;
+  /** 每项能力在这个驱动里的起步写法（按能力字典的参数生成），表单里加一项能力时照它起步 */
+  capability_examples?: Record<string, unknown>;
 };
 
 export type ConfigCheck = { ok: boolean; problems: string[]; warnings: string[] };
@@ -943,7 +991,10 @@ export type AdapterCatalog = {
   described_at: string | null;
 };
 
-export type MethodParamRule = { default?: number | null; min?: number | null; max?: number | null; unit?: string };
+/** 设备方法的参数规则。数值参数：缺省值与允许范围；选项型参数：缺省选项与允许的选项（能力登记选项的子集） */
+export type MethodParamRule = {
+  default?: number | string | ProgramRow[] | null; min?: number | null; max?: number | null; unit?: string; options?: string[];
+};
 export type MethodOutputRule = {
   key: string;
   label?: string;
@@ -953,6 +1004,8 @@ export type MethodOutputRule = {
   required?: boolean;
   /** 关联的检测指标：设备回报这个值时按样本写成该指标的检测结果（进数据审核）；空 = 只进检查点 */
   metric_id?: string;
+  /** series：设备回报一条曲线（{x, y}），上下限对 y；空 = 一个数 */
+  kind?: '' | 'series';
 };
 
 /** 设备方法：能力 + 适用型号 + 设备端程序 + 参数范围 + 输出规则，按版本管理 */
@@ -1012,7 +1065,24 @@ export type AdapterTestResult = {
 };
 
 /** 能力参数的规格：数值 / 整数、单位、是否必填。没登记的按「数值、单位未登记、必填」解释 */
-export type ParamSpec = { type?: 'number' | 'integer'; unit?: string; required?: boolean };
+/** 程序表的一列：数值 / 整数 / 选项；required 表示每行都要写 */
+export type ProgramColumn = {
+  key: string; label?: string; type?: 'number' | 'integer' | 'enum'; unit?: string; options?: string[]; required?: boolean;
+};
+
+/** 程序表的一格：具体的数或选项，或引用本步另一个数值参数（下发前代入） */
+export type ProgramCell = number | string | { param: string };
+export type ProgramRow = Record<string, ProgramCell>;
+
+/** 能力参数的规格。选项型（enum）写 options：值只能是其中之一，原样作为文字下发，没有单位；
+    程序表（program）写 columns 与 max_rows：值是行的列表（充放电工步、升温程序） */
+export type ParamSpec = {
+  type?: 'number' | 'integer' | 'enum' | 'program'; unit?: string; required?: boolean; options?: string[];
+  columns?: ProgramColumn[]; max_rows?: number | null;
+};
+
+/** 工位的能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项，程序表按列写 {列: 极限}（没写的列不约束） */
+export type LimitWindow = [number, number] | string[] | Record<string, [number, number] | string[]>;
 
 export type CapabilityRow = {
   id: string;
@@ -1536,6 +1606,8 @@ export type SampleRow = {
 
 export type SampleDetail = SampleRow & {
   lineage: SampleRow[];
+  /** 合并出来的样本：全部母样（谱系链只沿第一个母样往上走） */
+  parents?: SampleRow[];
   children: SampleRow[];
   assignments: {
     id: string;
@@ -1865,16 +1937,24 @@ export type WorkflowEventRow = {
 
 /* ---------- 指标与检测 ---------- */
 
+/** 从曲线派生数值：取法见后端 domain/series.py 的 REDUCERS */
+export type SeriesReducer = 'last_y' | 'first_y' | 'max_y' | 'min_y' | 'last_x' | 'max_x' | 'area';
+
 export type MetricRow = {
   id: string;
   code: string;
   name: string;
   version: string;
-  value_type: 'number' | 'text' | 'enum';
+  /** series：一组 x–y 点（充放电曲线、谱图），单位是 y 的单位 */
+  value_type: 'number' | 'text' | 'enum' | 'series';
   unit: string;
   method_version: string;
   sample_types: string[];
-  rules: { min?: number; max?: number; options?: (string | number)[] };
+  rules: {
+    min?: number; max?: number; options?: (string | number)[];
+    x_label?: string; x_unit?: string; max_points?: number;
+    derived?: { metric: string; of: SeriesReducer }[];
+  };
   state: string;
   referenced_by: number;
   numeric: boolean;
@@ -1883,6 +1963,17 @@ export type MetricRow = {
 };
 
 export type DataFlag = { code: string; message: string; rule_id?: string; key?: string; well?: string };
+
+/** 一条曲线（或一个结果里的几条之一） */
+export type CurveTrace = { name: string; x: number[]; y: number[] };
+
+/** 曲线概要：条数、点数、x / y 范围 */
+export type CurveSummary = {
+  trace_count: number;
+  points: number;
+  x_range: [number, number] | null;
+  y_range: [number, number] | null;
+};
 
 export type DataRuleRow = {
   id: string;
@@ -1912,6 +2003,8 @@ export type ResultValueRow = {
   value_type: string;
   value: number | string | null;
   display: string;
+  /** 曲线：概要 + 几百点的缩略；完整的点用 /result-values/{id}/series 取 */
+  series?: (CurveSummary & { preview: CurveTrace[]; x_label: string; x_unit: string }) | null;
   unit: string;
   collected_at: string | null;
   raw_file_id: string;
@@ -1964,9 +2057,11 @@ export type AnalysisTaskRow = {
     code: string;
     name: string;
     unit: string;
-    /** 录入控件按它给：number 以数值回传，enum 从 options 里选 */
-    value_type?: 'number' | 'text' | 'enum';
+    /** 录入控件按它给：number 以数值回传，enum 从 options 里选，series 按两列粘贴 */
+    value_type?: 'number' | 'text' | 'enum' | 'series';
     options?: string[];
+    x_label?: string;
+    x_unit?: string;
     collected: boolean;
     not_measured: boolean;
   }[];
@@ -2113,6 +2208,17 @@ export type ReportContent = {
   results: { metric_name: string; unit: string; rows: Record<string, unknown>[] }[];
   exclusions: Record<string, string | number>[];
   statistics: Record<string, unknown>[];
+  /** 曲线型指标的正式结果：每个指标一张按样本叠加的图（点已抽稀，条数封顶） */
+  curves?: {
+    metric_name: string;
+    unit: string;
+    x_label: string;
+    x_unit: string;
+    total: number;
+    shown: number;
+    excluded: number;
+    traces: { label: string; group: string; x: number[]; y: number[] }[];
+  }[];
   conclusion: string;
   batch_id: string;
   /** 父任务的多批合并报告：引用的全部批次、父任务，以及「分批情况」一节 */
@@ -2136,7 +2242,11 @@ export type ReportContent = {
   operation_log?: { time: string; user: string; action: string; before: string; after: string; detail: string; signed: boolean; meaning: string }[];
   raw_files?: { id: string; filename: string; media_type: string; size: number; checksum: string; usage: string[] }[];
   data_flags?: { scope: string; target: string; code: string; message: string; quality: string; review_state: string }[];
-  template?: { key: string; name: string; version: string; sections: string[] };
+  /** 生成时的模板快照：章节键顺序；组织模板另带改过的标题与固定文字章节 */
+  template?: {
+    key: string; name: string; version: string; sections: string[];
+    titles?: Record<string, string>; texts?: Record<string, { title: string; body: string }>;
+  };
 };
 
 export type ReportInstrument = {
@@ -2159,6 +2269,38 @@ export type ReportTemplate = {
   name: string;
   version: string;
   description: string;
+  sections: { key: string; title: string }[];
+  /** 内置模板（代码里，只读）还是组织自己的模板 */
+  builtin?: boolean;
+};
+
+/** 组织报告模板的一节：内置章节（可改标题）或固定文字章节（声明、方法说明） */
+export type ReportTemplateSection = { key: string; title?: string; kind?: 'text'; body?: string };
+
+export type CustomReportTemplate = {
+  id: string;
+  key: string;
+  version: number;
+  name: string;
+  description: string;
+  /** draft | released | retired */
+  state: string;
+  state_label: string;
+  builtin: false;
+  sections: ReportTemplateSection[];
+  /** 起草人的用户 id：起草人不能发布本人起草的模板 */
+  created_by: string;
+  created_by_name: string;
+  released_by_name: string;
+  created_at: string | null;
+  released_at: string | null;
+  row_version: number;
+};
+
+export type ReportTemplateListing = {
+  builtin: ReportTemplate[];
+  custom: CustomReportTemplate[];
+  /** 可选的内置章节 */
   sections: { key: string; title: string }[];
 };
 
@@ -2275,10 +2417,12 @@ export type AnalysisView = {
   state: string;
   official: boolean;
   scope_label: string;
-  available_metrics: { id: string; code: string; name: string; unit: string; numeric: boolean }[];
+  available_metrics: { id: string; code: string; name: string; unit: string; numeric: boolean; value_type?: string }[];
   selected_metrics: string[];
   metrics: MetricBlock[];
   non_numeric_metrics: { metric_id: string; metric_name: string; value_type: string }[];
+  /** 曲线指标：不进数值统计，按样本叠加画（/results/{batch}/series） */
+  series_metrics?: { metric_id: string; metric_name: string; unit: string; x_label: string; x_unit: string }[];
   show_factor_effects: boolean;
   /** 历史批次没有类型化结果时回落到旧视图 */
   legacy?: boolean;
@@ -2286,6 +2430,53 @@ export type AnalysisView = {
   groups?: unknown[];
   summary?: Record<string, unknown>;
   samples?: unknown[];
+};
+
+/** 曲线叠加：一个曲线指标在批次（或父任务各批次）里每个样本的当前曲线，纳入口径与数值统计相同 */
+export type SeriesView = {
+  batch_id?: string;
+  task_id?: string;
+  metric_id: string;
+  metric_code: string;
+  metric_name: string;
+  unit: string;
+  x_label: string;
+  x_unit: string;
+  official: boolean;
+  scope_label: string;
+  samples: (CurveSummary & {
+    assignment_id: string;
+    batch_id: string;
+    analysis_task_id: string;
+    result_value_id: string;
+    result_version: number;
+    condition_group: string;
+    condition_label: string;
+    is_control: boolean;
+    well: string;
+    quality: string;
+    review_state: string;
+    traces: CurveTrace[];
+  })[];
+  excluded: {
+    assignment_id: string;
+    condition_label: string;
+    result_version: number;
+    reason: string;
+    reason_label: string;
+  }[];
+};
+
+/** 一条曲线结果的完整数据点 */
+export type SeriesDetail = CurveSummary & {
+  id: string;
+  metric_code: string;
+  metric_name: string;
+  result_version: number;
+  unit: string;
+  x_label: string;
+  x_unit: string;
+  traces: CurveTrace[];
 };
 
 /* ---------- 库存 ---------- */
@@ -2363,7 +2554,8 @@ export type MaintenanceOrderRow = {
 };
 
 export type DesignSpace = {
-  bounds?: Record<string, { min?: number | null; max?: number | null }>;
+  /** 数值因子写上下限；类别因子（溶剂、催化剂、协议）写允许的选项 */
+  bounds?: Record<string, { min?: number | null; max?: number | null; options?: (number | string)[] }>;
   forbidden?: Record<string, number | string>[];
   max_points?: number;
 };
@@ -2664,6 +2856,12 @@ export type FormulationStage = {
   after?: string[];
   /** 本阶段最后一个加料之后是否紧跟搅拌；缺省是 */
   stir_after_last?: boolean;
+  /** false：不接上一个阶段的尾巴，只接 after；没汇合的尾巴由后面的阶段或后段一起接上 */
+  chain?: boolean;
+  /** 加料顺序：table 按表格列顺序（缺省），routes 按 routes 里类别的先后 */
+  order?: 'table' | 'routes';
+  /** 本阶段的加料后步骤，覆盖全局 stir */
+  stir?: RecipeStep;
   then?: FormulationFixedStep[];
 };
 
@@ -2673,7 +2871,34 @@ export type FormulationRoute = {
   param: string;
   /** 不是阶段最后一个加料时是否紧跟搅拌；缺省是 */
   stir_after?: boolean;
+  /** 这类料不能是一瓶在本阶段加的最后一种；写文字就是原因（如 EC 常温是固体） */
+  not_last?: boolean | string;
   step: RecipeStep;
+  /** 这类料的加料后步骤，覆盖阶段与全局的 stir */
+  stir?: RecipeStep;
+};
+
+/** 逐瓶参数列：表格里用量以外的一列（终混温度、每瓶分装量），每瓶的值作用于某个固定设备步骤的参数 */
+export type FormulationRowParam = {
+  key: string;
+  /** 表格里这一列的列名（表头里的单位后缀照认） */
+  header: string;
+  label?: string;
+  step: string;
+  param: string;
+  unit?: string;
+  /** 空白格或表格没有这一列时用它；不给就每瓶都要写 */
+  default?: number | string | null;
+};
+
+/** 分装量核对：每瓶总质量 ÷ density（g/mL）估算母液体积，分装瓶数 × 每瓶分装量 + 母瓶留样 reserve（mL）要放得下 */
+export type FormulationVolumeCheck = {
+  /** 实验参数或逐瓶参数的 key */
+  bottles: string;
+  volume: string;
+  /** 物料主数据没登记密度（1 mL = x g）时用的缺省密度，g/mL */
+  density?: number;
+  reserve?: number;
 };
 
 export type FormulationExperimentParam = {
@@ -2683,7 +2908,8 @@ export type FormulationExperimentParam = {
   step: string;
   param: string;
   unit: string;
-  default: number;
+  /** 数值，或选项型参数的选项 */
+  default: number | string;
 };
 
 export type FormulationTemplateConfig = {
@@ -2700,6 +2926,20 @@ export type FormulationTemplateConfig = {
   stir?: RecipeStep;
   suffix?: FormulationFixedStep[];
   experiment_params?: FormulationExperimentParam[];
+  row_params?: FormulationRowParam[];
+  volume_check?: FormulationVolumeCheck;
+  /** 生成的流程按哪份 SOP 执行；步骤模板的 sop_step 写这份 SOP 里的步骤标题 */
+  sop?: { code: string };
+};
+
+/** 实验参数 / 逐瓶参数作用的能力参数的规格：选项型的给下拉 */
+export type FormulationParamSpec = { type: 'number' | 'integer' | 'enum' | 'program'; unit: string; options: string[]; label: string };
+
+export type FormulationCheck = {
+  ok: boolean;
+  problems: string[];
+  param_specs: Record<string, FormulationParamSpec>;
+  preview?: FormulationPreview;
 };
 
 export type FormulationTemplate = {
@@ -2713,6 +2953,8 @@ export type FormulationTemplate = {
   config?: FormulationTemplateConfig;
   /** 模板配置按现在的主数据（方法、能力、指标）重核的结果；只在详情里有 */
   check?: { ok: boolean; problems: string[] };
+  /** 实验参数与逐瓶参数的规格；只在详情里有 */
+  param_specs?: Record<string, FormulationParamSpec>;
   row_version: number;
   created_by_name?: string;
   created_at?: string | null;
@@ -2723,13 +2965,17 @@ export type FormulationColumn = {
   header: string;
   name: string;
   unit: string;
-  kind: 'serial' | 'reagent' | 'ignored';
+  kind: 'serial' | 'reagent' | 'param' | 'ignored';
   category?: string;
   stage?: string;
 };
 
 /** 表格里的一瓶：行号（表格里的第几行）、瓶身序列号、各试剂用量（按试剂名） */
-export type FormulationRow = { row: number; serial: string; amounts: Record<string, number> };
+export type FormulationRow = {
+  row: number; serial: string; amounts: Record<string, number>;
+  /** 逐瓶参数：参数 key → 这一瓶的值 */
+  params?: Record<string, number | string>;
+};
 
 export type FormulationReagent = {
   name: string;
@@ -2763,7 +3009,7 @@ export type FormulationPreview = {
   /** 生成的流程草稿的名称、样品位、风险评估编号与设计说明 */
   recipe?: { name: string; plate: number; risk: string; design: string };
   /** 实际用上的实验参数取值 */
-  params?: Record<string, number>;
+  params?: Record<string, number | string>;
   issues: string[];
   warnings: string[];
   /** 读文件时的提醒（隐藏行、隐藏工作表）；只在上传解析的结果里有 */

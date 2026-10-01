@@ -100,7 +100,53 @@ class FormulationService:
         if full:
             problems = self.problems(config)
             row["check"] = {"ok": not problems, "problems": problems}
+            row["param_specs"] = self.param_specs(config)
         return row
+
+    def param_specs(self, config: Any) -> dict[str, dict[str, Any]]:
+        """实验参数与逐瓶参数作用的那个能力参数的规格（类型、选项、单位）：界面据此给选项型参数画下拉。"""
+        from ..domain.params import spec_of
+
+        if not isinstance(config, dict):
+            return {}
+        capabilities = self.capabilities.specs()
+        fixed = {
+            step.get("key"): step for _, steps in rules.fixed_sections(config) for step in (steps if isinstance(steps, list) else [])
+            if isinstance(step, dict) and step.get("key")
+        }
+        specs: dict[str, dict[str, Any]] = {}
+        for row in [*(config.get("experiment_params") or []), *(config.get("row_params") or [])]:
+            if not isinstance(row, dict) or not row.get("key"):
+                continue
+            step = fixed.get(row.get("step")) or {}
+            capability = capabilities.get(step.get("cap"))
+            if capability is None or row.get("param") not in (capability.get("params") or {}):
+                continue
+            spec = spec_of(capability, row["param"])
+            specs[row["key"]] = {"type": spec["type"], "unit": spec["unit"], "options": spec["options"], "label": spec["label"]}
+        return specs
+
+    @staticmethod
+    def read_table(filename: str, data: bytes) -> dict[str, Any]:
+        try:
+            sheet = read_sheet(filename, data)
+        except SpreadsheetError as exc:
+            raise ValidationFailed(str(exc), code="spreadsheet_invalid") from exc
+        return {"filename": filename, "table": sheet.rows, "warnings": list(sheet.warnings)}
+
+    def check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """编辑器用：核对还没保存的配置；带了表格就按它试算一次（与导入同一套生成规则，不写库）。"""
+        config = payload.get("config") or {}
+        problems = self.problems(config)
+        out: dict[str, Any] = {"ok": not problems, "problems": problems, "param_specs": self.param_specs(config)}
+        if payload.get("table") is not None and isinstance(config, dict):
+            draft = FormulationTemplate(
+                id="", org_id=self.ctx.org_id, code="", name=str(payload.get("name") or "模板试算"),
+                description=str(payload.get("description") or ""), config=config, state="active",
+            )
+            out["preview"] = self._generate(draft, str(payload.get("filename") or "试算表格"), payload["table"],
+                                            payload.get("params") or {}, samples=False)
+        return out
 
     def list(self, state: str | None = None) -> list[dict[str, Any]]:
         return [self.out(template) for template in self.templates.list(state)]
@@ -176,15 +222,19 @@ class FormulationService:
 
     # ---------- 解析与预览 ----------
 
-    def catalog(self) -> dict[str, dict[str, str]]:
-        """试剂目录：物料主数据的名称 → 类别与基本单位。同名多条（不同单位登记）时取有类别的那条。"""
-        catalog: dict[str, dict[str, str]] = {}
+    def catalog(self) -> dict[str, dict[str, Any]]:
+        """试剂目录：物料主数据的名称 → 类别、基本单位与单位换算（分装量核对按登记的密度估体积）。
+        同名多条（不同单位登记）时取有类别的那条。"""
+        catalog: dict[str, dict[str, Any]] = {}
         for material in self.materials.list():
             if material.state != "active":
                 continue
             if material.name in catalog and catalog[material.name]["category"]:
                 continue
-            catalog[material.name] = {"category": material.category or "", "base_unit": material.base_unit or ""}
+            catalog[material.name] = {
+                "category": material.category or "", "base_unit": material.base_unit or "",
+                "conversions": dict(material.conversions or {}),
+            }
         return catalog
 
     def _generate(self, template: FormulationTemplate, filename: str, table: list[list[Any]],

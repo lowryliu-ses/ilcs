@@ -30,7 +30,7 @@ from ..models import (
 )
 from ..repositories.base import ScopedRepository
 from ..repositories.recipes import PlanRepository, RecipeRepository
-from ..repositories.resources import StationRepository
+from ..repositories.resources import CapabilityRepository, StationRepository
 from .audit_service import AuditService
 from .identity_service import user_may
 
@@ -170,11 +170,15 @@ class ProposalService:
             issues.append(f"{len(points)} 个点 × {repeats} 次重复超过流程每批 {recipe.plate} 个样品位")
         if points and recipe is not None:
             proposed = [
-                {**factor, "levels": sorted({point[index] for point in points})}
+                {**factor, "levels": matrix.ordered_levels(point[index] for point in points)}
                 for index, factor in enumerate(factors)
             ]
+            from ..repositories.materials import MaterialRepository
+
             issues += matrix.target_issues(
                 proposed, normalize(recipe.steps or []), StationRepository(self.db, self.ctx).specs(),
+                CapabilityRepository(self.db).specs(),
+                MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in proposed),
             )
         return issues, points
 
@@ -182,7 +186,7 @@ class ProposalService:
         from .plan_service import PlanService
 
         factors = [
-            {**factor, "levels": sorted({point[index] for point in points})}
+            {**factor, "levels": matrix.ordered_levels(point[index] for point in points)}
             for index, factor in enumerate(plan.factors or [])
         ]
         round_no = (plan.round_no or 1) + 1
@@ -459,6 +463,8 @@ def _exclusion(value: ResultValue) -> str:
     原因用正式统计的同一套措辞。"""
     if value.superseded_by_id:
         return "superseded"
+    if value.value_series:
+        return "series"
     if any(isinstance(flag, dict) and flag.get("code") == "simulated" for flag in value.flags or []):
         return "simulated"
     if value.review_state == "pending":

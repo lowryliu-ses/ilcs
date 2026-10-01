@@ -73,6 +73,8 @@ class Plan(Base):
     # 单条件方案：显式样本数或样本清单
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     sample_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 指定的样本怎么用：fresh 一瓶一配方（用过的不能再进新批次）/ continue 接着用上一步的产物（多步合成）
+    sample_policy: Mapped[str] = mapped_column(String, default="fresh")
     # 所需检测指标（指标定义版本 ID）与资源需求
     required_metrics: Mapped[list] = mapped_column(JSON, default=list)
     resource_requirements: Mapped[list] = mapped_column(JSON, default=list)

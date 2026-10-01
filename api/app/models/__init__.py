@@ -21,7 +21,7 @@ from .recipe import (
     AnalysisRun, DatasetSnapshot, ExperimentTask, Plan, PlanProposal, PlanTemplate, PlanVersion, Recipe,
     TaskAssignment,
 )
-from .report import Report, ReportVersion
+from .report import Report, ReportTemplate, ReportVersion
 from .resource import (
     AcceptanceRun, Adapter, Asset, CalibrationRecord, Capability, DeviceTemplate, EnvironmentReading, Island,
     MaintenanceOrder, PersonBooking, ResourceBooking, Station,
@@ -33,7 +33,7 @@ from .workflow import BatchSignal, StepAdvance, StepRun, WorkflowEvent
 
 __all__ = [
     "AcceptanceRun", "AccessLog", "AdapterExecution", "Adapter", "Alarm", "Allocation", "AnalysisTask", "Asset",
-    "AuditEvent", "Base", "Batch", "CalibrationRecord", "Capability", "Checkpoint", "Command",
+    "AuditEvent", "Base", "ReportTemplate", "Batch", "CalibrationRecord", "Capability", "Checkpoint", "Command",
     "ExecutorHeartbeat", "MaintenanceOrder", "PlanProposal", "DatasetSnapshot", "AnalysisRun",
     "ESignature", "ExperimentTask", "FileObject", "IdempotencyKey", "IngestEvent", "InventoryEvent",
     "InventoryLedger", "Island", "Lab", "Lot", "Material", "Membership", "MetricDefinition",

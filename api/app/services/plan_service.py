@@ -42,10 +42,10 @@ SNAPSHOT_LABELS = {
     "name": "名称", "plan_type": "方案类型", "goal": "目的", "recipe_id": "实验流程", "method_version": "流程版本",
     "factors": "因子与水平", "control": "对照", "repeats": "重复次数", "layout": "布局", "seed": "随机种子",
     "design_points": "设计点", "design_space": "设计空间", "sample_count": "样本数", "sample_ids": "样本清单",
-    "required_metrics": "检测指标", "resource_requirements": "资源需求",
+    "sample_policy": "样本用法", "required_metrics": "检测指标", "resource_requirements": "资源需求",
 }
 RESTORABLE = ("name", "goal", "factors", "control", "repeats", "layout", "seed", "design_points", "design_space",
-              "sample_count", "sample_ids", "required_metrics", "resource_requirements")
+              "sample_count", "sample_ids", "sample_policy", "required_metrics", "resource_requirements")
 TEMPLATE_FIELDS = ("goal", "factors", "control", "repeats", "layout", "seed", "design_space", "sample_count",
                    "required_metrics", "resource_requirements")
 
@@ -311,6 +311,7 @@ class PlanService:
     def _target_options(self, plan: Plan) -> list[dict]:
         """因子可以作用的设备参数：流程里每个设备步骤及其能力声明的参数。"""
         from ..domain.bindings import bindings_of
+        from ..domain.params import spec_of
         from ..domain.steps import DEVICE, kind_of, normalize, step_id_of
         from ..repositories.resources import CapabilityRepository
 
@@ -320,18 +321,23 @@ class PlanService:
         for index, step in enumerate(normalize(recipe.steps if recipe else [])):
             if kind_of(step) != DEVICE:
                 continue
-            declared = (capabilities.get(step.get("cap", "")) or {}).get("params") or {}
+            capability = capabilities.get(step.get("cap", "")) or {}
+            declared = capability.get("params") or {}
             # 取自上游结果的参数（前馈）不能再让因子作用
             params = sorted((set(declared) | set(step.get("params") or {})) - set(bindings_of(step)))
+            rows = []
+            for name in params:
+                spec = spec_of(capability, name)
+                if spec["type"] == "program":
+                    continue  # 程序表不作因子水平：要变的量做成数值参数、在程序表里引用
+                rows.append({
+                    "name": name, "label": declared.get(name, name), "unit": spec["unit"], "type": spec["type"],
+                    # 选项型参数：因子水平只能从这些选项里挑
+                    "options": spec["options"],
+                })
             options.append({
                 "step_id": step_id_of(step, index), "step_name": step.get("name") or f"第 {index + 1} 步",
-                "capability": step.get("cap", ""),
-                "params": [
-                    {"name": name, "label": declared.get(name, name),
-                     "unit": ((capabilities.get(step.get("cap", "")) or {}).get("param_specs") or {})
-                     .get(name, {}).get("unit", "")}
-                    for name in params
-                ],
+                "capability": step.get("cap", ""), "params": rows,
             })
         return options
 
@@ -350,10 +356,13 @@ class PlanService:
             }
         from ..repositories.resources import CapabilityRepository
 
+        from ..repositories.materials import MaterialRepository
+
         recipe = self.recipes.get(plan.recipe_id)
         issues = matrix.target_issues(
             factors, normalize(recipe.steps if recipe else []), StationRepository(self.db, self.ctx).specs(),
             CapabilityRepository(self.db).specs(),
+            MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in factors),
         )
         return {
             "key": "targets", "label": "因子作用的设备参数",
@@ -492,9 +501,17 @@ class PlanService:
             from ..domain.plan_dosing import dosing_factors
             from ..repositories.resources import CapabilityRepository
 
-            factors = plan.factors or []
+            from ..domain.amounts import attach_doses
+            from ..repositories.materials import MaterialRepository
+
+            capabilities = CapabilityRepository(self.db).specs()
+            # 按 mmol / 当量给的因子先换成物料单位再估需求（换不过去的照原样估，方案检查另报）
+            factors, _ = attach_doses(
+                plan.factors or [], steps, capabilities,
+                MaterialRepository(self.db, self.ctx).specs_by_name((f.get("material") or {}).get("name") for f in plan.factors or []),
+            )
             listed = {str(item.get("material") or "") for item in bom}
-            dosing = dosing_factors(steps, bom, factors, CapabilityRepository(self.db).specs())
+            dosing = dosing_factors(steps, bom, factors, capabilities)
             # material_demand 按因子顺序只给带物料的因子各出一行
             positions = [index for index, factor in enumerate(factors) if factor.get("material")]
             demand_rows = matrix.material_demand(factors, plan.repeats, plan.design_points or None)
@@ -583,6 +600,7 @@ class PlanService:
             "seed": plan.seed,
             "sample_count": self.sample_total(plan),
             "sample_ids": plan.sample_ids or [],
+            "sample_policy": plan.sample_policy or "fresh",
             "required_metrics": plan.required_metrics or [],
             "resource_requirements": plan.resource_requirements or [],
             "method_version": plan.method_version,
@@ -690,6 +708,7 @@ class PlanService:
             design_points=payload.get("design_points") or [],
             sample_count=payload.get("sample_count", 0),
             sample_ids=payload.get("sample_ids") or [],
+            sample_policy=payload.get("sample_policy") or "fresh",
             required_metrics=payload.get("required_metrics") or [],
             resource_requirements=payload.get("resource_requirements") or [],
             method_version=recipe.version,
@@ -1080,7 +1099,8 @@ class PlanService:
                 "layout": plan.layout, "seed": plan.seed, "factors": plan.factors,
                 "design_points": plan.design_points or [], "design_space": plan.design_space or {},
                 "control": plan.control, "sample_count": plan.sample_count,
-                "sample_ids": plan.sample_ids, "required_metrics": plan.required_metrics,
+                "sample_ids": plan.sample_ids, "sample_policy": plan.sample_policy or "fresh",
+                "required_metrics": plan.required_metrics,
                 "resource_requirements": plan.resource_requirements,
                 "recipe_id": plan.recipe_id, "method_version": plan.method_version,
             }

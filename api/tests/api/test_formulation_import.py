@@ -249,3 +249,35 @@ def test_import_rejects_problem_tables_and_unusable_bottles(researcher, line, db
     assert disposed.json()["detail"]["code"] == "sample_unusable"
     db.expire_all()
     assert db.get(PhysicalSample, f"B-{tag}-8") is None
+
+
+def test_check_endpoint_validates_unsaved_config_and_can_try_a_table(researcher, operator, line):
+    """模板编辑器：没保存的配置也能核对、带一张表试算；不写库、不登记瓶子。"""
+    broken = {**line["config"], "plate": 0}
+    checked = researcher.post(f"{BASE}/check", {"config": broken})
+    assert checked.status_code == 200, checked.text
+    assert not checked.json()["ok"] and "每批样品位 plate 必须是 1–96 的整数" in checked.json()["problems"]
+    specs = checked.json()["param_specs"]
+    assert specs["bottles"]["type"] == "integer" and specs["volume"]["unit"] == "mL"
+
+    serial = f"TRY-{line['tag']}"
+    table = _table(line, [[serial, 10, 15, 4.6, 1.2]])
+    tried = researcher.post(f"{BASE}/check", {"config": line["config"], "name": "试算", "table": table,
+                                              "params": {"volume": 5}})
+    assert tried.status_code == 200, tried.text
+    preview = tried.json()["preview"]
+    assert tried.json()["ok"] and preview["issues"] == [], preview["issues"]
+    assert any(step["name"].endswith("称量加注") for step in preview["steps"])
+    assert preview["plan"]["sample_ids"] == [serial]
+    assert researcher.get(f"/api/samples/{serial}").status_code == 404, "试算不登记瓶子"
+    assert operator.post(f"{BASE}/check", {"config": line["config"]}).status_code == 403
+
+
+def test_table_endpoint_reads_a_sheet_without_any_template(researcher, operator, line):
+    table = _table(line, [["R-1", 10, 15, 4.6, 1.2]])
+    response = researcher.upload(f"{BASE}/table", "配方.csv", _csv(table), "text/csv")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["filename"] == "配方.csv" and body["table"][1][0] == "R-1" and body["warnings"] == []
+    assert researcher.upload(f"{BASE}/table", "配方.txt", b"x", "text/plain").status_code == 422
+    assert operator.upload(f"{BASE}/table", "配方.csv", _csv(table), "text/csv").status_code == 403

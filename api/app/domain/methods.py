@@ -57,7 +57,8 @@ def definition_issues(
     """方法定义本身的问题。发布前必须为空。
 
     `metrics` 是本组织的指标定义 {id: {code, unit, value_type, state}}：输出项关联了指标时，指标要存在、在用、
-    是数值型、单位与输出项相同——设备回报的数是按输出项的单位原样写成结果的，单位不同就差出倍数。没给就不查关联。
+    是数值型（或曲线型，输出项 `kind: "series"`）、单位与输出项相同——设备回报的数是按输出项的单位原样写成结果的，
+    单位不同就差出倍数。没给就不查关联。
     """
     issues: list[str] = []
     if not str(name or "").strip():
@@ -74,6 +75,15 @@ def definition_issues(
             continue
         if capability is not None and key not in known:
             issues.append(f"参数 {key} 不是能力 {capability_id} 的参数（可用：{'、'.join(sorted(known)) or '无'}）")
+        if capability is not None and key in known:
+            from .params import spec_of
+
+            if spec_of(capability, key)["type"] == "enum":
+                issues.extend(_enum_rule_issues(key, rule, spec_of(capability, key)))
+                continue
+            if spec_of(capability, key)["type"] == "program":
+                issues.extend(_program_rule_issues(key, rule, spec_of(capability, key), capability))
+                continue
         lo, hi, default = _num(rule.get("min")), _num(rule.get("max")), _num(rule.get("default"))
         if lo is not None and hi is not None and lo > hi:
             issues.append(f"参数 {key} 下限 {lo:g} 大于上限 {hi:g}")
@@ -110,8 +120,11 @@ def definition_issues(
                 issues.append(f"输出 {key} 关联的指标 {metric_id} 不存在")
             elif metric.get("state") != "active":
                 issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 已停用")
-            elif metric.get("value_type") != "number":
-                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 不是数值型：设备回报的是数")
+            elif metric.get("value_type") not in ("number", "series"):
+                issues.append(f"输出 {key} 关联的指标 {metric.get('code')} 不是数值或曲线型：设备回报的是数或曲线")
+            elif (metric.get("value_type") == "series") != (row.get("kind") == "series"):
+                wanted = "曲线" if metric.get("value_type") == "series" else "数值"
+                issues.append(f"输出 {key} 关联的是{wanted}指标 {metric.get('code')}，输出类型要选{wanted}")
             elif canonical_unit(row.get("unit")) != canonical_unit(metric.get("unit")):
                 issues.append(
                     f"输出 {key} 的单位 {row.get('unit') or '（未填）'} 与指标 {metric.get('code')} 的单位 "
@@ -145,6 +158,53 @@ def snapshot(spec: MethodSpec) -> dict[str, Any]:
     }
 
 
+def _enum_rule_issues(key: str, rule: dict, spec: dict) -> list[str]:
+    """选项型参数的方法规则：可以收窄允许的选项（`options`，要是能力登记选项的子集），缺省值是其中之一；没有上下限与单位。"""
+    issues: list[str] = []
+    if rule.get("min") not in (None, "") or rule.get("max") not in (None, ""):
+        issues.append(f"参数 {key} 是选项型，不写上下限，用 options 列允许的选项")
+    if rule.get("unit"):
+        issues.append(f"参数 {key} 是选项型，没有单位")
+    allowed = rule.get("options")
+    if allowed not in (None, []):
+        if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
+            issues.append(f"参数 {key} 的允许选项必须是文字列表")
+            allowed = []
+        else:
+            unknown = [item for item in allowed if item not in spec["options"]]
+            if unknown:
+                issues.append(f"参数 {key} 的允许选项 {'、'.join(unknown)} 不是能力登记的选项")
+    default = rule.get("default")
+    if default not in (None, ""):
+        choices = allowed or spec["options"]
+        if not isinstance(default, str) or default not in choices:
+            issues.append(f"参数 {key} 缺省值 {default!r} 不在允许的选项 {'、'.join(choices)} 里")
+    return issues
+
+
+def _program_rule_issues(key: str, rule: dict, spec: dict, capability: dict) -> list[str]:
+    """程序表参数的方法规则：只给缺省程序表（标准化成工步、标准升温程序），按列定义核对；没有上下限、选项与单位。"""
+    from . import program
+
+    issues = [f"参数 {key} 是程序表，不写 {field}" for field in ("min", "max", "options", "unit")
+              if rule.get(field) not in (None, "", [])]
+    default = rule.get("default")
+    if default not in (None, [], ""):
+        issues.extend(f"参数 {key} 的缺省程序表：{text}" for text in program.value_issues(spec, default, spec["label"]))
+        issues.extend(program.ref_issues(spec, default, capability, f"参数 {key} 的缺省程序表", key))
+    return issues
+
+
+def rule_default(rule: dict) -> Any:
+    """方法规则的缺省值：数值参数取数，选项型参数取文字，程序表取一份拷贝；没有返回 None。"""
+    default = (rule or {}).get("default")
+    if isinstance(default, list):
+        return copy.deepcopy(default) if default else None
+    if isinstance(default, str) and default.strip() and _num(default) is None:
+        return default
+    return _num(default)
+
+
 def step_problems(step: dict[str, Any], spec: MethodSpec | None) -> list[str]:
     ref = method_ref(step)
     if not ref:
@@ -167,6 +227,13 @@ def step_problems(step: dict[str, Any], spec: MethodSpec | None) -> list[str]:
         if rule is None:
             problems.append(f"参数 {key} 不在设备方法 {spec.code} 的参数表里")
             continue
+        if isinstance(value, str):
+            allowed = rule.get("options") or []
+            if allowed and value not in allowed:
+                problems.append(f"参数 {key}={value} 不在设备方法允许的选项 {'、'.join(allowed)} 里")
+            continue
+        if isinstance(value, list):
+            continue  # 程序表：方法只给缺省，逐格范围由能力的列定义与工位的列极限管
         number = _num(value)
         lo, hi = _num(rule.get("min")), _num(rule.get("max"))
         if number is None:
@@ -205,8 +272,8 @@ def apply(
         # 取自上游结果的参数不补缺省值：它在下发时才有值，补一个固定值等于绕过前馈
         bound = set((step.get("bindings") or {}) if isinstance(step.get("bindings"), dict) else ())
         defaults = {
-            key: _num(rule.get("default")) for key, rule in spec.params.items()
-            if _num(rule.get("default")) is not None and key not in bound
+            key: rule_default(rule) for key, rule in spec.params.items()
+            if rule_default(rule) is not None and key not in bound
         }
         row["params"] = {**defaults, **(step.get("params") or {})}
         if not step.get("dur") and spec.dur_min:

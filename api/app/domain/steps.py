@@ -22,22 +22,24 @@ WAIT = "wait"
 REVIEW = "review"
 # 质检关卡：读上游设备步骤回执里的测量值按阈值自动判定，不合格按配置返工 / 报废 / 保持
 GATE = "gate"
-# 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系
+# 样本拆分：一个样本分出 N 个子样本（如一瓶电解液做 N 个扣电），建立谱系；N 可以按样本取（因子水平、上游读数）
 SPLIT = "split"
+# 样本合并：同一条件组（或全部）的在用样本合成一个新样本（合并馏分、拼批），谱系指回全部母样
+MERGE = "merge"
 # 条件分支：按上游测量值 / 人工记录字段 / 人工选择走一条出边；可带有上限的回环
 BRANCH = "branch"
 # 子流程：引用一个已发布方法，建批次时展开
 SUBFLOW = "subflow"
 # 消息通知：发一条 flow.notify 对外事件（Webhook 订阅方收到），立即继续
 NOTIFY = "notify"
-KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY)
+KINDS = (DEVICE, MANUAL, WAIT, REVIEW, GATE, SPLIT, MERGE, BRANCH, SUBFLOW, NOTIFY)
 KIND_NAMES = {
     DEVICE: "设备", MANUAL: "人工", WAIT: "等待", REVIEW: "审核", GATE: "质检关卡", SPLIT: "样本拆分",
-    BRANCH: "条件分支", SUBFLOW: "子流程", NOTIFY: "消息通知",
+    MERGE: "样本合并", BRANCH: "条件分支", SUBFLOW: "子流程", NOTIFY: "消息通知",
 }
 GATE_ON_FAIL = {"rework": "返工", "scrap": "报废", "hold": "保持待人工判断"}
 # 系统即时判定 / 登记的节点：没有预定时长，也不占工位
-AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, BRANCH, SUBFLOW, NOTIFY}
+AUTOMATIC_KINDS = {REVIEW, GATE, SPLIT, MERGE, BRANCH, SUBFLOW, NOTIFY}
 BRANCH_MODES = {"measure": "按上游设备测量值", "form": "按上游人工记录字段", "manual": "人工选择"}
 TIMEOUT_ACTIONS = {"alarm": "只报警", "fail": "判为失败，进入恢复评估", "skip": "自动跳过"}
 # 设备步骤的超时已由指令超时守着（超过硬上限转结果未知、人工核查）：步骤级只允许加报警，
@@ -53,16 +55,17 @@ MAX_LOOPS = 10
 APPLICABLE: dict[str, set[str]] = {
     DEVICE: {
         "cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable",
-        "consumes_materials", "material", "material_param",
+        "consumes_materials", "material", "material_param", "applies_to",
     },
     MANUAL: {
         "dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable",
         "consumes_materials", "material",
     },
-    WAIT: {"dur", "wait_for", "hard", "timeout", "skippable"},
+    WAIT: {"dur", "wait_for", "resource", "hard", "timeout", "skippable"},
     REVIEW: {"review_role", "dur", "timeout", "skippable"},
     GATE: {"gate"},
     SPLIT: {"split"},
+    MERGE: {"merge"},
     BRANCH: {"branch", "timeout", "requires_signature"},
     SUBFLOW: {"subflow"},
     NOTIFY: {"notify"},
@@ -139,6 +142,102 @@ def needs_station(step: dict[str, Any]) -> bool:
     return False
 
 
+def holds_station(step: dict[str, Any]) -> bool:
+    """等待期间样本仍留在上一步的设备里：这段时间照样占着那台工位。"""
+    return kind_of(step) == WAIT and bool(((step or {}).get("resource") or {}).get("holds_station"))
+
+
+def resource_issues(step: dict[str, Any]) -> list[str]:
+    """工位资源的写法。人工步骤：`{station}` 指定一台，或 `{capability}` 任一台实现该能力的；
+    等待步骤：`{holds_station: true}` 样本留在上一步的设备里。设备步骤按能力找工位，不写这一项。"""
+    if "resource" not in (step or {}) or step.get("resource") in (None, {}):
+        return []
+    resource = step["resource"]
+    kind = kind_of(step)
+    if not isinstance(resource, dict):
+        return ["工位资源 resource 必须是对象"]
+    if kind == MANUAL:
+        station, capability = resource.get("station"), resource.get("capability")
+        extra = sorted(set(resource) - {"station", "capability"})
+        issues = [f"人工步骤的工位资源不认 {key}" for key in extra]
+        if station and capability:
+            issues.append("人工步骤占用的工位要么指定一台（station），要么按能力任一台（capability），不能两个都写")
+        elif not station and not capability:
+            issues.append("人工步骤声明了工位资源，但没写占哪台工位（station）或哪种能力的工位（capability）")
+        for key, value in (("station", station), ("capability", capability)):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                issues.append(f"工位资源的 {key} 必须是非空文字")
+        return issues
+    if kind == WAIT:
+        extra = sorted(set(resource) - {"holds_station"})
+        issues = [f"等待步骤的工位资源只认 holds_station，不认 {key}" for key in extra]
+        if not isinstance(resource.get("holds_station", False), bool):
+            issues.append("holds_station 只能是是或否")
+        return issues
+    if kind == DEVICE:
+        return []  # 历史快照里可能带着，设备步骤按能力找工位、不读它
+    return [f"{KIND_NAMES.get(kind, kind)}步骤不占工位，不写工位资源"]
+
+
+QUALIFICATION_KINDS = {"sop": "SOP", "safety": "安全操作"}
+
+
+def qualification_issues(step: dict[str, Any]) -> list[str]:
+    """人工步骤要求执行人具备的资质：`{sop: SOP 编号, safety: 安全操作资质编号}`，至少写一项。
+
+    设备步骤按能力自动要求能力资质，不在这里写。编号要与「人员与资质」里登记的资质范围对上，
+    开跑检查与节点开始时按执行人逐项核对。"""
+    if "qualification" not in (step or {}) or step.get("qualification") in (None, {}):
+        return []
+    required = step["qualification"]
+    if kind_of(step) != MANUAL:
+        return ["只有人工步骤能声明执行人资质要求（设备步骤按能力自动要求）"]
+    if not isinstance(required, dict):
+        return ["资质要求 qualification 必须是对象"]
+    issues = [f"资质要求不认 {key}（只有 sop、safety）" for key in sorted(set(required) - set(QUALIFICATION_KINDS))]
+    for key, label in QUALIFICATION_KINDS.items():
+        value = required.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            issues.append(f"{label}资质编号必须是非空文字")
+    if not any(isinstance(required.get(key), str) and required[key].strip() for key in QUALIFICATION_KINDS):
+        issues.append("声明了资质要求，但 SOP 与安全操作资质都没写")
+    return issues
+
+
+def holds_station_issues(steps: list[dict[str, Any]], index: int) -> list[str]:
+    """等待期间占着工位：样本留在哪台设备里就占哪台，所以前驱只能是一个设备步骤。"""
+    from .graph import predecessors
+
+    if not holds_station(steps[index]):
+        return []
+    before = predecessors(steps)[index]
+    if len(before) != 1:
+        return ["等待期间占着工位：样本留在上一步的设备里，所以前驱只能有一个，而且要是设备步骤"]
+    parent = before[0]
+    if kind_of(steps[parent]) != DEVICE:
+        return [f"等待期间占着工位：前驱「{steps[parent].get('name') or step_id_of(steps[parent], parent)}」不是设备步骤，样本不在设备里"]
+    twins = [
+        other for other, parents in enumerate(predecessors(steps))
+        if other != index and parents == [parent] and holds_station(steps[other])
+    ]
+    if twins:
+        return [f"「{steps[parent].get('name') or step_id_of(steps[parent], parent)}」之后已经有一个等待步骤占着这台设备：样本只能在一处"]
+    return []
+
+
+def held_after(steps: list[dict[str, Any]]) -> dict[int, int]:
+    """占着工位的等待步骤 → 它占的那个设备步骤（唯一的前驱）。配置不成立的不算，校验另报。"""
+    from .graph import predecessors
+
+    found: dict[int, int] = {}
+    before = predecessors(steps)
+    for index, step in enumerate(steps):
+        if holds_station(step) and len(before[index]) == 1 and kind_of(steps[before[index][0]]) == DEVICE:
+            if before[index][0] not in found.values():
+                found[index] = before[index][0]
+    return found
+
+
 def consumes_materials(step: dict[str, Any]) -> bool:
     """只有显式声明消耗物料的步骤才要投料许可。
 
@@ -175,6 +274,54 @@ def material_issues(step: dict[str, Any]) -> list[str]:
             issues.append("声明了投料物料，但没有勾选「消耗物料」")
     if step.get("material_param") not in (None, "") and kind_of(step) != DEVICE:
         issues.append("只有设备步骤可以指定用量参数")
+    return issues
+
+
+def applies_to(step: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    """设备步骤只处理在某个投料步骤真加了料的瓶子：`applies_to: {dosed, then_any}` → (投料步骤, then_any)。
+
+    配液线「每加一种料后搅拌」按瓶执行：某瓶这种料是 0，这瓶跳过加料，也不做随后的搅拌；`then_any` 非空时
+    这瓶在其中至少还要再加一种才搅（阶段最后一种料加完不搅）。没声明返回 None：照旧处理这一步的全部瓶子。
+    """
+    rule = (step or {}).get("applies_to")
+    if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
+        return None
+    later = rule.get("then_any") if isinstance(rule.get("then_any"), list) else []
+    return rule["dosed"].strip(), tuple(item.strip() for item in later if isinstance(item, str) and item.strip())
+
+
+def applies_to_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int) -> list[str]:
+    """`applies_to` 引用的都要是指定了投料物料与用量参数的设备步骤：dosed 在本步之前，then_any 在 dosed 之后。"""
+    if "applies_to" not in (step or {}):
+        return []
+    rule = step["applies_to"]
+    if kind_of(step) != DEVICE:
+        return ["只有设备步骤能按瓶限定处理对象（applies_to）"]
+    if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
+        return ['applies_to 要写成 {"dosed": 投料步骤标识, "then_any": [投料步骤标识…]}']
+    later = rule.get("then_any", [])
+    if not isinstance(later, list) or not all(isinstance(item, str) and item.strip() for item in later):
+        return ["applies_to 的 then_any 必须是步骤标识列表"]
+    ids = [step_id_of(row, position) for position, row in enumerate(steps or [])]
+
+    def dosing(ref: str) -> bool:
+        row = steps[ids.index(ref)]
+        return kind_of(row) == DEVICE and bool(step_material(row)) and bool(str(row.get("material_param") or "").strip())
+
+    issues: list[str] = []
+    dosed = rule["dosed"].strip()
+    if dosed not in ids[:index]:
+        issues.append(f"applies_to 引用的投料步骤 {dosed} 不存在或不在本步之前")
+    elif not dosing(dosed):
+        issues.append(f"applies_to 引用的 {dosed} 不是指定了投料物料与用量参数的设备步骤")
+    start = ids.index(dosed) if dosed in ids else -1
+    for ref in (item.strip() for item in later):
+        if ref not in ids:
+            issues.append(f"applies_to 的 then_any 引用的步骤 {ref} 不存在")
+        elif ids.index(ref) <= start:
+            issues.append(f"applies_to 的 then_any 引用的 {ref} 要排在 {dosed} 之后")
+        elif not dosing(ref):
+            issues.append(f"applies_to 的 then_any 引用的 {ref} 不是指定了投料物料与用量参数的设备步骤")
     return issues
 
 
@@ -260,6 +407,11 @@ def branch_config(step: dict[str, Any]) -> dict[str, Any]:
     return (step or {}).get("branch") or {}
 
 
+def per_sample_branch(step: dict[str, Any]) -> bool:
+    """按样本分流：每个样本按自己孔位上的读数走自己的出口（只往前走、不回环）。"""
+    return kind_of(step) == BRANCH and branch_config(step).get("per_sample") is True
+
+
 def branch_cases(step: dict[str, Any]) -> list[dict[str, Any]]:
     cases = branch_config(step).get("cases") or []
     return [case for case in cases if isinstance(case, dict)]
@@ -327,6 +479,11 @@ def branch_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: int)
             issues.append(f"{label} 回环目标不能是子流程节点：子流程建批次时展开，请指向具体步骤")
         elif target:
             issues.extend(f"{label} {text}" for text in _irreversible_issues(steps, ids.index(target), index, "回环"))
+    if config.get("per_sample"):
+        if mode != "measure":
+            issues.append("按样本分流只能按上游设备的测量值：每个样本要有自己孔位上的读数")
+        if loop_cases(step):
+            issues.append("按样本分流的分支只能往前走、不能回环：各样本走的路不同，重做会把别的样本一起带回去")
     default = str(config.get("default") or "")
     if default and default not in seen:
         issues.append(f"默认出口 {default} 不存在")
@@ -464,16 +621,42 @@ def split_mode(step: dict[str, Any]) -> str:
     return mode if mode in SPLIT_MODES else "logical"
 
 
+MERGE_BY = {"condition": "同一条件组合成一个", "all": "全部合成一个"}
+MAX_SPLIT = 96
+
+
+def split_count_source(step: dict[str, Any]) -> dict[str, str]:
+    """份数按样本取：`{"factor": 因子名}`（方案因子的水平）或 `{"source_step_id", "field"}`（上游设备每孔的读数）。"""
+    source = ((step or {}).get("split") or {}).get("count_from") or {}
+    return {key: str(value) for key, value in source.items() if value} if isinstance(source, dict) else {}
+
+
 def split_issues(step: dict[str, Any]) -> list[str]:
     split = (step or {}).get("split") or {}
     count = split.get("count")
     issues: list[str] = []
-    if not isinstance(count, int) or isinstance(count, bool) or not 2 <= count <= 96:
-        issues.append("拆分份数必须是 2–96 的整数")
+    source = split_count_source(step)
+    if split.get("count_from") not in (None, {}, ""):
+        if not source.get("factor") and not (source.get("source_step_id") and source.get("field")):
+            issues.append("按样本取份数要写方案因子（factor），或上游设备步骤与读数字段（source_step_id、field）")
+        if count not in (None, "") and (not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= MAX_SPLIT):
+            issues.append(f"按样本取份数时，缺省份数（取不到时用）要是 1–{MAX_SPLIT} 的整数")
+    elif not isinstance(count, int) or isinstance(count, bool) or not 2 <= count <= MAX_SPLIT:
+        issues.append(f"拆分份数必须是 2–{MAX_SPLIT} 的整数")
     if not str(split.get("child_type") or "").strip():
         issues.append("必须写明子样本类型（如 扣电、极片）")
     if split.get("mode") not in (None, "", *SPLIT_MODES):
         issues.append("拆分方式只能是 logical（系统内分组）或 physical（实体分装，确认孔位后推进）")
+    return issues
+
+
+def merge_issues(step: dict[str, Any]) -> list[str]:
+    merge = (step or {}).get("merge") or {}
+    issues: list[str] = []
+    if (merge.get("by") or "condition") not in MERGE_BY:
+        issues.append("合并方式只能是 condition（同一条件组合成一个）或 all（全部合成一个）")
+    if not str(merge.get("child_type") or "").strip():
+        issues.append("必须写明合并后的样本类型（如 合并液、粗品）")
     return issues
 
 

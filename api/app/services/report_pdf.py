@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 
-from ..domain.report_templates import SECTION_TITLES
+from ..domain.report_templates import title_of
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -18,7 +18,14 @@ FONT = "STSong-Light"
 # CID 字体的字形映射不是 Unicode：U+00B7（·）会画成「▲」，U+2022（•）会画成「煉」。
 # 项目符号只用实测过的 U+30FB，别换成看起来更合适的那几个。
 BULLET = "\u30fb"
+# \u6b63\u6587\u91cc\u7684\u4e2d\u70b9\uff08mPa\u00b7s\u3001N\u00b7m\uff09\u540c\u7406\u753b\u4e0d\u51fa\u6765\uff1a\u753b\u4e4b\u524d\u6362\u6210 U+30FB
+GLYPHS = str.maketrans({"\u00b7": BULLET})
 _registered = False
+
+# 曲线图按条件组分色（颜色用完再换虚线）；打印成黑白也分得开
+CURVE_COLORS = [(0.12, 0.38, 0.72), (0.80, 0.33, 0.10), (0.18, 0.55, 0.27), (0.55, 0.25, 0.62),
+                (0.70, 0.55, 0.05), (0.15, 0.55, 0.60), (0.45, 0.45, 0.45), (0.80, 0.20, 0.45)]
+CURVE_DASHES = [(), (3, 1.6), (1, 1.4), (4, 1.4, 1, 1.4)]
 
 LEFT = 20 * mm
 RIGHT = A4[0] - 20 * mm
@@ -45,10 +52,10 @@ class Page:
 
     def _header(self) -> None:
         self.pdf.setFont(FONT, 14)
-        self.pdf.drawString(LEFT, self.y, self.title)
+        self.pdf.drawString(LEFT, self.y, self.title.translate(GLYPHS))
         self.y -= 6 * mm
         self.pdf.setFont(FONT, 8)
-        self.pdf.drawString(LEFT, self.y, self.subtitle)
+        self.pdf.drawString(LEFT, self.y, self.subtitle.translate(GLYPHS))
         self.pdf.setLineWidth(0.5)
         self.y -= 2.5 * mm
         self.pdf.line(LEFT, self.y, RIGHT, self.y)
@@ -70,7 +77,7 @@ class Page:
         self.space(12 * mm)
         self.y -= 2 * mm
         self.pdf.setFont(FONT, 11)
-        self.pdf.drawString(LEFT, self.y, text)
+        self.pdf.drawString(LEFT, self.y, text.translate(GLYPHS))
         self.y -= 1.8 * mm
         self.pdf.setLineWidth(0.3)
         self.pdf.line(LEFT, self.y, RIGHT, self.y)
@@ -123,7 +130,7 @@ class Page:
     @staticmethod
     def _wrap(value: str, size: float, width: float) -> list[str]:
         lines: list[str] = []
-        for paragraph in str(value or "").split("\n"):
+        for paragraph in str(value or "").translate(GLYPHS).split("\n"):
             current = ""
             for char in paragraph:
                 if pdfmetrics.stringWidth(current + char, FONT, size) > width:
@@ -136,12 +143,86 @@ class Page:
 
     @staticmethod
     def _clip(value: str, size: float, width: float) -> str:
+        value = value.translate(GLYPHS)
         if pdfmetrics.stringWidth(value, FONT, size) <= width:
             return value
         clipped = value
         while clipped and pdfmetrics.stringWidth(clipped + "…", FONT, size) > width:
             clipped = clipped[:-1]
         return clipped + "…"
+
+    def chart(self, traces: list[dict], x_label: str, y_label: str, height: float = 62 * mm) -> None:
+        """曲线叠加图：同一条件组同一颜色（颜色用完换虚线），图下按组列图例。点已经在报告内容里抽稀过。"""
+        traces = [trace for trace in traces if trace.get("x") and trace.get("y")]
+        if not traces:
+            return
+        groups: list[str] = []
+        for trace in traces:
+            if trace.get("group", "") not in groups:
+                groups.append(trace.get("group", ""))
+        legend_rows = (len(groups) + 3) // 4
+        self.space(height + 12 * mm + legend_rows * LINE)
+        left, right = LEFT + 14 * mm, RIGHT - 3 * mm
+        top = self.y - 3 * mm
+        bottom = top - height
+        xs = [value for trace in traces for value in trace["x"]]
+        ys = [value for trace in traces for value in trace["y"]]
+        x_lo, x_hi = min(xs), max(xs)
+        y_lo, y_hi = min(ys), max(ys)
+        if x_hi == x_lo:
+            x_lo, x_hi = x_lo - 1, x_hi + 1
+        pad = (y_hi - y_lo) * 0.05 or abs(y_hi) * 0.05 or 1
+        y_lo, y_hi = y_lo - pad, y_hi + pad
+
+        def px(value: float) -> float:
+            return left + (right - left) * (value - x_lo) / (x_hi - x_lo)
+
+        def py(value: float) -> float:
+            return bottom + height * (value - y_lo) / (y_hi - y_lo)
+
+        pdf = self.pdf
+        pdf.saveState()
+        pdf.setFont(FONT, 7)
+        for index in range(5):
+            y_value = y_lo + (y_hi - y_lo) * index / 4
+            x_value = x_lo + (x_hi - x_lo) * index / 4
+            pdf.setStrokeColorRGB(0.86, 0.86, 0.86)
+            pdf.setLineWidth(0.3)
+            pdf.line(left, py(y_value), right, py(y_value))
+            pdf.setFillColorRGB(0.3, 0.3, 0.3)
+            pdf.drawRightString(left - 1.2 * mm, py(y_value) - 1, f"{y_value:.4g}")
+            pdf.drawCentredString(px(x_value), bottom - 3.4 * mm, f"{x_value:.4g}")
+        pdf.setStrokeColorRGB(0, 0, 0)
+        pdf.setLineWidth(0.5)
+        pdf.rect(left, bottom, right - left, height, stroke=1, fill=0)
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.drawString(left, top + 1.2 * mm, y_label.translate(GLYPHS))
+        pdf.drawCentredString((left + right) / 2, bottom - 7.2 * mm, x_label.translate(GLYPHS))
+        pdf.setLineWidth(0.8)
+        for trace in traces:
+            index = groups.index(trace.get("group", ""))
+            pdf.setStrokeColorRGB(*CURVE_COLORS[index % len(CURVE_COLORS)])
+            pdf.setDash(*CURVE_DASHES[(index // len(CURVE_COLORS)) % len(CURVE_DASHES)])
+            path = pdf.beginPath()
+            for order, (x_value, y_value) in enumerate(zip(trace["x"], trace["y"])):
+                (path.moveTo if order == 0 else path.lineTo)(px(x_value), py(y_value))
+            pdf.drawPath(path, stroke=1, fill=0)
+        pdf.setDash()
+        self.y = bottom - 12 * mm
+        width = (RIGHT - LEFT) / 4
+        for row in range(legend_rows):
+            for column, group in enumerate(groups[row * 4:(row + 1) * 4]):
+                index = groups.index(group)
+                x = LEFT + column * width
+                pdf.setStrokeColorRGB(*CURVE_COLORS[index % len(CURVE_COLORS)])
+                pdf.setDash(*CURVE_DASHES[(index // len(CURVE_COLORS)) % len(CURVE_DASHES)])
+                pdf.line(x, self.y + 1, x + 6 * mm, self.y + 1)
+                pdf.setDash()
+                pdf.setFillColorRGB(0, 0, 0)
+                pdf.drawString(x + 7.5 * mm, self.y - 0.5, self._clip(group or "未分组", 7, width - 9 * mm))
+            self.y -= LINE
+        pdf.restoreState()
+        self.y -= 2 * mm
 
     def finish(self) -> None:
         self._footer()
@@ -171,14 +252,24 @@ def render(content: dict) -> bytes:
         ),
     )
 
-    sections = (content.get("template") or {}).get("sections") or LEGACY_SECTIONS
-    # 「分批情况」只有多批合并报告才有内容；单批报告跳过它，章节编号照常连续
-    sections = [key for key in sections if key != "batches" or content.get("batches")]
+    template = content.get("template") or {}
+    sections = template.get("sections") or LEGACY_SECTIONS
+    texts = template.get("texts") or {}
+    # 「分批情况」只有多批合并报告才有内容、「曲线」只有曲线型指标有正式结果才有内容：没有就跳过，章节编号照常连续
+    sections = [key for key in sections
+                if (key != "batches" or content.get("batches")) and (key != "curves" or content.get("curves"))]
     for number, key in enumerate(sections, start=1):
+        if key in texts:
+            # 组织模板里的固定文字章节（声明、方法说明）：原样印出，一行一段
+            page.heading(f"{_chinese(number)}、{title_of(template, key)}")
+            for paragraph in str(texts[key].get("body") or "").splitlines():
+                if paragraph.strip():
+                    page.text(paragraph.strip())
+            continue
         renderer = RENDERERS.get(key)
         if renderer is None:
             continue
-        page.heading(f"{_chinese(number)}、{SECTION_TITLES.get(key, key)}")
+        page.heading(f"{_chinese(number)}、{title_of(template, key)}")
         renderer(page, content)
 
     page.finish()
@@ -402,6 +493,21 @@ def _statistics(page: "Page", content: dict) -> None:
             page.text(f"{BULLET} 主效应 {effect.get('factor')}：{levels}", size=8.5, indent=4 * mm)
 
 
+def _curves(page: "Page", content: dict) -> None:
+    for chart in content.get("curves") or []:
+        unit = f"（{chart['unit']}）" if chart.get("unit") else ""
+        x_unit = f"（{chart['x_unit']}）" if chart.get("x_unit") else ""
+        note = f"{chart.get('metric_name', '')}：正式结果 {chart.get('total', 0)} 条"
+        if chart.get("shown", 0) < chart.get("total", 0):
+            note += f"，图中画前 {chart['shown']} 条"
+        if chart.get("excluded"):
+            note += f"；另有 {chart['excluded']} 条没纳入（未通过审核或质量判定不是有效）"
+        groups = len({trace.get("group", "") for trace in chart.get("traces") or []})
+        page.space(LINE + 62 * mm + 12 * mm + ((groups + 3) // 4) * LINE)  # 说明和图放在同一页
+        page.text(note)
+        page.chart(chart.get("traces") or [], f"{chart.get('x_label') or 'x'}{x_unit}", f"{chart.get('metric_name', '')}{unit}")
+
+
 def _conclusion(page: "Page", content: dict) -> None:
     page.text(content.get("conclusion") or "—")
 
@@ -418,6 +524,7 @@ RENDERERS = {
     "plan": _plan, "method": _method, "samples": _samples, "batches": _batches, "resources": _resources,
     "instruments": _instruments,
     "execution": _execution, "operation_log": _operation_log, "results": _results, "exclusions": _exclusions,
-    "data_flags": _data_flags, "raw_files": _raw_files, "statistics": _statistics, "conclusion": _conclusion,
+    "data_flags": _data_flags, "raw_files": _raw_files, "statistics": _statistics, "curves": _curves,
+    "conclusion": _conclusion,
     "approval": _approval,
 }

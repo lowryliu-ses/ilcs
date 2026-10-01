@@ -20,11 +20,13 @@ import { RecipeDetailPage } from '../features/recipes/RecipeDetailPage';
 import { RecipeEditorPage } from '../features/recipes/RecipeEditorPage';
 import { ExceptionsPage } from '../features/exceptions/ExceptionsPage';
 import { FormulationImportPage } from '../features/formulations/FormulationImportPage';
+import { FormulationTemplateEditorPage, FormulationTemplatesPage } from '../features/formulations/FormulationTemplatesPage';
 import { IntegrationsPage } from '../features/integrations/IntegrationsPage';
 import { MethodsPage } from '../features/methods/MethodsPage';
 import { EnvironmentPage } from '../features/environment/EnvironmentPage';
 import { RecipesPage } from '../features/recipes/RecipesPage';
 import { ReportsPage } from '../features/reports/ReportsPage';
+import { ReportTemplatesPage } from '../features/reports/ReportTemplatesPage';
 import { ResultsPage } from '../features/results/ResultsPage';
 import { SampleDetailPage, SamplesPage } from '../features/samples/SamplesPage';
 import { SchedulePage } from '../features/schedule/SchedulePage';
@@ -57,6 +59,7 @@ const NAV: [string, NavItem[]][] = [
     { path: '/recipes', label: '实验流程' },
     { path: '/plans', label: '实验方案' },
     { path: '/formulations', label: '配方导入', perm: 'recipe.edit' },
+    { path: '/formulation-templates', label: '配液模板', perm: 'recipe.edit' },
   ]],
   ['执行与监控', [
     { path: '/samples', label: '样本管理' },
@@ -71,6 +74,7 @@ const NAV: [string, NavItem[]][] = [
     { path: '/data-review', label: '数据审核' },
     { path: '/results', label: '结果分析' },
     { path: '/reports', label: '报告管理' },
+    { path: '/report-templates', label: '报告模板' },
   ]],
   ['资源管理', [
     { path: '/assets', label: '仪器设备' },
@@ -193,6 +197,8 @@ export function App() {
           <Route path="/plans" element={<PlansPage />} />
           <Route path="/plans/:planId" element={<PlanDetailPage />} />
           <Route path="/formulations" element={<FormulationImportPage />} />
+          <Route path="/formulation-templates" element={<FormulationTemplatesPage />} />
+          <Route path="/formulation-templates/:templateId" element={<FormulationTemplateEditorPage />} />
           <Route path="/recipes" element={<RecipesPage />} />
           <Route path="/recipes/:recipeId" element={<RecipeDetailPage />} />
           <Route path="/recipes/:recipeId/edit" element={<RecipeEditorPage />} />
@@ -212,6 +218,7 @@ export function App() {
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/results/:batchId" element={<ResultsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/report-templates" element={<ReportTemplatesPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/stations" element={<StationsPage tab="ledger" />} />
           <Route path="/stations/connections" element={<StationsPage tab="connections" />} />

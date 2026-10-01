@@ -458,6 +458,8 @@ class PlanCreateIn(BaseModel):
     design_points: list[list[Any]] = []
     sample_count: int = Field(default=0, ge=0, le=96)
     sample_ids: list[str] = []
+    # 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成）
+    sample_policy: Literal["fresh", "continue"] = "fresh"
     required_metrics: list[str] = []
     resource_requirements: list[dict[str, Any]] = []
 
@@ -478,6 +480,7 @@ class PlanPatchIn(Versioned):
     design_space: dict[str, Any] | None = None
     design_points: list[list[Any]] | None = None
     sample_count: int | None = Field(default=None, ge=0, le=96)
+    sample_policy: Literal["fresh", "continue"] | None = None
     sample_ids: list[str] | None = None
     required_metrics: list[str] | None = None
     resource_requirements: list[dict[str, Any]] | None = None
@@ -875,6 +878,18 @@ class MaterialCreateIn(BaseModel):
     ghs: list[str] = []
 
 
+class MaterialPatchIn(Versioned):
+    """改物料主数据。没传的字段不动；名称与基础单位在已有批号时锁定（服务端判）。"""
+
+    name: str | None = None
+    base_unit: str | None = None
+    category: str | None = None
+    cas: str | None = None
+    conversions: dict[str, Quantity] | None = None
+    external_ref: str | None = None
+    ghs: list[str] | None = None
+
+
 class LotCreateIn(BaseModel):
     id: str
     material: str
@@ -973,7 +988,7 @@ class MetricCreateIn(BaseModel):
     code: str
     name: str
     version: str = "v1"
-    value_type: Literal["number", "text", "enum"] = "number"
+    value_type: Literal["number", "text", "enum", "series"] = "number"
     unit: str = ""
     method_version: str = ""
     sample_types: list[str] = []
@@ -984,7 +999,7 @@ class MetricPatchIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
-    value_type: Literal["number", "text", "enum"] | None = None
+    value_type: Literal["number", "text", "enum", "series"] | None = None
     unit: str | None = None
     method_version: str | None = None
     sample_types: list[str] | None = None
@@ -1129,13 +1144,14 @@ class ReportCreateIn(BaseModel):
     title: str = ""
     conclusion: str = ""
     # 报告模板：standard 完整实验报告 / summary 结果摘要 / audit 质量审计报告
-    template: Literal["standard", "summary", "audit"] = "standard"
+    # 内置模板键（standard / summary / audit）或组织报告模板的键；服务端按键取最新的已发布版本
+    template: str = Field(default="standard", max_length=32)
 
 
 class ReportPatchIn(Versioned):
     conclusion: str | None = None
     refresh: bool = False
-    template: Literal["standard", "summary", "audit"] | None = None
+    template: str | None = Field(default=None, max_length=32)
 
 
 class PublishIn(Signed):
@@ -1144,20 +1160,42 @@ class PublishIn(Signed):
 
 # ---------- 资源 ----------
 
+# 能力极限：数值参数 [下限, 上限]，选项型参数是允许的选项（登记选项的子集），程序表按列写 {列: 极限}；
+# 写法由服务端按参数规格核
+LimitWindow = list[float] | list[str] | dict[str, list[float] | list[str]]
+
+
 class LimitsIn(Signed):
     # 只列要改的能力：没列出的保持原样（合并写入）
-    limits: dict[str, dict[str, list[float]]] = {}
+    limits: dict[str, dict[str, LimitWindow]] = {}
     # 这台工位不再承接的能力：整项移除，引用它的流程随之重校验
     remove: list[str] = []
     row_version: int | None = None
 
 
-class ParamSpecIn(BaseModel):
-    """能力参数的规格：数值或整数、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。"""
+class ProgramColumnIn(BaseModel):
+    """程序表的一列：标识、显示名、类型（数值 / 整数 / 选项）、单位、选项、每行是否必填。"""
 
-    type: Literal["number", "integer"] = "number"
+    key: str = Field(max_length=32)
+    label: str = Field(default="", max_length=60)
+    type: Literal["number", "integer", "enum"] = "number"
+    unit: str = Field(default="", max_length=32)
+    options: list[str] = Field(default_factory=list, max_length=50)
+    required: bool = False
+
+
+class ParamSpecIn(BaseModel):
+    """能力参数的规格：数值、整数、选项或程序表、单位、是否必填。没登记的参数按「数值、单位未登记、必填」解释。
+
+    选项型（enum）写 `options`：值只能是其中之一，原样作为文字下发；没有单位。
+    程序表（program）写 `columns` 与 `max_rows`：值是行的列表（充放电工步、升温程序），见 domain/program.py。"""
+
+    type: Literal["number", "integer", "enum", "program"] = "number"
     unit: str = Field(default="", max_length=32)
     required: bool = True
+    options: list[str] = Field(default_factory=list, max_length=50)
+    columns: list[ProgramColumnIn] = Field(default_factory=list, max_length=20)
+    max_rows: int | None = Field(default=None, ge=1, le=200)
 
 
 class CapabilityIn(Signed):
@@ -1191,7 +1229,7 @@ class StationCreateIn(Signed):
     channels: int = Field(default=1, ge=1, le=512)
     # 通道怎么计：batch 一个批次的一个设备步骤占 1 个；sample 批次里每个样本各占 1 个（一颗电芯一个通道）
     channel_unit: Literal["batch", "sample"] = "batch"
-    limits: dict[str, dict[str, list[float]]] = {}
+    limits: dict[str, dict[str, LimitWindow]] = {}
     asset_id: str = ""
     protocol: str = ""
     adapter_driver: str = "simulation"
@@ -1454,6 +1492,26 @@ class LocationActiveIn(BaseModel):
 TableCell = str | float | None
 
 
+class ReportTemplateIn(BaseModel):
+    """新建组织报告模板草稿。sections 不给而给了 copy_from（内置模板键或组织模板 id）时以它的章节为起点。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(max_length=32)
+    name: str = Field(max_length=200)
+    description: str = ""
+    sections: list[dict[str, Any]] | None = None
+    copy_from: str = ""
+
+
+class ReportTemplatePatchIn(Versioned):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    sections: list[dict[str, Any]] | None = None
+
+
 class FormulationTemplateIn(BaseModel):
     """配液模板：固定步骤 + 加料阶段 + 物料类别 → 加法 + 搅拌规则 + 实验参数，config 结构见 domain/formulation.py。"""
 
@@ -1474,11 +1532,25 @@ class FormulationTemplatePatchIn(Versioned):
 
 
 class FormulationPreviewIn(BaseModel):
-    """按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。"""
+    """按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。
+    实验参数是数，选项型的实验参数是选项文字。"""
 
     filename: str = Field(default="", max_length=200)
     table: list[list[TableCell]]
-    params: dict[str, float] = {}
+    params: dict[str, float | str] = {}
+
+
+class FormulationCheckIn(BaseModel):
+    """模板编辑器：按还没保存的配置核对问题；带了表格就顺便按它试算一次（不写库、不登记瓶子）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any]
+    name: str = Field(default="", max_length=200)
+    description: str = ""
+    filename: str = Field(default="", max_length=200)
+    table: list[list[TableCell]] | None = None
+    params: dict[str, float | str] = {}
 
 
 class FormulationImportIn(FormulationPreviewIn):

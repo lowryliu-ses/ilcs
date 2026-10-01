@@ -468,7 +468,7 @@ input.bad, select.bad { border-color: var(--sev-1); }
 .fg-handle:hover { background: var(--accent); }
 .kind.branch { border-color: color-mix(in srgb, var(--s-paused) 55%, var(--border)); color: var(--s-paused); }
 .kind.subflow { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
-.kind.gate, .kind.split { border-color: color-mix(in srgb, var(--s-scheduled) 45%, var(--border)); color: var(--ink-2); }
+.kind.gate, .kind.split, .kind.merge { border-color: color-mix(in srgb, var(--s-scheduled) 45%, var(--border)); color: var(--ink-2); }
 .palette .cap[draggable="true"] { cursor: grab; }
 .case-row { display: grid; grid-template-columns: 70px 1fr 70px 70px 1fr 28px; gap: 4px; align-items: center; }
 .case-row.form { grid-template-columns: 70px 1fr 1fr 1fr 28px; }
@@ -489,3 +489,80 @@ table.compact th, table.compact td { padding: 4px 8px; }
 .seg a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .seg a + a { border-left: 1px solid var(--border-2); }
 .page-tabs { justify-self: start; }
+
+/* 程序表编辑器：表格可能比属性栏宽，只在自己的框里横向滚动，不把整页撑出滚动条 */
+.program-editor { min-width: 0; max-width: 100%; }
+.program-scroll { overflow-x: auto; max-width: 100%; }
+.program-scroll td, .program-scroll th { white-space: nowrap; }
+.program-cell { width: 80px; }
+.program-ref { width: 76px; padding-left: 2px; padding-right: 2px; }
+
+/* 驱动配置表单（ConfigForm）：简单项一格一项；嵌套的对象、表、列表可以收起；表单编辑不了的写法就地按 JSON 改 */
+.cfg-editor { display: grid; gap: 8px; min-width: 0; }
+.cfg-record { display: grid; gap: 8px; min-width: 0; }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 12px; }
+.cfg-field { display: grid; gap: 3px; align-content: start; min-width: 0; }
+.cfg-field > input, .cfg-field > select { width: 100%; min-width: 0; }
+.cfg-label { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.cfg-key { font-size: 10.5px; color: var(--muted); opacity: .75; }
+.cfg-hint { font-size: 11px; color: var(--muted); }
+.cfg-required { color: var(--sev-1); font-weight: 600; }
+.cfg-x { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 3px; font-size: 13px; line-height: 1; }
+.cfg-x:hover { color: var(--sev-1); }
+.cfg-add { justify-self: start; font-size: 12px; }
+.cfg-section { border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); min-width: 0; }
+.cfg-section-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 8px; }
+.cfg-section.open > .cfg-section-head { border-bottom: 1px dashed var(--border); }
+.cfg-section-body { padding: 8px; display: grid; gap: 8px; min-width: 0; }
+.cfg-toggle { border: 0; background: none; padding: 0; font: inherit; cursor: pointer; color: var(--ink); display: inline-flex; align-items: center; gap: 5px; }
+.cfg-cards { display: grid; gap: 6px; min-width: 0; }
+.cfg-card { border: 1px solid var(--border); border-left: 3px solid var(--accent-soft); border-radius: var(--r); background: var(--surface-2); min-width: 0; }
+.cfg-card-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; }
+.cfg-card-body { padding: 0 8px 8px; display: grid; gap: 8px; min-width: 0; }
+.cfg-keyinput { width: 150px; }
+.cfg-table-wrap { display: grid; gap: 6px; min-width: 0; }
+.cfg-table td { vertical-align: top; }
+.cfg-table { width: 100%; }
+.cfg-table td input, .cfg-table td select { width: 100%; min-width: 90px; }
+.cfg-table td input.cfg-keyinput { width: 150px; }
+.cfg-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cfg-chip { display: inline-flex; align-items: center; gap: 2px; }
+.cfg-chip input { width: 120px; }
+.cfg-tools { display: inline-flex; gap: 4px; }
+.cfg-extra { display: grid; gap: 4px; padding: 6px 8px; border: 1px dashed color-mix(in srgb, var(--s-paused) 55%, var(--border)); border-radius: var(--r); }
+.cfg-json { display: grid; gap: 3px; min-width: 0; }
+.cfg-json textarea { width: 100%; min-width: 0; }
+.cfg-adder { gap: 6px; }
+.cfg-subrow > td { background: var(--surface-2); padding: 6px 8px 8px; }
+
+/* 曲线叠加（XYChart）：按条件组分色，颜色用完换虚线；与报告 PDF 的配色一致 */
+:root {
+  --c0: #1f61b8; --c1: #cc551a; --c2: #2e8c45; --c3: #8c409e;
+  --c4: #b38c0d; --c5: #268c99; --c6: #737373; --c7: #cc3373;
+}
+.chart-trace { fill: none; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.chart-trace.dashed { stroke-dasharray: 5 3; }
+.chart-trace.faded { opacity: .18; }
+.chart-trace.pickable { cursor: pointer; }
+.chart-trace.pickable:hover { stroke-width: 2.6; }
+.chart-trace.dot { stroke: var(--surface); stroke-width: .8; }
+.chart-trace.c0 { stroke: var(--c0); } .chart-trace.dot.c0 { fill: var(--c0); }
+.chart-trace.c1 { stroke: var(--c1); } .chart-trace.dot.c1 { fill: var(--c1); }
+.chart-trace.c2 { stroke: var(--c2); } .chart-trace.dot.c2 { fill: var(--c2); }
+.chart-trace.c3 { stroke: var(--c3); } .chart-trace.dot.c3 { fill: var(--c3); }
+.chart-trace.c4 { stroke: var(--c4); } .chart-trace.dot.c4 { fill: var(--c4); }
+.chart-trace.c5 { stroke: var(--c5); } .chart-trace.dot.c5 { fill: var(--c5); }
+.chart-trace.c6 { stroke: var(--c6); } .chart-trace.dot.c6 { fill: var(--c6); }
+.chart-trace.c7 { stroke: var(--c7); } .chart-trace.dot.c7 { fill: var(--c7); }
+.swatch.line.chart-trace { width: 16px; height: 0; border-top: 2px solid; background: none; }
+.swatch.line.chart-trace.dashed { border-top-style: dashed; }
+.swatch.line.chart-trace.c0 { border-color: var(--c0); } .swatch.line.chart-trace.c1 { border-color: var(--c1); }
+.swatch.line.chart-trace.c2 { border-color: var(--c2); } .swatch.line.chart-trace.c3 { border-color: var(--c3); }
+.swatch.line.chart-trace.c4 { border-color: var(--c4); } .swatch.line.chart-trace.c5 { border-color: var(--c5); }
+.swatch.line.chart-trace.c6 { border-color: var(--c6); } .swatch.line.chart-trace.c7 { border-color: var(--c7); }
+.curve-thumb { display: block; }
+.curve-thumb .chart-trace { stroke-width: 1.3; }
+.curve-cell { display: grid; gap: 2px; justify-items: start; border: 0; background: none; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; }
+.curve-cell:hover .curve-thumb { outline: 1px solid var(--accent-soft); }
+.curve-input { display: grid; gap: 4px; min-width: 260px; }
+.curve-input textarea { width: 100%; }

@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from ...schemas import (
     InventoryEventIn, LotAdjustIn, LotCreateIn, LotOpenIn, LotPatchIn, LotScrapIn,
-    MaterialCreateIn, Signed, WasteCreateIn, WastePatchIn,
+    MaterialCreateIn, MaterialPatchIn, Signed, Versioned, WasteCreateIn, WastePatchIn,
 )
 from ...services.inventory_service import InventoryService
 from ...services.material_service import MaterialService
@@ -21,6 +21,30 @@ def create_material(
     payload: MaterialCreateIn, db: DbSession, user: CurrentUser, ctx=require("material.edit")
 ):
     return MaterialService(db, ctx).create_material(payload.model_dump(), user)
+
+
+@router.patch("/materials/{material_id}")
+def update_material(
+    material_id: str, payload: MaterialPatchIn, db: DbSession, user: CurrentUser, ctx=require("material.edit")
+):
+    """改物料主数据。已有批号的物料不能改名称与基础单位（按名称与单位对账）。"""
+    changes = payload.model_dump(exclude_unset=True, exclude={"row_version"})
+    return MaterialService(db, ctx).update_material(material_id, changes, payload.row_version, user)
+
+
+@router.post("/materials/{material_id}/retire")
+def retire_material(
+    material_id: str, payload: Versioned, db: DbSession, user: CurrentUser, ctx=require("material.edit")
+):
+    """停用：不再按它入库新批号、配液模板导入不再认它；已有批号照常可用。"""
+    return MaterialService(db, ctx).retire_material(material_id, payload.row_version, user)
+
+
+@router.post("/materials/{material_id}/restore")
+def restore_material(
+    material_id: str, payload: Versioned, db: DbSession, user: CurrentUser, ctx=require("material.edit")
+):
+    return MaterialService(db, ctx).restore_material(material_id, payload.row_version, user)
 
 
 @router.get("/lots")

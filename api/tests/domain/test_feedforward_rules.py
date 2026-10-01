@@ -159,7 +159,10 @@ def test_factor_target_units_and_bound_parameter_conflicts():
     plain = [{**steps[1], "bindings": {}, "params": {"electrolyte": 60}}]
     plain[0]["step_id"] = "s02"
     factors[0]["unit"] = "mL"
-    assert any("单位 mL" in text for text in target_issues(factors, plain, stations, CAPS))
+    # 同量纲按比例换算（建批次下发换算后的量），核对工位范围也用换算后的数：50 mL = 50000 μL 超出 [10, 200]
+    assert any("换算后 50000 μL" in text for text in target_issues(factors, plain, stations, CAPS))
+    factors[0]["unit"] = "g"
+    assert any("单位 g 换不成" in text for text in target_issues(factors, plain, stations, CAPS)), "跨量纲又没有物料换算"
     factors[0]["unit"] = " μL"
     assert target_issues(factors, plain, stations, CAPS) == []
 

@@ -1,7 +1,10 @@
 """配液模板：表头解析、列识别、加料 / 搅拌步骤的生成规则、阶段依赖与方案（重复瓶、样本顺序）。"""
 import copy
+from decimal import Decimal
 
 from app.domain import formulation as rules
+from app.domain import steps as steps_rules
+from app.domain.dosing import covers
 
 REFERENCE_HEADER = ["序列号", "EC (g)", "EMC(g)", "DEC(g)", "DMC(g)", "EP(g)", "LiPF6(g)", "LiFSI(g)", "LiTFSI(g)",
                     "LiBF4", "VC(g)", "FEC(g)", "LiDFP(g)"]
@@ -218,9 +221,12 @@ def test_unknown_columns_block_only_when_they_carry_numbers():
 
 def test_all_zero_reagent_generates_no_dose_step():
     header = ["序列号", "EC (g)", "EMC (g)", "LiBF4"]
-    result = generate([header, ["B-1", 1, 2, 0], ["B-2", 1, 2, None]])
+    result = generate([header, ["B-1", 1, 2, 0], ["B-2", 1, 2, 0]])
     assert result["issues"] == []
     assert "LiBF4 全为 0，不生成加料步骤" in result["warnings"]
+    # 整列空白 = 这次不用这种料，与整列 0 一样；只有同一列有的填了、有的空着才是问题
+    unused = generate([header, ["B-1", 1, 2, None], ["B-2", 1, 2, ""]])
+    assert unused["issues"] == [] and "LiBF4 全为 0，不生成加料步骤" in unused["warnings"]
     assert not any(step.get("material") == "LiBF4" for step in result["steps"])
     assert {row["name"]: row["zero_rows"] for row in result["reagents"]} == {"EC": 0, "EMC": 0, "LiBF4": 2}
     # 锂盐阶段没有加料：阶段 after（固体物料到加料位）落到本阶段第一个 then 步骤上
@@ -342,7 +348,10 @@ def test_first_stage_without_doses_forks_at_its_first_then_step():
 
 def test_row_with_a_serial_but_no_amounts_is_an_issue():
     result = generate([["序列号", "EC (g)", "EMC (g)"], ["B-1", 1, 2], ["B-2", 3, 2], ["B-3", None, ""]])
-    assert "第 4 行（序列号 B-3）所有试剂都是 0" in result["issues"]
+    # 整行都空只报这一行，不再按列逐格报空白
+    assert result["issues"] == ["第 4 行（序列号 B-3）没有填任何试剂用量"]
+    zeros = generate([["序列号", "EC (g)", "EMC (g)"], ["B-1", 1, 2], ["B-2", 0, 0]])
+    assert "第 3 行（序列号 B-2）所有试剂都是 0" in zeros["issues"]
     # 值本身有问题的行只报那个问题，不再叠一条「都是 0」
     bad = generate([["序列号", "EC (g)"], ["B-1", 1], ["B-2", "abc"]])
     assert not any("所有试剂都是 0" in item for item in bad["issues"])
@@ -357,7 +366,7 @@ def test_huge_and_too_precise_numbers_become_issues_or_warnings_not_crashes():
     params = generate([REFERENCE_HEADER, REFERENCE_ROW], params={"bottles": 1e30})
     assert any("实验参数「分装瓶数」的值" in item and "过大" in item for item in params["issues"])
     # 量化到 6 位后是 0：合计、全 0 判断与因子水平一致，不生成水平全是 0 的加料步骤
-    tiny = generate([header, ["B-1", 1, 2, "1e-9"], ["B-2", 1, 2, None]])
+    tiny = generate([header, ["B-1", 1, 2, "1e-9"], ["B-2", 1, 2, 0]])
     assert tiny["issues"] == [], tiny["issues"]
     assert "LiBF4 全为 0，不生成加料步骤" in tiny["warnings"]
     assert "有用量超出 6 位小数精度，已按 6 位小数计：第 2 行（B-1）LiBF4 1e-9 → 0" in tiny["warnings"]
@@ -413,3 +422,212 @@ def test_sop_reference_is_validated_and_passes_through_to_generated_steps():
     result = generate([REFERENCE_HEADER, REFERENCE_ROW], config=config)
     stirs = [step for step in result["steps"] if step["name"].endswith("加料后制冷搅拌")]
     assert stirs and all(step["sop_step"] == "加料后制冷搅拌" for step in stirs)
+
+
+def _stirred(result: dict, serial: str) -> list[str]:
+    """这一瓶实际会被搅的那些「加料后搅拌」（按步骤的 applies_to 与这瓶的用量判）。"""
+    amounts = next(row["amounts"] for row in result["rows"] if row["serial"] == serial)
+    material = {step["step_id"]: step["material"] for step in result["steps"] if step.get("material")}
+    return [step["name"] for step in result["steps"] if (rule := steps_rules.applies_to(step))
+            and covers(rule, lambda step_id: Decimal(str(amounts[material[step_id]])))]
+
+
+def test_stirs_apply_only_to_bottles_dosed_at_their_step():
+    steps = generate([REFERENCE_HEADER, REFERENCE_ROW])["steps"]
+    ids = {step["name"]: step["step_id"] for step in steps}
+    rule = {step["name"]: step.get("applies_to") for step in steps if step["name"].endswith("加料后制冷搅拌")}
+    # 液体阶段：只看这瓶在前一步加没加料；最后一种（EP）同样搅
+    assert rule["EMC 加料后制冷搅拌"] == {"dosed": ids["EMC 称量加注"]}
+    assert rule["EP 加料后制冷搅拌"] == {"dosed": ids["EP 称量加注"]}
+    # 锂盐与添加剂阶段最后一种不搅：这瓶之后在本阶段还要再加一种才搅
+    later = [ids[name] for name in ("LiFSI 称量加料", "LiTFSI 称量加料", "LiBF4 称量加料", "VC 移液加注",
+                                    "FEC 移液加注", "LiDFP 称量加料")]
+    assert rule["LiPF6 加料后制冷搅拌"] == {"dosed": ids["LiPF6 称量加料"], "then_any": later}
+    assert rule["FEC 加料后制冷搅拌"] == {"dosed": ids["FEC 移液加注"], "then_any": [ids["LiDFP 称量加料"]]}
+    assert not any("applies_to" in step for step in steps if not step["name"].endswith("加料后制冷搅拌"))
+    assert all(steps_rules.applies_to_issues(step, steps, index) == [] for index, step in enumerate(steps))
+
+
+def test_a_bottle_without_a_material_is_stirred_as_if_it_were_alone():
+    header = ["序列号", "EC (g)", "EMC(g)", "LiPF6(g)", "FEC(g)"]
+    together = generate([header, ["A-1", 10, 15, 4.6, 0], ["B-1", 10, 15, 4.6, 1.4]])
+    alone = generate([header, ["A-1", 10, 15, 4.6, 0]])
+    assert together["issues"] == [] and alone["issues"] == []
+    # A 不含 FEC：LiPF6 是它最后一种料，不搅、直接关盖终混——和它单独配时一样
+    assert _stirred(together, "A-1") == _stirred(alone, "A-1") == ["EMC 加料后制冷搅拌"]
+    assert _stirred(together, "B-1") == ["EMC 加料后制冷搅拌", "LiPF6 加料后制冷搅拌"]
+
+
+def test_ec_is_never_chilled_alone_and_cannot_be_the_last_liquid():
+    config = template_config()
+    config["routes"]["预热溶剂"]["not_last"] = "EC 常温是固体，加完要紧接着加下一种溶剂"
+    header = ["序列号", "EC (g)", "EMC(g)", "DEC(g)", "LiPF6(g)"]
+    # X 瓶 EMC 为 0：EMC 那一次搅拌不搅它，EC 之后直接接 DEC
+    result = generate([header, ["X-1", 10, 0, 17, 4.6], ["Y-1", 10, 15, 17, 4.6]], config=config)
+    assert result["issues"] == []
+    assert _stirred(result, "X-1") == ["DEC 加料后制冷搅拌"]
+    assert _stirred(result, "Y-1") == ["EMC 加料后制冷搅拌", "DEC 加料后制冷搅拌"]
+    # EC 成了这瓶最后一种液体：后面的溶剂都是 0，或 EC 排在最后一列
+    last = generate([header, ["X-1", 10, 0, 0, 4.6], ["Y-1", 10, 15, 17, 4.6]], config=config)
+    assert last["issues"] == ["第 2 行（X-1）EC 之后在「液体」阶段没有再加别的料：EC 常温是固体，加完要紧接着加下一种溶剂"]
+    ordered = generate([["序列号", "EMC(g)", "EC (g)", "LiPF6(g)"], ["Z-1", 15, 10, 4.6]], config=config)
+    assert any(item.startswith("第 2 行（Z-1）EC 之后") for item in ordered["issues"]), ordered["issues"]
+
+
+def test_blank_cells_next_to_filled_ones_are_issues_not_zeros():
+    header = ["序列号", "EC (g)", "EMC(g)", "DEC(g)", "LiPF6(g)"]
+    result = generate([header, ["D-1", 10, "", 17, 4.6], ["E-1", 10, 15, 17, 4.6], ["F-1", 10, None, 16, 4.6]])
+    assert result["issues"] == ["EMC 列第 2、4 行是空白：同一列有的填了、有的空着，不加这种料请填 0"]
+    assert generate([header, ["D-1", 10, 0, 17, 4.6], ["E-1", 10, 15, 17, 4.6]])["issues"] == []
+
+
+def test_volume_check_compares_aliquots_with_the_estimated_mother_liquor():
+    config = template_config()
+    config["volume_check"] = {"bottles": "bottles", "volume": "volume", "density": 1.35, "reserve": 5}
+    # 参考配方 72 g 按 1.35 g/mL 约 53.3 mL：2 × 30 mL + 5 mL 放不下，2 × 20 mL + 5 mL 可以
+    result = generate([REFERENCE_HEADER, REFERENCE_ROW], config=config)
+    assert result["issues"] == [
+        "分装 2 瓶 × 30 mL、母瓶至少留 5 mL，共要 65 mL，超过母液体积（总质量按 1.35 g/mL 估算）："
+        "第 2 行（ELY-0001）72 g 约 53.3 mL；请减少分装瓶数或每瓶分装量，或加大配制量"
+    ]
+    assert generate([REFERENCE_HEADER, REFERENCE_ROW], config=config, params={"volume": 20})["issues"] == []
+    # 按 mg 填的列同样按质量估算（1000 mg = 1 g ≈ 0.7 mL，放不下）
+    grams = generate([["序列号", "EC (mg)"], ["B-1", 1000]], config=config)
+    assert any("超过母液体积" in issue and "约 0.7 mL" in issue for issue in grams["issues"]), grams["issues"]
+    # 既不是质量也不是体积的列：估算不了，只提醒
+    moles = generate([["序列号", "EC (mmol)"], ["B-1", 10]], config=config)
+    assert any("EC（mmol） 估算不了体积" in item for item in moles["warnings"]), moles["warnings"]
+
+
+def test_template_issues_check_not_last_and_volume_check():
+    config = template_config()
+    config["routes"]["预热溶剂"]["not_last"] = " "
+    config["volume_check"] = {"bottles": "bottles", "volume": "size", "density": 0, "reserve": -1}
+    issues = rules.template_issues(config, capability_specs(), {}, {METRIC})
+    for item in ("加法「预热溶剂」的 not_last 只能是是或否，或写明原因的文字",
+                 "volume_check 的 volume 要写一个实验参数的 key",
+                 "volume_check 的 density（物料主数据没登记密度时估算母液体积用，g/mL）必须是正数",
+                 "volume_check 的 reserve（母瓶至少留多少 mL）必须是不小于 0 的数"):
+        assert item in issues, (item, issues)
+    assert not any("volume_check 的 bottles" in item for item in issues)
+
+
+def test_applies_to_must_point_at_dose_steps():
+    steps = generate([REFERENCE_HEADER, REFERENCE_ROW])["steps"]
+    index = next(position for position, step in enumerate(steps) if step["name"] == "LiPF6 加料后制冷搅拌")
+    stir, dosed = steps[index], steps[index]["applies_to"]["dosed"]
+
+    def issues(rule):
+        return steps_rules.applies_to_issues({**stir, "applies_to": rule}, steps, index)
+
+    assert issues({"dosed": "s99"}) == ["applies_to 引用的投料步骤 s99 不存在或不在本步之前"]
+    assert issues({"dosed": "s05"}) == ["applies_to 引用的 s05 不是指定了投料物料与用量参数的设备步骤"]
+    assert issues({"dosed": dosed, "then_any": ["s07"]}) == [f"applies_to 的 then_any 引用的 s07 要排在 {dosed} 之后"]
+    assert issues(dosed) == ['applies_to 要写成 {"dosed": 投料步骤标识, "then_any": [投料步骤标识…]}']
+    manual = {**steps[0], "applies_to": {"dosed": "s07"}}
+    assert steps_rules.applies_to_issues(manual, steps, 0) == ["只有设备步骤能按瓶限定处理对象（applies_to）"]
+
+
+# ---------- 模板结构：按类别 / 阶段的加料后步骤、逐瓶参数列、阶段不串行、按类别排序、按登记的密度核分装量 ----------
+
+def _names(result):
+    return [step["name"] for step in result["steps"]]
+
+
+def test_category_and_stage_can_bring_their_own_post_dose_step():
+    config = template_config()
+    vortex = {"kind": "device", "name": "{material} 加完涡旋", "cap": "cap.t.stir", "params": {"temp": 25, "time": 30, "rpm": 1200},
+              "dur": 1}
+    chill = {"kind": "device", "name": "{material} 加完冷藏", "cap": "cap.t.stir", "params": {"temp": 5, "time": 120, "rpm": 300},
+             "dur": 3}
+    config["routes"]["添加剂"]["stir"] = vortex
+    config["stages"][1]["stir"] = chill
+    assert rules.template_issues(config, capability_specs(), {}, {METRIC}) == []
+    names = _names(generate([REFERENCE_HEADER, REFERENCE_ROW], config=config, params={"volume": 20}))
+    assert "VC 加完涡旋" in names and "FEC 加完涡旋" in names, "添加剂用自己的加料后步骤"
+    assert "LiPF6 加完冷藏" in names, "锂盐没写自己的，用阶段的"
+    assert "EMC 加料后制冷搅拌" in names, "液体阶段没写，用全局的"
+
+    # 全局没有 stir，但某个要搅拌的类别既没自己的也没阶段的：报出来
+    config = template_config()
+    del config["stir"]
+    config["stages"][1]["stir"] = chill
+    issues = rules.template_issues(config, capability_specs(), {}, {METRIC})
+    assert any("搅拌步骤模板 stir 必须是设备步骤" in issue for issue in issues), "液体阶段的溶剂还要搅"
+    config["stages"][0]["stir"] = chill
+    assert rules.template_issues(config, capability_specs(), {}, {METRIC}) == []
+    config["routes"]["溶剂"]["stir"] = {"kind": "manual", "name": "x"}
+    assert "加法「溶剂」的加料后步骤必须是设备步骤" in rules.template_issues(config, capability_specs(), {}, {METRIC})
+
+
+def test_row_params_turn_an_extra_column_into_a_per_bottle_factor():
+    config = template_config()
+    config["row_params"] = [{"key": "mix_temp", "header": "终混温度", "label": "终混温度", "step": "s_mix", "param": "temp",
+                             "unit": "℃"}]
+    assert rules.template_issues(config, capability_specs(), {}, {METRIC}) == []
+    header = ["序列号", "EC (g)", "EMC (g)", "LiPF6 (g)", "终混温度 (℃)"]
+    rows = [["A-1", 10, 15, 4.6, 25], ["A-2", 10, 15, 4.6, 40], ["A-3", 10, 15, 4.6, 25], ["A-4", 10, 15, 4.6, 40]]
+    result = generate([header, *rows], config=config, params={"volume": 5})
+    assert result["issues"] == [], result["issues"]
+    assert [col["kind"] for col in result["columns"]] == ["serial", "reagent", "reagent", "reagent", "param"]
+    factor = next(row for row in result["plan"]["factors"] if row["name"] == "终混温度")
+    mix = next(step["step_id"] for step in result["steps"] if step["name"] == "终混")
+    assert factor == {"name": "终混温度", "unit": "℃", "levels": [25, 40], "target": {"step_id": mix, "param": "temp"}}
+    assert len(result["plan"]["design_points"]) == 2 and result["plan"]["repeats"] == 2, "同配方不同温度是两个条件"
+    assert result["plan"]["sample_ids"] == ["A-1", "A-3", "A-2", "A-4"]
+
+    blank = generate([header, ["A-1", 10, 15, 4.6, None]], config=config, params={"volume": 5})
+    assert "第 2 行（A-1）终混温度 是空白：逐瓶参数每瓶都要写（或在模板里给缺省值）" in blank["issues"]
+    config["row_params"][0]["default"] = 30
+    missing_column = generate([header[:-1], ["A-1", 10, 15, 4.6]], config=config, params={"volume": 5})
+    assert missing_column["issues"] == [] and missing_column["rows"][0]["params"] == {"mix_temp": 30}
+
+    config["row_params"][0].update(param="rpm", unit="℃")
+    assert any("登记的单位 rpm" in issue for issue in rules.template_issues(config, capability_specs(), {}, {METRIC}))
+    config["row_params"][0].update(param="temp", unit="℃", step="aliquot", key="bottles")
+    issues = rules.template_issues(config, capability_specs(), {}, {METRIC})
+    assert any("key「bottles」与别的实验参数或逐瓶参数重复" in issue for issue in issues)
+
+
+def test_detached_stage_and_route_order():
+    config = template_config()
+    config["stages"][1]["chain"] = False
+    config["stages"][1]["order"] = "routes"
+    header = ["序列号", "EC (g)", "EMC (g)", "VC (g)", "LiPF6 (g)"]
+    result = generate([header, ["A-1", 10, 15, 1.2, 4.6]], config=config, params={"volume": 5})
+    assert result["issues"] == [], result["issues"]
+    by_name = {step["name"]: step for step in result["steps"]}
+    ids = {step["step_id"]: step["name"] for step in result["steps"]}
+    salt_first = by_name["LiPF6 称量加料"]
+    assert [ids[ref] for ref in salt_first["after"]] == ["过渡舱转固体物料到加料位"], "不接液体阶段的尾巴"
+    names = _names(result)
+    assert names.index("LiPF6 称量加料") < names.index("VC 移液加注"), "按 routes 顺序：锂盐在添加剂前（表格里 VC 在前）"
+    opener = by_name["测试段开盖"]
+    assert {ids[ref] for ref in opener["after"]} == {"过渡舱转测试段", "配液段开盖"}, "后段把没汇合的液体阶段尾巴一起接上"
+    # 第二个阶段不接上一个阶段、又没写从哪开始：模板问题
+    config["stages"][1]["after"] = []
+    assert "阶段「salt」不接上一个阶段（chain: false），要用 after 写明从哪一步开始" in rules.template_issues(
+        config, capability_specs(), {}, {METRIC})
+
+
+def test_volume_check_uses_registered_densities_and_volume_columns():
+    config = template_config()
+    config["volume_check"] = {"bottles": "bottles", "volume": "volume", "reserve": 5}
+    catalog = {**CATALOG, "EC": {"category": "预热溶剂", "base_unit": "g", "conversions": {"mL": "1.32"}},
+               "EMC": {"category": "溶剂", "base_unit": "g", "conversions": {"mL": "1.0"}}}
+    header = ["序列号", "EC (g)", "EMC (g)"]
+    # 13.2 g EC ≈ 10 mL + 10 g EMC = 10 mL → 20 mL；2 × 10 + 5 = 25 放不下，2 × 7 + 5 = 19 可以
+    short = generate([header, ["A-1", 13.2, 10]], config=config, params={"volume": 10}, catalog=catalog)
+    assert short["issues"] == [
+        "分装 2 瓶 × 10 mL、母瓶至少留 5 mL，共要 25 mL，超过母液体积（按物料主数据登记的密度估算）："
+        "第 2 行（A-1）23.2 g 约 20.0 mL；请减少分装瓶数或每瓶分装量，或加大配制量"
+    ]
+    assert generate([header, ["A-1", 13.2, 10]], config=config, params={"volume": 7}, catalog=catalog)["issues"] == []
+    # 没登记密度、模板也没给缺省密度：估算不了，只提醒
+    plain = generate([header, ["A-1", 13.2, 10]], config=config, params={"volume": 10})
+    assert plain["issues"] == [] and any("估算不了体积" in item for item in plain["warnings"])
+    # 模板给了缺省密度：没登记的按它
+    config["volume_check"]["density"] = 1.25
+    mixed = generate([header, ["A-1", 13.2, 10]], config=config, params={"volume": 10},
+                     catalog={**CATALOG, "EC": catalog["EC"]})
+    assert "按物料主数据登记的密度估算，没登记的按 1.25 g/mL" in mixed["issues"][0]
