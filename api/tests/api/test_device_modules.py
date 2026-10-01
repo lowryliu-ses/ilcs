@@ -42,6 +42,17 @@ def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_neware_module_passes_its_own_tests_and_its_profile_imports():
+    from app.services.template_service import template_check, template_digest
+
+    module = ROOT / "devices" / "gateway" / "neware-bts"
+    result = _pytest(module / "tests")
+    assert result.returncode == 0, result.stdout + result.stderr
+    profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
+    assert profile["digest"] == template_digest(profile), "profile.json 改过之后要重算摘要"
+    assert template_check(profile)["ok"] and profile["supports"]["hold"] is False
+
+
 @pytest.fixture()
 def module_gateway(tmp_path, monkeypatch):
     from app.core.config import settings

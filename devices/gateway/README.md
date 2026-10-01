@@ -29,6 +29,8 @@ devices/gateway/<厂家-型号>/
 
 样板：[sample-cycler](sample-cycler/)（8 通道充放电柜，厂家只给 Windows SDK）。
 
+已有模块：[neware-bts](neware-bts/)（Neware 充放电柜，经开源的 aurora-neware 走 BTS 8.0 的 TCP XML 接口）。
+
 ### 两种模块
 
 | 设备给的接口 | 模块里有什么 | ILCS 侧驱动 |
