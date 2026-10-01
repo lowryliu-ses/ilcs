@@ -172,3 +172,53 @@ def test_device_reported_curves_are_written_per_well(admin, db, finished_batch):
         assert written[capacity["id"]].value_num == 100.0 + index
         assert any(flag["code"] == "derived" for flag in written[capacity["id"]].flags)
     db.rollback()
+
+
+def test_values_from_a_simulator_device_are_flagged_simulated(admin, db, finished_batch):
+    """走真实协议的外部模拟设备（工位当前采用的接入验收由自报为模拟器的设备通过）：回报的值和内置模拟一样
+    打「模拟」标记、仪器注明模拟设备、不进训练数据；验收不是模拟器通过的工位照常是实测值。"""
+    from app.core.context import system_context
+    from app.models import AcceptanceRun, Adapter, Batch, Command, ResultValue
+    from app.services.device_result_service import DeviceResultService
+
+    capacity = admin.post("/api/metrics", {"code": f"sim_cap_{uuid4().hex[:6]}", "name": "模拟容量",
+                                           "value_type": "number", "unit": "Ah"})
+    assert capacity.status_code == 201, capacity.text
+    capacity = capacity.json()
+    batch = db.get(Batch, finished_batch["id"])
+    command = next(row for row in db.query(Command).filter(Command.batch_id == batch.id).all() if row.type == "dispatch")
+    snapshot = dict(batch.recipe_snapshot)
+    base = next(step for step in snapshot["steps"] if step.get("kind", "device") == "device")
+    step = {**base, "method": {**(base.get("method") or {}), "code": "CYC", "version": 1, "outputs": [
+        {"key": "capacity", "unit": "Ah", "metric_id": capacity["id"]},
+    ]}}
+    snapshot["steps"] = [*snapshot["steps"], step]
+    batch.recipe_snapshot = snapshot
+    adapter = db.query(Adapter).filter(Adapter.station_id == command.station_id).one()
+    runs = {simulator: AcceptanceRun(org_id=batch.org_id, station_id=command.station_id, level="readonly", state="done",
+                                     ok=True, simulator=simulator) for simulator in (True, False)}
+    db.add_all(runs.values())
+    db.flush()
+    adapter.accepted_run_id = runs[True].id
+    db.flush()
+    service = DeviceResultService(db, system_context(batch.org_id))
+    first, second = sorted(service.analysis.assignments.for_batch(batch.id), key=lambda row: row.well)[:2]
+
+    outcome = service.record(batch, command, step, {"wells": {first.well: {"capacity": 0.0032}}}, "real:http_json_v1")
+    assert outcome["problems"] == [] and outcome["samples"] == 1, outcome
+    adapter.accepted_run_id = runs[False].id  # 验收已出结论就只读：换成真设备通过的那次
+    db.flush()
+    outcome = service.record(batch, command, step, {"wells": {second.well: {"capacity": 0.0031}}}, "real:http_json_v1")
+    assert outcome["problems"] == [] and outcome["samples"] == 1, outcome
+    db.flush()
+
+    from app.services.proposal_service import _exclusion
+
+    rows = {row.assignment_id: row for row in
+            db.query(ResultValue).filter(ResultValue.metric_definition_id == capacity["id"]).all()}
+    simulated, measured = rows[first.id], rows[second.id]
+    assert any(flag["code"] == "simulated" for flag in simulated.flags), simulated.flags
+    assert simulated.instrument.startswith("模拟设备") and _exclusion(simulated) == "simulated"
+    assert not any(flag["code"] == "simulated" for flag in measured.flags), measured.flags
+    assert not measured.instrument.startswith("模拟")
+    db.rollback()

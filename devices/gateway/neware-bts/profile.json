@@ -36,9 +36,11 @@
   },
   "acceptance": {
     "capability": "cap.test",
-    "params": {}
+    "params": {
+      "channel": 1
+    }
   },
-  "note": "设备模块 devices/gateway/neware-bts：网关跑在 BTS 那台 Windows 机器上，经 aurora-neware 走 BTS 8.0 的 TCP XML 接口；按 ILCS 指令号去重、可按指令号查询，条码 ILCS-<指令号摘要> 认作业。工步在 BTS 工步文件里定，指令只带通道（channel）。BTS 接口不做保持。动作级验收要在网关配置里打开 auto_channel、白名单只留装了假电池的通道。凭据是网关令牌文件（credential_ref）。",
+  "note": "设备模块 devices/gateway/neware-bts：网关跑在 BTS 那台 Windows 机器上，经 aurora-neware 走 BTS 8.0 的 TCP XML 接口；按 ILCS 指令号去重、可按指令号查询，每颗电芯的条码 ILCS-<指令号与孔位摘要> 认作业。工步在 BTS 工步文件里定，指令只带通道：单颗 channel，或逐孔 wells {孔位: {channel}}（工位按样本计通道，上柜的人工步骤按样本记通道、前馈到这一步）。BTS 接口不做保持。验收用通道 1：动作级验收时通道 1 放假电池。凭据是网关令牌文件（credential_ref）。",
   "state": "draft",
-  "digest": "sha256:b2299f7e5222070f8a65f6e86e065e64691f189197a9265b95aa4596e9504582"
+  "digest": "sha256:83162c153a509b1820b1a9c4996424930ba4f1c27147ca0ee948df18ffd58f57"
 }

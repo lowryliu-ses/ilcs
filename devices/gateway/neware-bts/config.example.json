@@ -7,8 +7,9 @@
   "auto_channel": false,
   "programs": {
     "CC-CV-0.5C": {"name": "0.5C 恒流恒压循环", "file": "C:\\Neware\\steps\\ilcs\\cccv-0.5c.xml"},
-    "FORMATION": {"name": "化成", "file": "C:\\Neware\\steps\\ilcs\\formation.xml"}
+    "FORMATION": {"name": "化成", "file": "C:\\Neware\\steps\\ilcs\\formation.xml"},
+    "REST-10S": {"name": "静置 10 秒（接入验收用）", "file": "C:\\Neware\\steps\\ilcs\\rest-10s.xml"}
   },
-  "default_program": "",
+  "default_program": "REST-10S",
   "data_dir": "C:\\Neware data\\ILCS"
 }

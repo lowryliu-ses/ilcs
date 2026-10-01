@@ -11,7 +11,8 @@
 - 曲线型输出（`{"x": [...], "y": [...]}` 或几条 `traces`）按曲线指标记；曲线声明了派生的数值指标时一并写
   （要求指标里含这些派生指标，建任务时一起冻结）。回传事件里只留曲线的概要，完整的点在结果里。
 - 值不成立（类型、单位不对）不写并报警；越界照写、置可疑、打标，与回传同一口径。内置模拟给的是示意值：
-  打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。
+  打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。走真实协议接入的
+  外部模拟设备（工位当前采用的接入验收由自报为模拟器的设备通过）回报的值同样打这个标记：驱动是真的，数不是实测。
 - 与设备步骤完成同一个事务，不自己提交；出错只报警，不挡流程推进——值留在检查点上，可以人工补录。
 """
 from __future__ import annotations
@@ -35,6 +36,10 @@ from .analysis_service import AnalysisService, digest, stored_value, value_colum
 
 METHOD = "设备回报"
 SIMULATED = "simulated"
+SIMULATED_NOTES = {
+    "builtin": "内置模拟设备按方法输出规则给的示意值，不是实测",
+    "device": "模拟设备回报的值（工位的接入验收由自报为模拟器的设备通过），不是实测",
+}
 
 
 def linked_rules(step: dict) -> list[dict]:
@@ -70,7 +75,8 @@ class DeviceResultService:
         rules = linked_rules(step)
         if not rules:
             return {"written": 0, "samples": 0, "problems": []}
-        instrument = self._instrument(command.station_id, origin)
+        simulated = self._simulated(command.station_id, origin)
+        instrument = self._instrument(command.station_id, simulated)
         from .batch_service import BatchService
 
         targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
@@ -139,7 +145,7 @@ class DeviceResultService:
             )
             self.db.add(event)
             self.db.flush()
-            written += self._write(task, sample, event, prepared, current, command, origin, instrument, collected_at)
+            written += self._write(task, sample, event, prepared, current, command, simulated, instrument, collected_at)
             samples += 1
             self.analysis._refresh_task_state(task)
             event.response = {"task_id": task.id, "task_state": task.state, "written": len(prepared)}
@@ -183,15 +189,15 @@ class DeviceResultService:
         return task
 
     def _write(self, task: AnalysisTask, sample: Sample, event: IngestEvent, prepared: list[dict],
-               current: dict[str, ResultValue], command: Command, origin: str, instrument: str,
+               current: dict[str, ResultValue], command: Command, simulated: str, instrument: str,
                collected_at: datetime) -> int:
         for row in prepared:
             definition = row["definition"]
             flags = [*row["flags"], *(row.get("marks") or [])]
             if row["batch_level"]:
                 flags.append(dataquality.flag("batch_level", "设备只回报了批次级读数，按每个样本各记一份"))
-            if origin == "simulation":
-                flags.append(dataquality.flag(SIMULATED, "内置模拟设备按方法输出规则给的示意值，不是实测"))
+            if simulated:
+                flags.append(dataquality.flag(SIMULATED, SIMULATED_NOTES[simulated]))
             previous = current.get(definition.id)
             value = ResultValue(
                 org_id=task.org_id, analysis_task_id=task.id, physical_sample_id=task.physical_sample_id,
@@ -213,15 +219,29 @@ class DeviceResultService:
                 previous.row_version = int(previous.row_version or 0) + 1
         return len(prepared)
 
-    def _instrument(self, station_id: str, origin: str) -> str:
-        """测出这个值的仪器：工位关联资产的序列号（没有就资产编号），内置模拟另外注明。"""
+    def _simulated(self, station_id: str, origin: str) -> str:
+        """这一步的值是不是模拟出来的：builtin 内置模拟适配器，device 外部模拟设备，空串是真设备。
+
+        外部模拟设备走真实协议、回执和真设备一样，只能看工位当前采用的接入验收：放行这版连接配置的那次验收
+        是由自报为模拟器的设备通过的（正式环境拒绝接入模拟器，那里不会出现）。"""
+        if origin == "simulation":
+            return "builtin"
+        from ..models import AcceptanceRun, Adapter
+
+        adapter = self.db.query(Adapter).filter(Adapter.station_id == station_id).first()
+        run = self.db.get(AcceptanceRun, adapter.accepted_run_id) if adapter is not None and adapter.accepted_run_id else None
+        return "device" if run is not None and run.simulator else ""
+
+    def _instrument(self, station_id: str, simulated: str) -> str:
+        """测出这个值的仪器：工位关联资产的序列号（没有就资产编号），模拟的另外注明。"""
         from ..repositories.resources import AssetRepository, StationRepository
 
         station = StationRepository(self.db, self.ctx).get(station_id)
         asset = AssetRepository(self.db, self.ctx).get(station.asset_id) if station and station.asset_id else None
         label = (asset.serial or asset.asset_no) if asset is not None else ""
-        if origin == "simulation":
-            return f"内置模拟（{label}）" if label else "内置模拟"
+        prefix = {"builtin": "内置模拟", "device": "模拟设备"}.get(simulated)
+        if prefix:
+            return f"{prefix}（{label}）" if label else prefix
         return label
 
     @staticmethod
