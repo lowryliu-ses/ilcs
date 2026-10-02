@@ -75,7 +75,7 @@ class Gateway:
             command_id=record["command_id"], capability=record.get("capability", ""), params=record.get("params") or {},
             type=record.get("type", "dispatch"), batch_id=record.get("batch_id", ""), step_id=record.get("step_id", ""),
             step_index=int(record.get("step_index") or 0), method=record.get("method") or {},
-            handle=record.get("handle", ""),
+            handle=record.get("handle", ""), material=record.get("material") or {},
         )
 
     # ---------- 提交 ----------
@@ -100,6 +100,7 @@ class Gateway:
                 "command_id": command_id, "capability": str(body.get("capability") or ""), "params": params,
                 "type": kind, "batch_id": str(body.get("batch_id") or ""), "step_id": str(body.get("step_id") or ""),
                 "step_index": int(body.get("step_index") or 0), "method": body.get("method") or {},
+                "material": body.get("material") if isinstance(body.get("material"), dict) else {},
                 "state": "starting", "started_at": time.time(),
             }
             self.ledger.put(record)  # 先落盘：此刻崩掉，重启后也知道这条指令可能已经发给设备

@@ -1,0 +1,2 @@
+# 结果文件接收器读 Neware .nda / .ndax（format: "neware"）时要装的；只收 CSV / 键值表时不用装
+NewareNDA==2026.6.11

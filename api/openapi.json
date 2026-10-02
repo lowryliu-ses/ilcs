@@ -3938,6 +3938,15 @@
             "title": "Key",
             "type": "string"
           },
+          "kind": {
+            "default": "",
+            "enum": [
+              "",
+              "series"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "label": {
             "default": "",
             "title": "Label",

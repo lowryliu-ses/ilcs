@@ -54,6 +54,8 @@ class Job:
     # 步骤引用的设备方法：{id, code, version, name, program}；按 program 选设备上的程序
     method: dict[str, Any] = field(default_factory=dict)
     handle: str = ""
+    # 这一步投的料：{name, unit, param}（物料名、单位、用量取哪个参数）；不投料的步骤为空
+    material: dict[str, Any] = field(default_factory=dict)
 
     @property
     def program(self) -> str:

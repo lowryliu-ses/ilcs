@@ -1,0 +1,21 @@
+{
+  "device_id": "RAMAN-01",
+  "model": "QE Pro",
+  "vendor": "Ocean Insight",
+  "capability": "cap.ely.raman",
+  "spectrometer": {"backend": "cseabreeze", "serial": "QEP01234", "flush_scans": 1},
+  "laser": {"kind": "external", "wavelength_nm": 785},
+  "integration_ms": 1000,
+  "max_integration_ms": 10000,
+  "max_repeats": 5,
+  "shift_range_cm1": [150, 2000],
+  "correct_dark_counts": false,
+  "correct_nonlinearity": false,
+  "programs": {
+    "RAMAN": {"name": "拉曼谱（785 nm，积分 1 s）", "integration_ms": 1000},
+    "RAMAN-LONG": {"name": "拉曼谱（弱信号，积分 5 s）", "integration_ms": 5000},
+    "RAMAN-FAST": {"name": "快速拉曼谱（积分 0.2 s，接入验收用）", "integration_ms": 200}
+  },
+  "default_program": "RAMAN-FAST",
+  "max_points": 20000
+}

@@ -4,9 +4,12 @@
 每个文件的流程：
 1. 等文件写完：大小与修改时间连续 `settle_sec` 秒不变才处理（软件还在写的文件不碰）；
 2. 按 `profiles` 的文件名正则匹配，命名组 `task_id`（必填，检测任务编号）与 `sample_id`（可选）；
-3. 按格式解析：`csv`（表头 + 取第一行 / 最后一行）或 `key_value`（每行「键,值」）；列名按 `metrics`
+3. 按格式解析：`csv`（表头 + 取第一行 / 最后一行）、`key_value`（每行「键,值」）或 `neware`（Neware 充放电柜的
+   .nda / .ndax，经 NewareNDA 读出逐点记录，按 `cycling.py` 算每圈容量与整个测试的汇总）；列名按 `metrics`
    映射到指标版本；空值、`NA` 这类写成「无法测得」并带原因，不当 0。曲线型指标（充放电曲线、谱图）取整列：
    `"series": {"x": 列, "y": 列, "trace": 分组列}`，按分组列（如圈数）分成几条；不是数的行（单位行、表尾说明）跳过；
+   `neware` 的曲线缺省取每圈一行的表（`"table": "cycles"`，如放电容量随圈数），`"table": "records"` 取逐点记录
+   （可用 `"cycles": [1, 50]`、`"status": ["CC_DChg"]` 只取一部分），点太多时按 `max_points` 均匀抽稀；
 4. 上传原始文件（`POST /api/integrations/files`）拿到 `raw_file_id`；
 5. 回传结果（`POST /api/integrations/results`）：`event_id` = 规则名 + 文件内容 SHA-256。本地台账（`state_file`）
    按内容摘要记下已上传的原始文件编号与采集时间：同一内容再导出一次，回传内容逐字相同，ILCS 只回放原结果，
@@ -41,8 +44,22 @@ import urllib.error
 import urllib.request
 import uuid
 
+try:
+    from . import cycling
+except ImportError:  # 直接当脚本跑（python devices/connectors/result_files/receiver.py）
+    import cycling  # type: ignore[no-redef]
+
 log = logging.getLogger("ilcs.result-files")
 NOT_MEASURED = {"", "na", "n/a", "nan", "-", "--", "null", "none"}
+FORMATS = {"csv", "key_value", "neware"}
+CURVE_POINTS = 20000  # ILCS 每条曲线的缺省上限（api/app/domain/series.py MAX_POINTS）
+
+
+def _float(value) -> float:
+    """曲线里的一个数。空值、不是数的格子抛 ValueError（这一行跳过）；数值 0 照收。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("空值")
+    return float(value)
 
 
 class Rejected(Exception):
@@ -108,8 +125,14 @@ class Profile:
         if "task_id" not in self.pattern.groupindex:
             raise ValueError(f"规则 {self.name} 的文件名正则必须带命名组 (?P<task_id>...)")
         self.format = str(raw.get("format") or "csv")
-        if self.format not in {"csv", "key_value"}:
-            raise ValueError(f"规则 {self.name} 的 format 只能是 csv 或 key_value")
+        if self.format not in FORMATS:
+            raise ValueError(f"规则 {self.name} 的 format 只能是 csv、key_value 或 neware")
+        mass = raw.get("active_mass_mg")
+        # 活性物质质量（mg）：算比容量用；不写就用 .nda 文件里登记的（有的话）
+        self.active_mass_mg = float(mass) if isinstance(mass, (int, float)) and mass > 0 else None
+        # 保持率的基准圈（缺省第一个充放电都有的圈）、末圈放电不到前一圈多少算没跑完（见 cycling.summary）
+        self.reference_cycle = raw.get("reference_cycle")
+        self.incomplete_ratio = float(raw.get("incomplete_ratio", 0.5))
         self.delimiter = str(raw.get("delimiter") or ",")
         self.row = str(raw.get("row") or "last")
         if self.row not in {"first", "last"}:
@@ -123,10 +146,13 @@ class Profile:
                 raise ValueError(f"规则 {self.name} 的列 {column} 必须给出 metric_version_id")
             curve = target.get("series")
             if curve is not None:
-                if self.format != "csv":
-                    raise ValueError(f"规则 {self.name} 的 {column} 是曲线：只有 csv 格式能取整列")
+                if self.format not in {"csv", "neware"}:
+                    raise ValueError(f"规则 {self.name} 的 {column} 是曲线：只有 csv 与 neware 格式能取整列")
                 if not isinstance(curve, dict) or not curve.get("x") or not curve.get("y"):
                     raise ValueError(f"规则 {self.name} 的曲线 {column} 要写 {{\"x\": 列名, \"y\": 列名}}")
+                if curve.get("table", "cycles") not in {"cycles", "records"} or (
+                        self.format != "neware" and "table" in curve):
+                    raise ValueError(f"规则 {self.name} 的曲线 {column}：table 只有 neware 格式能写，取 cycles 或 records")
         self.instrument_serial = str(raw.get("instrument_serial") or "")
         self.station_id = str(raw.get("station_id") or "")
         self.parser_version = str(raw.get("parser_version") or f"{self.name}-1")
@@ -137,6 +163,23 @@ class Profile:
         """CSV 的全部数据行（曲线取整列用）。"""
         return [{str(key).strip(): (value or "").strip() for key, value in row.items() if key is not None}
                 for row in csv.DictReader(io.StringIO(text), delimiter=self.delimiter)]
+
+    def neware(self, path: Path) -> tuple[dict, list[dict], list[dict]]:
+        """Neware .nda / .ndax → (汇总值, 每圈一行, 逐点记录)。汇总值与每圈的表写成文字，与 CSV 走同一套映射。"""
+        try:
+            records, mass = cycling.read_neware(str(path))
+        except RuntimeError as exc:
+            raise Retry(str(exc)) from exc  # 没装 NewareNDA：配置问题，文件留着等装好
+        except Exception as exc:  # noqa: BLE001  NewareNDA 读不了的文件：文件本身不合格
+            raise Rejected(f"读不了这个 Neware 数据文件：{exc}") from exc
+        if not records:
+            raise Rejected("Neware 数据文件里没有数据点")
+        rows = cycling.cycles(records)
+        summary = cycling.summary(rows, active_mass_mg=self.active_mass_mg or mass, reference_cycle=self.reference_cycle,
+                                  incomplete_ratio=self.incomplete_ratio)
+        text = {key: "" if value is None else f"{value:.10g}" for key, value in summary.items()}
+        table = [{key: "" if value is None else str(value) for key, value in row.items()} for row in rows]
+        return text, table, records
 
     def rows(self, text: str) -> dict:
         if self.format == "key_value":
@@ -167,13 +210,19 @@ class Profile:
         skipped = 0
         for row in table:
             try:
-                x, y = float(row.get(spec["x"]) or "") * x_factor, float(row.get(spec["y"]) or "") * y_factor
-            except ValueError:
+                x, y = _float(row.get(spec["x"])) * x_factor, _float(row.get(spec["y"])) * y_factor
+            except (TypeError, ValueError):
                 skipped += 1
                 continue
             xs, ys = traces.setdefault(str(row.get(spec["trace"], "")) if spec.get("trace") else "", ([], []))
             xs.append(x)
             ys.append(y)
+        limit = int(spec.get("max_points") or CURVE_POINTS)
+        for name, (xs, ys) in list(traces.items()):
+            if len(xs) > limit:
+                # 均匀抽稀到上限（保留首尾）：ILCS 拒收点数超限的曲线
+                picks = sorted({round(i * (len(xs) - 1) / (limit - 1)) for i in range(limit)})
+                traces[name] = ([xs[i] for i in picks], [ys[i] for i in picks])
         entry = {"metric_version_id": target["metric_version_id"], "unit": str(target.get("unit") or "")}
         if not traces:
             entry["not_measured_reason"] = f"导出文件的 {spec['x']} / {spec['y']} 两列没有成对的数值"
@@ -186,11 +235,16 @@ class Profile:
             log.info("曲线 %s 跳过了 %d 行不是数的行（单位行、说明行）", label, skipped)
         return entry
 
-    def metrics_from(self, values: dict, table: list[dict] | None = None) -> list[dict]:
+    def metrics_from(self, values: dict, table: list[dict] | None = None,
+                     records: list[dict] | None = None) -> list[dict]:
         metrics = []
         for column, target in self.metrics.items():
-            if target.get("series") is not None:
-                metrics.append(self.curve(column, target, table or []))
+            spec = target.get("series")
+            if spec is not None:
+                rows = table or []
+                if spec.get("table") == "records":
+                    rows = cycling.select(records or [], cycles_wanted=spec.get("cycles"), statuses=spec.get("status"))
+                metrics.append(self.curve(column, target, rows))
                 continue
             if column not in values:
                 raise Rejected(f"文件里没有列 {column!r}（规则 {self.name}）")
@@ -277,12 +331,15 @@ class Receiver:
     def _process(self, path: Path, profile: Profile) -> None:
         match = profile.pattern.fullmatch(path.name)
         content = path.read_bytes()
-        try:
-            text = content.decode(profile.encoding)
-        except UnicodeDecodeError as exc:
-            raise Rejected(f"文件不是 {profile.encoding} 编码：{exc}") from exc
-        table = profile.table(text) if profile.format == "csv" else []
-        metrics = profile.metrics_from(profile.rows(text), table)
+        if profile.format == "neware":
+            metrics = profile.metrics_from(*profile.neware(path))
+        else:
+            try:
+                text = content.decode(profile.encoding)
+            except UnicodeDecodeError as exc:
+                raise Rejected(f"文件不是 {profile.encoding} 编码：{exc}") from exc
+            table = profile.table(text) if profile.format == "csv" else []
+            metrics = profile.metrics_from(profile.rows(text), table)
         digest = hashlib.sha256(content).hexdigest()
         key = f"{profile.name}:{digest}"
         # 同一内容第二次出现：沿用第一次的采集时间与原始文件编号，回传内容逐字相同
