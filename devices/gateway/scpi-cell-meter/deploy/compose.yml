@@ -1,0 +1,65 @@
+# 在 ILCS 那台机器上起三台模拟的电芯检测仪表（Keithley 2450、Keithley 2400、Hioki BT3562），接进 ILCS 的后端网络，
+# 给联调与模拟实验用。先起 ILCS（deploy/docker-compose.yml，项目名 ilcs，后端网络 ilcs_backend），再在仓库根目录：
+#
+#   docker compose -f devices/gateway/scpi-cell-meter/deploy/compose.yml up -d --build
+#
+# 每台一个容器：仪表口（2450 走 5025；2400 真机是串口，这里直接开 TCP 4001，ILCS 当 socket:// 串口连；Hioki 真机是 23，
+# 容器里不是 root，改用 2323）+ 统一控制口 9900（只在后端网络可见；令牌首次启动写到仓库的 secrets/simctl/）。
+#
+# ILCS 侧：
+#   - deploy/.env 的 ILCS_ADAPTER_ALLOWED_HOSTS 加上 k2450-sim、k2400-sim、bt3562-sim，重建 api 与 executor；
+#   - 工位套用接入模板 TPL-SCPI-K2450-OCV / TPL-SCPI-K2400-OCV / TPL-SCPI-BT3562-ACIR，连接参数例如
+#       transport          = {"kind": "tcp", "host": "k2450-sim", "port": 5025}
+#                            （2400：{"kind": "serial", "port": "socket://k2400-sim:4001", "baudrate": 9600}）
+#       expected_device_id = ILCS-SIMULATOR-2450-01（2400：ILCS-SIMULATOR-2400-01；Hioki：ILCS-SIMULATOR）
+#       simulator_control  = {"url": "http://k2450-sim:9900", "token_ref": "file:///run/secrets/ilcs/simctl/SIM-K2450-01.token"}
+#   scripts/load-device-simulators.py register 按这些登记。
+name: ilcs-scpi-cell-meter-sim
+
+x-meter: &meter
+  build:
+    context: ../../../..
+    dockerfile: devices/gateway/scpi-cell-meter/deploy/Dockerfile
+  image: ilcs-scpi-cell-meter:latest
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  volumes:
+    - ../../../../secrets/simctl:/run/secrets/ilcs/simctl
+  networks:
+    - ilcs_backend
+
+services:
+  k2450-sim:
+    <<: *meter
+    container_name: ilcs-k2450-sim
+    hostname: k2450-sim
+    environment:
+      SIM_MODEL: keithley-2450
+      SIM_PORT: "5025"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-K2450-01.token
+
+  k2400-sim:
+    <<: *meter
+    container_name: ilcs-k2400-sim
+    hostname: k2400-sim
+    environment:
+      SIM_MODEL: keithley-2400
+      SIM_PORT: "4001"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-K2400-01.token
+
+  bt3562-sim:
+    <<: *meter
+    container_name: ilcs-bt3562-sim
+    hostname: bt3562-sim
+    environment:
+      SIM_MODEL: hioki-bt3562
+      SIM_PORT: "2323"
+      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-BT3562-01.token
+
+networks:
+  ilcs_backend:
+    external: true
