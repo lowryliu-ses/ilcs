@@ -40,6 +40,11 @@ devices/gateway/<厂家-型号>/
 
 Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices/connectors/result_files`，`format: "neware"`）。
 
+在 ILCS 那台机器上模拟联调：每个模块的 `deploy/compose.yml` 起一个模拟网关容器（接 ILCS 的后端网络 `ilcs_backend`），
+`deploy/.env` 的 `ILCS_ADAPTER_ALLOWED_HOSTS` 加上它的主机名；然后 `scripts/load-neware-cycler.py register`（Neware 柜）、
+`scripts/load-device-simulators.py register [--acceptance]`（天平称量加料站、IKA 加热搅拌、拉曼光谱仪）登记工位、
+套用接入模板、连上模拟网关并验收。
+
 ### 两种模块
 
 | 设备给的接口 | 模块里有什么 | ILCS 侧驱动 |
