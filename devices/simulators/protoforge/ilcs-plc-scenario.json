@@ -1,0 +1,162 @@
+{
+  "id": "ilcs-plc-modbus",
+  "name": "ILCS 联调：Modbus PLC（启动握手）",
+  "description": "ILCS 写设定值 sp、置线圈 cmd_start → 状态字 state = 1（运行）→ 5 s 后写实测值 pv、state = 3（完成）；置线圈 cmd_ack → state = 0（空闲）。从站 2，不影响已有的从站 1。给 ILCS 的 modbus_map_v1 联调用。",
+  "devices": [
+    {
+      "id": "ilcs-plc-modbus",
+      "name": "ILCS 联调 PLC（Modbus TCP，从站 2）",
+      "protocol": "modbus_tcp",
+      "protocol_config": {
+        "slave_id": 2
+      },
+      "points": [
+        {
+          "name": "state",
+          "address": "40001",
+          "data_type": "uint16",
+          "unit": "",
+          "description": "状态字：0 空闲 1 运行 3 完成 4 故障",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": 0
+        },
+        {
+          "name": "sp",
+          "address": "40003",
+          "data_type": "float32",
+          "unit": "℃",
+          "description": "设定温度（ILCS 写）",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": 0.0
+        },
+        {
+          "name": "pv",
+          "address": "40005",
+          "data_type": "float32",
+          "unit": "℃",
+          "description": "实测温度（完成时更新）",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": 25.0
+        },
+        {
+          "name": "error",
+          "address": "40007",
+          "data_type": "uint16",
+          "unit": "",
+          "description": "故障码",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": 0
+        },
+        {
+          "name": "serial",
+          "address": "40011",
+          "data_type": "string",
+          "unit": "",
+          "description": "序列号",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": "PF-MB-PLC-01"
+        },
+        {
+          "name": "model",
+          "address": "40051",
+          "data_type": "string",
+          "unit": "",
+          "description": "型号",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": "ProtoForge Modbus PLC"
+        },
+        {
+          "name": "cmd_start",
+          "address": "00001",
+          "data_type": "bool",
+          "unit": "",
+          "description": "启动（ILCS 置 1，PLC 接收后清 0）",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": false
+        },
+        {
+          "name": "cmd_ack",
+          "address": "00002",
+          "data_type": "bool",
+          "unit": "",
+          "description": "复位（完成 / 故障 → 空闲）",
+          "access": "rw",
+          "generator_type": "fixed",
+          "fixed_value": false
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "mb-start",
+      "name": "ilcs-plc-modbus：收到启动 → 运行 5 s → 完成",
+      "rule_type": "collaboration",
+      "source_device_id": "ilcs-plc-modbus",
+      "source_point": "cmd_start",
+      "condition": {
+        "operator": "==",
+        "value": true
+      },
+      "actions": [
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "cmd_start",
+          "action_type": "set",
+          "value": false
+        },
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "state",
+          "action_type": "set",
+          "value": 1
+        },
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "pv",
+          "action_type": "set",
+          "value": 61.5,
+          "delay": 5
+        },
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "state",
+          "action_type": "set",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "id": "mb-ack",
+      "name": "ilcs-plc-modbus：复位 → 空闲",
+      "rule_type": "collaboration",
+      "source_device_id": "ilcs-plc-modbus",
+      "source_point": "cmd_ack",
+      "condition": {
+        "operator": "==",
+        "value": true
+      },
+      "actions": [
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "cmd_ack",
+          "action_type": "set",
+          "value": false
+        },
+        {
+          "target_device_id": "ilcs-plc-modbus",
+          "target_point": "state",
+          "action_type": "set",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}

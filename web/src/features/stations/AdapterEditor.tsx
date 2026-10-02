@@ -23,6 +23,7 @@ import type {
 } from '../../shared/types';
 import { Field, Modal, useToast } from '../../shared/ui';
 import { AcceptancePanel } from './AcceptancePanel';
+import { PointsPanel } from './PointsPanel';
 import { ConfigEditor, ConfigForm, useFormContext } from './ConfigForm';
 
 type Issues = { message: string; problems: string[]; warnings: string[]; blocked: string[] };
@@ -383,6 +384,7 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
       {testResult ? <div className="note">健康检查结果：<span className="mono">{JSON.stringify(testResult.health)}</span></div> : null}
       {test.error ? <div className="note bad">{test.error.message}</div> : null}
       {detail.data ? <AcceptancePanel station={station} adapter={detail.data} /> : null}
+      {detail.data && detail.data.kind === 'real' && detail.data.points ? <PointsPanel station={station} adapter={detail.data} /> : null}
     </Modal>
   );
 }

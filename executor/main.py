@@ -33,6 +33,7 @@ from app.core.db import ADVISORY_NAMESPACE, SessionLocal, engine  # noqa: E402
 from app.core.events import QUEUE_CHANNEL  # noqa: E402
 from app.core.schema import SchemaMismatch, verify  # noqa: E402
 from app.services.acceptance_service import AcceptanceRunner  # noqa: E402
+from app.services.point_service import PointWriteRunner  # noqa: E402
 from app.services.execution_service import ExecutorLoop  # noqa: E402
 from app.services.executor_runtime import ConcurrentExecutor  # noqa: E402
 
@@ -194,8 +195,12 @@ def main() -> int:
     with SessionLocal() as db:
         # 上一个执行器没做完的接入验收：判出错，写明要现场核对（单活锁保证此刻没有别人在跑它们）
         interrupted = AcceptanceRunner(db).interrupt_orphans()
+        # 上一个执行器写到一半的手动写点：结论只能是未知，要人核对设备上的值
+        unsettled = PointWriteRunner(db).interrupt_orphans()
     if interrupted:
         info("上次中断的接入验收已判为出错", count=interrupted)
+    if unsettled:
+        info("上次中断的手动写点已判为结果未知", count=unsettled)
     info(
         "执行器已启动", revision=revision, poll_sec=POLL_SEC, simulate_heartbeat=SIMULATE_HEARTBEAT,
         pid=os.getpid(), mode=MODE, workers=settings.executor_workers,

@@ -14,6 +14,11 @@
   没拿到确认 → 台账记「未确认」，回执是结果未知，之后见到设备在运行才按运行处理，质量标 uncertain。
 
 设备没有时钟时，回执里的 device_ts 用驱动观测到状态的时间；遥测的设定值取指令参数里的同名数值。
+
+**点位读写和任务执行是两层**：点表（`points`）登记了点就能按点读值；点上写了 `writable: true`（可带
+`min` / `max`）的还能由人手动写一个值（`write_point_manually`：先读、再写、再回读）。只读写点位的设备不配能力映射
+与状态，不参与自动流程；要参与自动流程（下发指令、确认做没做完），才要求能力映射与状态点。任务用的控制信号
+（启动、状态、复位、指令号……）不能声明成可写：要动设备请走指令，免得绕过作业台账。
 """
 from __future__ import annotations
 
@@ -41,6 +46,8 @@ NORMALIZED_STATES = {"idle", "accepted", "running", "held", "done", "failed"}
 TERMINAL = {"done", "failed", "aborted", "rejected"}
 KEEP_JOBS = 200
 BUILTINS = {"command_id", "batch_id", "step_id", "capability", "program", "type"}
+# 点上可以写的说明字段（和协议无关）：显示名、单位、可不可以手动写、手动写的范围
+POINT_META = ("label", "unit", "writable", "min", "max")
 _FORMATTER = string.Formatter()
 _FIELD = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 
@@ -110,6 +117,60 @@ def template_fields(template) -> set[str]:
     if isinstance(template, dict):
         return set().union(*(template_fields(item) for item in template.values())) if template else set()
     return set()
+
+
+def point_meta(spec) -> dict:
+    """点的说明字段（点写成字符串简写时没有）。"""
+    return {key: spec.get(key) for key in POINT_META if key in spec} if isinstance(spec, dict) else {}
+
+
+def check_point_meta(name: str, spec, control: set[str]) -> None:
+    """配置检查：说明字段的类型、范围；任务用的控制信号不能声明成可写。"""
+    meta = point_meta(spec)
+    for key in ("label", "unit"):
+        if key in meta and not isinstance(meta[key], str):
+            raise AdapterError(f"点 {name} 的 {key} 必须是文字")
+    if "writable" in meta and not isinstance(meta["writable"], bool):
+        raise AdapterError(f"点 {name} 的 writable 只能是 true / false")
+    for key in ("min", "max"):
+        value = meta.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value)):
+            raise AdapterError(f"点 {name} 的 {key} 必须是数")
+    if meta.get("min") is not None and meta.get("max") is not None and meta["min"] > meta["max"]:
+        raise AdapterError(f"点 {name} 的 min 大于 max")
+    if meta.get("writable") and name in control:
+        raise AdapterError(f"点 {name} 是任务用的控制信号（启动、状态、复位、指令号这类），不能声明成可手动写："
+                           "要让设备动作请走指令")
+
+
+def plain(value):
+    """读回来的值转成能放进 JSON 的样子：数、布尔、文字原样；其他（时间、字节、协议对象）转文字。"""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def same_value(written, read, tolerance: float = 0.0) -> bool:
+    """回读值和写入值是不是一回事：数按容差比（单精度、比例换算会有尾差），其余按文字比。"""
+    if isinstance(written, bool) or isinstance(read, bool):
+        return _truthy(written) == _truthy(read)
+    if isinstance(written, (int, float)) and isinstance(read, (int, float)):
+        limit = max(tolerance, 1e-6 * max(1.0, abs(float(written))))
+        return abs(float(written) - float(read)) <= limit
+    return str(written) == str(read)
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"true", "1", "on"}
 
 
 def flatten(params: dict, prefix: str = "") -> dict:
@@ -241,6 +302,9 @@ class MappedJobAdapter:
         specs = self.config.get("capabilities") or {}
         if not isinstance(specs, dict):
             raise AdapterError("capabilities 必须是 {能力: 映射}")
+        if not specs:
+            raise AdapterError(f"这台设备只配了点表（只读写点位），不参与自动流程：要下发 {capability}，先在适配器配置里"
+                               "配能力映射与状态；设备没有动作")
         spec = specs.get(capability)
         if not isinstance(spec, dict):
             raise AdapterError(f"能力 {capability} 没有在适配器配置 capabilities 里映射到设备命令，设备没有动作")
@@ -314,6 +378,107 @@ class MappedJobAdapter:
             "interlock": bool(identity.get("interlock")),
             "accepts_commands": bool(identity.get("accepts_commands", True)),
         }
+
+    # ---------- 点位读写（不参与自动流程也能用）----------
+
+    @property
+    def tasks(self) -> bool:
+        """配了能力映射：这台设备参与自动流程（接指令）。没配就是只读写点位。"""
+        return bool(self.config.get("capabilities"))
+
+    def point_specs(self) -> dict:
+        """{点名: 点的定义}；没有点表返回 {}。子类给。"""
+        return {}
+
+    def control_points(self) -> set[str]:
+        """任务用的控制信号点（启动、状态、复位、指令号……）：不能手动写。子类给。"""
+        return set()
+
+    def read_point_value(self, name: str):
+        """读一个点的工程值。读不到抛 AdapterUnreachable / AdapterIndeterminate。子类给。"""
+        raise AdapterError(f"{self.PROTOCOL} 没有点表")
+
+    def write_point_value(self, name: str, value) -> None:
+        """写一个点。设备明确不收抛 AdapterError；没拿到结论抛 AdapterUnreachable / AdapterIndeterminate。子类给。"""
+        raise AdapterError(f"{self.PROTOCOL} 没有点表")
+
+    def write_tolerance(self, name: str) -> float:
+        """回读比较的容差（比例换算、整数寄存器会有尾差）。"""
+        return 0.0
+
+    def point_catalog(self) -> list[dict]:
+        control = self.control_points()
+        rows = []
+        for name, spec in self.point_specs().items():
+            meta = point_meta(spec)
+            rows.append({
+                "name": name, "label": str(meta.get("label") or ""), "unit": str(meta.get("unit") or ""),
+                "writable": bool(meta.get("writable")), "min": meta.get("min"), "max": meta.get("max"),
+                "control": name in control,
+            })
+        return rows
+
+    def read_points(self, names: list[str] | None = None) -> list[dict]:
+        """按点表逐个读；某个点读不到只在那一行写明，不影响别的点。"""
+        rows = []
+        for row in self.point_catalog():
+            if names and row["name"] not in names:
+                continue
+            try:
+                with self._lock:
+                    value = self.read_point_value(row["name"])
+                rows.append({**row, "value": plain(value), "error": ""})
+            except (AdapterError, AdapterUnreachable, AdapterIndeterminate) as exc:
+                rows.append({**row, "value": None, "error": str(exc)})
+        return rows
+
+    def check_manual_write(self, name: str, value) -> None:
+        """手动写之前的核对（不碰设备）：点登记了、声明了可写、不是控制信号、值是单个值、在范围里。"""
+        specs = self.point_specs()
+        if name not in specs:
+            raise AdapterError(f"点 {name} 没有在点表里登记")
+        meta = point_meta(specs[name])
+        if not meta.get("writable"):
+            raise AdapterError(f"点 {name} 没有声明可写（writable: true），不能手动写")
+        if name in self.control_points():
+            raise AdapterError(f"点 {name} 是任务用的控制信号，不能手动写：要让设备动作请走指令")
+        if value is None or isinstance(value, (dict, list)):
+            raise AdapterError("一次只能写一个值（数、布尔或文字）")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise AdapterError("值必须是有限的数")
+        low, high = meta.get("min"), meta.get("max")
+        if low is not None or high is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise AdapterError(f"点 {name} 限定了范围（{low if low is not None else '—'}–{high if high is not None else '—'}），要写一个数")
+            if (low is not None and value < low) or (high is not None and value > high):
+                raise AdapterError(f"{value:g} 超出点 {name} 允许的范围 {low if low is not None else '—'}–"
+                                   f"{high if high is not None else '—'}")
+
+    def write_point_manually(self, name: str, value) -> dict:
+        """先读当前值、再写、再回读。
+
+        - 写之前出的错（核对不过、读不到当前值、设备明确不收）：设备没动 → AdapterError；
+        - 写出去了却没拿到结论、写完读不回来：结果未知 → AdapterIndeterminate，要人核对设备上的值。
+        返回 {before, after, matches}：`matches` 为假说明设备收下了、但回读值和写入值不同（被设备限幅、换算）。
+        """
+        self.check_manual_write(name, value)
+        with self._lock:
+            try:
+                before = self.read_point_value(name)
+            except (AdapterError, AdapterUnreachable, AdapterIndeterminate) as exc:
+                raise AdapterError(f"读不到 {name} 的当前值（{exc}），没有写入") from exc
+            try:
+                self.write_point_value(name, value)
+            except AdapterError:
+                raise
+            except (AdapterUnreachable, AdapterIndeterminate) as exc:
+                raise AdapterIndeterminate(f"写 {name} = {value!r} 没有结论（{exc}）：设备上的值可能已经变了，请核对") from exc
+            try:
+                after = self.read_point_value(name)
+            except (AdapterError, AdapterUnreachable, AdapterIndeterminate) as exc:
+                raise AdapterIndeterminate(f"写 {name} = {value!r} 之后读不回来（{exc}）：设备上的值请现场核对") from exc
+        return {"before": plain(before), "after": plain(after),
+                "matches": same_value(value, after, self.write_tolerance(name))}
 
     # ---------- 参数与模板取值 ----------
 

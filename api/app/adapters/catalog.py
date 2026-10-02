@@ -321,10 +321,20 @@ def _gate(name: str, label: str) -> ConfigField:
     ))
 
 
+# 点位读写：点上的说明字段，和协议无关。可写的点由人手动写（签名、留痕、执行器执行）
+POINT_META = (
+    ConfigField("label", "显示名", "string"),
+    ConfigField("unit", "单位", "string"),
+    ConfigField("writable", "可手动写", "boolean",
+                hint="缺省不可写；任务用的控制信号（启动、状态、复位、指令号）不能声明可写"),
+    ConfigField("min", "手动写下限", "number"),
+    ConfigField("max", "手动写上限", "number"),
+)
 OPCUA_POINT = _record("", "节点", (
     ConfigField("node", "节点 ID", "string", required=True,
                 hint='ns=3;s="DB_ILCS"."State"，或带命名空间 URI 的 nsu=urn:…;s=…（服务器重启后序号会变，URI 不变）'),
     ConfigField("scale", "比例", "number", hint="读数 × 比例 = 工程值，写入时反算"),
+    *POINT_META,
 ), shorthand="node")
 MODBUS_POINT = _record("", "寄存器", (
     ConfigField("table", "表", "string", options=("holding", "input", "coil", "discrete"),
@@ -336,6 +346,7 @@ MODBUS_POINT = _record("", "寄存器", (
     ConfigField("word_order", "字序", "string", options=("big", "little"), hint="32 位数值缺省高字在前"),
     ConfigField("bit", "位", "integer", hint="从保持寄存器取某一位（只读）"),
     ConfigField("length", "字符数", "integer", hint="ascii 必填，≤240"),
+    *POINT_META,
 ))
 
 
@@ -370,7 +381,8 @@ def _point_map(kind: str) -> tuple[ConfigField, ...]:
     ))
     return (
         _table("points", "点表", OPCUA_POINT if kind == "opcua" else MODBUS_POINT, "点名", required=True,
-               hint="点名 → 节点 ID" if kind == "opcua" else "点名 → 寄存器定义"),
+               hint=("点名 → 节点 ID" if kind == "opcua" else "点名 → 寄存器定义")
+               + "；只登记点表就能按点读值，标了可写的点还能手动写"),
         _table("identity", "身份点", _point("", "点"), "身份字段", hint="{device_id, model, vendor, firmware} → 点名",
                key_options=("device_id", "serial", "model", "vendor", "firmware")),
         _gate("ready", "就绪条件"), _gate("interlock", "联锁条件"),
@@ -382,12 +394,12 @@ def _point_map(kind: str) -> tuple[ConfigField, ...]:
             _point("write", "写指令号的点"),
             _point("echo", "回显指令号的点", hint="PLC 回显时，启动未确认的作业可以按它找回"),
         )),
-        _table("capabilities", "能力映射", capability, "能力", key_ref="capabilities", scope="capability", required=True,
-               hint="每项能力的常量、程序号、设定值、启动、实测"),
+        _table("capabilities", "能力映射", capability, "能力", key_ref="capabilities", scope="capability",
+               hint="每项能力的常量、程序号、设定值、启动、实测；只读写点位（不参与自动流程）的设备不配"),
         _record("status", "状态点与状态映射", (
             _point("point", "状态点", required=True),
             _table("states", "状态映射", _value("状态", "string", options=STATES), "状态值", required=True),
-        ), required=True),
+        ), hint="配了能力映射就必须配：自动流程要确认作业做没做完"),
         _record("error", "故障点与故障码", (
             _point("point", "故障点", required=True),
             _table("codes", "故障码说明", _value("说明", "string"), "故障码"),
@@ -443,16 +455,23 @@ LINE = (
     _query("interlock", "联锁命令", "value", LINE_OK),
     ConfigField("error_pattern", "错误回复（正则）", "string"),
     _table("error_codes", "故障码说明", _value("说明", "string"), "故障码"),
+    _table("points", "点表", _record("", "点", (
+        ConfigField("send", "查询命令", "string", required=True),
+        ConfigField("pattern", "回复格式（正则）", "string", required=True, hint="要带命名组 (?P<value>…)"),
+        *POINT_META,
+        _list("write", "写命令", LINE_STEP, single=True, hint="可写的点必填；{value} 是要写的值，如 SP {value:.1f}"),
+    )), "点名", hint="只读写点位：每个点一条查询命令；只配点表的设备不参与自动流程"),
     _table("capabilities", "能力命令", _record("", "能力", (
         _list("start", "启动命令", LINE_STEP, required=True, hint="依次发送；动作命令之前的命令被拒，设备没有动作"),
         _record("result", "即时结果", (
             ConfigField("pattern", "结果格式（正则）", "string", required=True, hint="命名组就是结果字段"),
         ), hint="读码器这类即时动作：动作命令的回复就是结果，作业当场完成"),
         *CAPABILITY_EXTRAS,
-    )), "能力", key_ref="capabilities", scope="capability", required=True, hint="每项能力的启动命令列表"),
+    )), "能力", key_ref="capabilities", scope="capability",
+           hint="每项能力的启动命令列表；只读写点位的设备不配"),
     _query("status", "状态命令与映射", "state",
            _table("states", "状态映射", _value("状态", "string", options=STATES), "设备状态值", required=True),
-           hint="可选命名组 detail：故障时按故障码说明翻译", required=True),
+           hint="可选命名组 detail：故障时按故障码说明翻译；配了能力命令就必须配"),
     _list("actuals", "实测值命令", _query("", "实测查询"), single=True, hint="做完读回实测值：每个命名组是一个实测参数"),
     _list("hold", "保持命令", LINE_STEP), _list("resume", "恢复命令", LINE_STEP),
     _list("abort", "终止命令", LINE_STEP), _list("acknowledge", "复位命令", LINE_STEP),
@@ -483,19 +502,26 @@ REST = (
              _table("fields", "身份字段", _value("响应字段", "string"), "身份字段",
                     key_options=("device_id", "serial", "model", "vendor", "firmware")),
              _match("interlock", "急停 / 故障判断", "取这些值时算联锁"), _match("ready", "就绪判断", "取这些值时算就绪"),
-             required=True, hint="没有身份请求就无法判断在线"),
+             hint="判断在线用；只读写点位的设备不配时读第一个点"),
     _request("busy", "忙判断", ConfigField("field", "响应字段", "string", required=True),
              _list("values", "取这些值时算忙", _value("值")), hint="不配就不判忙（调度系统自己排队）"),
     _table("capabilities", "能力请求模板", _request("", "能力",
            ConfigField("handle", "任务号字段", "string", hint="响应里设备任务号在哪个字段；不填用指令号"),
            _table("actuals", "实测字段", _value("响应字段", "string"), "参数", key_ref="params", hint="做完按状态请求的响应读"),
-           *CAPABILITY_EXTRAS), "能力", key_ref="capabilities", scope="capability", required=True),
+           *CAPABILITY_EXTRAS), "能力", key_ref="capabilities", scope="capability",
+           hint="只读写点位（不参与自动流程）的设备不配"),
+    _table("points", "点表", _request("", "点",
+           ConfigField("field", "响应字段", "string", hint="值在响应的哪个字段，如 value 或 a.b.0.c；不填就是整个响应"),
+           *POINT_META,
+           _request("write", "写请求", hint="可写的点必填；body 里用 {value}，整串占位时保持数 / 布尔类型",
+                    path_hint="base_url 下以 / 开头的相对路径"),
+           path_hint="读这个点的请求路径"), "点名", hint="只读写点位：每个点一个读请求，可写的点再配写请求"),
     _table("positions", "位置映射", _value("设备站点编号", "string"), "ILCS 位置编号",
            hint="配置后 {from_position} / {to_position} 按它查表，查不到明确拒绝"),
     _request("status", "状态请求", ConfigField("field", "状态字段", "string", required=True),
              _table("states", "状态映射", _value("状态", "string", options=REST_STATES), "状态值", required=True),
              ConfigField("error_field", "故障说明字段", "string"),
-             path_hint="可用 {handle}（设备任务号）、{command_id}", required=True),
+             path_hint="可用 {handle}（设备任务号）、{command_id}", hint="配了能力请求就必须配"),
     _request("lookup", "按指令号找回",
              ConfigField("detail_path", "详情路径", "string", hint="列表项里没有匹配字段时逐个取详情，可用 {id}"),
              ConfigField("id_field", "任务号字段", "string", hint="缺省 id"),
@@ -671,6 +697,17 @@ def nested_warnings(spec: ConfigField, value, path: str) -> list[str]:
     return warnings
 
 
+# 映射驱动：设备自己的点表 / 命令 / 接口，ILCS 映射出两层——点位读写（只配点表）与任务执行（再配能力映射与状态）
+MAPPING_DRIVERS = {"modbus_map_v1", "opcua_map_v1", "rest_map_v1", "line_command_v1"}
+
+
+def has_tasks(driver: str, config: dict | None) -> bool:
+    """这份配置让设备参与自动流程（接指令）吗？映射驱动看有没有能力映射；按 ILCS 契约接的驱动一律参与。"""
+    if driver not in MAPPING_DRIVERS:
+        return True
+    return bool((config or {}).get("capabilities"))
+
+
 def validate_config(driver: str, config: dict, credential_ref: str = "", *, protocol: str = "",
                     template: bool = False) -> ConfigCheck:
     """保存前的配置检查：字段 + 真的构造一次驱动实例（不连设备，不碰任何真实工位的作业台账）。
@@ -709,6 +746,9 @@ def validate_config(driver: str, config: dict, credential_ref: str = "", *, prot
         check.warnings.append(f"按连接示例构造驱动时发现：{found}（套用到工位时按真实连接参数再核一次）")
     elif found:
         check.problems.append(found)
+    if not found and not has_tasks(driver, config):
+        check.warnings.append("只配了点表、没有能力映射：可以读值、手动写标了可写的点，但不参与自动流程"
+                              "（排到这台设备的指令会被拒绝；接入验收只要求只读级）")
     return check
 
 

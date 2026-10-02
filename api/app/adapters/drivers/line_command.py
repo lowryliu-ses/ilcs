@@ -10,6 +10,14 @@
   其中 `motion: true` 的那条（缺省是最后一条）才会让设备动作；
 - `status`：查询命令 + 正则（命名组 `state`，可选 `detail`）+ 状态值到 idle/running/held/done/failed 的映射；
 - `actuals`、`identity`、`ready`、`interlock`、`hold` / `resume` / `abort` / `acknowledge`：同样是命令 + 正则。
+- `points`（只读写点位，可以不配 `capabilities` / `status`）：每个点一条查询命令 + 正则（命名组 `value`），
+  `writable: true` 的点再配写命令 `write`（`{value}` 是要写的值，可带格式，如 `SP {value:.1f}`）：
+
+  ```json
+  "points": {"temp": {"send": "PV?", "pattern": "^(?P<value>[-\\d.]+)$", "unit": "℃"},
+             "setpoint": {"send": "SP?", "pattern": "^(?P<value>[-\\d.]+)$", "writable": true, "min": 0, "max": 200,
+                          "write": [{"send": "SP {value:.1f}", "expect": "^OK"}]}}
+  ```
 
 指令号、去重、重启后按原指令号查询由作业台账（`jobs.py`）负责。错误分类：
 - 动作命令之前的命令被拒、没回复、回复不符合预期：启动命令还没发，设备没动 → `AdapterError`；
@@ -26,7 +34,7 @@ from urllib.parse import urlparse
 
 from ...core.config import settings
 from ..base import AdapterError, AdapterIndeterminate, AdapterUnreachable
-from ..jobs import BUILTINS, MappedJobAdapter, placeholders, render
+from ..jobs import BUILTINS, MappedJobAdapter, check_point_meta, placeholders, render
 
 DRIVER = "line_command_v1"
 MAX_LINE = 64 * 1024
@@ -293,12 +301,28 @@ class LineCommandAdapter(MappedJobAdapter):
         self.identity_queries = [_query(item, "identity") for item in identity]
         self.ready = _query(self.config.get("ready"), "ready", "value")
         self.interlock_check = _query(self.config.get("interlock"), "interlock", "value")
+        raw_points = self.config.get("points") or {}
+        if not isinstance(raw_points, dict):
+            raise AdapterError("points 必须是 {点名: {send, pattern, …}}")
+        self.points = {}
+        for name, spec in raw_points.items():
+            query = _query(spec, f"points.{name}", "value")
+            check_point_meta(name, spec, set())
+            if spec.get("writable") and not spec.get("write"):
+                raise AdapterError(f"points.{name} 声明了可写，要配写命令 write：[{{\"send\": \"SP {{value}}\", \"expect\": \"^OK\"}}]")
+            write = spec.get("write")
+            query["write_steps"] = _steps([write] if isinstance(write, dict) else write, f"points.{name}.write")
+            self.points[name] = query
+        if not self.tasks and not self.points:
+            raise AdapterError("line_command_v1 至少要配点表（points，读写点位）或能力映射（capabilities，参与自动流程）")
+        # 只读写点位的设备可以不配状态；配了能力映射（要参与自动流程）就必须能查到设备状态
         self.status = _query(self.config.get("status"), "status", "state")
-        if self.status is None:
-            raise AdapterError("line_command_v1 必须配置 status：查询命令、正则与状态映射")
-        states = self.status.get("states") or {}
-        if not isinstance(states, dict) or not states or not set(states.values()) <= STATE_NAMES:
-            raise AdapterError("status.states 必须把设备状态值映射到 idle / running / held / done / failed")
+        if self.status is None and self.tasks:
+            raise AdapterError("line_command_v1 配了能力映射就要配 status：查询命令、正则与状态映射")
+        if self.status is not None:
+            states = self.status.get("states") or {}
+            if not isinstance(states, dict) or not states or not set(states.values()) <= STATE_NAMES:
+                raise AdapterError("status.states 必须把设备状态值映射到 idle / running / held / done / failed")
         actuals = self.config.get("actuals") or []
         self.actual_queries = [_query(item, "actuals") for item in (actuals if isinstance(actuals, list) else [actuals])]
         self.controls = {name: _steps(self.config.get(name), name) for name in ("hold", "resume", "abort", "acknowledge")}
@@ -386,8 +410,27 @@ class LineCommandAdapter(MappedJobAdapter):
             if self.interlock_check is not None:
                 value = self._ask(self.interlock_check, session).group("value")
                 identity["interlock"] = value not in (self.interlock_check.get("ok") or [])
+            if not self.identity_queries and self.ready is None and self.interlock_check is None:
+                # 一条命令都不问就报在线是假在线（串口服务器连得上不等于仪表在回话）：问一次状态或第一个点
+                self._ask(self.status or next(iter(self.points.values())), session)
         identity.setdefault("device_id", identity.get("serial", ""))
         return identity
+
+    # ---------- 点位 ----------
+
+    def point_specs(self) -> dict:
+        return dict(self.points)
+
+    def read_point_value(self, name: str):
+        raw = self._ask(self.points[name]).group("value")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return (raw or "").strip()
+
+    def write_point_value(self, name: str, value) -> None:
+        # 控制命令的规则：设备回报错 = 明确没执行（AdapterError）；没回复、回复不符合 expect = 结果未知
+        self._run(self.points[name]["write_steps"], {"value": value})
 
     def precheck(self, spec: dict) -> None:
         if self.ready is None and self.interlock_check is None:

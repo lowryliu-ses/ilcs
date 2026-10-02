@@ -5079,6 +5079,46 @@
         "title": "PlanTemplateIn",
         "type": "object"
       },
+      "PointWriteIn": {
+        "additionalProperties": false,
+        "description": "手动写一个设备点位：只对点表里声明了可写的点。签名针对工位；原因必填，和前后值一起留痕。",
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 2,
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "signature_id",
+          "value",
+          "reason"
+        ],
+        "title": "PointWriteIn",
+        "type": "object"
+      },
       "ProgramColumnIn": {
         "description": "程序表的一列：标识、显示名、类型（数值 / 整数 / 选项）、单位、选项、每行是否必填。",
         "properties": {
@@ -23015,6 +23055,67 @@
         ]
       }
     },
+    "/api/point-writes/{write_id}/cancel": {
+      "post": {
+        "operationId": "cancel_point_write_api_point_writes__write_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "write_id",
+            "required": true,
+            "schema": {
+              "title": "Write Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Cancel Point Write",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
     "/api/recipes": {
       "get": {
         "operationId": "list_recipes_api_recipes_get",
@@ -30149,6 +30250,220 @@
           }
         ],
         "summary": "Describe Adapter",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/stations/{station_id}/adapter/point-writes": {
+      "get": {
+        "operationId": "list_point_writes_api_stations__station_id__adapter_point_writes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Point Writes",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/stations/{station_id}/adapter/points": {
+      "get": {
+        "description": "按点表逐个读设备点位（只读、不动设备）。只读写点位的设备不配能力映射也能用；某个点读不到只在那一行写明。",
+        "operationId": "read_points_api_stations__station_id__adapter_points_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Points",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/stations/{station_id}/adapter/points/{point}/write": {
+      "post": {
+        "description": "申请手动写一个点（点表里声明了可写的点）：签名、写明原因，登记一条排队记录，由执行器先读、写、再回读。",
+        "operationId": "write_point_api_stations__station_id__adapter_points__point__write_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "point",
+            "required": true,
+            "schema": {
+              "title": "Point",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PointWriteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Write Point",
         "tags": [
           "resource"
         ]

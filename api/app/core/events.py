@@ -104,8 +104,8 @@ def _wakes_executor(obj: Any, is_new: bool) -> bool:
         return state == "sent" or (getattr(obj, "type", "") == "transfer" and state == "done")
     if name == "WorkflowEvent":
         return getattr(obj, "state", "") == "pending"
-    if name == "AcceptanceRun":
-        # 新排队的接入验收：执行器立刻领取，不等满轮询周期
+    if name in {"AcceptanceRun", "PointWrite"}:
+        # 新排队的接入验收、手动写点：执行器立刻领取，不等满轮询周期
         return getattr(obj, "state", "") == "queued"
     if name == "WebhookDelivery":
         return is_new

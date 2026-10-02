@@ -1357,6 +1357,15 @@ class AcceptanceWaiveIn(Signed):
     reason: str = Field(min_length=4, max_length=2000)
 
 
+class PointWriteIn(Signed):
+    """手动写一个设备点位：只对点表里声明了可写的点。签名针对工位；原因必填，和前后值一起留痕。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: bool | int | float | str
+    reason: str = Field(min_length=2, max_length=2000)
+
+
 class AcceptanceRequestIn(BaseModel):
     """申请一次设备接入验收。动作级要签名并写明现场批准人（DEC-02）；故障项目只随动作级一起申请。"""
 

@@ -46,6 +46,8 @@ PERMISSIONS: dict[str, list[str]] = {
     "inventory.reverse": ["qa", "admin"],
     # ---------- 资源 ----------
     "station.edit": ["automation_engineer", "admin"],
+    # 手动写设备点位（声明了可写的点，签名、留痕、执行器执行）：会改设备上的值，和维护工位同一批人
+    "device.write": ["automation_engineer", "admin"],
     # 设备接入模板决定设备怎么被驱动：起草归工位维护，发布要另一个人（职责分离）
     "template.release": ["qa", "automation_engineer", "admin"],
     "location.edit": ["automation_engineer", "admin"],
@@ -137,7 +139,8 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
         ("inventory.post", "库存入账"), ("inventory.reverse", "库存冲销"),
     ]),
     ("资源", [
-        ("station.edit", "维护工位与适配器"), ("template.release", "发布与退役设备接入模板"),
+        ("station.edit", "维护工位与适配器"), ("device.write", "手动写设备点位"),
+        ("template.release", "发布与退役设备接入模板"),
         ("location.edit", "维护放置位与板库"),
         ("asset.edit", "维护仪器设备与校准"),
         ("booking.edit", "资源预约"), ("maintenance.edit", "维护工单"), ("environment.record", "录入环境读数"),

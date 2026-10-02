@@ -31,6 +31,7 @@ from ..repositories.resources import AdapterRepository, CapabilityRepository
 from ..repositories.workflow import StepRunRepository
 from ..core.db import SessionLocal
 from .acceptance_service import AcceptanceRunner, dispatch_hold, heartbeat_keeper, requeue_if_needed
+from .point_service import PointWriteRunner
 from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .file_service import FileService
@@ -1086,6 +1087,7 @@ class ExecutorLoop:
         self.db.commit()
         # 串行模式只跑只读级验收：动作级要几分钟，会拖住别的工位的保持与终止（续写存活记录兜底）
         accepted = AcceptanceRunner(self.db).run_due(on_progress=heartbeat_keeper(SessionLocal), physical=False)
+        PointWriteRunner(self.db).run_due()
         self.probe_devices()
         self.db.commit()
         monitor = DeviceMonitor(self.db)
@@ -1161,6 +1163,8 @@ class ExecutorLoop:
         """
         # 接入验收排在最前：配置刚改过的设备先验收，通过了本轮就能照常投递。动作级验收和动作指令守同一道执行门
         accepted = AcceptanceRunner(self.db).run_due(station_id, dispatch_open=dispatch_open)
+        # 人签名申请的手动写点：在投递之前做，执行前再核对工位上没有可能在动作的指令
+        written = PointWriteRunner(self.db).run_due(station_id)
         probed = self.probe_devices(station_id=station_id)
         self.db.commit()
         reconciled = self.reconcile(station_id=station_id)
@@ -1169,7 +1173,7 @@ class ExecutorLoop:
         executed = self.execute_pending(limit, station_id=station_id, dispatch_open=dispatch_open)
         return {
             "probed": probed, "reconciled": reconciled, "polled": polled, "executed": executed,
-            "overdue": overdue["overdue"], "timed_out": overdue["timed_out"], "accepted": accepted,
+            "overdue": overdue["overdue"], "timed_out": overdue["timed_out"], "accepted": accepted, "written": written,
         }
 
     def control_pass(self, *, simulate_heartbeat: bool = True, monitor_assets: bool = False) -> dict:
@@ -1204,7 +1208,8 @@ class ExecutorLoop:
         """本轮要派活的工位：有指令要处理的，加上到了探测周期的主动探测设备。"""
         from ..adapters.registry import probe_interval
 
-        wanted = self.commands.stations_with_open_work() | AcceptanceRunner(self.db).due_stations()
+        wanted = (self.commands.stations_with_open_work() | AcceptanceRunner(self.db).due_stations()
+                  | PointWriteRunner(self.db).due_stations())
         moment = now()
         for record in self.adapters.list():
             interval = probe_interval(record) if record.enabled else None

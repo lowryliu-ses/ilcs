@@ -24,6 +24,10 @@
 }
 ```
 
+**只读写点位**：只登记 `points`（不配 `capabilities` / `status`）也能接——按点读值，点上写了 `writable: true`
+（可带 `min` / `max`、`label`、`unit`）的还能由人手动写一个值。这样的设备不参与自动流程，下发指令一律拒绝；
+配了能力映射就必须配状态点，自动流程的确认要求不放松。
+
 `recipe` 把设备方法的设备端程序（步骤没引用设备方法时用 `default`）换成 PLC 的程序号；`map` 里没有的程序
 直接拒绝。选项型参数同理：`write` 里写成 `{"point": …, "map": {选项: 代码}}`，下发时换成设备代码，没登记的选项拒绝。下发顺序：就绪 / 联锁检查 → 常量 → 程序号 → 设定值 → 指令号（可选）→ 启动信号。启动信号之前的任何写入
 失败都说明设备没动（明确失败）；启动信号本身被拒是明确失败，没拿到结论是结果未知。PLC 回显指令号时
@@ -35,7 +39,7 @@ import math
 import time
 
 from ..base import AdapterError, AdapterIndeterminate, AdapterUnreachable
-from ..jobs import MappedJobAdapter, render_value
+from ..jobs import MappedJobAdapter, check_point_meta, render_value
 
 STATE_NAMES = {"idle", "running", "held", "done", "failed"}
 
@@ -52,12 +56,17 @@ class PointMapAdapter(MappedJobAdapter):
             raise AdapterError(f"{self.DRIVER} 必须在 points 里登记用到的点")
         self.points = points
         self.status = self.config.get("status") or {}
-        if not self.status.get("point"):
-            raise AdapterError("status.point 必填：没有状态点就无法判断作业做没做完")
-        states = self.status.get("states") or {}
-        if not isinstance(states, dict) or not states or not set(states.values()) <= STATE_NAMES:
-            raise AdapterError("status.states 必须把状态值映射到 idle / running / held / done / failed")
-        self.states = {str(key).lower(): value for key, value in states.items()}
+        # 只读写点位的设备可以不配状态；配了能力映射（要参与自动流程）就必须有状态点
+        if self.tasks or self.status:
+            if not self.status.get("point"):
+                raise AdapterError("配了能力映射就要配 status.point：没有状态点就无法判断作业做没做完"
+                                   "（只读写点位的设备不配 capabilities 与 status）")
+            states = self.status.get("states") or {}
+            if not isinstance(states, dict) or not states or not set(states.values()) <= STATE_NAMES:
+                raise AdapterError("status.states 必须把状态值映射到 idle / running / held / done / failed")
+            self.states = {str(key).lower(): value for key, value in states.items()}
+        else:
+            self.states = {}
         self.heartbeat_spec = self.config.get("heartbeat") or {}
         if isinstance(self.heartbeat_spec, str):
             self.heartbeat_spec = {"point": self.heartbeat_spec}
@@ -66,9 +75,12 @@ class PointMapAdapter(MappedJobAdapter):
         for name in self._referenced():
             if name not in self.points:
                 raise AdapterError(f"配置引用了没有登记的点 {name}")
+        control = self.control_points()
+        for name, point in self.points.items():
+            check_point_meta(name, point, control)
 
     def _referenced(self) -> set[str]:
-        names = {self.status["point"]}
+        names = {self.status["point"]} if self.status.get("point") else set()
         for key in ("ready", "interlock", "error", "hold", "resume", "abort", "acknowledge"):
             spec = self.config.get(key) or {}
             if spec.get("point"):
@@ -112,6 +124,36 @@ class PointMapAdapter(MappedJobAdapter):
         if key not in mapping:
             raise AdapterError(f"参数 {parameter} 的值 {value!r} 没有在 write.{parameter}.map 里登记设备代码")
         return mapping[key]
+
+    def control_points(self) -> set[str]:
+        """任务用的控制信号：状态、启动、保持 / 恢复 / 终止 / 复位、指令号、心跳、故障、就绪与联锁。"""
+        names = {self.status["point"]} if self.status.get("point") else set()
+        for key in ("ready", "interlock", "error", "hold", "resume", "abort", "acknowledge"):
+            spec = self.config.get(key) or {}
+            if isinstance(spec, dict) and spec.get("point"):
+                names.add(spec["point"])
+        if self.heartbeat_spec.get("point"):
+            names.add(self.heartbeat_spec["point"])
+        job_id = self.config.get("job_id") or {}
+        names |= {job_id[key] for key in ("write", "echo") if isinstance(job_id, dict) and job_id.get(key)}
+        for spec in (self.config.get("capabilities") or {}).values():
+            start = (spec or {}).get("start") or {} if isinstance(spec, dict) else {}
+            if start.get("point"):
+                names.add(start["point"])
+        return names
+
+    def point_specs(self) -> dict:
+        return dict(self.points)
+
+    def read_point_value(self, name: str):
+        return self._read(name)
+
+    def write_point_value(self, name: str, value) -> None:
+        self._write(name, value)
+
+    def write_tolerance(self, name: str) -> float:
+        scale = abs(self._scale(name))
+        return scale / 2 if scale != 1 else 0.0
 
     # ---------- 子类 I/O ----------
 
@@ -186,6 +228,11 @@ class PointMapAdapter(MappedJobAdapter):
                 self._heartbeat = (beat, moment)
             elif moment - self._heartbeat[1] > self.heartbeat_stale:
                 raise AdapterUnreachable(f"PLC 心跳 {self.heartbeat_spec['point']} {self.heartbeat_stale:g} s 没有变化，程序可能已停止")
+        touched = any(isinstance(point, str) for point in (self.config.get("identity") or {}).values()) or any(
+            (self.config.get(key) or {}).get("point") for key in ("ready", "interlock")) or self.heartbeat_spec.get("point")
+        if not touched:
+            # 没有身份点、就绪 / 联锁、心跳：一个点都不读就报在线是假在线。读一个点证明设备在回话
+            self._read(self.status.get("point") or next(iter(self.points)))
         identity.setdefault("device_id", identity.get("serial", ""))
         return identity
 

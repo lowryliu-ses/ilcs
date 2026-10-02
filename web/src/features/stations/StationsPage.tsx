@@ -394,6 +394,9 @@ function ConnectionsPanel({ stations, onConfigure }: { stations: StationRow[]; o
                   <td className="small">
                     {adapter.protocol}
                     <div className="tiny muted">v{adapter.version} · 配置 v{adapter.config_version}</div>
+                    {adapter.kind === 'real' && adapter.tasks === false ? (
+                      <div className="tiny muted" title="只配了点表：能读点、手动写声明了可写的点，不接指令">只读写点位 · 不参与自动流程</div>
+                    ) : null}
                     {adapter.template ? (
                       <div className={`tiny ${adapter.template.outdated ? 'warn-text' : 'muted'}`}>
                         模板 {adapter.template.code} r{adapter.template.revision}
