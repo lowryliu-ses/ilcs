@@ -92,3 +92,24 @@ def test_driver_self_report_is_stored_and_listed(admin, db):
     assert db.get(Adapter, "ST-05").methods[0]["program"] == "*"
     station = next(row for row in admin.get("/api/stations").json() if row["id"] == "ST-05")
     assert station["adapter"]["catalog"]["methods"]
+
+
+def test_a_curve_output_keeps_its_kind_and_links_a_curve_metric(researcher):
+    """谱图、充放电曲线这类输出：输出类型 series 要随方法存下来，才能关联曲线型指标（不然核对一律说「输出类型要选曲线」）。"""
+    from uuid import uuid4
+
+    metric = researcher.post("/api/metrics", {"code": f"spec_{uuid4().hex[:6]}", "name": "谱图", "value_type": "series",
+                                              "unit": "counts", "rules": {"x_label": "拉曼位移", "x_unit": "cm-1"}})
+    assert metric.status_code == 201, metric.text
+    created = researcher.post("/api/device-methods", {**DEFINITION, "name": f"带谱图 {uuid4().hex[:4]}", "outputs": [
+        {"key": "spectrum", "label": "谱图", "unit": "counts", "kind": "series", "metric_id": metric.json()["id"]},
+    ]})
+    assert created.status_code == 201, created.text
+    method = created.json()
+    assert method["issues"] == [] and method["outputs"][0]["kind"] == "series", method
+    numeric = researcher.post("/api/device-methods", {**DEFINITION, "name": f"错的类型 {uuid4().hex[:4]}", "outputs": [
+        {"key": "spectrum", "unit": "counts", "metric_id": metric.json()["id"]},
+    ]}).json()
+    assert any("输出类型要选曲线" in issue for issue in numeric["issues"]), numeric["issues"]
+    for row in (method, numeric):
+        assert researcher.delete(f"/api/device-methods/{row['id']}").status_code == 200

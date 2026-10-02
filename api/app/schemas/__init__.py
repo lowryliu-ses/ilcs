@@ -270,6 +270,8 @@ class MethodOutputRule(BaseModel):
     required: bool = False
     # 关联的检测指标：设备回报这个值时按样本写成该指标的检测结果（进数据审核）；不填只进检查点
     metric_id: str = ""
+    # 输出类型：空 = 数值；series = 曲线（谱图、充放电曲线），上下限对 y 核对，只能关联曲线型指标
+    kind: Literal["", "series"] = ""
 
 
 class DeviceMethodIn(BaseModel):

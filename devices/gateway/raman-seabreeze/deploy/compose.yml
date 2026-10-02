@@ -1,0 +1,48 @@
+# 在 ILCS 那台机器上起一个模拟的拉曼光谱仪网关（假光谱仪，一瓶碳酸酯 / LiPF6 电解液的合成谱），接进 ILCS 的后端网络，
+# 给联调与模拟实验用。先起 ILCS（deploy/docker-compose.yml，项目名 ilcs，后端网络 ilcs_backend），再在仓库根目录：
+#
+#   docker compose -f devices/gateway/raman-seabreeze/deploy/compose.yml up -d --build
+#
+# ILCS 侧：
+#   - deploy/.env 的 ILCS_ADAPTER_ALLOWED_HOSTS 加上 raman-sim，重建 api 与 executor；
+#   - 工位套用接入模板 TPL-RAMAN-SEABREEZE，连接参数填
+#       base_url           = https://raman-sim:8443/api/v1
+#       ca_file            = /run/secrets/ilcs/gateway/SIM-RAMAN-01.crt
+#       expected_device_id = SIM-RAMAN-01
+#     凭据 credential_ref = file:///run/secrets/ilcs/gateway/SIM-RAMAN-01.token
+#
+# 证书与令牌首次启动写到仓库的 secrets/gateway/（ILCS 容器挂的是同一个目录）；作业台账与采谱结论在 raman-sim-state 卷里。
+name: ilcs-raman-sim
+
+services:
+  raman-sim:
+    build:
+      context: ../../../..
+      dockerfile: devices/gateway/raman-seabreeze/deploy/Dockerfile
+    image: ilcs-raman-seabreeze:latest
+    container_name: ilcs-raman-sim
+    hostname: raman-sim
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      GATEWAY_HOST_NAME: raman-sim
+      # 假光谱仪：采一张谱用的时间 = 积分时间 × 这个系数（1 = 和真机一样，积分 1 s 的谱采 1 s）
+      GATEWAY_TIME_SCALE: "1"
+    volumes:
+      - ../../../../secrets/gateway:/run/secrets/gateway
+      - raman-sim-state:/var/lib/ilcs-gateway
+    networks:
+      - ilcs_backend
+
+networks:
+  ilcs_backend:
+    external: true
+
+volumes:
+  raman-sim-state:

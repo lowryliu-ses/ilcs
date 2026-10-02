@@ -103,6 +103,10 @@ class HttpJsonAdapter:
     @staticmethod
     def _payload(request: CommandRequest) -> dict:
         extra = {"method": request.method} if request.method else {}
+        if request.material:
+            # 这一步投哪种料（名称、单位、用量取哪个参数）：称量加料的网关据此核对装在设备上的料对不对，
+            # 并按实际称量回报 delivered.materials。只是附加字段，params 照旧原样下发
+            extra["material"] = dict(request.material)
         return {**extra,
             "command_id": request.command_id,
             "station_id": request.station_id,

@@ -1,0 +1,18 @@
+{
+  "device_id": "SIM-RAMAN-01",
+  "model": "QE Pro",
+  "vendor": "Ocean Insight",
+  "capability": "cap.ely.raman",
+  "laser": {"kind": "external", "wavelength_nm": 785},
+  "integration_ms": 1000,
+  "max_integration_ms": 10000,
+  "max_repeats": 5,
+  "shift_range_cm1": [150, 2000],
+  "correct_dark_counts": false,
+  "correct_nonlinearity": false,
+  "programs": {
+    "RAMAN": {"name": "拉曼谱（785 nm，积分 1 s）", "integration_ms": 1000},
+    "RAMAN-FAST": {"name": "快速拉曼谱（积分 0.3 s）", "integration_ms": 300}
+  },
+  "default_program": "RAMAN"
+}

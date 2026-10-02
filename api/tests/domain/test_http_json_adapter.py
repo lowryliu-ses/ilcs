@@ -251,3 +251,16 @@ def test_http_json_driver_uses_connect_timeout_for_connection(device_gateway, mo
     monkeypatch.setattr(http.client.socket, "create_connection", recording)
     _adapter(base_url, connect_timeout_sec=0.7, request_timeout_sec=5).healthcheck()
     assert seen == [0.7]
+
+
+def test_http_json_payload_carries_the_material_only_for_dosing_steps():
+    """投料步骤把物料（名称、单位、用量参数）交给网关核对；params 照旧原样下发，不投料的步骤不带这个字段。"""
+    from app.adapters.base import CommandRequest
+    from app.adapters.drivers.http_json import HttpJsonAdapter
+
+    base = {"command_id": "CMD-M", "station_id": "ST-HTTP-TEST", "capability": "cap.dose", "params": {"mass": 1.2},
+            "type": "dispatch", "batch_id": "B-1", "step_index": 0}
+    plain = HttpJsonAdapter._payload(CommandRequest(**base))
+    assert "material" not in plain and plain["params"] == {"mass": 1.2}
+    dosed = HttpJsonAdapter._payload(CommandRequest(**base, material={"name": "LiPF6", "unit": "g", "param": "mass"}))
+    assert dosed["material"] == {"name": "LiPF6", "unit": "g", "param": "mass"} and dosed["params"] == {"mass": 1.2}

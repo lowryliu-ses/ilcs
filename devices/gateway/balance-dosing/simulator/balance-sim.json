@@ -1,0 +1,61 @@
+{
+  "device_id": "SIM-BAL-DOSE-01",
+  "model": "XPE206DRQ",
+  "vendor": "Mettler Toledo（模拟）",
+  "balance": {
+    "kind": "tcp",
+    "host": "127.0.0.1",
+    "port": 1
+  },
+  "capabilities": {
+    "weigh": "cap.weigh",
+    "dose_solid": "cap.ely.dose_solid",
+    "dose_liquid": "cap.ely.dose_liquid"
+  },
+  "solid": {
+    "kind": "quantos",
+    "tolerance_pct": 2,
+    "substances": {
+      "LiPF6": "LiPF6",
+      "LiFSI": "LiFSI",
+      "LiTFSI": "LiTFSI",
+      "LiBF4": "LiBF4",
+      "LiDFP": "LiDFP"
+    }
+  },
+  "liquid": {
+    "kind": "cavro",
+    "link": {
+      "kind": "tcp",
+      "host": "127.0.0.1",
+      "port": 1
+    },
+    "syringe_ul": 5000,
+    "steps": 3000,
+    "output_port": 12,
+    "tolerance_g": 0.01,
+    "materials": {
+      "EMC": {
+        "port": 1,
+        "density_g_ml": 1.01
+      },
+      "DEC": {
+        "port": 2,
+        "density_g_ml": 0.975
+      },
+      "DMC": {
+        "port": 3,
+        "density_g_ml": 1.07
+      },
+      "EP": {
+        "port": 4,
+        "density_g_ml": 0.88
+      }
+    }
+  },
+  "acceptance_material": {
+    "dose_solid": "LiPF6",
+    "dose_liquid": "DMC"
+  },
+  "stable_timeout_sec": 10
+}

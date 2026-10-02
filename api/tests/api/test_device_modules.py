@@ -42,15 +42,18 @@ def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_neware_module_passes_its_own_tests_and_its_profile_imports():
+@pytest.mark.parametrize("name", ["neware-bts", "balance-dosing", "ika-stirrer", "raman-seabreeze"])
+def test_device_module_passes_its_own_tests_and_its_profile_imports(name):
+    """仓库里的设备模块：自测（各自一个进程——模块的 driver / simulator 包同名）全过，profile.json 能导入成接入模板。"""
     from app.services.template_service import template_check, template_digest
 
-    module = ROOT / "devices" / "gateway" / "neware-bts"
+    module = ROOT / "devices" / "gateway" / name
     result = _pytest(module / "tests")
     assert result.returncode == 0, result.stdout + result.stderr
     profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
     assert profile["digest"] == template_digest(profile), "profile.json 改过之后要重算摘要"
-    assert template_check(profile)["ok"] and profile["supports"]["hold"] is False
+    assert template_check(profile)["ok"], template_check(profile)
+    assert profile["supports"]["hold"] is False, "这几台设备都不做保持：契约如实声明"
 
 
 @pytest.fixture()

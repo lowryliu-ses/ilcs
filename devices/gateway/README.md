@@ -29,7 +29,16 @@ devices/gateway/<厂家-型号>/
 
 样板：[sample-cycler](sample-cycler/)（8 通道充放电柜，厂家只给 Windows SDK）。
 
-已有模块：[neware-bts](neware-bts/)（Neware 充放电柜，经开源的 aurora-neware 走 BTS 8.0 的 TCP XML 接口）。
+已有模块：
+
+| 模块 | 设备 | 接口 |
+|---|---|---|
+| [neware-bts](neware-bts/) | Neware 充放电柜 | 经开源的 aurora-neware 走 BTS 8.0 的 TCP XML 接口；一条指令几颗电芯，一颗一个通道 |
+| [balance-dosing](balance-dosing/) | 天平称量加料站：梅特勒天平 / Quantos 加粉 / Cavro 协议注射泵加液 | MT-SICS（含 Quantos 的 QRD / QRA）与 Cavro DT 协议，串口或网口 |
+| [ika-stirrer](ika-stirrer/) | IKA 磁力加热搅拌器（一个位置一台） | NAMUR 串口协议 |
+| [raman-seabreeze](raman-seabreeze/) | 拉曼光谱仪（Ocean Insight） | python-seabreeze（USB），谱图回报成曲线 |
+
+Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices/connectors/result_files`，`format: "neware"`）。
 
 ### 两种模块
 

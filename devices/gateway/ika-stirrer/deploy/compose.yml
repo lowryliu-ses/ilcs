@@ -1,0 +1,48 @@
+# 在 ILCS 那台机器上起一个模拟的 IKA 加热搅拌网关（4 块假加热板），接进 ILCS 的后端网络，给联调与模拟实验用。
+# 先起 ILCS（deploy/docker-compose.yml，项目名 ilcs，后端网络 ilcs_backend），再在仓库根目录：
+#
+#   docker compose -f devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
+#
+# ILCS 侧：
+#   - deploy/.env 的 ILCS_ADAPTER_ALLOWED_HOSTS 加上 ika-stirrer-sim，重建 api 与 executor；
+#   - 工位套用接入模板 TPL-IKA-STIRRER，连接参数填
+#       base_url           = https://ika-stirrer-sim:8443/api/v1
+#       ca_file            = /run/secrets/ilcs/gateway/SIM-IKA-STIR-01.crt
+#       expected_device_id = SIM-IKA-STIR-01
+#     凭据 credential_ref = file:///run/secrets/ilcs/gateway/SIM-IKA-STIR-01.token
+#
+# 证书与令牌首次启动写到仓库的 secrets/gateway/（ILCS 容器挂的是同一个目录）；作业台账与作业记录在
+# ika-stirrer-sim-state 卷里。容器停止时网关先把在跑的（假）板停下，给它留够时间。
+name: ilcs-ika-stirrer-sim
+
+services:
+  ika-stirrer-sim:
+    build:
+      context: ../../../..
+      dockerfile: devices/gateway/ika-stirrer/deploy/Dockerfile
+    image: ilcs-ika-stirrer:latest
+    container_name: ilcs-ika-stirrer-sim
+    hostname: ika-stirrer-sim
+    restart: unless-stopped
+    stop_grace_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      GATEWAY_HOST_NAME: ika-stirrer-sim
+    volumes:
+      - ../../../../secrets/gateway:/run/secrets/gateway
+      - ika-stirrer-sim-state:/var/lib/ilcs-gateway
+    networks:
+      - ilcs_backend
+
+networks:
+  ilcs_backend:
+    external: true
+
+volumes:
+  ika-stirrer-sim-state:

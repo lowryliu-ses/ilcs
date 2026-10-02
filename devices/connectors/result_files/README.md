@@ -62,9 +62,47 @@
   ```
 
   `x` / `y` 两列成对取数（`x_factor`、`factor` 分别乘到 x、y 上），给了 `trace` 就按这一列的值分成几条（每圈一条）；
-  不是数的行（单位行、表尾说明）跳过，一对数都没有写成「无法测得」。只有 `csv` 格式能取整列。同一个文件里的数值指标
+  不是数的行（单位行、表尾说明）跳过，一对数都没有写成「无法测得」。`csv` 与 `neware` 格式能取整列。同一个文件里的数值指标
   照旧取 `row` 那一行（如最后一行的容量）；或者在曲线指标上声明派生（`derived`），由 ILCS 从曲线算。
+  点数超过 `max_points`（缺省 20000，ILCS 每条曲线的上限）按均匀抽稀，保留首尾。
 - 检测软件的文件名里没有任务编号时，先在软件里把导出文件名模板配成带任务编号（扫码录入任务号最常见）。
+
+## Neware 充放电数据（`format: "neware"`）
+
+Neware BTS 存的 `.nda` / `.ndax` 是二进制文件，用 [NewareNDA](https://github.com/d-cogswell/NewareNDA)（BSD-3）读出逐点记录，
+再按 `cycling.py` 算每圈的充 / 放电容量、能量、库伦效率和整个测试的汇总。跑接收器的机器要 `pip install NewareNDA==2026.6.11`
+（会装 pandas）；没装时文件留在收件箱、日志报错，装好下一轮就处理。
+
+```json
+{
+  "name": "neware", "format": "neware", "pattern": "^(?P<task_id>[^_]+)__(?P<sample_id>[^_]+)__.*\\.ndax?$",
+  "active_mass_mg": 16.0, "reference_cycle": 3, "parser_version": "neware-nda-1", "media_type": "application/zip",
+  "metrics": {
+    "first_discharge_mAh_g": {"metric_version_id": "METRIC-discharge_capacity-v1", "unit": "mAh/g"},
+    "retention_pct":         {"metric_version_id": "METRIC-retention-v1", "unit": "%"},
+    "放电容量-圈数":          {"metric_version_id": "<曲线指标>", "unit": "mAh", "series": {"x": "cycle", "y": "discharge_mAh"}},
+    "放电曲线":              {"metric_version_id": "<曲线指标>", "unit": "V", "series": {
+                               "table": "records", "x": "Discharge_Capacity(mAh)", "y": "Voltage", "trace": "Cycle",
+                               "cycles": [1, 50], "status": ["CC_DChg"]}}
+  }
+}
+```
+
+- 数值指标的键是汇总里的项：`cycle_count`、`first_charge_mAh`、`first_discharge_mAh`、`first_ce_pct`（首效）、
+  `reference_cycle` / `reference_discharge_mAh`（保持率的基准圈，缺省第一个充、放电都有的圈，`reference_cycle` 可以指定）、
+  `last_cycle` / `last_discharge_mAh`（文件里最后一圈，原样）、`last_cycle_partial`（末圈放电不到前一圈的 `incomplete_ratio`，
+  缺省一半，当作没跑完时为 1）、`final_cycle` / `final_discharge_mAh` / `final_ce_pct`（去掉没跑完的末圈后的最后一圈）、
+  `max_discharge_mAh`、`mean_ce_pct`（基准圈之后到终圈的平均库伦效率）、`retention_pct`（终圈 ÷ 基准圈 × 100）。
+  给了 `active_mass_mg`（或 `.nda` 文件里登记了活性物质质量）再多一组比容量 `*_mAh_g`。取不到的项写成「无法测得」，不当 0。
+- 曲线缺省取每圈一行的表（列 `cycle`、`charge_mAh`、`discharge_mAh`、`charge_mWh`、`discharge_mWh`、`ce_pct`）；
+  `"table": "records"` 取逐点记录（NewareNDA 的列名：`Voltage`、`Current(mA)`、`Charge_Capacity(mAh)`、
+  `Discharge_Capacity(mAh)`、`Time`……），可以只取几圈（`cycles`）、几种工步（`status`，如 `CC_DChg`）。
+- 容量每个工步从 0 重新累计（NewareNDA 的口径），一圈的容量是这圈各工步最大值之和；已对 NewareNDA 仓库里的真实
+  `.ndax` / `.nda` 样例与 pandas 的同一算法逐圈核对过（`api/tests/api/test_result_files.py`，设 `NEWARE_SAMPLE` 可复跑）。
+- **原始文件上传**：`.ndax` 是 zip 包，`media_type` 写 `application/zip`；ILCS 缺省不收这类二进制，要在 `.env` 的
+  `ILCS_FILE_ALLOWED_TYPES` 里加上它（`.nda` 是 `application/octet-stream`，放开前想清楚）。不想上传就写 `"upload_raw": false`。
+- 文件名要带检测任务编号：BTS 的备份文件名可以按条码命名，手工跑的测试把条码填成检测任务编号；经 ILCS 网关
+  （`devices/gateway/neware-bts`）跑的测试，条码是 `ILCS-<摘要>`，那一路的曲线由网关取数（待做），不走这里。
 
 ## 运行
 

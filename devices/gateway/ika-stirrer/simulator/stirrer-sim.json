@@ -1,0 +1,20 @@
+{
+  "device_id": "SIM-IKA-STIR-01",
+  "model": "RCT digital",
+  "vendor": "IKA",
+  "capability": "cap.ely.stir",
+  "ambient_c": 25,
+  "positions": {
+    "1": {"name": "左前", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"},
+    "2": {"name": "右前", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"},
+    "3": {"name": "左后", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"},
+    "4": {"name": "右后", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"}
+  },
+  "auto_position": false,
+  "programs": {
+    "STIR-FINAL": {"name": "终混"},
+    "STIR": {"name": "控温搅拌"}
+  },
+  "default_program": "STIR",
+  "poll_sec": 2
+}
