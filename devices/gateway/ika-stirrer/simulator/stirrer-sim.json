@@ -10,7 +10,7 @@
     "3": {"name": "左后", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"},
     "4": {"name": "右后", "max_temp_c": 80, "max_rpm": 1500, "sensor": "external"}
   },
-  "auto_position": false,
+  "auto_position": true,
   "programs": {
     "STIR-FINAL": {"name": "终混"},
     "STIR": {"name": "控温搅拌"}
