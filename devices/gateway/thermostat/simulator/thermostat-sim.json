@@ -1,0 +1,33 @@
+{
+  "device_id": "SIM-CHILL-01",
+  "model": "Unichiller 012",
+  "vendor": "Huber",
+  "chiller": {
+    "kind": "huber",
+    "name": "冷浴",
+    "min_c": -20,
+    "max_c": 25,
+    "tolerance_c": 0.5,
+    "settle_sec": 10,
+    "reach_timeout_sec": 900,
+    "after": "keep",
+    "standby_c": 20
+  },
+  "capabilities": {"thermostat": "cap.thermostat", "stir": "cap.ely.stir"},
+  "stirrers": {
+    "1": {"name": "左前", "max_rpm": 1500},
+    "2": {"name": "右前", "max_rpm": 1500},
+    "3": {"name": "左后", "max_rpm": 1500},
+    "4": {"name": "右后", "max_rpm": 1500}
+  },
+  "auto_position": true,
+  "programs": {
+    "CHILL": {"name": "控温（到温保持）", "action": "thermostat"},
+    "STIR-CHILL": {"name": "加料后制冷搅拌", "action": "stir"},
+    "STIR-COLD": {"name": "冷藏搅拌", "action": "stir"}
+  },
+  "default_program": "CHILL",
+  "poll_sec": 2,
+  "lost_after_sec": 30,
+  "simulation": {"ambient_c": 22, "tau_s": 15, "time_scale": 1, "floor_c": -40}
+}

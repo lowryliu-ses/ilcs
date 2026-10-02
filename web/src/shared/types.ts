@@ -1195,6 +1195,9 @@ export type ServiceIdentityRow = {
     stations?: string[];
     analysis_tasks?: 'all' | string[];
     instrument_serials?: string[];
+    plan_proposals?: 'all' | string[];
+    batch_signals?: 'all' | string[];
+    environment_zones?: 'all' | string[];
   };
   created_at: string;
   rotated_at: string | null;

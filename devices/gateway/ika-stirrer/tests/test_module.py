@@ -581,7 +581,8 @@ def test_example_and_simulator_configs_parse():
     assert example.keys == ("1", "2", "3", "4") and example.default_program in example.programs
     station, sim = simulated_station(module / "simulator" / "stirrer-sim.json")
     try:
-        assert station.config.device_id == "SIM-IKA-STIR-01" and not station.config.auto_position
+        # 模拟的位置是虚的、ILCS 的 cap.ely.stir 也还没有 position 参数：模拟容器自己挑位置
+        assert station.config.device_id == "SIM-IKA-STIR-01" and station.config.auto_position
         assert station.identity()["simulator"] is True
     finally:
         station.close()

@@ -12,7 +12,7 @@
 | `driver/config.py` | 网关配置（`--config`）：位置（链路、温度与转速极限、温度探头）、室温、程序、看门狗 |
 | `simulator/namur_server.py` | 假加热板：TCP 上说 NAMUR（写命令不回），一阶温度模型、转速爬升、设定值压到量程里、看门狗模式 2；可单独起 |
 | `simulator/__init__.py` | 模拟工位：每个位置起一块假板，真实接口照常连它们；故障注入在设备层（`FaultState`） |
-| `simulator/stirrer-sim.json` | 容器里跑模拟网关用的配置（4 个位置，ILCS 必须指定位置） |
+| `simulator/stirrer-sim.json` | 容器里跑模拟网关用的配置（4 个位置，自动挑位置：模拟的位置是虚的） |
 | `gateway.py` | 入口：`--simulate` 用假板；`--check` 只读地问一遍每块板 |
 | `profile.json` | ILCS 设备接入模板文件（草稿），导入后核对、由另一个人发布 |
 | `tests/` | `test_module.py` 对假板跑 ILCS 接入验收清单（含故障项目）与驱动规则（含多瓶、部分启动、失联、重启）；`test_namur.py` 真实接口对着假板走 TCP |

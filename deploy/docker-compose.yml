@@ -318,6 +318,34 @@ services:
     networks:
       - backend
 
+  # 环境读数连接器（可选，--profile environment）：手套箱水氧、温湿度、露点 → ILCS 环境读数，步骤的环境要求按它核对。
+  # 先在「系统治理」签发服务身份并授权环境区域，密钥写到 ../secrets/environment/secret，
+  # 读数点写到 ../secrets/environment/environment.json（示例见 devices/connectors/environment/README.md）。
+  environment:
+    image: ilcs-api:latest
+    container_name: ilcs-environment
+    profiles: ["environment"]
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      ENVIRONMENT_CONFIG: /run/secrets/ilcs/environment/environment.json
+    volumes:
+      - ../secrets/environment:/run/secrets/ilcs/environment:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /opt/ilcs
+    command: ["python", "devices/connectors/environment/poller.py"]
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+
   web:
     image: nginx:alpine
     container_name: ilcs-web

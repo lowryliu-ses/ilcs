@@ -37,12 +37,16 @@ devices/gateway/<厂家-型号>/
 | [balance-dosing](balance-dosing/) | 天平称量加料站：梅特勒天平 / Quantos 加粉 / Cavro 协议注射泵加液 | MT-SICS（含 Quantos 的 QRD / QRA）与 Cavro DT 协议，串口或网口 |
 | [ika-stirrer](ika-stirrer/) | IKA 磁力加热搅拌器（一个位置一台） | NAMUR 串口协议 |
 | [raman-seabreeze](raman-seabreeze/) | 拉曼光谱仪（Ocean Insight） | python-seabreeze（USB），谱图回报成曲线 |
+| [thermostat](thermostat/) | 恒温循环器 / 冷水机（Huber / Julabo / LAUDA，配置里选）+ 可选的 IKA 板做制冷搅拌 | Huber PB 命令、Julabo、LAUDA 命令集，串口或网口；板子走 NAMUR |
+| [potentiostat](potentiostat/) | 电化学工作站（第一个后端 PalmSens EmStat4 / EmStat Pico / Nexus）：电导池 EIS 电导率、LSV 电化学窗口、CV、OCP、CA | MethodSCRIPT（USB 虚拟串口或网口），曲线 + 派生指标；别的品牌按 `driver/backend.py` 加后端 |
+| [scpi-cell-meter](scpi-cell-meter/) | 电芯开路电压 / 交流内阻：Keithley 2450、2400 SourceMeter（OCV），Hioki BT3561A–63A / BT3562 / BT3563（1 kHz ACIR + OCV） | 映射模块：三份 `profile-*.json` 走内置 `line_command_v1`（SCPI，LAN 或 RS-232），没有网关代码 |
 
 Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices/connectors/result_files`，`format: "neware"`）。
 
 在 ILCS 那台机器上模拟联调：每个模块的 `deploy/compose.yml` 起一个模拟网关容器（接 ILCS 的后端网络 `ilcs_backend`），
 `deploy/.env` 的 `ILCS_ADAPTER_ALLOWED_HOSTS` 加上它的主机名；然后 `scripts/load-neware-cycler.py register`（Neware 柜）、
-`scripts/load-device-simulators.py register [--acceptance]`（天平称量加料站、IKA 加热搅拌、拉曼光谱仪）登记工位、
+`scripts/load-device-simulators.py register [--acceptance]`（天平称量加料站、IKA 加热搅拌、拉曼光谱仪、冷水机制冷搅拌、
+电化学工作站、电芯开路电压 / 内阻仪）登记工位、
 套用接入模板、连上模拟网关并验收。
 
 ### 两种模块

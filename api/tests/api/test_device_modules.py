@@ -42,18 +42,23 @@ def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("name", ["neware-bts", "balance-dosing", "ika-stirrer", "raman-seabreeze"])
+@pytest.mark.parametrize("name", ["neware-bts", "balance-dosing", "ika-stirrer", "raman-seabreeze", "thermostat",
+                                  "potentiostat", "scpi-cell-meter"])
 def test_device_module_passes_its_own_tests_and_its_profile_imports(name):
-    """仓库里的设备模块：自测（各自一个进程——模块的 driver / simulator 包同名）全过，profile.json 能导入成接入模板。"""
+    """仓库里的设备模块：自测（各自一个进程——模块的 driver / simulator 包同名）全过，profile.json 能导入成接入模板。
+    映射模块（没有网关代码，如 scpi-cell-meter）一种仪表一份 profile-*.json，每份都要能导入。"""
     from app.services.template_service import template_check, template_digest
 
     module = ROOT / "devices" / "gateway" / name
     result = _pytest(module / "tests")
     assert result.returncode == 0, result.stdout + result.stderr
-    profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
-    assert profile["digest"] == template_digest(profile), "profile.json 改过之后要重算摘要"
-    assert template_check(profile)["ok"], template_check(profile)
-    assert profile["supports"]["hold"] is False, "这几台设备都不做保持：契约如实声明"
+    profiles = sorted(module.glob("profile*.json"))
+    assert profiles, f"{name} 没有 profile.json"
+    for path in profiles:
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        assert profile["digest"] == template_digest(profile), f"{path.name} 改过之后要重算摘要"
+        assert template_check(profile)["ok"], (path.name, template_check(profile))
+        assert profile["supports"]["hold"] is False, "这几台设备都不做保持：契约如实声明"
 
 
 @pytest.fixture()
