@@ -4,7 +4,8 @@
 作业逻辑见 `point_map.py`；这里只把点名解释成节点：
 
 - `points.<名>` 写节点 ID：`"ns=3;s=\\"DB_ILCS\\".\\"State\\""`，或带命名空间 URI 的 `"nsu=urn:…;s=Line.State"`
-  （服务器重启后命名空间序号可能变，URI 不变）；也可以写 `{"node": …, "scale": 0.1}`。
+  （服务器重启后命名空间序号可能变，URI 不变）；也可以写 `{"node": …, "scale": 0.1}`，要手动写的点写成
+  `{"node": …, "writable": true, "min": 0, "max": 10, "unit": "bar", "label": "压力设定"}`（见 `point_map.py`）。
 - 写入按节点当前的数据类型编码（Boolean / Int16 / UInt32 / Float / Double / String …），不猜类型。
 - 启动也可以是方法调用：`"start": {"method": {"object": "<对象节点>", "method": "<方法节点>", "args": ["{program}"]}}`。
 
@@ -126,7 +127,14 @@ class OpcUaMapAdapter(PointMapAdapter):
         integers = {ua.VariantType.SByte, ua.VariantType.Byte, ua.VariantType.Int16, ua.VariantType.UInt16,
                     ua.VariantType.Int32, ua.VariantType.UInt32, ua.VariantType.Int64, ua.VariantType.UInt64}
         if variant_type == ua.VariantType.Boolean:
-            return bool(value)
+            # 文字 "false" 用 bool() 会变成 true：只认布尔、0 / 1 与 true / false 文字
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return bool(value)
+            if isinstance(value, str) and value.strip().lower() in {"true", "false", "1", "0"}:
+                return value.strip().lower() in {"true", "1"}
+            raise AdapterError(f"布尔节点只能写 true / false，收到 {value!r}")
         if variant_type in integers:
             return int(round(float(value)))
         if variant_type in {ua.VariantType.Float, ua.VariantType.Double}:

@@ -22,7 +22,7 @@ from ..repositories.resources import (
     AdapterRepository, AssetRepository, CapabilityRepository, IslandRepository, StationRepository,
     adopt_asset_model, station_model,
 )
-from ..adapters.catalog import DRIVERS, validate_config
+from ..adapters.catalog import DRIVERS, has_tasks, validate_config
 from .acceptance_service import after_config_change, gate_out, requeue_if_needed, running_stations
 from .template_service import (
     TemplateService, connection_problems, station_template_options, template_brief, template_changes,
@@ -138,6 +138,9 @@ class StationService:
             "note": adapter.note,
             # 适配器契约：真实设备不支持的能力在界面上禁用并说明原因，不假装通用支持
             "kind": adapter.kind,
+            # 参与自动流程（接指令）？映射驱动只配了点表的是「只读写点位」：能读点、手动写，不接指令
+            "tasks": adapter.kind != "real" or has_tasks(adapter.driver, adapter.config),
+            "points": adapter.kind == "real" and bool((adapter.config or {}).get("points")),
             "capabilities": {
                 "hold": adapter.supports_hold,
                 "abort": adapter.supports_abort,
@@ -660,7 +663,7 @@ class StationService:
         before = {
             "kind": adapter.kind, "driver": adapter.driver, "protocol": adapter.protocol,
             "version": adapter.version, "enabled": adapter.enabled,
-            "config_version": adapter.config_version,
+            "config_version": adapter.config_version, "tasks": has_tasks(adapter.driver, adapter.config),
         }
         # 逐项记前后值：把 base_url 改到别的主机、换一个凭据引用，审计里都要看得出来。
         # config 已拒绝秘密原文、credential_ref 只是引用，二者都可以留痕。

@@ -791,6 +791,10 @@ export type AdapterRow = {
   note: string;
   capabilities: { hold: boolean; abort: boolean; query: boolean; dedup: boolean };
   unsupported_note: string;
+  /** 参与自动流程（接指令）；映射驱动只配了点表的是「只读写点位」 */
+  tasks?: boolean;
+  /** 登记了点表：可以读点、手动写声明了可写的点 */
+  points?: boolean;
   /** 驱动自报（或按登记配置）的设备身份与方法目录 */
   catalog?: AdapterCatalog;
   /** 配置变更后的接入验收闸门 */
@@ -799,6 +803,48 @@ export type AdapterRow = {
   template?: AdapterTemplate | null;
   /** 这台设备自己的连接参数（只在受 station.edit 保护的详情接口里有） */
   template_connection?: Record<string, unknown>;
+};
+
+/** 点表里的一个点：读到的值，或读不到的原因 */
+export type PointReading = {
+  name: string;
+  label: string;
+  unit: string;
+  writable: boolean;
+  min: number | null;
+  max: number | null;
+  /** 任务用的控制信号（启动、状态、复位、指令号）：不能手动写 */
+  control: boolean;
+  value: number | boolean | string | null;
+  error: string;
+};
+
+export type PointsListing = {
+  station_id: string;
+  driver: string;
+  config_version: number;
+  tasks: boolean;
+  read_at: string;
+  points: PointReading[];
+};
+
+/** 一次手动写点：签名申请、执行器先读、写、再回读 */
+export type PointWriteRow = {
+  id: string;
+  station_id: string;
+  point: string;
+  value: number | boolean | string | null;
+  reason: string;
+  requested_by: string;
+  config_version: number;
+  state: 'queued' | 'running' | 'done' | 'failed' | 'unknown' | 'cancelled';
+  state_label: string;
+  before: number | boolean | string | null;
+  after: number | boolean | string | null;
+  matches: boolean | null;
+  error: string;
+  created_at: string | null;
+  finished_at: string | null;
 };
 
 export type AcceptanceGate = {

@@ -14,6 +14,7 @@
 }
 ```
 
+点上还可以写 `label`、`unit`、`writable`（可手动写）、`min` / `max`（手动写的范围），见 `point_map.py`。
 地址是协议里的 0 基地址（手册上写 40001 的，这里填 0）。表：holding / input / coil / discrete，只有 holding 与
 coil 可写；布尔从保持寄存器取某一位只读不写（读—改—写不是原子的）。32 位数值缺省高字在前，可设
 `word_order: little`。异常应答说明写入没被采纳 → 明确失败；连不上、超时 → 结果未知。
@@ -73,6 +74,9 @@ class ModbusMapAdapter(PointMapAdapter):
             raise AdapterError(f"点 {name} 是 ascii，必须给出字符数 length（≤240）")
         if point.get("word_order", "big") not in {"big", "little"}:
             raise AdapterError(f"点 {name} 的 word_order 只能是 big 或 little")
+        if point.get("writable") and (table in {"input", "discrete"} or (kind == "bool" and table == "holding")):
+            raise AdapterError(f"点 {name} 只读（{table} 表{'里的位' if table == 'holding' else ''}），不能声明 writable："
+                               "可写的只有保持寄存器（holding）与线圈（coil）")
 
     def close(self) -> None:
         with self._io:

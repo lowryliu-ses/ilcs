@@ -26,6 +26,7 @@ from ..adapters.acceptance import (
     AcceptanceRecord, FAIL, PASS, SKIP, STATE_LABELS, default_template, injector_for, run_acceptance,
 )
 from ..adapters.base import AdapterError
+from ..adapters.catalog import has_tasks
 from ..adapters.registry import REAL_IMPLEMENTATIONS, contract_of, describe
 from ..adapters.drivers.simulation import SimulationAdapter
 from ..core.clock import now
@@ -142,7 +143,8 @@ def after_config_change(db: Session, adapter: Adapter, before: dict[str, Any], *
     `light=True`：只改了说明、协议名、版本或超时——不改变连谁、怎么判结论，不新欠验收；原来欠着的照旧欠着，按新版本重排。
     """
     required = adapter.acceptance_required if light else acceptance_requirement(
-        before, {"kind": adapter.kind, "driver": adapter.driver}, adapter.acceptance_required,
+        before, {"kind": adapter.kind, "driver": adapter.driver, "tasks": has_tasks(adapter.driver, adapter.config)},
+        adapter.acceptance_required,
     )
     if adapter.kind != "real":
         required = ""

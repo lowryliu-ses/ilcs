@@ -272,6 +272,35 @@ class AcceptanceRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class PointWrite(Base):
+    """一次手动写设备点位：人签名申请，执行器执行（先读、写、再回读），出了结论就只读、永不删除。
+
+    只对点表里声明了可写（`writable: true`）的点；任务用的控制信号（启动、状态、复位、指令号）不能手动写。
+    申请时记下配置版本：执行前配置变了就不执行（点的定义可能已经不是申请时看到的那个）。
+    """
+
+    __tablename__ = "point_writes"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    station_id: Mapped[str] = mapped_column(String, index=True)
+    point: Mapped[str] = mapped_column(String)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)  # {"value": 要写的值}：JSON 列装标量要包一层
+    reason: Mapped[str] = mapped_column(Text, default="")
+    signature_id: Mapped[str] = mapped_column(String, default="")
+    requested_by: Mapped[str] = mapped_column(String, default="")
+    requested_by_id: Mapped[str] = mapped_column(String, default="")
+    config_version: Mapped[int] = mapped_column(Integer, default=0)
+    # queued 排队 | running 执行中 | done 已写入 | failed 没有写（设备没动）| unknown 结果未知 | cancelled 已取消
+    state: Mapped[str] = mapped_column(String, default="queued", index=True)
+    before: Mapped[dict] = mapped_column(JSON, default=dict)  # {"value": 写之前读到的值}
+    after: Mapped[dict] = mapped_column(JSON, default=dict)   # {"value": 写之后回读的值}
+    matches: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class MaintenanceOrder(Base):
     """维护 / 点检工单。计划 → 执行 → 完成，完成要写记录并签名。
 

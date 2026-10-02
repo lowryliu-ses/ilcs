@@ -3,10 +3,12 @@ from fastapi.responses import Response
 
 from ...schemas import (
     AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterCreateIn, AdapterPatchIn, CapabilityIn,
-    CapabilityPatchIn, CommandVerifyIn, IslandIn, LimitsIn, ManualReviewIn, ReadinessIn, RetireIn, StationCreateIn, StationPatchIn,
+    CapabilityPatchIn, CommandVerifyIn, IslandIn, LimitsIn, ManualReviewIn, PointWriteIn, ReadinessIn, RetireIn,
+    StationCreateIn, StationPatchIn,
 )
 from ...services.acceptance_service import AcceptanceService, run_out
 from ...services.batch_service import BatchService
+from ...services.point_service import PointService
 from ...services.station_service import StationService
 from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
 
@@ -228,6 +230,32 @@ def acceptance_report(run_id: str, db: DbSession, ctx=require("station.edit")):
 @router.post("/acceptance-runs/{run_id}/cancel")
 def cancel_acceptance(run_id: str, db: DbSession, user: CurrentUser, ctx=require("station.edit")):
     return AcceptanceService(db, ctx).cancel(run_id, user)
+
+
+@router.get("/stations/{station_id}/adapter/points")
+def read_points(station_id: str, db: DbSession, ctx=require("station.edit")):
+    """按点表逐个读设备点位（只读、不动设备）。只读写点位的设备不配能力映射也能用；某个点读不到只在那一行写明。"""
+    return PointService(db, ctx).read(station_id)
+
+
+@router.get("/stations/{station_id}/adapter/point-writes")
+def list_point_writes(station_id: str, db: DbSession, ctx=require("station.edit"), limit: int = 20):
+    return PointService(db, ctx).writes(station_id, limit)
+
+
+@router.post("/stations/{station_id}/adapter/points/{point}/write", status_code=201)
+def write_point(
+    station_id: str, point: str, payload: PointWriteIn, db: DbSession, user: CurrentUser, ctx=require("device.write"),
+):
+    """申请手动写一个点（点表里声明了可写的点）：签名、写明原因，登记一条排队记录，由执行器先读、写、再回读。"""
+    return PointService(db, ctx).request_write(
+        station_id, point, payload.value, payload.reason, payload.signature_id, user,
+    )
+
+
+@router.post("/point-writes/{write_id}/cancel")
+def cancel_point_write(write_id: str, db: DbSession, user: CurrentUser, ctx=require("device.write")):
+    return PointService(db, ctx).cancel(write_id, user)
 
 
 @router.post("/stations/{station_id}/adapter/test")

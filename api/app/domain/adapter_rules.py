@@ -55,12 +55,18 @@ def acceptance_requirement(before: dict[str, Any], after: dict[str, Any], pendin
     """配置变更后要补的验收级别：'' 不用验收 / readonly / physical。
 
     - 模拟适配器不设闸门：内置模拟不连任何设备，正式环境本来就禁止模拟执行；
-    - 第一次接成真实设备、或换了驱动：动作级。驱动怎么下发、怎么判结论全变了，只读检查证明不了；
+    - 只读写点位（映射驱动只配了点表、没有能力映射，`tasks` 为假）：只读级。它不接指令，动作级验收没有可下发的能力；
+      手动写点另有签名与留痕；
+    - 第一次接成真实设备、换了驱动、或从只读写点位改成参与自动流程：动作级。下发、判结论的方式是新的，只读检查证明不了；
     - 其他改动（地址、映射、超时、说明……）：至少只读级。还没补上的动作级要求不因为又改了一次而降级。
+
+    `tasks` 缺省为真（按 ILCS 契约接的驱动都参与自动流程）。
     """
     if after.get("kind") != "real":
         return ""
-    if before.get("kind") != "real" or before.get("driver") != after.get("driver"):
+    if not after.get("tasks", True):
+        return READONLY
+    if before.get("kind") != "real" or before.get("driver") != after.get("driver") or not before.get("tasks", True):
         return PHYSICAL
     return PHYSICAL if pending == PHYSICAL else READONLY
 
