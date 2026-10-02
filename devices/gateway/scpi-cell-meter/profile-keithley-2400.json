@@ -1,0 +1,93 @@
+{
+  "format": "ilcs-device-template/1",
+  "code": "TPL-SCPI-K2400-OCV",
+  "revision": 1,
+  "name": "Keithley 2400 电芯开路电压（SCPI，RS-232）",
+  "model": "2400",
+  "vendor": "Keithley",
+  "driver": "line_command_v1",
+  "protocol": "SCPI（RS-232）",
+  "version": "scpi-cell-meter 0.1",
+  "config": {
+    "write_terminator": "\r",
+    "read_terminator": "\r",
+    "connect_timeout_sec": 3,
+    "request_timeout_sec": 5,
+    "inter_command_delay_ms": 20,
+    "probe_interval_sec": 10,
+    "idle_after_start": "unknown",
+    "identity": {
+      "send": "*IDN?",
+      "pattern": "^(?P<vendor>[^,]*),\\s*(?:MODEL )?(?P<model>[^,]*),\\s*(?P<device_id>[^,]*),\\s*(?P<firmware>.*)$"
+    },
+    "error_pattern": "^[-+]?[1-9]\\d*,",
+    "methods": [{"program": "OCV", "name": "开路电压（源 0 A、四线测电压）", "capability": "cap.cell_check"}],
+    "capabilities": {
+      "cap.cell_check": {
+        "start": [
+          {"send": "*CLS", "reply": false},
+          {"send": ":OUTP:SMOD HIMP", "reply": false},
+          {"send": ":OUTP OFF", "reply": false},
+          {"send": ":SOUR:CLE:AUTO OFF", "reply": false},
+          {"send": ":ROUT:TERM FRON", "reply": false},
+          {"send": ":SOUR:FUNC CURR", "reply": false},
+          {"send": ":SOUR:CURR:MODE FIX", "reply": false},
+          {"send": ":SOUR:CURR:RANG:AUTO ON", "reply": false},
+          {"send": ":SOUR:CURR:LEV 0", "reply": false},
+          {"send": ":SENS:FUNC:CONC OFF", "reply": false},
+          {"send": ":SENS:FUNC \"VOLT\"", "reply": false},
+          {"send": ":SENS:VOLT:PROT 10", "reply": false},
+          {"send": ":SENS:VOLT:RANG 20", "reply": false},
+          {"send": ":SENS:VOLT:NPLC 1", "reply": false},
+          {"send": ":SYST:RSEN ON", "reply": false},
+          {"send": ":FORM:ELEM VOLT", "reply": false},
+          {"send": ":TRIG:COUN 1", "reply": false},
+          {"send": ":ARM:COUN 1", "reply": false},
+          {"send": ":TRAC:FEED:CONT NEV", "reply": false},
+          {"send": ":TRAC:CLE", "reply": false},
+          {"send": ":TRAC:FEED SENS", "reply": false},
+          {"send": ":TRAC:POIN 1", "reply": false},
+          {"send": ":TRAC:FEED:CONT NEXT", "reply": false},
+          {"send": ":SYST:ERR?", "expect": "^[-+]?0+,"},
+          {"send": ":OUTP ON", "reply": false, "wait_ms": 50},
+          {"send": ":SYST:ERR?", "expect": "^[-+]?0+,"},
+          {"send": ":OUTP?", "expect": "^(1|ON)$"},
+          {"send": ":READ?", "motion": true, "reject": "[eE]\\+?37"},
+          {"send": ":OUTP OFF", "reply": false}
+        ],
+        "result": {"pattern": "^(?P<ocv_V>[-+]?\\d+(?:\\.\\d*)?(?:[eE][-+]?\\d+)?)$"}
+      }
+    },
+    "status": {
+      "send": ":TRAC:POIN:ACT?",
+      "pattern": "^\\+?0*(?P<state>\\d)\\d*$",
+      "states": {
+        "0": "idle",
+        "1": "done",
+        "2": "done",
+        "3": "done",
+        "4": "done",
+        "5": "done",
+        "6": "done",
+        "7": "done",
+        "8": "done",
+        "9": "done"
+      }
+    },
+    "actuals": {"send": ":TRAC:DATA?", "pattern": "^(?P<ocv_V>[-+]?\\d+(?:\\.\\d*)?(?:[eE][-+]?\\d+)?)$"},
+    "acknowledge": [
+      {"send": ":OUTP OFF", "reply": false},
+      {"send": ":TRAC:FEED:CONT NEV", "reply": false},
+      {"send": ":TRAC:CLE", "reply": false}
+    ]
+  },
+  "connection": {
+    "transport": {"kind": "serial", "port": "rfc2217://serial-server.lab.internal:4001", "baudrate": 9600},
+    "expected_device_id": "<仪器序列号>"
+  },
+  "supports": {"hold": false, "abort": false, "query": true, "dedup": true},
+  "acceptance": {"capability": "cap.cell_check", "params": {}},
+  "note": "设备模块 devices/gateway/scpi-cell-meter（映射模块，没有网关代码）：Keithley 2400 SourceMeter 走 RS-232（出厂 9600 8N1、结束符 CR、无流控；经串口服务器 rfc2217:// / socket:// 或本机串口；不支持 GPIB），源 0 A、四线测电压，读电芯开路电压 ocv_V（V），不测内阻。一条指令测一颗电芯：配置（数据缓冲区只存这一个读数）→ 查错误队列 → 开输出（关断状态 HIMP，输出只在测量时开着）→ :READ? 的回复就是结果、当场完成 → 关输出。测量是即时动作：没有可保持、可终止的在途作业；回复丢了按数据缓冲区里有没有读数找回结论（质量 uncertain）。缺省电压限值（compliance）10 V、20 V 量程、前面板端子、四线：被测电压高于 10 V、接后面板、两线夹具都要改模板。2450 设成 SCPI2400 命令集时也可以用这份模板（通道改成 TCP 5025、结束符 LF）。验收用 cap.cell_check（无参数）：动作级验收时夹具上放一颗参考电芯。",
+  "state": "draft",
+  "digest": "sha256:32056d687aa3638facf82aab0f63ac8b75c7b8f190844008c0ac90544917c0f4"
+}

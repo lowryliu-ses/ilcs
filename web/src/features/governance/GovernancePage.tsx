@@ -287,7 +287,11 @@ function scopeSummary(row: ServiceIdentityRow) {
     : row.scopes.analysis_tasks?.length ? `检测任务 ${row.scopes.analysis_tasks.join('、')}` : '无结果回传权限';
   const serials = row.scopes.instrument_serials?.length
     ? `仪器序列号 ${row.scopes.instrument_serials.join('、')}` : '';
-  return <>{stations}<div className="tiny muted">{tasks}{serials ? ` · ${serials}` : ''}</div></>;
+  const zones = row.scopes.environment_zones === 'all'
+    ? '全部区域的环境读数'
+    : row.scopes.environment_zones?.length ? `环境读数 ${row.scopes.environment_zones.join('、')}` : '';
+  const extra = [serials, zones].filter(Boolean).join(' · ');
+  return <>{stations}<div className="tiny muted">{tasks}{extra ? ` · ${extra}` : ''}</div></>;
 }
 
 function list(value: string): string[] {
@@ -311,11 +315,17 @@ function IdentityForm({
   const [allTasks, setAllTasks] = useState(taskScope === 'all');
   const [tasks, setTasks] = useState(Array.isArray(taskScope) ? taskScope.join('、') : '');
   const [serials, setSerials] = useState((identity?.scopes.instrument_serials ?? []).join('、'));
+  const zoneScope = identity?.scopes.environment_zones;
+  const [allZones, setAllZones] = useState(zoneScope === 'all');
+  const [zones, setZones] = useState(Array.isArray(zoneScope) ? zoneScope.join('、') : '');
 
+  // 表单只管这几项；别处授予的范围（外部优化器的方案、批次事件）原样带回去，编辑时不能悄悄抹掉
   const scopes = () => ({
+    ...(identity?.scopes ?? {}),
     stations: list(stations),
     analysis_tasks: allTasks ? 'all' : list(tasks),
     instrument_serials: list(serials),
+    environment_zones: allZones ? 'all' : list(zones),
   });
   const save = useMutation<[], ServiceIdentityRow | SecretResult>(
     () => identity
@@ -360,6 +370,10 @@ function IdentityForm({
       <Field label="授权仪器序列号" hint="可选；回传声明序列号时必须位于此清单">
         <textarea rows={2} value={serials} onChange={(event) => setSerials(event.target.value)} />
       </Field>
+      <label className="row small"><input type="checkbox" checked={allZones} onChange={(event) => setAllZones(event.target.checked)} />允许上报全部区域的环境读数</label>
+      {!allZones ? <Field label="授权环境区域" hint="手套箱 / 温湿度连接器可以上报哪些区域的读数（区域名与步骤环境要求里写的一致）；留空表示不能上报">
+        <textarea rows={2} value={zones} onChange={(event) => setZones(event.target.value)} placeholder="配液段手套箱、测试段手套箱" />
+      </Field> : null}
       {save.error ? <div className="note bad">{save.error.message}</div> : null}
     </Modal>
   );

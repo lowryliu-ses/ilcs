@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""登记三台模拟设备的工位，接到各自的模拟网关：天平称量加料站、IKA 加热搅拌、拉曼光谱仪。
+"""登记模拟设备的工位，接到各自的模拟网关 / 模拟仪表：天平称量加料站、IKA 加热搅拌、拉曼光谱仪、冷水机制冷搅拌、
+电化学工作站、电芯开路电压 / 内阻仪（Keithley 2450、Keithley 2400、Hioki BT3562）。
 
-只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署。设备侧是三个设备模块的模拟网关容器
-（`devices/gateway/<模块>/deploy/compose.yml`：balance-sim、ika-stirrer-sim、raman-sim，接 ILCS 的后端网络），
-ILCS 经 `http_json_v1` 走 HTTPS + 令牌接它们，和接真机是同一条路，只是网关自报为模拟器：
+只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署。设备侧是各设备模块的模拟容器
+（`devices/gateway/<模块>/deploy/compose.yml`，接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
+thermostat-sim、potentiostat-sim）ILCS 经 `http_json_v1` 走 HTTPS + 令牌接，网关自报为模拟器；电芯检测仪表是映射模块
+（k2450-sim、k2400-sim、bt3562-sim），ILCS 用内置的 `line_command_v1` 直接连仪表口，另登记模拟设备的统一控制口。
+和接真机是同一条路：
 
-    docker compose -f devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 三个模拟网关各起一个
+    docker compose -f devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 每个模块各起一组
     docker compose -f devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
     docker compose -f devices/gateway/raman-seabreeze/deploy/compose.yml up -d --build
-    python3 scripts/load-device-simulators.py register [--base http://127.0.0.1:8090] [--acceptance] [--only balance,stirrer,raman]
+    docker compose -f devices/gateway/thermostat/deploy/compose.yml up -d --build
+    docker compose -f devices/gateway/potentiostat/deploy/compose.yml up -d --build
+    docker compose -f devices/gateway/scpi-cell-meter/deploy/compose.yml up -d --build
+    python3 scripts/load-device-simulators.py register [--base http://127.0.0.1:8090] [--acceptance] [--only balance,chiller,…]
 
-每台：能力（`cap.weigh` 没有就登记；`cap.ely.*` 用电解液线已有的）→ 实验区 → 占位资产 → 工位（先按内置模拟登记）→
+每台：能力（`cap.weigh`、`cap.thermostat`、`cap.echem`、`cap.cell_check` 没有就登记；`cap.ely.*` 用电解液线已有的）→
+实验区 → 占位资产 → 工位（先按内置模拟登记）→
 接入模板（工程师导入模块的 profile.json、QA 发布）→ 工位套用模板连到模拟网关（签名）→ 重连 → 等执行器跑完只读级验收；
 `--acceptance` 再逐项能力申请动作级 + 故障项目验收（签名 + 批准说明）并等出结论。已有的先查后用，重复运行不会多建。
 
-工位的型号取占位资产（XPE206DRQ、RCT digital、QE Pro），和电解液线设备方法的适用型号不同，排程不会把电解液线的步骤
+工位的型号取占位资产（XPE206DRQ、RCT digital、QE Pro、Unichiller 012 ……），和电解液线设备方法的适用型号不同，排程不会把电解液线的步骤
 落到这几台上。正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
 """
 from __future__ import annotations
@@ -36,11 +43,32 @@ Actor, Failed, actors, http_transport = common.Actor, common.Failed, common.acto
 step, ok, note, wait_for, _items = common.step, common.ok, common.note, common.wait_for, common._items
 
 ISLAND = {"id": 11, "name": "设备模拟联调"}
-WEIGH = {
-    "id": "cap.weigh", "name": "称量", "params": {},
-    "recovery": {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "称量没有可保持的动作",
-                 "sideEffect": "无：只读天平读数", "verify": ["秤上的容器"]},
+# 这几台用到、电解液线里没有的能力：没有就登记
+CAPABILITIES = {
+    "cap.weigh": {
+        "id": "cap.weigh", "name": "称量", "params": {},
+        "recovery": {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "称量没有可保持的动作",
+                     "sideEffect": "无：只读天平读数", "verify": ["秤上的容器"]},
+    },
+    "cap.thermostat": {
+        "id": "cap.thermostat", "name": "控温", "params": {"temp": "温度", "time": "到温后保温时间"},
+        "param_specs": {"temp": {"type": "number", "unit": "℃"}, "time": {"type": "number", "unit": "s"}},
+        "recovery": {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "不做保持：冷水机照最后的设定值控温",
+                     "sideEffect": "重试会重新到温、重新计保温时间", "verify": ["浴温", "冷水机报警"]},
+    },
+    "cap.echem": {
+        "id": "cap.echem", "name": "电化学测试", "params": {},
+        "recovery": {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "测量停不在半截：不做保持",
+                     "sideEffect": "重测会再给电池加一次电位（EIS 小振幅、LSV 会极化到终点电位）",
+                     "verify": ["接线与通道上的电池", "电池是否断开"]},
+    },
+    "cap.cell_check": {
+        "id": "cap.cell_check", "name": "电芯开路电压 / 内阻检测", "params": {},
+        "recovery": {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "即时读数，没有可保持的动作",
+                     "sideEffect": "无：源 0 A 测电压或 1 kHz 小信号测内阻", "verify": ["夹具上的电芯"]},
+    },
 }
+SIMCTL = "/run/secrets/ilcs/simctl"
 DEVICES: dict[str, dict[str, Any]] = {
     "balance": {
         "station": "ST-BAL-SIM", "name": "天平称量加料站（模拟）", "asset": "AS-BAL-SIM", "model": "XPE206DRQ",
@@ -67,6 +95,58 @@ DEVICES: dict[str, dict[str, Any]] = {
         "acceptance": [("cap.ely.raman", {"repeats": 1})],
         "summary": "seabreeze 光谱仪，785 nm 外接激光，谱图按曲线回报",
     },
+    "chiller": {
+        "station": "ST-CHILL-SIM", "name": "冷水机制冷搅拌（模拟，4 位）", "asset": "AS-CHILL-SIM",
+        "model": "Unichiller 012", "vendor": "Huber", "channels": 4, "channel_unit": "sample",
+        # 温度照网关配置的 min_c–max_c；搅拌转速 0（只冷不搅）或 50–1500 rpm
+        "limits": {"cap.thermostat": {"temp": [-20, 25], "time": [0, 3600]},
+                   "cap.ely.stir": {"temp": [-20, 25], "time": [1, 7200], "rpm": [0, 1500]}},
+        "module": "thermostat", "host": "thermostat-sim", "device_id": "SIM-CHILL-01",
+        # 冷浴从室温（22 ℃）到 20 ℃ 要二三十秒（模拟的时间常数 15 s，连续 10 s 在 ±0.5 ℃ 以内算到温）
+        "acceptance": [("cap.thermostat", {"temp": 20, "time": 1}), ("cap.ely.stir", {"temp": 20, "time": 2, "rpm": 300})],
+        "summary": "Huber PB 命令的冷水机 + 4 块 IKA 板（只用电机），模拟时网关自己分配位置",
+    },
+    "echem": {
+        "station": "ST-ECHEM-SIM", "name": "电化学工作站（模拟）", "asset": "AS-ECHEM-SIM", "model": "EmStat4 HR",
+        "vendor": "PalmSens", "channels": 1, "channel_unit": "sample",
+        "limits": {"cap.echem": {}},
+        "module": "potentiostat", "host": "potentiostat-sim", "device_id": "SIM-ECHEM-01",
+        "acceptance": [("cap.echem", {})],  # 缺省程序 OCP-10：开路电位 10 s，不加电位
+        "summary": "PalmSens MethodSCRIPT：电导池 EIS、LSV 电化学窗口、CV、OCP、CA",
+    },
+    "k2450": {
+        "station": "ST-OCV-SIM", "name": "电芯开路电压 Keithley 2450（模拟）", "asset": "AS-OCV-SIM", "model": "2450",
+        "vendor": "Keithley", "channels": 1, "channel_unit": "sample",
+        "limits": {"cap.cell_check": {}},
+        "module": "scpi-cell-meter", "profile": "profile-keithley-2450.json", "simctl": "SIM-K2450-01",
+        "connection": {"transport": {"kind": "tcp", "host": "k2450-sim", "port": 5025},
+                       "expected_device_id": "ILCS-SIMULATOR-2450-01"},
+        "control": "http://k2450-sim:9900",
+        "acceptance": [("cap.cell_check", {})],
+        "summary": "SCPI over LAN（line_command_v1 直接连仪表），源 0 A 四线测开路电压",
+    },
+    "k2400": {
+        "station": "ST-OCV2-SIM", "name": "电芯开路电压 Keithley 2400（模拟）", "asset": "AS-OCV2-SIM", "model": "2400",
+        "vendor": "Keithley", "channels": 1, "channel_unit": "sample",
+        "limits": {"cap.cell_check": {}},
+        "module": "scpi-cell-meter", "profile": "profile-keithley-2400.json", "simctl": "SIM-K2400-01",
+        "connection": {"transport": {"kind": "serial", "port": "socket://k2400-sim:4001", "baudrate": 9600},
+                       "expected_device_id": "ILCS-SIMULATOR-2400-01"},
+        "control": "http://k2400-sim:9900",
+        "acceptance": [("cap.cell_check", {})],
+        "summary": "SCPI over RS-232（模拟时串口服务器换成 socket://），源 0 A 测开路电压",
+    },
+    "bt3562": {
+        "station": "ST-ACIR-SIM", "name": "电芯交流内阻 Hioki BT3562（模拟）", "asset": "AS-ACIR-SIM", "model": "BT3562A",
+        "vendor": "Hioki", "channels": 1, "channel_unit": "sample",
+        "limits": {"cap.cell_check": {}},
+        "module": "scpi-cell-meter", "profile": "profile-hioki-bt3562.json", "simctl": "SIM-BT3562-01",
+        "connection": {"transport": {"kind": "tcp", "host": "bt3562-sim", "port": 2323},
+                       "expected_device_id": "ILCS-SIMULATOR"},
+        "control": "http://bt3562-sim:9900",
+        "acceptance": [("cap.cell_check", {})],
+        "summary": "SCPI over LAN，1 kHz 交流内阻（mΩ）+ 开路电压",
+    },
 }
 
 
@@ -77,12 +157,14 @@ def refuse_production() -> None:
 
 def ensure_capabilities(engineer: Actor, needed: set[str]) -> None:
     existing = {row["id"] for row in engineer.get("/capabilities")}
-    missing = sorted(needed - existing - {WEIGH["id"]})
+    missing = sorted(needed - existing - set(CAPABILITIES))
     if missing:
         raise Failed(f"能力 {', '.join(missing)} 还没登记：先登记电解液线（scripts/load-electrolyte-line.py register）")
-    if WEIGH["id"] in needed and WEIGH["id"] not in existing:
-        engineer.post("/capabilities", {**WEIGH, "signature_id": engineer.sign("能力模型变更批准", WEIGH["id"])})
-        ok("能力", f"{WEIGH['id']} {WEIGH['name']}（新登记，无参数）")
+    for key in sorted(needed & set(CAPABILITIES) - existing):
+        capability = CAPABILITIES[key]
+        engineer.post("/capabilities", {**capability, "signature_id": engineer.sign("能力模型变更批准", key)})
+        params = "、".join(capability["params"].values()) or "无参数"
+        ok("能力", f"{key} {capability['name']}（新登记，{params}）")
 
 
 def ensure_island(engineer: Actor) -> None:
@@ -115,7 +197,7 @@ def ensure_station(engineer: Actor, device: dict[str, Any]) -> None:
 
 
 def ensure_template(engineer: Actor, qa: Actor, device: dict[str, Any]) -> dict:
-    path = ROOT / "devices" / "gateway" / device["module"] / "profile.json"
+    path = ROOT / "devices" / "gateway" / device["module"] / device.get("profile", "profile.json")
     profile = json.loads(path.read_text(encoding="utf-8"))
     rows = [row for row in _items(engineer.get("/device-templates"))
             if row.get("code") == profile["code"] and int(row.get("revision") or 0) == int(profile["revision"])]
@@ -137,10 +219,18 @@ def ensure_template(engineer: Actor, qa: Actor, device: dict[str, Any]) -> dict:
 
 
 def connect(engineer: Actor, operator: Actor, template: dict, device: dict[str, Any], timeout: float) -> None:
-    station, device_id = device["station"], device["device_id"]
-    connection = {"base_url": f"https://{device['host']}:8443/api/v1",
-                  "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
-    credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
+    station = device["station"]
+    if "connection" in device:  # 映射模块：直接连仪表口，另登记模拟设备的统一控制口（故障项目用）
+        connection = {**device["connection"], "simulator_control": {
+            "url": device["control"], "token_ref": f"file://{SIMCTL}/{device['simctl']}.token"}}
+        credential = ""
+        where = connection["transport"].get("host") or connection["transport"].get("port")
+    else:
+        device_id = device["device_id"]
+        connection = {"base_url": f"https://{device['host']}:8443/api/v1",
+                      "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
+        credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
+        where = connection["base_url"]
     adapter = engineer.get(f"/stations/{station}/adapter")
     if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
             or adapter.get("credential_ref") != credential:
@@ -149,9 +239,9 @@ def connect(engineer: Actor, operator: Actor, template: dict, device: dict[str, 
             "row_version": adapter["row_version"],
             "signature_id": engineer.sign("设备集成配置变更批准", station, adapter["row_version"]),
         })
-        ok("设备连接", f"{station} 套用 {template['code']}：{connection['base_url']}，设备编号 {device_id}（已签名保存）")
+        ok("设备连接", f"{station} 套用 {template['code']}：{where}，设备编号 {connection['expected_device_id']}（已签名保存）")
     else:
-        ok("设备连接", f"{station} → {connection['base_url']}（沿用）")
+        ok("设备连接", f"{station} → {where}（沿用）")
     if (operator.get("/gate").get("blocked_stations") or {}).get(station):
         operator.post(f"/stations/{station}/adapter/reconnect")
 
@@ -224,7 +314,7 @@ def register(team: dict[str, Actor], keys: list[str], args: argparse.Namespace) 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="登记三台模拟设备的工位并接到模拟网关")
+    parser = argparse.ArgumentParser(description="登记模拟设备的工位并接到模拟网关 / 模拟仪表")
     parser.add_argument("command", choices=("register",))
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
     parser.add_argument("--only", default=",".join(DEVICES), help=f"只登记哪几台（{', '.join(DEVICES)}）")
