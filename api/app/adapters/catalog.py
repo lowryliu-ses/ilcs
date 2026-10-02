@@ -649,6 +649,12 @@ def check_fields(driver: str, config: dict, *, template: bool = False) -> Config
     for item in info.fields:
         if item.required and item.name not in config and not (template and item.connection):
             check.problems.append(f"缺少「{item.label}」（{item.name}）")
+    if driver in MAPPING_DRIVERS:
+        # 两层：只读写点位可以只配点表；参与自动流程（配了能力映射）就必须能确认作业做没做完
+        if config.get("capabilities") and not config.get("status"):
+            check.problems.append("配了能力映射（参与自动流程）就要配「状态」（status）：没有状态就无法判断作业做没做完")
+        if not config.get("capabilities") and not config.get("points"):
+            check.problems.append("至少要配点表（points，读写点位）或能力映射（capabilities，参与自动流程）")
     for name, value in config.items():
         item = known.get(name)
         if item is None:

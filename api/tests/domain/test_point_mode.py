@@ -101,7 +101,7 @@ def test_task_mode_keeps_its_requirements():
                                             "go": {"table": "coil", "address": 0, "type": "bool"}}}
     capabilities = {"cap.x": {"write": {"temp": "sp"}, "start": {"point": "go"}}}
     no_status = validate_config("modbus_map_v1", {**base, "capabilities": capabilities})
-    assert any("status.point" in problem for problem in no_status.problems), no_status.problems
+    assert any("status" in problem for problem in no_status.problems), no_status.problems
 
     status = {"point": "state", "states": {"0": "idle", "1": "running", "3": "done"}}
     full = {**base, "capabilities": capabilities, "status": status}

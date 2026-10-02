@@ -77,7 +77,9 @@ def test_driver_catalog_describes_every_registered_driver(admin):
     drivers = admin.get("/api/drivers", params={"station_id": "ST-05"}).json()
     assert {row["key"] for row in drivers} == set(REAL_IMPLEMENTATIONS)
     line = next(row for row in drivers if row["key"] == "line_command_v1")
-    assert "transport" in line["connection_keys"] and "status" in {f["name"] for f in line["fields"] if f["required"]}
+    # 两层：只读写点位可以只配点表，能力映射与状态不再是字段级必填（配了能力映射才要状态，由配置检查管）
+    required = {f["name"] for f in line["fields"] if f["required"]}
+    assert "transport" in line["connection_keys"] and "transport" in required and not {"status", "capabilities"} & required
     # 起步模板按工位能力极限生成（以前写死在前端）
     limits = next(row for row in admin.get("/api/stations").json() if row["id"] == "ST-05")["limits"]
     assert set(line["template"]["capabilities"]) == set(limits)
@@ -100,7 +102,12 @@ def test_invalid_config_is_rejected_when_saving(admin, station):
         "driver": "line_command_v1", "config": {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001},
                                                  "capabilities": {}, "stauts": {}},
     }).json()
-    assert not checked["ok"] and any("status" in problem for problem in checked["problems"])
+    assert not checked["ok"] and any("点表" in problem for problem in checked["problems"]), checked
+    tasks = admin.post(f"/api/stations/{station}/adapter/check", {
+        "driver": "line_command_v1", "config": {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001},
+                                                 "capabilities": {"cap.x": {"start": [{"send": "RUN"}]}}},
+    }).json()
+    assert not tasks["ok"] and any("status" in problem for problem in tasks["problems"]), tasks
     assert any("stauts" in warning for warning in checked["warnings"]), "拼错的键只提醒，驱动会忽略它"
 
     saved = _patch(admin, station, kind="real", driver="line_command_v1", protocol="串口 / TCP 命令",
