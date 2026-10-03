@@ -303,7 +303,6 @@ def connect(engineer: Actor, operator: Actor, template: dict, args: argparse.Nam
        + ("；设备自报为模拟器，只读级即可放行" if run.get("simulator") else ""))
     wait_for(f"{STATION} 适配器在线", lambda: not (operator.get("/gate").get("blocked_stations") or {}).get(STATION),
              timeout=60)
-    close_recovered_alarms(operator)
 
 
 def physical_acceptance(engineer: Actor) -> None:
@@ -322,19 +321,6 @@ def physical_acceptance(engineer: Actor) -> None:
     skipped = sorted(key for key, state in states.items() if state == "skip")
     ok("接入验收（动作级 + 故障项目）", f"{run['id']} 通过：{len(passed)} 项通过"
        + (f"，跳过 {'、'.join(skipped)}" if skipped else ""))
-
-
-def close_recovered_alarms(operator: Actor) -> None:
-    """新适配器重连前执行器会报一次「适配器失联」：只关本工位上条件已恢复的失联报警。"""
-    closed = 0
-    for alarm in operator.get("/alarms"):
-        if (alarm.get("state") == "active" and alarm.get("source_id") == STATION
-                and not alarm.get("condition_active") and "失联" in (alarm.get("message") or "")):
-            operator.post(f"/alarms/{alarm['id']}/ack")
-            operator.post(f"/alarms/{alarm['id']}/close")
-            closed += 1
-    if closed:
-        ok("关闭已恢复的接入报警", f"{closed} 条（新适配器重连前的「失联」）")
 
 
 def register_metrics(researcher: Actor) -> dict[str, str]:

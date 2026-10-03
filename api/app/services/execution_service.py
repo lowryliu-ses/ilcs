@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,7 @@ from .gate_service import GateService
 
 # 搬运能力：AGV、机械臂转运这类承运工位不承接工步，没有校准档案要核（与迁移核对同一口径）
 TRANSPORT_CAPABILITY = "cap.transfer"
+LOG = logging.getLogger("ilcs.executor")
 
 
 
@@ -1388,18 +1390,17 @@ class ExecutorLoop:
             try:
                 health = adapter_for(record).healthcheck()
             except AdapterUnreachable as exc:
-                record.connected = False
-                record.note = f"探测失败：{exc}"[:500]
+                self._probe_failed(record, f"探测失败：{exc}", exc)
                 continue
             except (AdapterError, NotImplementedError) as exc:
                 # 身份不符、正式环境里的模拟器：设备在线也不能用
-                record.connected = False
                 record.accepts_commands = False
-                record.note = f"探测拒绝：{exc}"[:500]
+                self._probe_failed(record, f"探测拒绝：{exc}", exc)
                 continue
             came_back = not record.connected
             record.connected = True
             record.last_heartbeat = moment
+            record.awaiting_handshake_since = None
             record.site_interlock = bool(health.get("interlock"))
             record.accepts_commands = bool(health.get("accepts_commands", True))
             record.note = f"探测在线：{health.get('device_id', '')}"
@@ -1448,6 +1449,19 @@ class ExecutorLoop:
                 self.db.get(Batch, command.batch_id), command,
                 "设备服务的驱动配置在指令执行期间变了：结果未知，转人工核查", delivery="maybe_sent",
             )
+
+    @staticmethod
+    def _probe_failed(record: Adapter, reason: str, exc: Exception) -> None:
+        """探测没通过：标离线，原因写进备注（失联报警带上它）。从在线变离线、或原因变了才记日志：设备一直不在时
+        每轮都探测，不能刷屏；下一次探测成功会覆盖备注，日志里还留着这次为什么没通过。"""
+        reason = reason[:500]
+        if record.connected or record.note != reason:
+            LOG.warning("设备探测没通过", extra={"fields": {
+                "station_id": record.station_id, "driver": record.driver, "was_connected": bool(record.connected),
+                "error": exc.__class__.__name__, "reason": reason,
+            }})
+        record.connected = False
+        record.note = reason
 
     def heartbeat_simulated(self) -> None:
         """只给模拟适配器补心跳。真实设备的在线状态必须由它自己上报。"""

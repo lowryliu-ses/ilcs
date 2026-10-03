@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import socket
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -22,19 +22,45 @@ from .alarm_service import AlarmService
 EXECUTOR_ID = "executor"
 
 
+def handshake_grace(adapter: Adapter) -> float:
+    """保存连接配置（或新登记）之后等第一次握手的宽限（秒）：执行器主动探测的设备给 3 个探测周期、至少 1 min；
+    设备自己推心跳的（含内置模拟，要人点「重新连接」）按心跳超时。"""
+    from ..adapters.registry import probe_interval
+
+    interval = probe_interval(adapter)
+    return max(60.0, 3 * interval) if interval else float(settings.heartbeat_stale_sec)
+
+
 class DeviceMonitor:
     def __init__(self, db: Session):
         self.db = db
 
     # ---------- 工位条件 ----------
 
+    @staticmethod
+    def awaiting_handshake(adapter: Adapter, moment: datetime | None = None) -> bool:
+        """新登记、或刚保存了改变连接的配置，还在等第一次握手、没过宽限：离线不是失联（执行门照样挡着下发）。"""
+        since = adapter.awaiting_handshake_since
+        if since is None or adapter.connected:
+            return False
+        return ((moment or now()) - since).total_seconds() < handshake_grace(adapter)
+
     def station_conditions(self, adapter: Adapter) -> dict[str, tuple[bool, int, str]]:
         """条件名 → (是否成立, 严重度, 描述)。停用的适配器不判失联与心跳，联锁照判。"""
-        age = (now() - adapter.last_heartbeat).total_seconds() if adapter.last_heartbeat else None
+        moment = now()
+        age = (moment - adapter.last_heartbeat).total_seconds() if adapter.last_heartbeat else None
         stale = age is None or age > settings.heartbeat_stale_sec
+        lost, details = "设备适配器失联", []
+        if adapter.awaiting_handshake_since is not None and not adapter.connected:
+            waited = (moment - adapter.awaiting_handshake_since).total_seconds()
+            details.append(f"保存连接配置 {waited / 60:.0f} min 后还没握上手：核对地址、凭据与设备身份")
+        if not adapter.connected and (adapter.note or "").startswith(("探测失败：", "探测拒绝：")):
+            details.append(adapter.note[:200])  # 执行器探测没通过的原因（ExecutorLoop._probe_failed）
+        if details:
+            lost += f"（{'；'.join(details)}）"
         return {
             "interlock": (bool(adapter.site_interlock), 1, "公共保护联锁触发"),
-            "disconnected": (bool(adapter.enabled) and not adapter.connected, 2, "设备适配器失联"),
+            "disconnected": (bool(adapter.enabled) and not adapter.connected, 2, lost),
             "heartbeat_stale": (
                 bool(adapter.enabled) and bool(adapter.connected) and stale, 2,
                 f"设备心跳超时（{(age or 0) / 60:.0f} min 未上报）",
@@ -51,8 +77,12 @@ class DeviceMonitor:
         from .exception_service import ExceptionService
 
         exceptions = ExceptionService(self.db, system_context(station.org_id, "异常引擎"))
+        pending = self.awaiting_handshake(adapter)
         for name, (active, severity, message) in self.station_conditions(adapter).items():
             key = f"station:{station_id}:{name}"
+            if name == "disconnected" and active and pending:
+                # 刚保存配置、在等第一次握手：既不是失联，也不是恢复——报警状态不动（改配置之前就在失联的照样挂着）
+                continue
             if active:
                 before = alarms.alarms.open_by_condition(key)
                 alarm = alarms.raise_alarm(

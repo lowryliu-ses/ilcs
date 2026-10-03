@@ -145,3 +145,31 @@ def test_point_only_device_and_token_rules(credentials):
             with pytest.raises(AdapterError, match="InvalidAccessToken"):
                 _adapter(device["port"], f"file://{credentials / 'wrong.token'}", tasks=False).healthcheck()
         assert sum(program.device.executions.values()) == 0
+
+
+def test_connections_opened_at_the_same_time_do_not_trip_over_each_other(credentials):
+    """执行器重启后第一轮会并发探测好几台 SiLA 设备：同时建客户端不能偶发失败。
+
+    sila2 0.14.0 建客户端时现场编译 protobuf、改 sys.modules，并发时会偶发 KeyError（如 'SiLAService_pb2'），
+    ILCS 曾因此把在线的设备判成失联、报一条报警。"""
+    import threading
+
+    with plc_sim("modbus") as (_, _, plc_port):
+        devices = {f"PLC-{index}": _plc_device(plc_port, tasks=False) for index in range(3)}
+        with driver_host(credentials / "site", devices):
+            failures: list[str] = []
+
+            def connect(port: int) -> None:
+                try:
+                    _adapter(port, f"file://{credentials / 'host.token'}", tasks=False)._connect()
+                except Exception as exc:  # noqa: BLE001  收集起来最后一起断言
+                    failures.append(repr(exc))
+
+            for _ in range(6):
+                threads = [threading.Thread(target=connect, args=(device["port"],))
+                           for device in devices.values() for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+    assert failures == [], failures[:3]

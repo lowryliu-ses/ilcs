@@ -151,6 +151,7 @@ def reset_runtime():
             adapter.site_interlock = False
             adapter.accepts_commands = True
             adapter.last_heartbeat = now()
+            adapter.awaiting_handshake_since = None
             adapter.current_command_id = ""
             adapter.supports_hold = True
             adapter.supports_abort = True
