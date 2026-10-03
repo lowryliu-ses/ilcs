@@ -358,6 +358,7 @@ cd ilcs && api/.venv/bin/python scripts/smoke.py   # 端到端闭环（需 api �
 | 数据库指令队列 + LISTEN/NOTIFY 唤醒 | NATS JetStream（多执行器分片、跨站点） | `repositories/execution.py`、`core/events.py` 与执行器循环 |
 | JWT + 本地口令 | Keycloak OIDC | `core/security.py`、`api/deps.py`；服务身份不变 |
 | 模拟适配器 | 厂商专用工位适配器 | 能用映射驱动描述的设备只写设备接入模板（`profile.json`）；厂家 SDK / 私有协议的设备按 `devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码。确实要进 ILCS 进程的新协议才在 `adapters/drivers/` 下实现 `adapters/base.py` 契约、在 `adapters/registry.py` 注册并在 `adapters/catalog.py` 声明配置项。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
+| 映射驱动在 ILCS 进程内，网关模块走 `http_json_v1` | 驱动移出 ILCS，放进独立的驱动项目，每台设备一个 SiLA 服务，ILCS 只经 SiLA 接设备 | 契约草案见 `devices/contracts/sila2/README.md`（新增 DeviceInfo、PointAccess，TaskExecution 1.1）。ILCS 侧改 `adapters/drivers/sila2.py`、点位服务，加配置摘要闸门；映射驱动与作业台账迁出 |
 | 模拟遥测序列与模拟原始曲线 | TimescaleDB 连续聚合 / 对象存储 | `ExecutionService.record_telemetry`、`ResultService.raw_curve_rows`；读接口不变 |
 | 本地文件存储 | 对象存储 | `services/file_service.py` 一处；接口返回的是文件 ID，不是路径 |
 | 自绘 SVG 图表 | uPlot | `web/src/shared/chart.tsx` |

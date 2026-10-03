@@ -79,6 +79,18 @@ class TaskExecutionImpl(FeatureImplementationBase):
     def get_DeviceIdentity(self, *, metadata):
         return json.dumps(self.device.identity(), ensure_ascii=False)
 
+    def get_TaskSupport(self, *, metadata):
+        """模拟器接受任意能力与参数；方法目录与身份里自报的一致。"""
+        return {
+            "Capabilities": [{
+                "Capability": "*", "ParametersSchema": json.dumps({"type": "object"}),
+                "Programs": [{"Program": str(row.get("program") or ""), "Name": str(row.get("name") or "")}
+                             for row in self.device.methods],
+            }],
+            "SupportsHold": True, "SupportsAbort": True, "SupportsQuery": True, "SupportsDedup": True,
+            "Handoff": "sync",
+        }
+
 
 class SimulatorControlImpl(FeatureImplementationBase):
     def __init__(self, parent_server: SilaServer, device: SimulatedDevice, runner: "SimulatorRunner"):

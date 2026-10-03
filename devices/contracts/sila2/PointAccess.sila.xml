@@ -1,0 +1,394 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="ilcs" FeatureVersion="1.0" MaturityLevel="Draft" Originator="ai.ses" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>PointAccess</Identifier>
+  <DisplayName>Point Access</DisplayName>
+  <Description>Read device points and let a person write a single value. Implemented by devices that expose points (registers, nodes, query commands). Writing a point is a manual, signed action in ILCS, not part of automatic workflows: anything that makes the device act goes through TaskExecution.</Description>
+  <Property>
+    <Identifier>Points</Identifier>
+    <DisplayName>Points</DisplayName>
+    <Description>Point catalog. Served from the driver configuration, so it stays readable while the device is offline.</Description>
+    <Observable>No</Observable>
+    <DataType>
+      <List>
+        <DataType>
+          <DataTypeIdentifier>PointDefinition</DataTypeIdentifier>
+        </DataType>
+      </List>
+    </DataType>
+  </Property>
+  <Command>
+    <Identifier>ReadPoints</Identifier>
+    <DisplayName>Read Points</DisplayName>
+    <Description>Read points one by one. A point that cannot be read is reported in its own row (Error not empty) and does not fail the other rows.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>Names</Identifier>
+      <DisplayName>Names</DisplayName>
+      <Description>Point names to read; an empty list reads every point in the catalog.</Description>
+      <DataType>
+        <List>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </List>
+      </DataType>
+    </Parameter>
+    <Response>
+      <Identifier>Values</Identifier>
+      <DisplayName>Values</DisplayName>
+      <Description>One row per point, in catalog order.</Description>
+      <DataType>
+        <List>
+          <DataType>
+            <DataTypeIdentifier>PointReading</DataTypeIdentifier>
+          </DataType>
+        </List>
+      </DataType>
+    </Response>
+    <DefinedExecutionErrors>
+      <Identifier>UnknownPoint</Identifier>
+    </DefinedExecutionErrors>
+  </Command>
+  <Command>
+    <Identifier>WritePoint</Identifier>
+    <DisplayName>Write Point</DisplayName>
+    <Description>Write one value: read the current value, write, read back, all within the driver host while it holds the device connection. Every defined error except WriteUnconfirmed means nothing was written.</Description>
+    <Observable>No</Observable>
+    <Parameter>
+      <Identifier>RequestId</Identifier>
+      <DisplayName>Request Id</DisplayName>
+      <Description>Idempotency key issued by ILCS (the id of the signed point-write record). Repeating a RequestId returns the stored outcome without writing again.</Description>
+      <DataType>
+        <Constrained>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+          <Constraints>
+            <MinimalLength>1</MinimalLength>
+          </Constraints>
+        </Constrained>
+      </DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Name</Identifier>
+      <DisplayName>Name</DisplayName>
+      <Description>Point name from the catalog.</Description>
+      <DataType>
+        <Constrained>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+          <Constraints>
+            <MinimalLength>1</MinimalLength>
+          </Constraints>
+        </Constrained>
+      </DataType>
+    </Parameter>
+    <Parameter>
+      <Identifier>Value</Identifier>
+      <DisplayName>Value</DisplayName>
+      <Description>Value in engineering units, of the point's ValueType.</Description>
+      <DataType>
+        <DataTypeIdentifier>PointValue</DataTypeIdentifier>
+      </DataType>
+    </Parameter>
+    <Response>
+      <Identifier>Outcome</Identifier>
+      <DisplayName>Outcome</DisplayName>
+      <Description>Values before and after the write.</Description>
+      <DataType>
+        <DataTypeIdentifier>WriteOutcome</DataTypeIdentifier>
+      </DataType>
+    </Response>
+    <DefinedExecutionErrors>
+      <Identifier>UnknownPoint</Identifier>
+      <Identifier>NotWritable</Identifier>
+      <Identifier>ControlPoint</Identifier>
+      <Identifier>OutOfRange</Identifier>
+      <Identifier>InvalidValue</Identifier>
+      <Identifier>DeviceBusy</Identifier>
+      <Identifier>WriteRejected</Identifier>
+      <Identifier>DeviceUnreachable</Identifier>
+      <Identifier>RequestConflict</Identifier>
+      <Identifier>WriteUnconfirmed</Identifier>
+    </DefinedExecutionErrors>
+  </Command>
+  <DefinedExecutionError>
+    <Identifier>UnknownPoint</Identifier>
+    <DisplayName>Unknown Point</DisplayName>
+    <Description>The point is not in the catalog. Nothing was read or written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>NotWritable</Identifier>
+    <DisplayName>Not Writable</DisplayName>
+    <Description>The point is not declared writable. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>ControlPoint</Identifier>
+    <DisplayName>Control Point</DisplayName>
+    <Description>The point is a task control signal (start, state, reset, command id, heartbeat, interlock). It is never written through this feature, whatever the configuration says; use TaskExecution. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>OutOfRange</Identifier>
+    <DisplayName>Out Of Range</DisplayName>
+    <Description>The value is outside the point's Minimum / Maximum. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>InvalidValue</Identifier>
+    <DisplayName>Invalid Value</DisplayName>
+    <Description>The value does not match the point's ValueType or cannot be encoded for the device. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>DeviceBusy</Identifier>
+    <DisplayName>Device Busy</DisplayName>
+    <Description>A job is running or held on the device. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>WriteRejected</Identifier>
+    <DisplayName>Write Rejected</DisplayName>
+    <Description>The device explicitly refused the write (exception response, Bad status code). Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>DeviceUnreachable</Identifier>
+    <DisplayName>Device Unreachable</DisplayName>
+    <Description>The current value could not be read before writing. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>RequestConflict</Identifier>
+    <DisplayName>Request Conflict</DisplayName>
+    <Description>The RequestId was already used for a different point or value. Nothing was written.</Description>
+  </DefinedExecutionError>
+  <DefinedExecutionError>
+    <Identifier>WriteUnconfirmed</Identifier>
+    <DisplayName>Write Unconfirmed</DisplayName>
+    <Description>The write was sent but not confirmed, or the value could not be read back. The device value may have changed and must be checked on site.</Description>
+  </DefinedExecutionError>
+  <DataTypeDefinition>
+    <Identifier>PointValue</Identifier>
+    <DisplayName>Point Value</DisplayName>
+    <Description>A single value in engineering units: Real, Integer, Boolean or String.</Description>
+    <DataType>
+      <Constrained>
+        <DataType>
+          <Basic>Any</Basic>
+        </DataType>
+        <Constraints>
+          <AllowedTypes>
+            <DataType>
+              <Basic>Real</Basic>
+            </DataType>
+            <DataType>
+              <Basic>Integer</Basic>
+            </DataType>
+            <DataType>
+              <Basic>Boolean</Basic>
+            </DataType>
+            <DataType>
+              <Basic>String</Basic>
+            </DataType>
+          </AllowedTypes>
+        </Constraints>
+      </Constrained>
+    </DataType>
+  </DataTypeDefinition>
+  <DataTypeDefinition>
+    <Identifier>PointDefinition</Identifier>
+    <DisplayName>Point Definition</DisplayName>
+    <Description>One catalog entry.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>Name</Identifier>
+          <DisplayName>Name</DisplayName>
+          <Description>Stable point name used by ReadPoints and WritePoint.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Pattern>[A-Za-z_][A-Za-z0-9_]*</Pattern>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Label</Identifier>
+          <DisplayName>Label</DisplayName>
+          <Description>Display name; empty to show Name.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Unit</Identifier>
+          <DisplayName>Unit</DisplayName>
+          <Description>Unit as written in ILCS (e.g. ℃, bar, rpm); empty for dimensionless and text points.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ValueType</Identifier>
+          <DisplayName>Value Type</DisplayName>
+          <Description>SiLA basic type of the point's values.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Set>
+                  <Value>Real</Value>
+                  <Value>Integer</Value>
+                  <Value>Boolean</Value>
+                  <Value>String</Value>
+                </Set>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Writable</Identifier>
+          <DisplayName>Writable</DisplayName>
+          <Description>A person may write this point through WritePoint.</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Minimum</Identifier>
+          <DisplayName>Minimum</DisplayName>
+          <Description>Lower bound for writes: one element, or an empty list when unbounded.</Description>
+          <DataType>
+            <List>
+              <DataType>
+                <Basic>Real</Basic>
+              </DataType>
+            </List>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Maximum</Identifier>
+          <DisplayName>Maximum</DisplayName>
+          <Description>Upper bound for writes: one element, or an empty list when unbounded.</Description>
+          <DataType>
+            <List>
+              <DataType>
+                <Basic>Real</Basic>
+              </DataType>
+            </List>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Control</Identifier>
+          <DisplayName>Control</DisplayName>
+          <Description>Task control signal (start, state, reset, hold / abort, command id, heartbeat, error, ready, interlock). Never writable through this feature.</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+  <DataTypeDefinition>
+    <Identifier>PointReading</Identifier>
+    <DisplayName>Point Reading</DisplayName>
+    <Description>The value of one point.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>Name</Identifier>
+          <DisplayName>Name</DisplayName>
+          <Description>Point name.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Value</Identifier>
+          <DisplayName>Value</DisplayName>
+          <Description>Value in engineering units (scaling applied). Carries no information when Error is not empty.</Description>
+          <DataType>
+            <DataTypeIdentifier>PointValue</DataTypeIdentifier>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Quality</Identifier>
+          <DisplayName>Quality</DisplayName>
+          <Description>good | uncertain | bad, as reported by the device or judged by the driver; bad when Error is not empty.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Set>
+                  <Value>good</Value>
+                  <Value>uncertain</Value>
+                  <Value>bad</Value>
+                </Set>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ObservedAt</Identifier>
+          <DisplayName>Observed At</DisplayName>
+          <Description>When the value was read.</Description>
+          <DataType>
+            <Basic>Timestamp</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Error</Identifier>
+          <DisplayName>Error</DisplayName>
+          <Description>Why the point could not be read; empty on success.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+  <DataTypeDefinition>
+    <Identifier>WriteOutcome</Identifier>
+    <DisplayName>Write Outcome</DisplayName>
+    <Description>Result of a confirmed write.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>Before</Identifier>
+          <DisplayName>Before</DisplayName>
+          <Description>Value read just before writing.</Description>
+          <DataType>
+            <DataTypeIdentifier>PointValue</DataTypeIdentifier>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>After</Identifier>
+          <DisplayName>After</DisplayName>
+          <Description>Value read back after writing.</Description>
+          <DataType>
+            <DataTypeIdentifier>PointValue</DataTypeIdentifier>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Matches</Identifier>
+          <DisplayName>Matches</DisplayName>
+          <Description>The read-back value equals the written value within the point's tolerance. False means the device accepted the write but holds a different value (clamped or rescaled by the device).</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ObservedAt</Identifier>
+          <DisplayName>Observed At</DisplayName>
+          <Description>When the value was read back.</Description>
+          <DataType>
+            <Basic>Timestamp</Basic>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+</Feature>

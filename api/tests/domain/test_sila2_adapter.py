@@ -92,6 +92,33 @@ def test_identity_submit_query_and_dedup(simulator):
     assert adapter.query("CMD-NEVER-SEEN") is None
 
 
+def test_context_carries_station_and_material(simulator):
+    """TaskExecution 1.1：上下文和 http_json_v1 的请求体一样带工位，投料步骤再带物料。"""
+    from dataclasses import replace
+
+    device, _, port = simulator
+    adapter = _adapter(port)
+    material = {"name": "电解液 LP57", "unit": "mL", "param": "electrolyte"}
+    adapter.submit(replace(_request("CMD-CTX"), material=material))
+    context = device.tasks["CMD-CTX"].context
+    assert context["station_id"] == "ST-SIM" and context["material"] == material
+    _wait_done(adapter, "CMD-CTX")
+    adapter.submit(_request("CMD-PLAIN"))
+    assert "material" not in device.tasks["CMD-PLAIN"].context, "不投料的步骤不带物料"
+
+
+def test_simulator_reports_task_support(simulator):
+    """模拟设备实现 TaskExecution 1.1 新增的 TaskSupport：任意能力、四种控制都支持、方法目录与身份一致。"""
+    from sila2.client import SilaClient
+
+    _, _, port = simulator
+    support = SilaClient("127.0.0.1", port, insecure=True).TaskExecution.TaskSupport.get()
+    assert [row.Capability for row in support.Capabilities] == ["*"]
+    assert [program.Program for program in support.Capabilities[0].Programs] == ["*"]
+    assert support.SupportsHold and support.SupportsAbort and support.SupportsQuery and support.SupportsDedup
+    assert support.Handoff == "sync"
+
+
 def test_hold_and_abort_target_the_in_flight_task(simulator):
     device, _, port = simulator
     adapter = _adapter(port)

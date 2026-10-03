@@ -1,0 +1,252 @@
+<Feature xmlns="http://www.sila-standard.org" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Category="ilcs" FeatureVersion="1.0" MaturityLevel="Draft" Originator="ai.ses" SiLA2Version="1.0" xsi:schemaLocation="http://www.sila-standard.org https://gitlab.com/SiLA2/sila_base/raw/master/schema/FeatureDefinition.xsd">
+  <Identifier>DeviceInfo</Identifier>
+  <DisplayName>Device Info</DisplayName>
+  <Description>Who the device is, what state it is in, and which driver and configuration speak for it. Every device service that ILCS connects to implements this feature. One SiLA server stands for one physical device: the SiLA server UUID identifies the device service, Identity identifies the physical device behind it.</Description>
+  <Property>
+    <Identifier>Identity</Identifier>
+    <DisplayName>Identity</DisplayName>
+    <Description>Identity of the physical device, read from the device on every call. ILCS compares DeviceId with the device id expected for the station, so a device that can report an id MUST report the id it reads from the device, never one taken from configuration.</Description>
+    <Observable>No</Observable>
+    <DataType>
+      <DataTypeIdentifier>PhysicalIdentity</DataTypeIdentifier>
+    </DataType>
+    <DefinedExecutionErrors>
+      <Identifier>DeviceUnreachable</Identifier>
+    </DefinedExecutionErrors>
+  </Property>
+  <Property>
+    <Identifier>Status</Identifier>
+    <DisplayName>Status</DisplayName>
+    <Description>Current device state as the driver reads it now. ILCS polls it to decide whether the station is online, interlocked and ready.</Description>
+    <Observable>No</Observable>
+    <DataType>
+      <DataTypeIdentifier>DeviceStatus</DataTypeIdentifier>
+    </DataType>
+    <DefinedExecutionErrors>
+      <Identifier>DeviceUnreachable</Identifier>
+    </DefinedExecutionErrors>
+  </Property>
+  <Property>
+    <Identifier>Driver</Identifier>
+    <DisplayName>Driver</DisplayName>
+    <Description>The driver plugin and configuration that speak for the device. Served from the driver host, so it stays readable while the device itself is offline.</Description>
+    <Observable>No</Observable>
+    <DataType>
+      <DataTypeIdentifier>DriverInfo</DataTypeIdentifier>
+    </DataType>
+  </Property>
+  <DefinedExecutionError>
+    <Identifier>DeviceUnreachable</Identifier>
+    <DisplayName>Device Unreachable</DisplayName>
+    <Description>The driver host is running but the physical device did not answer. ILCS treats the station as offline.</Description>
+  </DefinedExecutionError>
+  <DataTypeDefinition>
+    <Identifier>PhysicalIdentity</Identifier>
+    <DisplayName>Physical Identity</DisplayName>
+    <Description>Identity of the physical device behind the device service.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>DeviceId</Identifier>
+          <DisplayName>Device Id</DisplayName>
+          <Description>Identifier of the physical device (serial number, PLC device id).</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>IdentitySource</Identifier>
+          <DisplayName>Identity Source</DisplayName>
+          <Description>device: DeviceId was read from the device. config: the device cannot report an identity and DeviceId comes from the driver configuration; it then does not protect against a wrongly wired device.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Set>
+                  <Value>device</Value>
+                  <Value>config</Value>
+                </Set>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Vendor</Identifier>
+          <DisplayName>Vendor</DisplayName>
+          <Description>Manufacturer.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Model</Identifier>
+          <DisplayName>Model</DisplayName>
+          <Description>Model as reported by the device. ILCS compares it with the model registered for the station's asset and warns on a mismatch.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>SerialNumber</Identifier>
+          <DisplayName>Serial Number</DisplayName>
+          <Description>Serial number; may equal DeviceId.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Firmware</Identifier>
+          <DisplayName>Firmware</DisplayName>
+          <Description>Firmware or controller program version.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Simulator</Identifier>
+          <DisplayName>Simulator</DisplayName>
+          <Description>True for any simulated device, including third-party simulators. ILCS refuses simulated devices in production.</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+  <DataTypeDefinition>
+    <Identifier>DeviceStatus</Identifier>
+    <DisplayName>Device Status</DisplayName>
+    <Description>Device state at the time it was read.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>State</Identifier>
+          <DisplayName>State</DisplayName>
+          <Description>idle | running | held: the device is free, working or paused. done | failed: the device still shows the outcome of its last job and has not been reset. unknown: the driver cannot tell. Devices without jobs report idle.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Set>
+                  <Value>idle</Value>
+                  <Value>running</Value>
+                  <Value>held</Value>
+                  <Value>done</Value>
+                  <Value>failed</Value>
+                  <Value>unknown</Value>
+                </Set>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ActiveCommandId</Identifier>
+          <DisplayName>Active Command Id</DisplayName>
+          <Description>ILCS CommandId of the job currently on the device; empty when there is none.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>Interlock</Identifier>
+          <DisplayName>Interlock</DisplayName>
+          <Description>A safety interlock is active.</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>AcceptsCommands</Identifier>
+          <DisplayName>Accepts Commands</DisplayName>
+          <Description>The device is in remote / automatic mode and would accept a job now.</Description>
+          <DataType>
+            <Basic>Boolean</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ObservedAt</Identifier>
+          <DisplayName>Observed At</DisplayName>
+          <Description>When the driver read this status: device clock when the device has one, driver host clock otherwise.</Description>
+          <DataType>
+            <Basic>Timestamp</Basic>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+  <DataTypeDefinition>
+    <Identifier>DriverInfo</Identifier>
+    <DisplayName>Driver Info</DisplayName>
+    <Description>Driver plugin, driver host and configuration in effect for the device.</Description>
+    <DataType>
+      <Structure>
+        <Element>
+          <Identifier>Plugin</Identifier>
+          <DisplayName>Plugin</DisplayName>
+          <Description>Protocol plugin or device module that drives the device, e.g. modbus_map, opcua_map, rest_map, line_command, neware-bts.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>PluginVersion</Identifier>
+          <DisplayName>Plugin Version</DisplayName>
+          <Description>Version of the plugin or device module.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>HostVersion</Identifier>
+          <DisplayName>Host Version</DisplayName>
+          <Description>Version of the driver host runtime.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ConfigVersion</Identifier>
+          <DisplayName>Config Version</DisplayName>
+          <Description>Human-readable revision of the device configuration, e.g. the commit of the driver project it was deployed from.</Description>
+          <DataType>
+            <Basic>String</Basic>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>ConfigDigest</Identifier>
+          <DisplayName>Config Digest</DisplayName>
+          <Description>sha256 of the canonical JSON of the configuration that decides which device is talked to and how outcomes are judged: connection target, points, capability, state and error mappings. Timeouts and probe intervals are excluded, secrets are never included. ILCS pins the approved digest; a different digest blocks dispatch until the change is approved and accepted.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>String</Basic>
+              </DataType>
+              <Constraints>
+                <Pattern>sha256:[0-9a-f]{64}</Pattern>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+        <Element>
+          <Identifier>OfflineAfterSeconds</Identifier>
+          <DisplayName>Offline After Seconds</DisplayName>
+          <Description>How long the driver may take to notice that the device is gone, e.g. a PLC heartbeat timeout; 0 when an unanswered request is noticed at once. Acceptance tests wait at least this long before judging an offline check.</Description>
+          <DataType>
+            <Constrained>
+              <DataType>
+                <Basic>Real</Basic>
+              </DataType>
+              <Constraints>
+                <MinimalInclusive>0</MinimalInclusive>
+              </Constraints>
+            </Constrained>
+          </DataType>
+        </Element>
+      </Structure>
+    </DataType>
+  </DataTypeDefinition>
+</Feature>
