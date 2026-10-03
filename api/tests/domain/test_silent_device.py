@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from sim_harness import plc_config, plc_sim, record, silent_port
+from sim_harness import freezable_proxy, plc_config, plc_sim, record, silent_port
 
 
 @pytest.mark.parametrize("protocol", ["modbus", "opcua"])
@@ -35,3 +35,20 @@ def test_a_point_the_device_quickly_rejects_does_not_stop_the_others():
         rows = OpcUaMapAdapter(record("PLC 点表", config, credential)).read_points()
     assert rows[0]["name"] == "bogus" and rows[0]["error"] and "没有再读" not in rows[0]["error"]
     assert all(row["error"] == "" for row in rows[1:]), [row for row in rows[1:] if row["error"]]
+
+
+def test_link_that_goes_silent_mid_session_costs_one_timeout():
+    """会话建好之后断网（连接还挂着、没有回音）：读点等一个超时就答复，关旧会话不再多等一个超时。"""
+    from app.adapters.drivers.opcua_map import OpcUaMapAdapter
+
+    with plc_sim("opcua") as (_, _, port), freezable_proxy(port) as proxy:
+        config, credential = plc_config("opcua", proxy.port, request_timeout_sec=1.5, connect_timeout_sec=1)
+        adapter = OpcUaMapAdapter(record("PLC 点表", config, credential))
+        assert all(row["error"] == "" for row in adapter.read_points()), "会话经代理建好"
+        proxy.freeze()
+        started = time.monotonic()
+        rows = adapter.read_points()
+        took = time.monotonic() - started
+        adapter.close()
+    assert all(row["error"] for row in rows), rows
+    assert took < 2.5, f"等了 {took:.1f} s：关旧会话又等了一个超时"

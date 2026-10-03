@@ -7,6 +7,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import socket
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,65 @@ def silent_port():
         listener.bind(("127.0.0.1", 0))
         listener.listen(64)
         yield listener.getsockname()[1]
+
+class FreezableProxy:
+    """转发到本机某个端口的 TCP 代理。`freeze()` 之后一个字节都不再转发，连接还挂着：拔了网线、交换机断了就是这样
+    （没有 RST，客户端只能等超时）。"""
+
+    def __init__(self, target_port: int):
+        self.target_port = target_port
+        self.frozen = threading.Event()
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(16)
+        self.port = self.listener.getsockname()[1]
+        self.sockets: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def freeze(self) -> None:
+        self.frozen.set()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                inbound, _ = self.listener.accept()
+            except OSError:
+                return
+            outbound = socket.create_connection(("127.0.0.1", self.target_port))
+            self.sockets += [inbound, outbound]
+            for source, target in ((inbound, outbound), (outbound, inbound)):
+                threading.Thread(target=self._pump, args=(source, target), daemon=True).start()
+
+    def _pump(self, source: socket.socket, target: socket.socket) -> None:
+        while True:
+            try:
+                data = source.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
+            if not self.frozen.is_set():
+                try:
+                    target.sendall(data)
+                except OSError:
+                    return
+
+    def close(self) -> None:
+        for sock in [self.listener, *self.sockets]:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+@contextmanager
+def freezable_proxy(target_port: int):
+    proxy = FreezableProxy(target_port)
+    try:
+        yield proxy
+    finally:
+        proxy.close()
+
 
 
 def record(protocol: str, config: dict, credential_ref: str = "", **flags):

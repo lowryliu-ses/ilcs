@@ -167,9 +167,11 @@ class OpcUaSession:
             pass
 
     def drop(self) -> None:
-        if self.client is not None:
-            self._close(self.client)
-        self.client = None
+        """丢掉当前会话，下次调用重建。旧会话在后台关：服务器不回话（断网、卡死）时 CloseSession 要等满一个超时，
+        这次调用的答复不能跟着再晚一个超时；服务器还在的话照样关干净，不在服务器上留孤儿会话占会话数。"""
+        client, self.client = self.client, None
+        if client is not None:
+            threading.Thread(target=self._close, args=(client,), name="opcua-close", daemon=True).start()
 
     def classify(self, exc: Exception, action: str, rejections: dict | None = None) -> Exception:
         """Bad 状态码：约定的拒绝 → 明确失败；通信层 → 结果未知并重建会话；其他 → 无法确认。"""

@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from conftest import (TOKEN, client, free_port, modbus_points, plc_mapping, plc_sim, running_host, silent_port, token,
-                      write_site)
+from conftest import (TOKEN, client, free_port, freezable_proxy, modbus_points, plc_mapping, plc_sim, running_host,
+                      silent_port, token, write_site)
 
 
 def _plc_device(port: int, **extra) -> dict:
@@ -182,6 +182,25 @@ def test_silent_device_is_answered_within_one_timeout(tmp_path):
             assert _refused(lambda: c.PointAccess.WritePoint(
                 RequestId="pw-silent", Name="sp_thickness", Value=_point(100.0), metadata=token(c))) == "DeviceUnreachable"
             assert time.monotonic() - started < 3
+
+
+def test_link_that_goes_silent_mid_session_is_answered_within_one_timeout(tmp_path):
+    """OPC UA 会话建好之后断网（连接还挂着、没有回音）：读点一个超时就答复，关旧会话不再多等一个超时。"""
+    prefix = "nsu=urn:ilcs:sim:plc;s=Coater."
+    with plc_sim("opcua") as (_, plc_port), freezable_proxy(plc_port) as proxy:
+        device = {"plugin": "opcua_map", "port": free_port(), "simulator": True, "device_id": "PF-OPCUA-CFG",
+                  "config": {"endpoint": f"opc.tcp://127.0.0.1:{proxy.port}/plc/", "security_policy": "None",
+                             "request_timeout_sec": 1.5, "connect_timeout_sec": 1,
+                             "points": {"pressure": prefix + "PV_temp", "setpoint": prefix + "SP_temp"}}}
+        with running_host(write_site(tmp_path, {"PF-OPCUA": device})):
+            c = client(device["port"])
+            assert all(row.Quality == "good" for row in c.PointAccess.ReadPoints(Names=[], metadata=token(c)).Values)
+            proxy.freeze()
+            started = time.monotonic()
+            values = c.PointAccess.ReadPoints(Names=[], metadata=token(c)).Values
+            took = time.monotonic() - started
+            assert all(row.Quality == "bad" for row in values)
+            assert took < 2.5, f"等了 {took:.1f} s：关旧会话又等了一个超时"
 
 
 def test_mapped_identity_that_reads_blank_is_missing_not_the_configured_id(tmp_path, plc):
