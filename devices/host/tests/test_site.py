@@ -72,3 +72,23 @@ def test_plugin_rejects_a_bad_mapping_before_anything_starts(tmp_path):
     broken["config"]["capabilities"] = {"cap.x": {"start": {"point": "state"}}}  # 配了能力映射却没有状态点
     with pytest.raises(SiteError, match="status.point"):
         prepare(_load(write_site(tmp_path, {"PLC-1": broken})))
+
+
+def test_shipped_sites_load_and_every_plugin_constructs(tmp_path):
+    """仓库里带的现场配置都能加载，每台设备的插件都能按配置构造（不连设备）。"""
+    from pathlib import Path
+
+    from ilcs_host.features import DeviceRuntime
+    from ilcs_host.plugins import PLUGINS
+    from ilcs_host.settings import settings
+    from ilcs_host.site import load_site
+
+    sites = sorted(path for path in (Path(__file__).resolve().parents[1] / "sites").iterdir() if path.is_dir())
+    assert sites, "仓库里应带着试点现场配置"
+    for site_dir in sites:
+        site = load_site(site_dir, set(PLUGINS))
+        settings.configure(environment="development", allowed_hosts=site.allowed_hosts,
+                           credential_root=str(tmp_path), state_dir=str(tmp_path))
+        for entry in site.devices:
+            runtime = DeviceRuntime(entry, PLUGINS[entry.plugin], tmp_path)
+            assert runtime.points or runtime.tasks, f"{site_dir.name}/{entry.key} 既没有点表也没有能力映射"

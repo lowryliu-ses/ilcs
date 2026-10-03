@@ -113,6 +113,6 @@ api/.venv/bin/python -m pytest devices/host/tests
 |---|---|---|---|
 | `PF-MB-PLC` | modbus_map | 50201 | 从站 2 的握手 PLC：点位 + 任务（`cap.plc_run`），配置照抄 ILCS 工位 ST-PF-MB |
 | `PF-OPCUA` | opcua_map | 50202 | OPC UA 压力传感器：只读写点位，`setpoint` 可写 0–10 bar |
-| `PF-HTTP`（`.json.example`） | rest_map | 50203 | HTTP 设备：路径要对着本机 ProtoForge 核对；它的 8080 只在 ProtoForge 自己的网络里 |
+| `PF-HTTP` | rest_map | 50203 | HTTP REST 传感器（接口前缀 `/api/v1`）：读温度、湿度、气压、状态，湿度可写 0–100。它的 8080 只在 ProtoForge 自己的网络里：先 `docker network connect ilcs_backend protoforge` |
 
 ProtoForge 的 OPC UA、HTTP 设备做不了会动作的 PLC（它的规则引擎只接 Modbus 写入），所以任务执行只用握手 PLC 验证。

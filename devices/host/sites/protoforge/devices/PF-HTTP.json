@@ -1,0 +1,56 @@
+{
+  "note": "ProtoForge 的 HTTP REST 传感器（设备 http-rest，接口前缀 /api/v1）：读温度、湿度、气压、状态；湿度可写 0–100 用来验证写入与回读。ProtoForge 要接进 ilcs_backend 网络（docker network connect ilcs_backend protoforge）",
+  "plugin": "rest_map",
+  "port": 50203,
+  "simulator": true,
+  "config_version": "r1",
+  "config": {
+    "base_url": "http://protoforge:8080/api/v1",
+    "allow_insecure_http": true,
+    "request_timeout_sec": 5,
+    "connect_timeout_sec": 3,
+    "identity": {
+      "method": "GET",
+      "path": "/points",
+      "fields": {
+        "device_id": "device_id"
+      }
+    },
+    "points": {
+      "temperature": {
+        "path": "/temperature",
+        "field": "value",
+        "unit": "℃",
+        "label": "温度"
+      },
+      "humidity": {
+        "path": "/humidity",
+        "field": "value",
+        "unit": "%RH",
+        "label": "湿度",
+        "writable": true,
+        "min": 0,
+        "max": 100,
+        "write": {
+          "method": "POST",
+          "path": "/humidity",
+          "body": {
+            "value": "{value}"
+          }
+        }
+      },
+      "pressure": {
+        "path": "/pressure",
+        "field": "value",
+        "unit": "hPa",
+        "label": "气压"
+      },
+      "status": {
+        "path": "/status",
+        "field": "value",
+        "label": "状态",
+        "value_type": "String"
+      }
+    }
+  }
+}
