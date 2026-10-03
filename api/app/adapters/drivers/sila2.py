@@ -187,10 +187,13 @@ class Sila2Adapter:
 
     @staticmethod
     def _context(request: CommandRequest) -> str:
+        """TaskExecution 1.1 的上下文，与 `http_json_v1` 请求体带的一致：工位、设备方法，投料步骤再带物料
+        （称量加料这类设备据此核对装的料、按这个名字回报实际消耗）。"""
         return json.dumps({
             "batch_id": request.batch_id, "step_index": request.step_index, "step_id": request.step_id,
-            "target_command_id": request.target_command_id,
+            "target_command_id": request.target_command_id, "station_id": request.station_id,
             **({"method": request.method} if request.method else {}),
+            **({"material": dict(request.material)} if request.material else {}),
         }, ensure_ascii=False)
 
     def submit(self, request: CommandRequest) -> CommandResult:
