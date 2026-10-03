@@ -7,6 +7,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import socket
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,74 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+@contextmanager
+def silent_port():
+    """只收连接、从不答话的端口：设备进程卡死、容器被暂停时就是这样（内核替它建连接，请求没有回音）。"""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        yield listener.getsockname()[1]
+
+class FreezableProxy:
+    """转发到本机某个端口的 TCP 代理。`freeze()` 之后一个字节都不再转发，连接还挂着：拔了网线、交换机断了就是这样
+    （没有 RST，客户端只能等超时）。"""
+
+    def __init__(self, target_port: int):
+        self.target_port = target_port
+        self.frozen = threading.Event()
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(16)
+        self.port = self.listener.getsockname()[1]
+        self.sockets: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def freeze(self) -> None:
+        self.frozen.set()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                inbound, _ = self.listener.accept()
+            except OSError:
+                return
+            outbound = socket.create_connection(("127.0.0.1", self.target_port))
+            self.sockets += [inbound, outbound]
+            for source, target in ((inbound, outbound), (outbound, inbound)):
+                threading.Thread(target=self._pump, args=(source, target), daemon=True).start()
+
+    def _pump(self, source: socket.socket, target: socket.socket) -> None:
+        while True:
+            try:
+                data = source.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
+            if not self.frozen.is_set():
+                try:
+                    target.sendall(data)
+                except OSError:
+                    return
+
+    def close(self) -> None:
+        for sock in [self.listener, *self.sockets]:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+@contextmanager
+def freezable_proxy(target_port: int):
+    proxy = FreezableProxy(target_port)
+    try:
+        yield proxy
+    finally:
+        proxy.close()
+
 
 
 def record(protocol: str, config: dict, credential_ref: str = "", **flags):
@@ -363,3 +432,58 @@ def transfer(command_id: str, source: str = "HOTEL-01/S01", target: str = "ST-05
                 "to": {"location_id": target, "station_id": target.split("/")[0], "kind": "station"}},
         batch_id="B-SIM", step_index=0, step_id="s01",
     )
+
+
+# ---------- 驱动宿主（devices/host）：ILCS 只经 SiLA 2 接设备 ----------
+
+HOST_TOKEN = "k" * 40
+if str(ROOT / "devices" / "host") not in sys.path:
+    # ilcs_host 包以 devices/host 为根。放在最后：devices/host/tests 和 api/tests 都是没有 __init__.py 的 tests 目录，
+    # 放在前面会让 `from tests.conftest import …` 找到驱动宿主的 conftest
+    sys.path.append(str(ROOT / "devices" / "host"))
+
+
+def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN) -> Path:
+    """驱动宿主的现场目录：host.json、devices/<设备>.json、令牌文件；状态目录在里面。已有的设备文件按新内容覆盖。"""
+    import json
+
+    (root / "devices").mkdir(parents=True, exist_ok=True)
+    (root / "tokens.txt").write_text(token + "\n", encoding="utf-8")
+    (root / "host.json").write_text(json.dumps({
+        "environment": "development", "address": "127.0.0.1", "allowed_hosts": "127.0.0.1",
+        "state_dir": "state", "tokens_file": "tokens.txt",
+    }), encoding="utf-8")
+    for key, device in devices.items():
+        (root / "devices" / f"{key}.json").write_text(json.dumps(device, ensure_ascii=False), encoding="utf-8")
+    return root
+
+
+@contextmanager
+def run_host(root: Path):
+    """按现场目录在本进程里起驱动宿主，每台设备一个 SiLA 服务；退出时停掉（台账留在状态目录里）。"""
+    from ilcs_host.plugins import PLUGINS
+    from ilcs_host.server import prepare, start, stop
+    from ilcs_host.site import load_site
+
+    site = load_site(root, set(PLUGINS))
+    servers = start(site, prepare(site))
+    try:
+        yield site
+    finally:
+        stop(servers)
+
+
+@contextmanager
+def driver_host(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN):
+    with run_host(write_host_site(root, devices, token)) as site:
+        yield site
+
+
+def host_plc_device(plc_port: int, *, tasks: bool = True) -> dict:
+    """驱动宿主上的一台 Modbus PLC：插件配置就是 ILCS 映射驱动的那份（plc_config）；sp_temp 可手动写。"""
+    config, _ = plc_config("modbus", plc_port)
+    config["points"]["sp_temp"].update(writable=True, min=0, max=300, unit="℃")
+    if not tasks:  # 只读写点位：只留点表，不配能力映射与状态
+        config = {key: config[key] for key in ("host", "port", "unit_id", "request_timeout_sec", "points", "identity")}
+    return {"plugin": "modbus_map", "port": free_port(), "simulator": True, "config": config,
+            "supports": {"hold": True, "abort": True, "query": True, "dedup": True}}

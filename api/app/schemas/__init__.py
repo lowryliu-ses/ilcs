@@ -1366,6 +1366,14 @@ class PointWriteIn(Signed):
     reason: str = Field(min_length=2, max_length=2000)
 
 
+class DriverApprovalIn(Signed):
+    """签名批准驱动配置变更：设备服务报的驱动配置摘要变了，核对驱动项目里的这次改动后批准这一份。签名针对工位与当前配置版本。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=4, max_length=2000)
+
+
 class AcceptanceRequestIn(BaseModel):
     """申请一次设备接入验收。动作级要签名并写明现场批准人（DEC-02）；故障项目只随动作级一起申请。"""
 

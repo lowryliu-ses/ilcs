@@ -3,8 +3,8 @@ from fastapi.responses import Response
 
 from ...schemas import (
     AcceptanceRequestIn, AcceptanceWaiveIn, AdapterConfigCheckIn, AdapterCreateIn, AdapterPatchIn, CapabilityIn,
-    CapabilityPatchIn, CommandVerifyIn, IslandIn, LimitsIn, ManualReviewIn, PointWriteIn, ReadinessIn, RetireIn,
-    StationCreateIn, StationPatchIn,
+    CapabilityPatchIn, CommandVerifyIn, DriverApprovalIn, IslandIn, LimitsIn, ManualReviewIn, PointWriteIn, ReadinessIn,
+    RetireIn, StationCreateIn, StationPatchIn,
 )
 from ...services.acceptance_service import AcceptanceService, run_out
 from ...services.batch_service import BatchService
@@ -210,6 +210,14 @@ def waive_acceptance(
 ):
     """签名放行：检查清单证明不了的设备（不支持状态查询、要现场摆位的动作），现场核对后由人放行，放行记录存档。"""
     return AcceptanceService(db, ctx).waive(station_id, payload.reason, payload.signature_id, user)
+
+
+@router.post("/stations/{station_id}/adapter/driver-approval")
+def approve_driver_change(
+    station_id: str, payload: DriverApprovalIn, db: DbSession, user: CurrentUser, ctx=require("station.edit"),
+):
+    """签名批准驱动配置变更：驱动项目里改了点表或映射，核对后批准设备服务现在报的这一份，并排一次只读级接入验收。"""
+    return AcceptanceService(db, ctx).approve_driver(station_id, payload.reason, payload.signature_id, user)
 
 
 @router.get("/acceptance-runs/{run_id}")

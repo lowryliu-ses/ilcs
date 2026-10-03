@@ -8,6 +8,7 @@ ILCS 进程之外、设备那一侧的东西都在这里。ILCS 自己的驱动�
 | [`contracts/`](contracts/) | 设备侧任务契约：设备要实现成什么样 ILCS 才接得上。`sila2/`（SiLA 2 特性；[README](contracts/sila2/README.md) 是只经 SiLA 接设备的契约草案）、`opcua/`（节点与方法）、`modbus/`（任务寄存器表） | 驱动与模拟设备读同一份定义；交给设备厂家 |
 | [`simulators/`](simulators/README.md) | 外部模拟设备：独立进程、走真实协议，每种驱动都有；`pilot-devices.json` 是试点工位接到它们的连接配置 | `docker compose --profile pilot`、`scripts/configure-pilot-adapters.py`、测试 |
 | [`gateway/`](gateway/README.md) | 设备网关：网关 SDK `ilcs_gateway`（厂家只给 SDK / DLL、私有协议的设备，用它包成 `http_json_v1` 网关，只写启动、读状态、停止）+ 设备模块（一台（一类）设备一个交付目录：驱动、假 SDK、`profile.json`、测试、部署文件；样板 `sample-cycler`） | 设备开发者；`scripts/new-device-module.py` 从样板生成新模块；HTTPS 网关模拟设备（`simulators/http_gateway`）也基于这个 SDK |
+| [`host/`](host/README.md) | 驱动宿主（驱动项目的第一块）：一个进程托管多台设备，每台一个 SiLA 2 服务；协议插件是从 ILCS 抽出的映射驱动（Modbus / OPC UA / REST），配置写法不变 | ILCS 用 `sila2_v1` 连它；`sites/<现场>` 是各现场的设备配置 |
 | [`connectors/`](connectors/result_files/README.md) | 设备侧连接器：`result_files/` 盯住检测软件的导出目录，把结果文件回传 ILCS（只取数，不启动设备）；[`environment/`](connectors/environment/README.md) 按周期读手套箱水氧等传感器、上报环境读数 | `docker compose --profile results` / `--profile environment` |
 
 证书、令牌这类运行时文件不放这里，放仓库根目录的 `secrets/`（不进仓库）：compose 挂进容器的是

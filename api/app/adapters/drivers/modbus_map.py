@@ -82,6 +82,9 @@ class ModbusMapAdapter(PointMapAdapter):
         with self._io:
             self._drop()
 
+    def io_timeout(self) -> float:
+        return self.timeout
+
     # ---------- 连接 ----------
 
     def _connect(self):

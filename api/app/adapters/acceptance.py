@@ -81,6 +81,8 @@ class Report:
     simulator: bool = False
     # 验收结束时还没有结论的验收指令（设备可能仍在动作）：调用方据此挡住这台设备，现场核查后重新验收
     leftovers: list[str] = field(default_factory=list)
+    # 驱动在 ILCS 之外的设备服务报的插件与配置摘要（健康检查读到的）：这次验收的是哪一份驱动配置
+    driver_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -102,6 +104,7 @@ class Report:
             "contract": self.contract, "identity": self.identity, "config_digest": self.config_digest,
             "physical": self.physical, "faults": self.faults, "started_at": self.started_at, "ok": self.ok,
             "simulator": self.simulator, "physical_ran": self.physical_ran, "leftovers": list(self.leftovers),
+            "driver_info": dict(self.driver_info),
             "checks": [check.__dict__ for check in self.checks],
         }
 
@@ -115,6 +118,9 @@ class Report:
             f"- 设备自报：厂商 {identity.get('vendor') or '—'}，型号 {identity.get('reported_model') or '—'}，"
             f"固件 {identity.get('firmware') or '—'}" + ("，模拟器" if self.simulator else ""),
             f"- 配置摘要：{self.config_digest[:16]}（不含凭据）",
+            *([f"- 设备服务的驱动：{self.driver_info.get('plugin') or '—'} {self.driver_info.get('plugin_version') or ''}，"
+               f"配置 {self.driver_info.get('config_version') or '—'}（{str(self.driver_info.get('config_digest'))[:23]}）"]
+              if self.driver_info.get("config_digest") else []),
             f"- 范围：只读{' + 动作' if self.physical else ''}{' + 故障注入' if self.faults else ''}",
             f"- 结论：{'全部通过（跳过项见下表）' if self.ok else '有不通过的项目'}",
             "",
@@ -344,6 +350,7 @@ def _checklist(
     not_ready = ""  # 设备此刻不能动作的原因：动作级验收一项都不跑
     try:
         health = instance.healthcheck() or {}
+        report.driver_info = dict(health.get("driver_info") or {})
         connected = health.get("connected", True) is not False
         interlocked = bool(health.get("site_interlock") or health.get("interlock"))
         refusing = health.get("accepts_commands") is False

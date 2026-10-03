@@ -381,6 +381,7 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
 
       <IssueNote issues={issues} />
       {creating ? null : <CatalogNote catalog={detail.data?.catalog} />}
+      {creating || !detail.data?.driver_info?.config_digest ? null : <DriverNote station={station} adapter={detail.data} />}
       {testResult ? <div className="note">健康检查结果：<span className="mono">{JSON.stringify(testResult.health)}</span></div> : null}
       {test.error ? <div className="note bad">{test.error.message}</div> : null}
       {detail.data ? <AcceptancePanel station={station} adapter={detail.data} /> : null}
@@ -518,6 +519,71 @@ function TemplateForm({
           {creating ? '套用模板并签名接入' : current && current.id === selected ? '签名并保存连接参数' : '套用模板并签名保存'}
         </button>
       </div>
+    </div>
+  );
+}
+
+function digest(value?: string) {
+  return value ? value.replace('sha256:', '').slice(0, 12) : '—';
+}
+
+/** 驱动在 ILCS 之外的设备服务：报的驱动与配置摘要，和批准的那份对不对得上；变了要签名批准，再接入验收 */
+function DriverNote({ station, adapter }: { station: StationRow; adapter: AdapterRow }) {
+  const toast = useToast();
+  const { sign } = useSignature();
+  const [reason, setReason] = useState('');
+  const [approving, setApproving] = useState(false);
+  const approve = useMutation(
+    (payload: Record<string, unknown>) => api.post(`/stations/${station.id}/adapter/driver-approval`, payload),
+    {
+      invalidates: [`adapter-detail-${station.id}`, `stations:acceptance:${station.id}`, 'stations', 'audit'],
+      onSuccess: () => toast.push('已批准这次驱动变更：执行器马上跑只读级接入验收，通过后放行'),
+    },
+  );
+  const reported = adapter.driver_info ?? {};
+  const approved = adapter.approved_driver ?? {};
+  const submit = async () => {
+    if (reason.trim().length < 4) {
+      toast.push('写明核对了什么：驱动项目里的哪次改动、改了什么');
+      return;
+    }
+    const signatureId = await sign('批准驱动配置变更', station.id, ['批准驱动配置变更'], adapter.config_version);
+    if (!signatureId) return;
+    await approve.run({ reason: reason.trim(), signature_id: signatureId }).catch((error) => toast.push(error.message));
+    setApproving(false);
+    setReason('');
+  };
+  return (
+    <div className={`note${adapter.driver_changed ? ' bad' : ''}`}>
+      <b>设备服务的驱动</b>：{reported.plugin || '—'} {reported.plugin_version || ''} · 配置 {reported.config_version || '—'}（{digest(reported.config_digest)}）
+      {' · '}
+      {adapter.driver_changed
+        ? `和批准的不一致（批准的是 ${approved.plugin || '—'} ${digest(approved.config_digest)}）：驱动项目里改过，`
+          + (adapter.driver_awaiting_approval ? '核对后签名批准这次变更，再通过接入验收放行' : '已签名批准，等接入验收出结论')
+        : approved.config_digest
+          ? '已批准并通过接入验收'
+          : '还没有通过接入验收'}
+      {reported.reported_at ? <div className="small muted">最近一次探测：{time(reported.reported_at)}</div> : null}
+      {adapter.driver_awaiting_approval ? (
+        approving ? (
+          <div className="driver-approval">
+            <textarea
+              rows={2}
+              value={reason}
+              placeholder="核对了什么：驱动项目里的哪次改动（提交号）、改了哪些点表或映射"
+              onChange={(event) => setReason(event.target.value)}
+            />
+            <div className="row-end">
+              <button className="btn sm" onClick={() => setApproving(false)}>取消</button>
+              <button className="btn sm primary" disabled={approve.pending} onClick={submit}>签名批准</button>
+            </div>
+          </div>
+        ) : (
+          <div className="row-end">
+            <button className="btn sm" onClick={() => setApproving(true)}>批准这次驱动变更…</button>
+          </div>
+        )
+      ) : null}
     </div>
   );
 }

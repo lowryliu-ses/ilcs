@@ -418,18 +418,35 @@ class MappedJobAdapter:
             })
         return rows
 
+    def io_timeout(self) -> float:
+        """一次设备请求的超时（秒）。读点位时据此判断设备是不是不回话了。"""
+        return float(getattr(self, "request_timeout", 0) or 0)
+
     def read_points(self, names: list[str] | None = None) -> list[dict]:
-        """按点表逐个读；某个点读不到只在那一行写明，不影响别的点。"""
-        rows = []
+        """按点表逐个读；某个点读不到只在那一行写明，不影响别的点。
+
+        设备不回话（连不上、超时，而且确实等了大半个超时）就不再读后面的点：设备停了，每个点都要等满超时，读一次点表
+        就是「点数 × 超时」，调用方（界面、SiLA 客户端）早就超时了。设备很快回了错（地址不对、节点不存在、HTTP 5xx）
+        只算那一个点，接着读别的。
+        """
+        rows, silent = [], None
         for row in self.point_catalog():
             if names and row["name"] not in names:
                 continue
+            if silent is not None:
+                rows.append({**row, "value": None, "error": f"设备没有回话（{silent}），没有再读"})
+                continue
+            started = time.monotonic()
             try:
                 with self._lock:
                     value = self.read_point_value(row["name"])
                 rows.append({**row, "value": plain(value), "error": ""})
             except (AdapterError, AdapterUnreachable, AdapterIndeterminate) as exc:
                 rows.append({**row, "value": None, "error": str(exc)})
+                waited = time.monotonic() - started
+                if isinstance(exc, AdapterUnreachable) and not isinstance(exc, AdapterIndeterminate) \
+                        and waited >= self.io_timeout() / 2:
+                    silent = exc
         return rows
 
     def check_manual_write(self, name: str, value) -> None:
@@ -454,7 +471,7 @@ class MappedJobAdapter:
                 raise AdapterError(f"{value:g} 超出点 {name} 允许的范围 {low if low is not None else '—'}–"
                                    f"{high if high is not None else '—'}")
 
-    def write_point_manually(self, name: str, value) -> dict:
+    def write_point_manually(self, name: str, value, request_id: str = "") -> dict:
         """先读当前值、再写、再回读。
 
         - 写之前出的错（核对不过、读不到当前值、设备明确不收）：设备没动 → AdapterError；

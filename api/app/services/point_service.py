@@ -20,9 +20,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..adapters.base import AdapterError
+from ..adapters.base import AdapterError, AdapterUnreachable
 from ..adapters.catalog import has_tasks
-from ..adapters.jobs import MappedJobAdapter
 from ..adapters.registry import adapter_for
 from ..core.clock import now
 from ..core.context import AccessContext, system_context
@@ -30,7 +29,7 @@ from ..core.errors import NotFound, StateConflict, ValidationFailed
 from ..models import Adapter, PointWrite, User
 from ..repositories.execution import CommandRepository
 from ..repositories.resources import AdapterRepository, StationRepository
-from .acceptance_service import running_stations
+from .acceptance_service import driver_awaiting_approval, running_stations
 from .audit_service import AuditService
 from .identity_service import IdentityService
 
@@ -38,6 +37,7 @@ ACTIVE = ("queued", "running")
 STATE_LABELS = {"queued": "排队中", "running": "写入中", "done": "已写入", "failed": "没有写", "unknown": "结果未知",
                 "cancelled": "已撤回"}
 MEANING = "手动写入设备点位"
+UNAPPROVED_DRIVER = "设备服务的驱动配置变了、还没签名批准：点表可能已经把这个点指到了别的地址"
 LOG = logging.getLogger("ilcs.executor")
 
 
@@ -53,19 +53,27 @@ def write_out(row: PointWrite) -> dict[str, Any]:
     }
 
 
-def _points_driver(adapter: Adapter) -> MappedJobAdapter:
-    """这台设备的驱动实例（要有点表）。内置模拟、按 ILCS 契约接的驱动没有点表。"""
+def _points_driver(adapter: Adapter):
+    """这台设备的驱动实例（要有点表）：映射驱动登记了 points，或 SiLA 设备服务实现了 PointAccess。
+    内置模拟、其余按 ILCS 契约接的驱动没有点表。"""
     if adapter.kind != "real":
         raise StateConflict("内置模拟没有点表：接成真实设备（映射驱动）后才能读写点位", code="points_unavailable")
     try:
         implementation = adapter_for(adapter)
     except (NotImplementedError, AdapterError) as exc:
         raise StateConflict(str(exc), code="adapter_driver_unavailable") from exc
-    if not isinstance(implementation, MappedJobAdapter) or not implementation.point_specs():
+    if not callable(getattr(implementation, "read_points", None)):
         raise StateConflict(
-            f"{adapter.driver} 没有点表：点位读写要用映射驱动（Modbus / OPC UA 点表、REST、串口命令）并登记 points",
+            f"{adapter.driver} 没有点表：点位读写要用映射驱动（Modbus / OPC UA 点表、REST、串口命令）并登记 points，"
+            "或接实现了 PointAccess 的 SiLA 设备服务",
             code="points_unavailable",
         )
+    try:
+        specs = implementation.point_specs()
+    except AdapterUnreachable as exc:
+        raise StateConflict(f"连不上设备服务，读不到点表：{exc}", code="device_unreachable") from exc
+    if not specs:
+        raise StateConflict(f"{adapter.driver} 没有登记点表（或设备服务没有实现 PointAccess）", code="points_unavailable")
     return implementation
 
 
@@ -95,10 +103,16 @@ class PointService:
         if station_id in running_stations(self.db):
             raise StateConflict(f"{station_id} 的接入验收正在执行，结束后再读点位", code="acceptance_running")
         implementation = _points_driver(adapter)
+        try:
+            points = implementation.read_points()
+        except AdapterUnreachable as exc:  # SiLA 设备服务在截止时间内没有答复（映射驱动按行报错，不抛）
+            raise StateConflict(f"设备服务没有及时答复，读不到点位：{exc}", code="device_unreachable") from exc
+        except AdapterError as exc:
+            raise StateConflict(str(exc), code="point_read_refused") from exc
         return {
             "station_id": station_id, "driver": adapter.driver, "config_version": adapter.config_version,
             "tasks": has_tasks(adapter.driver, adapter.config), "read_at": now().isoformat(timespec="seconds"),
-            "points": implementation.read_points(),
+            "points": points,
         }
 
     def writes(self, station_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -114,6 +128,8 @@ class PointService:
         reason = (reason or "").strip()
         if not reason:
             raise ValidationFailed("手动写设备点位要写明原因", code="point_write_reason_required")
+        if driver_awaiting_approval(adapter):
+            raise StateConflict(f"{station_id} {UNAPPROVED_DRIVER}，核对并签名批准之后再写", code="driver_change_unapproved")
         implementation = _points_driver(adapter)
         try:
             implementation.check_manual_write(point, value)
@@ -195,6 +211,8 @@ class PointWriteRunner:
         if adapter.config_version != row.config_version:
             return (f"申请时是配置 v{row.config_version}，现在是 v{adapter.config_version}：点的定义可能变了，没有写；"
                     "请按新配置重新申请")
+        if driver_awaiting_approval(adapter):
+            return f"{UNAPPROVED_DRIVER}，没有写；批准之后请重新申请"
         acting = CommandRepository(self.db).acting_on_station(row.station_id)
         if acting:
             return (f"工位上有指令可能还在动作（{acting[0].id[:8]}）：手动写会干扰它，没有写；指令结束后再申请")
@@ -223,7 +241,7 @@ class PointWriteRunner:
                 state = implementation.device_state()
                 if state in {"running", "held"}:
                     return self._close(row, "failed", error=f"设备在{'运行' if state == 'running' else '保持'}中：手动写会干扰它，没有写")
-            outcome = implementation.write_point_manually(row.point, value)
+            outcome = implementation.write_point_manually(row.point, value, request_id=row.id)
         except StateConflict as exc:
             return self._close(row, "failed", error=f"{exc}，没有写")
         except AdapterError as exc:

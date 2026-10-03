@@ -1,12 +1,13 @@
 # ILCS 设备接入契约（SiLA 2）
 
-**状态：草案（阶段 0）。** 目标是 ILCS 只经 SiLA 2 接设备，设备驱动放在 ILCS 之外的驱动项目里。
+**状态：草案，试点中。** 目标是 ILCS 只经 SiLA 2 接设备，设备驱动放在 ILCS 之外的驱动项目里。服务端实现是驱动宿主
+[`devices/host`](../../host/README.md)，客户端是 ILCS 的 `sila2_v1`（`api/app/adapters/drivers/sila2.py`）。
 
 | 文件 | 版本 | 现状 |
 |---|---|---|
-| [`DeviceInfo.sila.xml`](DeviceInfo.sila.xml) | 1.0 | 新增草案，还没有服务端和 ILCS 客户端实现 |
-| [`PointAccess.sila.xml`](PointAccess.sila.xml) | 1.0 | 新增草案，还没有服务端和 ILCS 客户端实现 |
-| [`TaskExecution.sila.xml`](TaskExecution.sila.xml) | 1.1 | 模拟设备已实现 1.1；ILCS 的 `sila2_v1` 已按 1.1 发上下文，读 `TaskSupport`、按新错误分类留到阶段 1 |
+| [`DeviceInfo.sila.xml`](DeviceInfo.sila.xml) | 1.0 | 驱动宿主实现；ILCS 读身份、状态、驱动与配置摘要 |
+| [`PointAccess.sila.xml`](PointAccess.sila.xml) | 1.0 | 驱动宿主实现；ILCS 的点位面板与签名手动写走它 |
+| [`TaskExecution.sila.xml`](TaskExecution.sila.xml) | 1.1 | 驱动宿主与 SiLA 模拟设备实现；ILCS 读 `TaskSupport` 的方法目录，按错误标识定结论与类别 |
 | [`SimulatorControl.sila.xml`](SimulatorControl.sila.xml) | 1.0 | 只给模拟设备（故障注入），不属于设备契约 |
 
 `api/tests/domain/test_sila_contracts.py` 守着这几份定义：按 SiLA 官方 XSD 解析、核对每个命令声明的错误、用固定版本的
@@ -41,6 +42,10 @@ ILCS 读 `SiLAService` 的「已实现特性」来判断：有 TaskExecution 才
   DeviceInfo、PointAccess、TaskExecution 的全部命令和属性都受它约束，`SiLAService` 不受（ILCS 先读它判断已实现特性）。
 - 不用双向 TLS 的原因：sila2 0.14.0 的服务端不能强制校验客户端证书；令牌走标准元数据，各语言的 SiLA SDK 都支持。
 - 令牌缺失或错误：服务端拒绝调用，设备没有动作；ILCS 按明确失败处理，并提示凭据有问题。
+- **超时要配得上**：ILCS 每次调用的截止时间（`sila2_v1` 的 `request_timeout_sec`）必须长于驱动宿主答复一次调用的最长
+  时间，大约是插件的 `connect_timeout_sec + request_timeout_sec`。ILCS 先超时，就只能按「没有结论」处理：读点位报设备
+  无响应，手动写点记「结果未知」——哪怕驱动宿主随后查明根本没写。驱动宿主这边：设备不回话时读点只等一个超时，后面的点
+  不再读；写点读不到当前值就报 `DeviceUnreachable`（没写）。
 
 ## DeviceInfo（所有设备）
 
@@ -61,16 +66,21 @@ ILCS 读 `SiLAService` 的「已实现特性」来判断：有 TaskExecution 才
 ILCS 重新挂上闸门的那把锁。
 
 **怎么算：** `"sha256:" + sha256(规范化 JSON).hexdigest()`。
-- 规范化 JSON 是 UTF-8 编码，等价于 `json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))`。
-- 参与计算的是设备的有效配置，去掉 `connect_timeout_sec`、`request_timeout_sec`、`probe_interval_sec`、`acceptance`。
-  这几个键和 ILCS 现在「有在途指令也能改」的键一致，只决定等多久，不决定连谁、怎么判结论。
-- 凭据只写引用、不写原文，引用参与计算。
+- 规范化 JSON 是 UTF-8 编码，等价于 `json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))`。
+- `material` 是决定「连谁、怎么判结论」的全部内容：插件、是否模拟设备、支持标志、按配置登记的设备编号、凭据引用，以及
+  去掉 `connect_timeout_sec`、`request_timeout_sec`、`probe_interval_sec`、`acceptance` 的插件配置（这几个键和 ILCS「有在途
+  指令也能改」的键一致，只决定等多久）。端口、服务器 UUID、配置版本号是部署信息，不参与。
+- 凭据只写引用、不写原文。
 
-**ILCS 侧（阶段 1 实现）**：工位登记「已批准的摘要」和插件，执行器探测时读 `Driver` 比对。
-- 摘要或插件变了，按现在改配置的规则处理：停派工、要求补接入验收、报警。改映射至少补只读级；换插件，或从只读点位改成
-  参与自动流程，要补动作级。
-- 由人签名「批准驱动配置」并通过验收后才放行。
-- 指令在途期间摘要变了，这条指令转人工核查。
+**ILCS 侧**：接入验收通过、闸门放开时，把这次验收看到的驱动与摘要记为已批准（验收记录里也存一份，作为上线证据）。执行器
+探测时读 `Driver` 比对，报的和上一次不同、又不是已批准的那份，就照配置变更处理：
+- 配置版本加一（按旧配置排队的验收、手动写点作废），欠接入验收、停派工，报警；
+- 改映射欠只读级；换插件欠动作级（动作级照旧要签名与现场批准）；
+- 指令在途期间变了，这条指令转人工核查；
+- 不自动验收：有权限的人核对驱动项目里的这次改动，签名「批准驱动配置变更」（批准的是具体的摘要，记下谁、哪个签名），
+  批准时排一次只读级验收；验收看到的正是批准的那一份才放开闸门、记为已批准，报警条件复位。没批准时，验收通过了也放不开，
+  签名放行也不行。同一份新配置只处理一次。
+- ILCS 自己改了连接配置（换了设备服务）时，原来的批准作废，等这次验收重新批准。
 
 **驱动宿主侧**：设备的作业台账里有没结束的作业时，拒绝加载新配置。强行重启换了配置的，重启后这条作业按结果未知回报。
 
@@ -153,3 +163,7 @@ ILCS 重新挂上闸门的那把锁。
 4. `Status` 要不要做成可订阅的属性来减少轮询；v1 先轮询。
 5. 参数说明用 JSON Schema 的哪个版本、单位注解怎么写（暂定 2020-12、`unit` 字段）。
 6. 点位读数要不要带设备时间；现在 `ObservedAt` 是驱动读到的时间。
+7. 手动写点「结果未知」之后怎么核对。按同一个 `RequestId` 重发 `WritePoint` 不行：驱动宿主没收到过那一次时，重发会真的
+   写下去。考虑加 `QueryWrite(RequestId)`：只查写入台账、不执行。
+8. 服务器证书没带 SiLA 规定的服务器 UUID 扩展（OID 1.3.6.1.4.1.58583），sila2 客户端每次连接都警告。一个宿主一张证书
+   装不下每台设备各自的 UUID；要带就得每台设备一张、由宿主的 CA 签发。

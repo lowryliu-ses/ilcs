@@ -2296,6 +2296,28 @@
         "title": "DispatchIn",
         "type": "object"
       },
+      "DriverApprovalIn": {
+        "additionalProperties": false,
+        "description": "签名批准驱动配置变更：设备服务报的驱动配置摘要变了，核对驱动项目里的这次改动后批准这一份。签名针对工位与当前配置版本。",
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 4,
+            "title": "Reason",
+            "type": "string"
+          },
+          "signature_id": {
+            "title": "Signature Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signature_id",
+          "reason"
+        ],
+        "title": "DriverApprovalIn",
+        "type": "object"
+      },
       "EnvironmentBatchIn": {
         "properties": {
           "readings": {
@@ -30250,6 +30272,78 @@
           }
         ],
         "summary": "Describe Adapter",
+        "tags": [
+          "resource"
+        ]
+      }
+    },
+    "/api/stations/{station_id}/adapter/driver-approval": {
+      "post": {
+        "description": "签名批准驱动配置变更：驱动项目里改了点表或映射，核对后批准设备服务现在报的这一份，并排一次只读级接入验收。",
+        "operationId": "approve_driver_change_api_stations__station_id__adapter_driver_approval_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "station_id",
+            "required": true,
+            "schema": {
+              "title": "Station Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriverApprovalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Approve Driver Change",
         "tags": [
           "resource"
         ]

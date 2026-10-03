@@ -555,14 +555,17 @@ DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
         credential="file:///run/secrets/ilcs/<工位>.token",
     ),
     DriverInfo(
-        "sila2_v1", "SiLA 2", "SiLA 2", "SiLA 2 服务器实现 ILCS TaskExecution 特性", "设备侧",
+        "sila2_v1", "SiLA 2", "SiLA 2", "SiLA 2 设备服务（驱动宿主、厂商网关）实现 ILCS 的 DeviceInfo / PointAccess / TaskExecution", "设备侧",
         (ConfigField("host", "主机", "string", required=True, connection=True),
          ConfigField("port", "端口", "integer", required=True, connection=True),
          ConfigField("ca_file", "服务器证书 / CA", "string", connection=True, hint="位于凭据目录内"),
          ConfigField("insecure", "不加密", "boolean", hint="只限非正式环境"),
+         ConfigField("tasks", "参与自动流程", "boolean",
+                     hint="缺省是；只读写点位的设备（设备服务没有实现 TaskExecution）填 false"),
          ConfigField("device_timezone", "设备时区", "string"), *_timeouts(), *COMMON),
         lambda limits: {"host": "sila-device.lab.internal", "port": 50052, "ca_file": "/run/secrets/ilcs/sila/<设备>.crt",
                         "request_timeout_sec": 10, "probe_interval_sec": 10},
+        credential="file:///run/secrets/ilcs/sila/<驱动宿主>.token",
     ),
     DriverInfo(
         "opcua_v1", "OPC UA TaskExecution", "OPC UA", "OPC UA 服务器实现 ILCS TaskExecution 节点与方法", "设备侧",
@@ -708,7 +711,10 @@ MAPPING_DRIVERS = {"modbus_map_v1", "opcua_map_v1", "rest_map_v1", "line_command
 
 
 def has_tasks(driver: str, config: dict | None) -> bool:
-    """这份配置让设备参与自动流程（接指令）吗？映射驱动看有没有能力映射；按 ILCS 契约接的驱动一律参与。"""
+    """这份配置让设备参与自动流程（接指令）吗？映射驱动看有没有能力映射；SiLA 设备服务看 tasks（缺省参与）；
+    其余按 ILCS 契约接的驱动一律参与。"""
+    if driver == "sila2_v1":
+        return (config or {}).get("tasks", True) is not False
     if driver not in MAPPING_DRIVERS:
         return True
     return bool((config or {}).get("capabilities"))

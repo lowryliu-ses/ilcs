@@ -799,6 +799,14 @@ export type AdapterRow = {
   catalog?: AdapterCatalog;
   /** 配置变更后的接入验收闸门 */
   acceptance?: AcceptanceGate;
+  /** 驱动在 ILCS 之外的设备服务（sila2_v1 接驱动宿主）：最近一次报的驱动与配置摘要、接入验收批准的那份 */
+  driver_info?: DeviceDriverReport;
+  approved_driver?: DeviceDriverReport;
+  /** 报的和批准的对不上：驱动项目里改过、还没通过接入验收 */
+  driver_changed?: boolean;
+  /** 这次驱动变更还没有人签名批准（批准过的等接入验收出结论） */
+  driver_awaiting_approval?: boolean;
+  driver_approval?: { config_digest?: string; plugin?: string; approved_by?: string; approved_at?: string; reason?: string };
   /** 套用的设备接入模板（哪一版、有没有更新的发布版） */
   template?: AdapterTemplate | null;
   /** 这台设备自己的连接参数（只在受 station.edit 保护的详情接口里有） */
@@ -845,6 +853,17 @@ export type PointWriteRow = {
   error: string;
   created_at: string | null;
   finished_at: string | null;
+};
+
+/** 设备服务在 DeviceInfo.Driver 里报的驱动插件与配置摘要 */
+export type DeviceDriverReport = {
+  plugin?: string;
+  plugin_version?: string;
+  host_version?: string;
+  config_version?: string;
+  config_digest?: string;
+  offline_after_sec?: number;
+  reported_at?: string;
 };
 
 export type AcceptanceGate = {
