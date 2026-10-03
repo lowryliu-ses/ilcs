@@ -22,6 +22,7 @@ import json
 import math
 import os
 import socket
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 import uuid
@@ -52,6 +53,9 @@ WRITE_REFUSALS = {
     "DeviceUnreachable", "RequestConflict", "InvalidAccessToken",
 }
 SILA_TYPE = '<DataType xmlns="http://www.sila-standard.org"><Basic>{}</Basic></DataType>'
+# sila2 0.14.0 建客户端时现场编译 protobuf，生成的模块先放进 sys.modules 再删掉，不是线程安全的：执行器并发探测时
+# 两个线程同时建客户端会偶发 KeyError（如 'SiLAService_pb2'），被当成连不上、报一条失联。建客户端一律串行
+_CLIENT_LOCK = threading.Lock()
 
 
 class _Deadline:
@@ -183,10 +187,11 @@ class Sila2Adapter:
         from sila2.client import SilaClient
 
         try:
-            if self.insecure:
-                client = SilaClient(self.host, self.port, insecure=True)
-            else:
-                client = SilaClient(self.host, self.port, root_certs=self._root_certs())
+            with _CLIENT_LOCK:
+                if self.insecure:
+                    client = SilaClient(self.host, self.port, insecure=True)
+                else:
+                    client = SilaClient(self.host, self.port, root_certs=self._root_certs())
         except AdapterError:
             raise
         except Exception as exc:

@@ -137,3 +137,57 @@ def test_probed_devices_get_three_probe_cycles_and_a_probe_ends_the_wait(reset_r
         finally:
             adapter.kind, adapter.driver, adapter.config = saved
             db.commit()
+
+
+def test_a_failed_probe_is_logged_once_and_explained_in_the_alarm(reset_runtime, monkeypatch):
+    """探测没通过：从在线变离线记一条日志（设备一直不在、原因没变就不再记），失联报警写明原因。"""
+    import logging
+
+    from app.adapters import AdapterUnreachable
+    from app.core.clock import now
+    from app.core.db import SessionLocal
+    from app.models import Adapter, Alarm
+    from app.services import execution_service
+    from app.services.execution_service import ExecutorLoop
+    from app.services.monitoring_service import DeviceMonitor
+
+    class Failing:
+        def healthcheck(self):
+            raise AdapterUnreachable("SiLA 连接失败：KeyError: 'SiLAService_pb2'")
+
+    class Collect(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.WARNING)
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    collect, logger = Collect(), logging.getLogger("ilcs.executor")
+    logger.addHandler(collect)
+    monkeypatch.setattr(execution_service, "adapter_for", lambda record: Failing())
+    with SessionLocal() as db:
+        adapter = db.get(Adapter, STATION)
+        saved = (adapter.kind, adapter.driver, adapter.config)
+        adapter.kind, adapter.driver, adapter.config = "real", "modbus_map_v1", {"host": "127.0.0.1", "port": 502}
+        adapter.last_heartbeat = now() - timedelta(minutes=1)  # 到了探测周期
+        db.commit()
+        try:
+            loop = ExecutorLoop(db)
+            loop.probe_devices(STATION)
+            loop.probe_devices(STATION)  # 还是同样的原因：不再记
+            db.commit()
+            failed = [record for record in collect.records if record.getMessage() == "设备探测没通过"]
+            assert len(failed) == 1, [record.getMessage() for record in collect.records]
+            assert failed[0].fields["station_id"] == STATION and failed[0].fields["was_connected"] is True
+            assert "KeyError" in failed[0].fields["reason"]
+
+            DeviceMonitor(db).evaluate_station(STATION)
+            db.commit()
+            alarm = db.query(Alarm).filter(Alarm.condition_key == f"station:{STATION}:disconnected",
+                                           Alarm.condition_active.is_(True)).one()
+            assert "探测失败：SiLA 连接失败：KeyError" in alarm.message, alarm.message
+        finally:
+            logger.removeHandler(collect)
+            adapter.kind, adapter.driver, adapter.config = saved
+            db.commit()

@@ -50,10 +50,14 @@ class DeviceMonitor:
         moment = now()
         age = (moment - adapter.last_heartbeat).total_seconds() if adapter.last_heartbeat else None
         stale = age is None or age > settings.heartbeat_stale_sec
-        lost = "设备适配器失联"
+        lost, details = "设备适配器失联", []
         if adapter.awaiting_handshake_since is not None and not adapter.connected:
             waited = (moment - adapter.awaiting_handshake_since).total_seconds()
-            lost += f"（保存连接配置 {waited / 60:.0f} min 后还没握上手：核对地址、凭据与设备身份）"
+            details.append(f"保存连接配置 {waited / 60:.0f} min 后还没握上手：核对地址、凭据与设备身份")
+        if not adapter.connected and (adapter.note or "").startswith(("探测失败：", "探测拒绝：")):
+            details.append(adapter.note[:200])  # 执行器探测没通过的原因（ExecutorLoop._probe_failed）
+        if details:
+            lost += f"（{'；'.join(details)}）"
         return {
             "interlock": (bool(adapter.site_interlock), 1, "公共保护联锁触发"),
             "disconnected": (bool(adapter.enabled) and not adapter.connected, 2, lost),
