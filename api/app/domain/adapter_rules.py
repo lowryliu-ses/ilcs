@@ -14,7 +14,7 @@ from typing import Any
 # 设备可能仍在动作时照常可改：说明、停用、给人看的协议名与版本
 FREE_FIELDS = frozenset({"note", "enabled", "protocol", "version"})
 # 连接配置里照常可改的键：只决定等多久、多久探测一次、验收缺省用什么参数，不决定连谁、怎么判结论
-FREE_CONFIG_KEYS = frozenset({"connect_timeout_sec", "request_timeout_sec", "probe_interval_sec", "acceptance"})
+FREE_CONFIG_KEYS = frozenset({"connect_timeout_sec", "request_timeout_sec", "probe_interval_sec", "acceptance", "environment"})
 FIELD_LABELS = {
     "kind": "模式", "driver": "驱动", "credential_ref": "凭据引用",
     "supports_hold": "保持支持", "supports_abort": "终止支持", "supports_query": "按指令查询支持",

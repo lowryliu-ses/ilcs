@@ -161,6 +161,16 @@ COMMON = (
     ), connection=True, hint="只对自报为模拟器的设备生效：{url, token_ref, unit}；接真机时删掉"),
     _record("acceptance", "验收缺省", ACCEPTANCE_FIELDS,
             hint="{capability, params}：申请接入验收时缺省用的能力与参数（转运给起止位置 from / to）"),
+    _record("environment", "环境采集", (
+        ConfigField("zone", "区域", "string", required=True,
+                    hint="工位编号或房间 / 手套箱名：步骤的环境要求按区域取读数"),
+        _table("points", "指标 ← 点", _point("", "点"), "指标", required=True,
+               key_options=("temperature", "humidity", "dew_point", "h2o_ppm", "o2_ppm", "pressure", "pressure_diff",
+                            "particles"),
+               hint="{temperature: \"temperature\", humidity: \"humidity\"}：每个环境指标读哪个点"),
+        ConfigField("interval_sec", "采集周期（秒）", "number", hint="缺省 60 秒；执行器探测在线时顺带读"),
+    ), hint="把点位读数记成环境读数，开跑检查与下发前按它核对步骤的环境要求：{zone, points: {指标: 点名}, interval_sec}。"
+            "只对执行器探测的设备生效"),
 )
 IDLE_AFTER_START = ("done", "unknown")
 JOBS = (
