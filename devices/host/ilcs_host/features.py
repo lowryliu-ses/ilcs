@@ -82,14 +82,24 @@ class DeviceRuntime:
 
     # ---------- 身份与状态 ----------
 
+    def maps_identity(self) -> bool:
+        """插件配置里映射了设备编号（点表的 identity，或 REST 身份请求的 fields）：设备能报身份。"""
+        spec = self.entry.config.get("identity") or {}
+        fields = spec.get("fields") if isinstance(spec.get("fields"), dict) else spec
+        return any(fields.get(key) for key in ("device_id", "serial"))
+
     def identity(self) -> dict:
+        """设备能报身份就以设备为准，报空就是缺失（接错了设备、PLC 没配编号），不拿配置顶替——顶替了就核对不出接错的设备。
+        映射里没有编号的设备才按配置登记的编号（IdentitySource = config）。"""
         try:
             raw = self.adapter.identity()
         except (AdapterError, AdapterUnreachable) as exc:
             raise _defined(DEVICE_INFO, "DeviceUnreachable", str(exc)) from exc
         device_id = str(raw.get("device_id") or raw.get("serial") or "")
+        reported = bool(device_id) or self.maps_identity()
         return {
-            **raw, "device_id": device_id or self.entry.device_id, "source": "device" if device_id else "config",
+            **raw, "device_id": device_id if reported else self.entry.device_id,
+            "source": "device" if reported else "config",
             "simulator": bool(raw.get("simulator")) or self.entry.simulator,
         }
 

@@ -29,7 +29,7 @@ from ..core.errors import NotFound, StateConflict, ValidationFailed
 from ..models import Adapter, PointWrite, User
 from ..repositories.execution import CommandRepository
 from ..repositories.resources import AdapterRepository, StationRepository
-from .acceptance_service import running_stations
+from .acceptance_service import driver_awaiting_approval, running_stations
 from .audit_service import AuditService
 from .identity_service import IdentityService
 
@@ -37,6 +37,7 @@ ACTIVE = ("queued", "running")
 STATE_LABELS = {"queued": "排队中", "running": "写入中", "done": "已写入", "failed": "没有写", "unknown": "结果未知",
                 "cancelled": "已撤回"}
 MEANING = "手动写入设备点位"
+UNAPPROVED_DRIVER = "设备服务的驱动配置变了、还没签名批准：点表可能已经把这个点指到了别的地址"
 LOG = logging.getLogger("ilcs.executor")
 
 
@@ -102,10 +103,16 @@ class PointService:
         if station_id in running_stations(self.db):
             raise StateConflict(f"{station_id} 的接入验收正在执行，结束后再读点位", code="acceptance_running")
         implementation = _points_driver(adapter)
+        try:
+            points = implementation.read_points()
+        except AdapterUnreachable as exc:  # SiLA 设备服务在截止时间内没有答复（映射驱动按行报错，不抛）
+            raise StateConflict(f"设备服务没有及时答复，读不到点位：{exc}", code="device_unreachable") from exc
+        except AdapterError as exc:
+            raise StateConflict(str(exc), code="point_read_refused") from exc
         return {
             "station_id": station_id, "driver": adapter.driver, "config_version": adapter.config_version,
             "tasks": has_tasks(adapter.driver, adapter.config), "read_at": now().isoformat(timespec="seconds"),
-            "points": implementation.read_points(),
+            "points": points,
         }
 
     def writes(self, station_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -121,6 +128,8 @@ class PointService:
         reason = (reason or "").strip()
         if not reason:
             raise ValidationFailed("手动写设备点位要写明原因", code="point_write_reason_required")
+        if driver_awaiting_approval(adapter):
+            raise StateConflict(f"{station_id} {UNAPPROVED_DRIVER}，核对并签名批准之后再写", code="driver_change_unapproved")
         implementation = _points_driver(adapter)
         try:
             implementation.check_manual_write(point, value)
@@ -202,6 +211,8 @@ class PointWriteRunner:
         if adapter.config_version != row.config_version:
             return (f"申请时是配置 v{row.config_version}，现在是 v{adapter.config_version}：点的定义可能变了，没有写；"
                     "请按新配置重新申请")
+        if driver_awaiting_approval(adapter):
+            return f"{UNAPPROVED_DRIVER}，没有写；批准之后请重新申请"
         acting = CommandRepository(self.db).acting_on_station(row.station_id)
         if acting:
             return (f"工位上有指令可能还在动作（{acting[0].id[:8]}）：手动写会干扰它，没有写；指令结束后再申请")

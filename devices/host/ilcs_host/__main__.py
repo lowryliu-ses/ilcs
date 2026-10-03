@@ -22,6 +22,8 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true", help="只检查配置，打印每台设备的配置摘要")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # sila2 每次属性读取、每次命令都按 INFO 记三行（请求、令牌检查、返回值）；ILCS 每台设备每个探测周期都读，日志会被它淹没
+    logging.getLogger("sila2").setLevel(logging.WARNING)
 
     from .server import features_of, prepare, start, stop
 

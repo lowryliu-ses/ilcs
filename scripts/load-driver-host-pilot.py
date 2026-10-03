@@ -127,9 +127,10 @@ def physical_acceptance(engineer: Actor, station_id: str, station: dict[str, Any
        + (f"，跳过 {'、'.join(skipped)}" if skipped else ""))
 
 
-def register(team: dict[str, Actor], args: argparse.Namespace) -> None:
+def register(team: dict[str, Actor], args: argparse.Namespace, keys: list[str]) -> None:
     engineer, operator = team["engineer"], team["operator"]
-    for station_id, station in STATIONS.items():
+    for station_id in keys:
+        station = STATIONS[station_id]
         step(f"{station_id}：{station['name']}")
         ensure_station(engineer, station_id, station)
         connect(engineer, operator, station_id, station, args.timeout)
@@ -143,11 +144,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
     parser.add_argument("--acceptance", action="store_true", help="握手 PLC 再跑一次动作级验收")
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--only", default=",".join(STATIONS), help=f"只接哪几个工位（{', '.join(STATIONS)}）")
     args = parser.parse_args(argv)
+    keys = [key.strip() for key in args.only.split(",") if key.strip()]
     try:
+        unknown = [key for key in keys if key not in STATIONS]
+        if unknown:
+            raise Failed(f"不认识 {', '.join(unknown)}；可选 {', '.join(STATIONS)}")
         refuse_production()
-        register(actors(http_transport(args.base)), args)
-        print("\n完成：" + "、".join(STATIONS) + " 已经驱动宿主接入")
+        register(actors(http_transport(args.base)), args, keys)
+        print("\n完成：" + "、".join(keys) + " 已经驱动宿主接入")
         return 0
     except Failed as exc:
         print(f"\n失败：{exc}", file=sys.stderr)

@@ -28,6 +28,15 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+@contextmanager
+def silent_port():
+    """只收连接、从不答话的端口：设备进程卡死、容器被暂停时就是这样（内核替它建连接，请求没有回音）。"""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(64)
+        yield listener.getsockname()[1]
+
+
 def modbus_points(setpoints=("thickness", "temp")) -> dict:
     points = {
         "heartbeat": {"table": "holding", "address": 0, "type": "uint16"},

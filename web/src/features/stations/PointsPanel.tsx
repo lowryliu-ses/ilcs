@@ -107,6 +107,8 @@ export function PointsPanel({ station, adapter }: { station: StationRow; adapter
   };
 
   const tasks = listing?.tasks ?? adapter.tasks ?? true;
+  // 设备服务的驱动配置变了还没批准：点表可能已经把点指到了别的地址，服务端也会拒绝
+  const blocked = adapter.driver_awaiting_approval ? '设备服务的驱动配置变了、还没签名批准：批准之后再写' : pending ? '上一条写入还没出结论' : '';
   return (
     <div className="subsection">
       <div className="subsection-head">
@@ -147,7 +149,7 @@ export function PointsPanel({ station, adapter }: { station: StationRow; adapter
                         <button className="btn small" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     ) : (
-                      <button className="btn small" disabled={pending} title={pending ? '上一条写入还没出结论' : ''}
+                      <button className="btn small" disabled={Boolean(blocked)} title={blocked}
                         onClick={() => { setEditing(point.name); setValue(typeof point.value === 'boolean' || typeof point.value === 'number' ? point.value : ''); }}>
                         写入…
                       </button>

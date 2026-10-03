@@ -40,8 +40,9 @@ def _force_probe() -> None:
 
 
 @contextmanager
-def sila_station(admin, tmp_path, monkeypatch, device_port: int):
-    """工位 STATION 用 sila2_v1 接驱动宿主上的设备（只读写点位，tasks: false）；退出时改回内置模拟并停用。"""
+def sila_station(admin, tmp_path, monkeypatch, device_port: int, **overrides):
+    """工位 STATION 用 sila2_v1 接驱动宿主上的设备（只读写点位，tasks: false）；退出时改回内置模拟并停用。
+    `overrides` 改连接配置（如 request_timeout_sec）。"""
     from app.adapters.registry import reset_cache
     from app.core.config import settings
     from app.core.db import SessionLocal
@@ -64,7 +65,7 @@ def sila_station(admin, tmp_path, monkeypatch, device_port: int):
     else:
         assert admin.post(f"/api/stations/{STATION}/retire", {"retired": False}).status_code == 200
     config = {"host": "127.0.0.1", "port": device_port, "insecure": True, "tasks": False,
-              "expected_device_id": "SIM-PLC-T", "request_timeout_sec": 3}
+              "expected_device_id": "SIM-PLC-T", "request_timeout_sec": 3, **overrides}
     saved = _patch(admin, kind="real", driver="sila2_v1", protocol="SiLA 2", config=config,
                    credential_ref=f"file://{tmp_path / 'host.token'}", supports_hold=False, supports_abort=False)
     assert saved.status_code == 200, saved.text
@@ -114,6 +115,34 @@ def test_points_panel_and_signed_write_go_through_the_driver_host(admin, reset_r
             assert sum(program.device.executions.values()) == 0, "手动写点不启动作业"
 
 
+def test_silent_device_behind_the_host_is_unreachable_not_a_server_error(admin, reset_runtime, tmp_path, monkeypatch):
+    """设备卡死不回话（进程卡死、容器被暂停）：驱动宿主来不及在 ILCS 的截止时间内答复，读点位是「设备无响应」，
+    不是服务器内部错误；宿主来得及答复时，写点读不到当前值就明确没写，不是结果未知。"""
+    from sim_harness import driver_host, free_port, silent_port
+
+    points = {"serial": {"table": "holding", "address": 232, "type": "ascii", "length": 32},
+              "sp_temp": {"table": "holding", "address": 12, "type": "float32", "writable": True, "min": 0, "max": 300}}
+    with silent_port() as plc_port:
+        slow = {"plugin": "modbus_map", "port": free_port(), "simulator": True,
+                "config": {"host": "127.0.0.1", "port": plc_port, "unit_id": 1, "request_timeout_sec": 2, "points": points}}
+        fast = {**slow, "port": free_port(), "config": {**slow["config"], "request_timeout_sec": 0.3}}
+        with driver_host(tmp_path / "site", {"SLOW": slow, "FAST": fast}):
+            with sila_station(admin, tmp_path, monkeypatch, slow["port"], request_timeout_sec=1):
+                read = admin.get(f"/api/stations/{STATION}/adapter/points")
+                assert read.status_code == 409 and read.json()["detail"]["code"] == "device_unreachable", read.text
+            with sila_station(admin, tmp_path, monkeypatch, fast["port"]):
+                read = admin.get(f"/api/stations/{STATION}/adapter/points")
+                assert read.status_code == 200, read.text
+                assert all(row["value"] is None and row["error"] for row in read.json()["points"]), read.text
+                queued = admin.post(f"/api/stations/{STATION}/adapter/points/sp_temp/write",
+                                    {"value": 42.5, "reason": "设备不回话时写",
+                                     "signature_id": admin.sign("手动写入设备点位", target=STATION)})
+                assert queued.status_code == 201, queued.text
+                _pass()
+                row = admin.get(f"/api/stations/{STATION}/adapter/point-writes").json()[0]
+                assert row["state"] == "failed" and "DeviceUnreachable" in row["error"], row
+
+
 def test_driver_config_change_on_the_host_reopens_the_acceptance_gate(admin, reset_runtime, tmp_path, monkeypatch):
     from app.core.db import SessionLocal
     from app.models import Alarm
@@ -155,6 +184,10 @@ def test_driver_config_change_on_the_host_reopens_the_acceptance_gate(admin, res
                     "reason": "想直接放行", "signature_id": admin.sign(
                         "签名放行接入验收", target=STATION, object_version=unapproved["config_version"])})
                 assert waived.status_code == 409 and waived.json()["detail"]["code"] == "driver_change_unapproved"
+                # 手动写点也不行：新点表可能已经把同一个点名指到了别的地址
+                refused = admin.post(f"/api/stations/{STATION}/adapter/points/sp_temp/write", {
+                    "value": 42.5, "reason": "驱动变更没批准时写", "signature_id": admin.sign("手动写入设备点位", target=STATION)})
+                assert refused.status_code == 409 and refused.json()["detail"]["code"] == "driver_change_unapproved"
 
                 # 有权限的人核对后签名批准这一份：排一次只读级验收，通过时批准、放开闸门
                 approved = admin.post(f"/api/stations/{STATION}/adapter/driver-approval", {
@@ -170,6 +203,10 @@ def test_driver_config_change_on_the_host_reopens_the_acceptance_gate(admin, res
                 assert runs[0]["ok"] and runs[0]["driver_info"]["config_digest"] == changed_digest
                 assert accepted["approved_driver"]["config_digest"] == changed_digest, "验收通过时批准新的那份"
                 assert accepted["acceptance"]["required"] == "" and accepted["driver_changed"] is False
+                written = admin.post(f"/api/stations/{STATION}/adapter/points/sp_temp/write", {
+                    "value": 42.5, "reason": "批准之后写", "signature_id": admin.sign("手动写入设备点位", target=STATION)})
+                assert written.status_code == 201, written.text
+                assert _pass()["written"] == 1
                 actions = [row["action"] for row in admin.get(f"/api/audit?target={STATION}&limit=30").json()]
                 assert "批准驱动配置变更" in actions, actions
                 with SessionLocal() as db:

@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from conftest import TOKEN, client, free_port, modbus_points, plc_mapping, plc_sim, running_host, token, write_site
+from conftest import (TOKEN, client, free_port, modbus_points, plc_mapping, plc_sim, running_host, silent_port, token,
+                      write_site)
 
 
 def _plc_device(port: int, **extra) -> dict:
@@ -159,6 +160,39 @@ def test_unreachable_device_is_refused_before_acting(tmp_path):
         assert _refused(lambda: _submit(c, "CMD-OFF")) == "DeviceUnreachable", "台账里还没有这条作业：设备没动"
         assert _refused(lambda: c.DeviceInfo.Status.get(metadata=token(c))) == "DeviceUnreachable"
         assert _query(c, "CMD-OFF")["state"] == "not_found", "台账里没有就是没见过，不用问设备"
+
+
+def test_silent_device_is_answered_within_one_timeout(tmp_path):
+    """设备卡死不回话（连接建得上、请求没回音）：读点一个超时就答复、后面的点不再读；写点读不到当前值就明确没写。
+    宿主要赶在 ILCS 的截止时间之前答复，否则 ILCS 只能按「结果未知」处理一次其实没发出去的写入。"""
+    points = modbus_points()
+    points["sp_thickness"] = {**points["sp_thickness"], "writable": True, "min": 0, "max": 500}
+    with silent_port() as plc_port:
+        device = {"plugin": "modbus_map", "port": free_port(), "simulator": True,
+                  "config": {"host": "127.0.0.1", "port": plc_port, "unit_id": 1, "request_timeout_sec": 0.5,
+                             "points": points}}
+        with running_host(write_site(tmp_path, {"PLC-1": device})):
+            c = client(device["port"])
+            started = time.monotonic()
+            values = c.PointAccess.ReadPoints(Names=[], metadata=token(c)).Values
+            took = time.monotonic() - started
+            assert len(values) == len(points) and all(row.Quality == "bad" and row.Error for row in values)
+            assert took < 3, f"读 {len(values)} 个点等了 {took:.1f} s：每个点都等满了超时"
+            started = time.monotonic()
+            assert _refused(lambda: c.PointAccess.WritePoint(
+                RequestId="pw-silent", Name="sp_thickness", Value=_point(100.0), metadata=token(c))) == "DeviceUnreachable"
+            assert time.monotonic() - started < 3
+
+
+def test_mapped_identity_that_reads_blank_is_missing_not_the_configured_id(tmp_path, plc):
+    """点表映射了设备编号、设备却报空（接错了设备、PLC 没配编号）：报缺失，不拿现场配置里的编号顶替。"""
+    _, plc_port = plc
+    device = _plc_device(plc_port, device_id="SIM-PLC-T")
+    device["config"]["identity"] = {"device_id": "job_latched", "model": "model"}  # 还没下发过作业：读出来是空的
+    with running_host(write_site(tmp_path, {"PLC-1": device})):
+        c = client(device["port"])
+        identity = c.DeviceInfo.Identity.get(metadata=token(c))
+        assert (identity.DeviceId, identity.IdentitySource) == ("", "device")
 
 
 def test_restarted_host_answers_from_the_journal_without_resending(tmp_path):

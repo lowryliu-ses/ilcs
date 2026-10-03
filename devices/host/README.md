@@ -54,7 +54,7 @@ sites/<现场>/
 | `config` | 插件配置（ILCS 适配器配置的写法） |
 | `supports` | `{hold, abort, query, dedup}`，缺省只有查询与去重 |
 | `simulator` | 模拟设备（含 ProtoForge 这类第三方模拟器）写 true；正式环境拒绝启动 |
-| `device_id` | 设备报不出身份时按配置登记的编号（`DeviceInfo.Identity.IdentitySource` 报 config） |
+| `device_id` | 设备报不出身份时按配置登记的编号（`DeviceInfo.Identity.IdentitySource` 报 config）。插件配置里映射了设备编号的，以设备为准：读出来是空就报缺失，不拿它顶替 |
 | `credential_ref` | 设备凭据引用（env:// 或凭据目录内的 file://），原文不进配置 |
 | `config_version` | 给人看的配置版本（例如驱动项目的提交号） |
 | `server_uuid` | 可选；缺省按设备键生成，重新部署不变 |
@@ -62,6 +62,11 @@ sites/<现场>/
 **配置摘要**（`DeviceInfo.Driver.ConfigDigest`）：插件、是否模拟设备、支持标志、按配置登记的设备编号、凭据引用，加上去掉
 `connect_timeout_sec` / `request_timeout_sec` / `probe_interval_sec` / `acceptance` 的插件配置，按规范化 JSON 算 sha256。
 端口、服务器 UUID、配置版本号不参与。`python -m ilcs_host --site <现场> --check` 打印每台设备的摘要。
+
+**超时**：插件配置里的 `connect_timeout_sec` / `request_timeout_sec` 是驱动宿主对设备的超时。设备不回话（进程卡死、
+断网、容器被暂停）时，读点只等一个超时、后面的点不再读；写点读不到当前值就报 `DeviceUnreachable`（没写）。所以一次调用
+最长大约 `connect_timeout_sec + request_timeout_sec`，ILCS 那边 `sila2_v1` 的 `request_timeout_sec` 要比它长，否则 ILCS 先放弃，
+没写成的手动写入也只能记「结果未知」。
 
 **在途作业时不许换配置**：设备的作业台账里有没结束的作业时，摘要变了的配置拒绝启动这台设备（等作业结束，或现场核对后
 处理掉台账里的那条作业）。只改超时不算换配置。

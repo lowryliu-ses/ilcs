@@ -42,6 +42,10 @@ ILCS 读 `SiLAService` 的「已实现特性」来判断：有 TaskExecution 才
   DeviceInfo、PointAccess、TaskExecution 的全部命令和属性都受它约束，`SiLAService` 不受（ILCS 先读它判断已实现特性）。
 - 不用双向 TLS 的原因：sila2 0.14.0 的服务端不能强制校验客户端证书；令牌走标准元数据，各语言的 SiLA SDK 都支持。
 - 令牌缺失或错误：服务端拒绝调用，设备没有动作；ILCS 按明确失败处理，并提示凭据有问题。
+- **超时要配得上**：ILCS 每次调用的截止时间（`sila2_v1` 的 `request_timeout_sec`）必须长于驱动宿主答复一次调用的最长
+  时间，大约是插件的 `connect_timeout_sec + request_timeout_sec`。ILCS 先超时，就只能按「没有结论」处理：读点位报设备
+  无响应，手动写点记「结果未知」——哪怕驱动宿主随后查明根本没写。驱动宿主这边：设备不回话时读点只等一个超时，后面的点
+  不再读；写点读不到当前值就报 `DeviceUnreachable`（没写）。
 
 ## DeviceInfo（所有设备）
 
@@ -159,3 +163,7 @@ ILCS 重新挂上闸门的那把锁。
 4. `Status` 要不要做成可订阅的属性来减少轮询；v1 先轮询。
 5. 参数说明用 JSON Schema 的哪个版本、单位注解怎么写（暂定 2020-12、`unit` 字段）。
 6. 点位读数要不要带设备时间；现在 `ObservedAt` 是驱动读到的时间。
+7. 手动写点「结果未知」之后怎么核对。按同一个 `RequestId` 重发 `WritePoint` 不行：驱动宿主没收到过那一次时，重发会真的
+   写下去。考虑加 `QueryWrite(RequestId)`：只查写入台账、不执行。
+8. 服务器证书没带 SiLA 规定的服务器 UUID 扩展（OID 1.3.6.1.4.1.58583），sila2 客户端每次连接都警告。一个宿主一张证书
+   装不下每台设备各自的 UUID；要带就得每台设备一张、由宿主的 CA 签发。
