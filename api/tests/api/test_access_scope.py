@@ -4,7 +4,7 @@
 """
 import pytest
 
-from tests.conftest import ISOLATED_ORG, ORG
+from tests.conftest import ISOLATED_ORG, ORG, ServiceSession
 
 
 def test_login_requires_an_active_membership(client):
@@ -234,6 +234,75 @@ def test_service_identity_is_limited_to_authorized_stations(client, lims):
     denied = lims.post("/api/runtime/stations/ST-03/heartbeat", {"connected": True})
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "station_not_authorized"
+
+
+def test_runtime_adapter_list_is_limited_to_own_organization_and_stations(client, lims):
+    """适配器契约清单只列本组织、且授权给这个服务凭据的工位；未声明工位范围的一条都不给。"""
+    from app.core.db import SessionLocal
+    from app.core.security import hash_secret
+    from app.models import ServiceIdentity
+
+    assert [row["station_id"] for row in lims.get("/api/runtime/adapters").json()] == ["ST-07"]
+
+    # 别的组织的凭据即使在范围里写了本组织的工位编号，也看不到；本组织没声明工位范围的凭据同样看不到
+    temporary = {
+        "scope-other-org": (ISOLATED_ORG, {"stations": ["ST-07"]}),
+        "scope-none": (ORG, {"analysis_tasks": "all"}),
+    }
+    with SessionLocal() as db:
+        for source, (org_id, scopes) in temporary.items():
+            db.add(ServiceIdentity(
+                org_id=org_id, source=source, name=source, secret_hash=hash_secret(f"{source}-secret"), scopes=scopes,
+            ))
+        db.commit()
+    try:
+        for source in temporary:
+            listed = ServiceSession(client, source, f"{source}-secret").get("/api/runtime/adapters")
+            assert listed.status_code == 200, listed.text
+            assert listed.json() == [], source
+    finally:
+        with SessionLocal() as db:
+            db.query(ServiceIdentity).filter(ServiceIdentity.source.in_(list(temporary))).delete(
+                synchronize_session=False
+            )
+            db.commit()
+
+
+def test_device_condition_recovery_only_for_authorized_station_conditions(lims):
+    """设备上报「条件恢复」只认授权工位上的设备侧条件。条件一复位，批次续跑的前置检查就放行了。"""
+    from app.core.db import SessionLocal
+    from app.models import Alarm
+
+    cases = {
+        # 报警号: (组织, 来源类型, 来源, 产生方式, 期望状态码, 期望错误码)
+        "A-SCOPE-OWN": (ORG, "station", "ST-07", "device", 200, ""),
+        "A-SCOPE-OTHER-STATION": (ORG, "station", "ST-03", "device", 403, "station_not_authorized"),
+        "A-SCOPE-NOT-STATION": (ORG, "material", "Tank A", "device", 403, "alarm_not_authorized"),
+        "A-SCOPE-SOFTWARE": (ORG, "station", "ST-07", "system", 409, "system_alarm"),
+        "A-SCOPE-OTHER-ORG": (ISOLATED_ORG, "station", "ST-07", "device", 404, ""),
+    }
+    with SessionLocal() as db:
+        for alarm_id, (org_id, source_type, source_id, origin, _, _) in cases.items():
+            db.add(Alarm(
+                id=alarm_id, org_id=org_id, severity=3, source_type=source_type, source_id=source_id,
+                message="用例：设备侧条件", origin=origin,
+            ))
+        db.commit()
+    try:
+        for alarm_id, (_, _, _, _, status, code) in cases.items():
+            response = lims.post(f"/api/alarms/{alarm_id}/condition-cleared")
+            assert response.status_code == status, (alarm_id, response.text)
+            if code:
+                assert response.json()["detail"]["code"] == code, alarm_id
+        with SessionLocal() as db:
+            rows = db.query(Alarm).filter(Alarm.id.in_(list(cases)), Alarm.condition_active.is_(True)).all()
+            active = {row.id for row in rows}
+        assert active == set(cases) - {"A-SCOPE-OWN"}, "被拒的上报不能改动条件"
+    finally:
+        # 持续中的工位条件会挡住后面用例的批次续跑，用完就删
+        with SessionLocal() as db:
+            db.query(Alarm).filter(Alarm.id.in_(list(cases))).delete(synchronize_session=False)
+            db.commit()
 
 
 def test_disabled_service_identity_is_rejected_immediately(client, admin, device):

@@ -14,7 +14,7 @@ from ..domain.recipe_rules import is_valid, validate_steps
 from ..domain.steps import normalize
 from ..models import Adapter, Capability, Island, Station, User
 from ..adapters.base import AdapterError
-from ..adapters.registry import adapter_for, catalog_of, describe, reset_cache
+from ..adapters.registry import adapter_for, catalog_of, contract_of, describe, reset_cache
 from ..repositories.batches import AllocationRepository
 from ..repositories.execution import CommandRepository
 from ..repositories.recipes import RecipeRepository
@@ -444,6 +444,25 @@ class StationService:
                 f"该服务凭据未被授权操作工位 {station_id}", code="station_not_authorized"
             )
         return station
+
+    def adapter_contracts(self) -> list[dict]:
+        """适配器契约自述，给设备与集成服务看。
+
+        只列本组织的工位；服务身份再按授权的工位范围筛，未声明范围的一条都不给。适配器不带组织，
+        直接列全表会把别的组织的工位、驱动与方法目录一并交出去。
+        """
+        stations = {
+            station.id: station for station in self.stations.list()
+            if not self.ctx.is_service or service_may_use_station(self.ctx.scopes, station.id)
+        }
+        return [
+            {
+                "station_id": record.station_id,
+                **contract_of(record, tuple((stations[record.station_id].limits or {}).keys())).as_dict(),
+                **catalog_of(record),
+            }
+            for record in self.adapters.for_stations(stations)
+        ]
 
     def mark_command_manual(self, command_id: str, note: str, user: User) -> dict:
         """结果未知的指令转人工核查。不自动重试是刻意的：设备实态只能由人现场确认。"""

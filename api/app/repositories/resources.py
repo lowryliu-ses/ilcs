@@ -201,6 +201,13 @@ class AdapterRepository(Repository[Adapter]):
     def list(self) -> list[Adapter]:
         return list(self.db.query(Adapter).order_by(Adapter.station_id).all())
 
+    def for_stations(self, station_ids) -> list[Adapter]:
+        """这些工位的适配器。适配器不带组织、随工位归属：给调用方看之前，工位先按组织与授权范围筛过。"""
+        ids = list(station_ids)
+        if not ids:
+            return []
+        return list(self.db.query(Adapter).filter(Adapter.station_id.in_(ids)).order_by(Adapter.station_id).all())
+
     def health(self) -> list[AdapterHealth]:
         from ..adapters.registry import probe_interval
         from ..core.config import settings

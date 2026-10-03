@@ -29,7 +29,7 @@ def close(alarm_id: str, db: DbSession, user: CurrentUser, ctx: Ctx):
 
 @router.post("/{alarm_id}/condition-cleared")
 def condition_cleared(alarm_id: str, db: DbSession, ctx: ServiceCtx):
-    """设备侧条件恢复事件。走服务认证，不是人工按钮。"""
+    """设备侧条件恢复事件。走服务认证，不是人工按钮；只接受授权工位上的设备侧条件，软件判定的报警不接受。"""
     return AlarmService(db, ctx).condition_cleared(alarm_id)
 
 

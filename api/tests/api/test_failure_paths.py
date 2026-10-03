@@ -140,9 +140,15 @@ def test_adapter_loss_faults_batch_and_raises_alarm(operator, device, running_ba
     assert not still_blocked["preconditions"][0]["ok"]
 
     assert operator.post(f"/api/alarms/{alarm['id']}/close").status_code == 409, "条件未恢复不能关闭"
-    # 条件恢复是设备侧事件，走服务认证，不是人工按钮
+    # 「条件恢复」接口是设备侧事件，走服务认证，人调不了
     assert operator.client.post(f"/api/alarms/{alarm['id']}/condition-cleared").status_code == 401
-    assert device.post(f"/api/alarms/{alarm['id']}/condition-cleared").status_code == 200
+    # 这条是执行异常的报警（软件判定、挂在批次上）：设备不知道它的存在，不能由设备上报恢复
+    refused = device.post(f"/api/alarms/{alarm['id']}/condition-cleared")
+    assert refused.status_code == 403 and refused.json()["detail"]["code"] == "alarm_not_authorized"
+    assert operator.post(
+        f"/api/alarms/{alarm['id']}/clear-condition",
+        {"reason": "现场确认 ST-05 链路已恢复", "signature_id": operator.sign("异常原因已消除", target=alarm["id"])},
+    ).status_code == 200
 
     with SessionLocal() as db:
         db.get(Adapter, "ST-05").connected = True

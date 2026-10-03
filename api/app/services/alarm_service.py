@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..core.clock import now
 from ..core.context import AccessContext
 from ..core.errors import PermissionDenied, StateConflict, ValidationFailed
+from ..domain.access import service_may_use_station
 from ..models import Alarm, User
 from ..repositories.governance import AlarmRepository
 from .audit_service import AuditService
@@ -174,8 +175,27 @@ class AlarmService:
         return self.out(alarm)
 
     def condition_cleared(self, alarm_id: str) -> dict:
-        """设备侧条件恢复事件。操作者记为设备，不改变确认状态。"""
+        """设备侧条件恢复事件。操作者记为设备，不改变确认状态。
+
+        服务凭据只能反馈授权工位上的设备侧条件：来源不是工位的、工位不在授权范围内的一律拒绝——
+        条件一复位，批次续跑的前置检查就放行了。软件判定的报警（origin = system）设备不知道它的存在，
+        条件由系统自动复位，或由操作员写明原因并签名清除（`clear_condition`），不接受设备上报。
+        """
         alarm = self.alarms.require(alarm_id, "报警不存在")
+        if self.ctx.is_service:
+            if alarm.source_type != "station":
+                raise PermissionDenied(
+                    f"报警 {alarm.id} 不是工位上的设备侧条件，服务凭据不能上报它的恢复", code="alarm_not_authorized",
+                )
+            if not service_may_use_station(self.ctx.scopes, alarm.source_id):
+                raise PermissionDenied(
+                    f"该服务凭据未被授权操作工位 {alarm.source_id}", code="station_not_authorized",
+                )
+        if alarm.origin == "system":
+            raise StateConflict(
+                "这条报警是软件判定的，设备不知道它的存在：条件由系统自动复位，或由操作员写明原因并签名后清除",
+                code="system_alarm",
+            )
         alarm.condition_active = False
         self.audit.record(
             None, "条件恢复反馈", alarm.id, before="异常条件持续", after="条件已恢复",

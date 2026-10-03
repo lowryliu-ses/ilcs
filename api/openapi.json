@@ -9313,7 +9313,7 @@
     },
     "/api/alarms/{alarm_id}/condition-cleared": {
       "post": {
-        "description": "设备侧条件恢复事件。走服务认证，不是人工按钮。",
+        "description": "设备侧条件恢复事件。走服务认证，不是人工按钮；只接受授权工位上的设备侧条件，软件判定的报警不接受。",
         "operationId": "condition_cleared_api_alarms__alarm_id__condition_cleared_post",
         "parameters": [
           {
@@ -25907,7 +25907,7 @@
     },
     "/api/runtime/adapters": {
       "get": {
-        "description": "适配器契约自述：支持的能力、保持 / 终止 / 查询 / 去重，以及驱动自报的方法目录与指令类型。",
+        "description": "适配器契约自述：支持的能力、保持 / 终止 / 查询 / 去重，以及驱动自报的方法目录与指令类型。只列本组织、且在该服务凭据授权范围内的工位。",
         "operationId": "adapter_contracts_api_runtime_adapters_get",
         "parameters": [
           {
