@@ -1,0 +1,26 @@
+{
+  "_说明": "ProtoForge 联调线的作业指导书：三台 ProtoForge 模拟设备经驱动宿主接入 ILCS（只走 SiLA 2），按 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告跑一遍全流程。load-protoforge-flow.py 按它登记结构化步骤、上传同目录的附件 PDF（render-sop.py 生成）并走评审发布。改了内容就升版本号、重新生成 PDF。",
+  "code": "SOP-PF-01",
+  "title": "ProtoForge 握手 PLC 控温运行联调规程",
+  "version": "v1",
+  "category": "设备联调",
+  "capability_scope": ["cap.plc_run"],
+  "sample_types": ["联调样品"],
+  "requires_training_ack": true,
+  "purpose": "规定 ProtoForge 联调线（HTTP REST 温湿度传感器、OPC UA 压力传感器、Modbus TCP 握手 PLC，均经驱动宿主以 SiLA 2 接入）按设定温度做一次控温运行的操作：开工前核对环境与设备在线，装样核对设定，PLC 按设定温度运行并回报实测温度，QA 复核数据。用于验证 ILCS 从 SOP、流程、方案、任务到排程、批次执行、数据复核与报告的全链路。设备都是模拟设备，数据带「模拟」标记，不作实测结论。",
+  "safety": "联调用模拟设备，无真实样品、加热体与压力容器。开工前确认三台设备在「工位与接入」里经驱动宿主在线、实验区温湿度与 PLC 工位压力读数在要求范围内且未过期；读数缺失、过期或超限时不开工，排查传感器与驱动宿主后再继续。运行中不得在 ProtoForge 管理界面手动改写 PLC 的状态字与启动线圈。",
+  "steps": [
+    {"title": "核对环境与设备在线", "kind": "manual", "duration_min": 2,
+     "instructions": "在「环境监测」核对设备模拟联调区的温度（10–45 ℃）、相对湿度（≤ 80 %RH）与 ST-PF-MB 的压力（0.5–5 bar）读数在范围内且未过期；在「工位与接入」核对 ST-PF-HTTP、ST-PF-OPCUA、ST-PF-MB 在线。",
+     "checks": ["温湿度、压力读数在范围内且未过期", "三台设备在线"]},
+    {"title": "装样并核对设定温度", "kind": "manual", "duration_min": 2,
+     "instructions": "按批次样本清单核对联调样品，确认流程里 PLC 控温运行的设定温度为 60 ℃。",
+     "checks": ["样品与清单一致", "设定温度 60 ℃"]},
+    {"title": "PLC 控温运行", "kind": "device", "capability": "cap.plc_run", "duration_min": 1,
+     "instructions": "由系统下发：PLC 写设定温度、置启动，运行约 5 s 后回报实测温度并复位。下发前系统再核对一次环境要求。",
+     "checks": ["状态字回到空闲", "回报实测温度"]},
+    {"title": "QA 复核运行数据", "kind": "review", "duration_min": 2,
+     "instructions": "QA 核对设备回报的实测温度、环境读数与审计记录，确认数据完整后批准。",
+     "checks": ["实测温度已回报", "环境核对记录完整"]}
+  ]
+}
