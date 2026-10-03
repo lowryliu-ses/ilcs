@@ -191,3 +191,53 @@ def test_a_failed_probe_is_logged_once_and_explained_in_the_alarm(reset_runtime,
             logger.removeHandler(collect)
             adapter.kind, adapter.driver, adapter.config = saved
             db.commit()
+
+
+def test_a_probed_device_that_drops_alarms_after_two_probe_cycles(reset_runtime):
+    """握过手、由执行器探测的设备掉线：离上次探测成功不到 2 个探测周期先不报（计划内重启、网络抖动），
+    也不复位已经在的失联报警；超过了照常报。执行门不等，立刻挡住下发。"""
+    from app.core.clock import now
+    from app.core.db import SessionLocal
+    from app.models import Adapter, Alarm
+    from app.services.monitoring_service import DeviceMonitor, disconnect_delay
+
+    key = f"station:{STATION}:disconnected"
+    with SessionLocal() as db:
+        adapter = db.get(Adapter, STATION)
+        saved = (adapter.kind, adapter.driver, adapter.config)
+        adapter.kind, adapter.driver, adapter.config = "real", "modbus_map_v1", {"host": "127.0.0.1", "port": 502}
+        adapter.connected, adapter.awaiting_handshake_since = False, None
+        adapter.last_heartbeat = now() - timedelta(seconds=5)
+        db.commit()
+        try:
+            assert disconnect_delay(adapter) == 20, "缺省 10 s 探测一次：2 个周期"
+            monitor = DeviceMonitor(db)
+            monitor.evaluate_station(STATION)
+            db.commit()
+            assert db.query(Alarm).filter(Alarm.condition_key == key, Alarm.condition_active.is_(True)).count() == 0
+
+            adapter.last_heartbeat = now() - timedelta(seconds=25)
+            db.commit()
+            monitor.evaluate_station(STATION)
+            db.commit()
+            assert db.query(Alarm).filter(Alarm.condition_key == key, Alarm.condition_active.is_(True)).count() == 1
+
+            # 恢复后又刚掉线：延时内不当恢复、也不新报——上一条已经复位的不受影响，新的等过了延时再报
+            adapter.connected, adapter.last_heartbeat = True, now()
+            db.commit()
+            monitor.evaluate_station(STATION)
+            adapter.connected = False
+            db.commit()
+            monitor.evaluate_station(STATION)
+            db.commit()
+            assert db.query(Alarm).filter(Alarm.condition_key == key, Alarm.condition_active.is_(True)).count() == 0
+        finally:
+            adapter.kind, adapter.driver, adapter.config = saved
+            adapter.connected = True
+            db.commit()
+
+
+def test_a_device_reporting_itself_disconnected_alarms_at_once(device, operator, reset_runtime):
+    """设备自己推心跳报「未连接」：不等，立刻报。"""
+    _heartbeat(device, False)
+    assert len(_alarms(operator)) == 1

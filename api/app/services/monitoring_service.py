@@ -31,6 +31,15 @@ def handshake_grace(adapter: Adapter) -> float:
     return max(60.0, 3 * interval) if interval else float(settings.heartbeat_stale_sec)
 
 
+def disconnect_delay(adapter: Adapter) -> float | None:
+    """握过手的设备掉线后报警前等多久（秒）：执行器主动探测的设备连续 2 个探测周期探不到才报（驱动宿主计划内重启、
+    网络抖一下就不报一条马上复位的失联）；设备自己推心跳报「未连接」的立刻报，返回 None。执行门不等，照样立刻挡住下发。"""
+    from ..adapters.registry import probe_interval
+
+    interval = probe_interval(adapter)
+    return 2 * interval if interval else None
+
+
 class DeviceMonitor:
     def __init__(self, db: Session):
         self.db = db
@@ -44,6 +53,14 @@ class DeviceMonitor:
         if since is None or adapter.connected:
             return False
         return ((moment or now()) - since).total_seconds() < handshake_grace(adapter)
+
+    @staticmethod
+    def recently_lost(adapter: Adapter, moment: datetime | None = None) -> bool:
+        """握过手的设备刚掉线、离上次探测成功还没到报警延时：先不报，也不复位已经在的失联报警。"""
+        delay = disconnect_delay(adapter)
+        if delay is None or adapter.connected or adapter.awaiting_handshake_since is not None or not adapter.last_heartbeat:
+            return False
+        return ((moment or now()) - adapter.last_heartbeat).total_seconds() < delay
 
     def station_conditions(self, adapter: Adapter) -> dict[str, tuple[bool, int, str]]:
         """条件名 → (是否成立, 严重度, 描述)。停用的适配器不判失联与心跳，联锁照判。"""
@@ -77,11 +94,11 @@ class DeviceMonitor:
         from .exception_service import ExceptionService
 
         exceptions = ExceptionService(self.db, system_context(station.org_id, "异常引擎"))
-        pending = self.awaiting_handshake(adapter)
+        pending = self.awaiting_handshake(adapter) or self.recently_lost(adapter)
         for name, (active, severity, message) in self.station_conditions(adapter).items():
             key = f"station:{station_id}:{name}"
             if name == "disconnected" and active and pending:
-                # 刚保存配置、在等第一次握手：既不是失联，也不是恢复——报警状态不动（改配置之前就在失联的照样挂着）
+                # 刚保存配置在等第一次握手，或握过手的设备刚掉线、还没到报警延时：既不报，也不当恢复——报警状态不动
                 continue
             if active:
                 before = alarms.alarms.open_by_condition(key)
