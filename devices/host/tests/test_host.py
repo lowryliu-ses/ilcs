@@ -249,6 +249,25 @@ def test_config_cannot_change_under_an_unfinished_job(tmp_path):
         assert prepare(load_site(site_dir, set(PLUGINS)))
 
 
+def test_checking_a_new_config_does_not_record_it(tmp_path, plc):
+    """`--check` 只检查：检查过新配置不算换过配置，摘要等设备服务真正按它起来了才记。"""
+    from ilcs_host.plugins import PLUGINS
+    from ilcs_host.server import prepare
+    from ilcs_host.site import load_site
+
+    _, plc_port = plc
+    device = _plc_device(plc_port)
+    with running_host(write_site(tmp_path, {"PLC-1": device})) as site:
+        started_with = site.devices[0].digest
+    marker = tmp_path / "state" / "PLC-1.digest"
+    assert marker.read_text(encoding="utf-8").strip() == started_with
+    device["config"]["points"]["sp_thickness"]["max"] = 400
+    checked = load_site(write_site(tmp_path, {"PLC-1": device}), set(PLUGINS))
+    prepare(checked)  # `python -m ilcs_host --check` 走的就是这一步
+    assert checked.devices[0].digest != started_with
+    assert marker.read_text(encoding="utf-8").strip() == started_with, "只检查不改状态"
+
+
 def test_point_only_device_over_opcua_has_no_task_execution(tmp_path):
     with plc_sim("opcua") as (_, plc_port):
         prefix = "nsu=urn:ilcs:sim:plc;s=Coater."

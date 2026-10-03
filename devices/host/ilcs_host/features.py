@@ -69,16 +69,22 @@ class DeviceRuntime:
         self.lock = threading.RLock()
 
     def _guard_config_change(self, state_dir: Path) -> None:
-        """设备上还有没结束的作业时，配置摘要不许变：新配置可能连的是另一个地址、按另一套状态码判结论。"""
-        marker = state_dir / f"{self.entry.key}.digest"
-        previous = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        """设备上还有没结束的作业时，配置摘要不许变：新配置可能连的是另一个地址、按另一套状态码判结论。
+
+        这里只检查。摘要等设备服务真正按这份配置起来了才记（`record_digest`）：`--check` 不能改状态，否则检查过新配置、
+        旧进程又开了作业，换配置重启时就核对不出来了。"""
+        self.marker = state_dir / f"{self.entry.key}.digest"
+        previous = self.marker.read_text(encoding="utf-8").strip() if self.marker.exists() else ""
         current = self.adapter.journal.current()
         if previous and previous != self.entry.digest and current is not None and current["state"] not in TERMINAL:
             raise SiteError(
                 f"设备 {self.entry.key} 还有没结束的作业 {current['id']}，配置摘要却变了（{previous} → {self.entry.digest}）："
                 "等作业结束，或现场核对后把台账里的这条作业处理掉，再换配置"
             )
-        marker.write_text(self.entry.digest + "\n", encoding="utf-8")
+
+    def record_digest(self) -> None:
+        """设备服务按这份配置上线了：记下摘要，下次启动据此判断配置变没变。"""
+        self.marker.write_text(self.entry.digest + "\n", encoding="utf-8")
 
     # ---------- 身份与状态 ----------
 

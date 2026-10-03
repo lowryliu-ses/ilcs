@@ -115,6 +115,7 @@ def start(site: Site, runtimes: list[DeviceRuntime]) -> list[SilaServer]:
                 server.start(site.address, runtime.entry.port, private_key=material[0], cert_chain=material[1],
                              enable_discovery=False)
             servers.append(server)
+            runtime.record_digest()
             log.info("设备 %s（%s）已上线：%s:%s，特性 %s", runtime.entry.key, runtime.entry.plugin, site.address,
                      runtime.entry.port, "、".join(f.fully_qualified_identifier.split("/")[2] for f in features_of(runtime)))
     except Exception:
