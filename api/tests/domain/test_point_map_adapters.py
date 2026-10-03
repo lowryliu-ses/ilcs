@@ -46,6 +46,29 @@ def _wait(adapter, command_id: str, seconds: float = 6, states=("done", "failed"
     raise AssertionError(f"指令 {command_id} 没有在时限内到达 {states}")
 
 
+def _until(label: str, condition, seconds: float = 5.0) -> None:
+    """等 PLC 扫描把状态同步出来：读到为止，不按固定时长猜。PLC 每个扫描周期才把内存写回协议层，
+    全量跑时机器忙，一轮扫描可能远比平时慢；固定等 0.2–0.5 s 会偶发地早读一步。"""
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{seconds:g} s 内没等到：{label}")
+        time.sleep(0.05)
+
+
+def _readiness(adapter) -> tuple[bool, bool]:
+    """经驱动读（和下发前的就绪 / 联锁检查读的是同一组点）：(接受指令, 联锁)。"""
+    identity = adapter.identity()
+    return bool(identity.get("accepts_commands", True)), bool(identity.get("interlock"))
+
+
+def _heartbeat_stopped(adapter) -> bool:
+    """心跳隔两个扫描周期不再变：PLC 程序真的停了（最后一轮扫描可能还在把心跳写回协议层）。"""
+    before = adapter.read_point_value("heartbeat")
+    time.sleep(0.15)
+    return adapter.read_point_value("heartbeat") == before
+
+
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_point_map_job_runs_to_done_and_replays_duplicates(protocol, isolated):
     cert_dir = isolated if protocol == "opcua" else None
@@ -101,15 +124,15 @@ def test_writes_before_the_start_edge_and_readiness_are_explicit(protocol):
         with pytest.raises(AdapterError, match="没有对应的写入点"):
             adapter.submit(_coat("CMD-X", params={"thickness": 180, "temp": 110, "speed": 3}, program="COAT-180"))
         program.device.set_fault("interlock")
-        time.sleep(0.2)
+        _until("PLC 报联锁", lambda: _readiness(adapter)[1])
         with pytest.raises(AdapterError, match="联锁"):
             adapter.submit(_coat("CMD-I", program="COAT-180"))
         program.device.set_fault("busy")
-        time.sleep(0.2)
+        _until("PLC 退出远程模式、联锁解除", lambda: _readiness(adapter) == (False, False))
         with pytest.raises(AdapterError, match="未就绪"):
             adapter.submit(_coat("CMD-R", program="COAT-180"))
         program.device.set_fault("none")
-        time.sleep(0.2)
+        _until("PLC 回到远程模式", lambda: _readiness(adapter) == (True, False))
         assert not program.device.executions, "没有一条被拒的指令让 PLC 动作"
 
         # PLC 自己不认这个程序号：作业报故障，带故障代码对应的说明
@@ -127,14 +150,12 @@ def test_hold_resume_abort_and_failure_codes(protocol):
     with plc_sim(protocol, task_seconds=30) as (program, _, port):
         adapter = _adapter(protocol, port)
         adapter.submit(_coat("CMD-H"))
-        time.sleep(0.2)
+        _until("PLC 开始运行", lambda: program.memory["State"] == 1)  # 还没运行时给的保持信号 PLC 不理
         assert adapter.hold(_coat("CMD-HOLD", "hold", target="CMD-H")).state == "done"
-        time.sleep(0.3)
-        assert program.memory["State"] == 2
+        _until("PLC 进入保持", lambda: program.memory["State"] == 2)
         resumed = adapter.submit(_coat("CMD-RES", "resume"))
         assert resumed.command_id == "CMD-RES"
-        time.sleep(0.3)
-        assert program.memory["State"] == 1
+        _until("PLC 恢复运行", lambda: program.memory["State"] == 1)
         assert adapter.abort(_coat("CMD-ABORT", "abort", target="CMD-H")).state == "done"
         aborted = adapter.query("CMD-H")
         assert aborted.state == "failed" and "终止" in aborted.error
@@ -149,9 +170,13 @@ def test_hold_resume_abort_and_failure_codes(protocol):
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_plc_that_refuses_the_start_is_a_clear_failure(protocol):
-    """PLC 不接这次启动（报 start_refused 里登记的故障码、停在空闲）：设备明确没动，判失败，不等启动超时转人工。"""
+    """PLC 不接这次启动（报 start_refused 里登记的故障码、停在空闲）：设备明确没动，判失败，不等启动超时转人工。
+
+    这台不映射就绪信号（`ready`）：模拟 PLC 进入 busy 后，下一轮扫描会把远程模式写回协议层，映射了的话下发前的就绪检查
+    会先拦下来——拦不拦得住看扫描赶没赶在读之前，测的就不是「PLC 自己拒绝启动」这条路了，用例也会时过时不过。
+    """
     with plc_sim(protocol, task_seconds=0.3) as (program, _, port):
-        adapter = _adapter(protocol, port)
+        adapter = _adapter(protocol, port, ready={})
         program.device.set_fault("busy")
         assert adapter.submit(_coat("CMD-R")).state == "accepted", "启动沿写下去就是交接，拒不拒要看 PLC 的反应"
         refused = _wait(adapter, "CMD-R", seconds=4)
@@ -159,7 +184,6 @@ def test_plc_that_refuses_the_start_is_a_clear_failure(protocol):
         assert sum(program.device.executions.values()) == 0
         # 故障点上还留着 91：PLC 接了下一次启动就进入运行，不会被旧代码误判成拒绝
         program.device.set_fault("none")
-        time.sleep(0.5)  # 等 PLC 扫描一轮：远程模式随故障清除恢复
         adapter.submit(_coat("CMD-OK"))
         assert _wait(adapter, "CMD-OK").state == "done"
 
@@ -172,7 +196,7 @@ def test_stalled_plc_heartbeat_reads_as_lost(protocol):
         adapter = _adapter(protocol, port)
         adapter.healthcheck()
         runner.closed.set()  # PLC 程序停了：变量还能读，心跳不再变
-        time.sleep(0.3)
+        _until("PLC 心跳不再变", lambda: _heartbeat_stopped(adapter))
         watcher = _adapter(protocol, port, heartbeat={"point": "heartbeat", "stale_sec": 0.3})
         watcher.healthcheck()
         time.sleep(0.4)
