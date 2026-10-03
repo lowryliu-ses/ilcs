@@ -23,4 +23,4 @@
 | 需求与方案 | [实验室平台开发需求文档](archive/实验室平台开发需求文档.md)、[实验室平台修订方案](archive/实验室平台修订方案.md)（2026-09-21） |
 | 对照与评审 | [PRD 对照差距梳理](archive/PRD对照差距梳理-2026-09-24.md)、[MADSci 对照评审](archive/MADSci对照评审-2026-09-28.md)、[核心链路评审](archive/reviews/)（三轮与整改方案，2026-09-26 至 09-28） |
 | 设计记录 | [设备接入插件化](archive/设备接入插件化-2026-09-29.md) |
-| 验证证据 | [Compose 本地部署验证](archive/compose-validation-local-2026-09-22.md)、[恢复演练](archive/recovery-drill-local-2026-09-22.md)、[目标机探测](archive/target-host-probe-2026-09-22.md)、[历史数据迁移报告](archive/migration-report.md) |
+| 验证证据 | [Compose 本地部署验证](archive/compose-validation-local-2026-09-22.md)、[恢复演练](archive/recovery-drill-local-2026-09-22.md)、[目标机探测](archive/target-host-probe-2026-09-22.md)、[历史数据迁移报告](archive/migration-report.md)、[驱动宿主本机试点](archive/驱动宿主本机试点-2026-10-03.md)（2026-10-03） |
