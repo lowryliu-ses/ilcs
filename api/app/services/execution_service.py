@@ -1407,6 +1407,7 @@ class ExecutorLoop:
             reported = health.get("driver_info") or {}
             if reported.get("config_digest"):
                 self._track_driver(record, reported, moment)
+            self._sample_environment(record, moment)
             if came_back:
                 # 还欠验收、上次自动验收因为连不上没通过：设备回来了，再排一次
                 station = self.db.get(Station, record.station_id)
@@ -1449,6 +1450,56 @@ class ExecutorLoop:
                 self.db.get(Batch, command.batch_id), command,
                 "设备服务的驱动配置在指令执行期间变了：结果未知，转人工核查", delivery="maybe_sent",
             )
+
+    def _sample_environment(self, record: Adapter, moment) -> None:
+        """连接配置登记了环境采集（`environment: {zone, points: {指标: 点名}, interval_sec}`）：探测在线时，到了采集周期
+        就读这几个点、记成环境读数（来源 device:<工位>），开跑检查与下发前据此核对步骤的环境要求。读不到、不是数的点跳过
+        并记日志——缺读数照样不放行，「没测」不等于「合格」；不影响在线判断。"""
+        from sqlalchemy import func
+
+        from ..models import EnvironmentReading
+        from .environment_service import EnvironmentService
+
+        spec = (record.config or {}).get("environment")
+        if not isinstance(spec, dict) or not str(spec.get("zone") or "").strip() or not isinstance(spec.get("points"), dict):
+            return
+        wanted = {str(metric): str(point) for metric, point in spec["points"].items() if metric and point}
+        if not wanted:
+            return
+        zone, source = str(spec["zone"]).strip(), f"device:{record.station_id}"
+        last = (self.db.query(func.max(EnvironmentReading.measured_at))
+                .filter(EnvironmentReading.zone == zone, EnvironmentReading.source == source).scalar())
+        try:
+            interval = max(1.0, float(spec.get("interval_sec") or 60))
+        except (TypeError, ValueError):
+            interval = 60.0
+        if last is not None and (moment - last).total_seconds() < interval:
+            return
+        read = getattr(adapter_for(record), "read_points", None)
+        if not callable(read):
+            return
+        try:
+            rows = {row.get("name"): row for row in read(sorted(set(wanted.values())))}
+        except Exception as exc:  # noqa: BLE001  采集失败不影响在线判断，下一轮再读
+            LOG.warning("环境采集读点没通过", extra={"fields": {
+                "station_id": record.station_id, "zone": zone, "error": exc.__class__.__name__, "reason": str(exc)[:300]}})
+            return
+        readings, skipped = [], []
+        for metric, point in wanted.items():
+            row = rows.get(point) or {}
+            value = row.get("value")
+            if row.get("error") or isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+                skipped.append(f"{metric}←{point}：{row.get('error') or f'读到 {value!r}，不是数'}")
+                continue
+            readings.append({"zone": zone, "metric": metric, "value": float(value), "unit": str(row.get("unit") or ""),
+                             "note": f"{record.station_id} 点 {point}"})
+        if skipped:
+            LOG.warning("环境采集有点没读到", extra={"fields": {"station_id": record.station_id, "zone": zone,
+                                                          "skipped": skipped}})
+        if readings:
+            station = self.db.get(Station, record.station_id)
+            EnvironmentService(self.db, system_context(station.org_id if station else "", "环境采集")).record(
+                {"readings": readings}, None, source=source)
 
     @staticmethod
     def _probe_failed(record: Adapter, reason: str, exc: Exception) -> None:

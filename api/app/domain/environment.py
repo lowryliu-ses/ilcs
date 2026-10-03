@@ -14,7 +14,7 @@ from typing import Any
 
 METRICS = {
     "temperature": ("温度", "℃"), "humidity": ("相对湿度", "%RH"), "dew_point": ("露点", "℃"),
-    "h2o_ppm": ("水含量", "ppm"), "o2_ppm": ("氧含量", "ppm"), "pressure_diff": ("压差", "Pa"),
+    "h2o_ppm": ("水含量", "ppm"), "o2_ppm": ("氧含量", "ppm"), "pressure": ("压力", ""), "pressure_diff": ("压差", "Pa"),
     "particles": ("洁净度", "个/m³"),
 }
 
