@@ -23,7 +23,9 @@ from ..repositories.resources import (
     adopt_asset_model, station_model,
 )
 from ..adapters.catalog import DRIVERS, has_tasks, validate_config
-from .acceptance_service import after_config_change, driver_drift, gate_out, requeue_if_needed, running_stations
+from .acceptance_service import (
+    after_config_change, driver_awaiting_approval, driver_drift, gate_out, requeue_if_needed, running_stations,
+)
 from .template_service import (
     TemplateService, connection_problems, station_template_options, template_brief, template_changes,
 )
@@ -162,6 +164,9 @@ class StationService:
             "driver_info": adapter.driver_info or {},
             "approved_driver": adapter.approved_driver or {},
             "driver_changed": bool(driver_drift(adapter, adapter.driver_info or {})),
+            # 这次驱动变更还没有人签名批准（批准过的等接入验收出结论）；最近一次签名批准的记录
+            "driver_awaiting_approval": driver_awaiting_approval(adapter),
+            "driver_approval": adapter.driver_approval or {},
             # 套用的设备接入模板（哪一版、有没有更新的发布版）与这台设备自己的连接参数
             "template": template_brief(self.db, adapter.template_id),
             "template_connection": (adapter.template_connection or {}) if include_config else {},

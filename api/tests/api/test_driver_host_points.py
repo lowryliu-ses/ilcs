@@ -138,19 +138,40 @@ def test_driver_config_change_on_the_host_reopens_the_acceptance_gate(admin, res
                 changed_digest = site.devices[0].digest
                 assert changed_digest != first["approved_driver"]["config_digest"]
                 _force_probe()
-                _pass()  # 探测读到新摘要：照配置变更处理——版本加一、欠验收、报警，排一次只读级验收
+                _pass()  # 探测读到新摘要：照配置变更处理——版本加一、欠验收、停派工、报警；等人签名批准，不自动排验收
                 gated = admin.get(f"/api/stations/{STATION}/adapter").json()
                 assert gated["config_version"] == version + 1, "驱动配置变了也算配置变更：版本加一"
                 assert gated["acceptance"]["required"] == "readonly" and gated["driver_changed"] is True
+                assert gated["driver_awaiting_approval"] is True and "待签名批准" in gated["acceptance"]["reason"]
+                runs = admin.get(f"/api/stations/{STATION}/adapter/acceptance").json()["runs"]
+                assert runs[0]["trigger"] == "config_change", "没批准之前不自动排验收"
+
+                # 没批准：手动跑的验收通过了也放不开闸门，签名放行也不行
+                assert admin.post(f"/api/stations/{STATION}/adapter/acceptance", {"level": "readonly"}).status_code == 201
+                _pass()
+                unapproved = admin.get(f"/api/stations/{STATION}/adapter").json()
+                assert unapproved["acceptance"]["required"] == "readonly" and unapproved["driver_changed"] is True
+                waived = admin.post(f"/api/stations/{STATION}/adapter/acceptance/waive", {
+                    "reason": "想直接放行", "signature_id": admin.sign(
+                        "签名放行接入验收", target=STATION, object_version=unapproved["config_version"])})
+                assert waived.status_code == 409 and waived.json()["detail"]["code"] == "driver_change_unapproved"
+
+                # 有权限的人核对后签名批准这一份：排一次只读级验收，通过时批准、放开闸门
+                approved = admin.post(f"/api/stations/{STATION}/adapter/driver-approval", {
+                    "reason": "核对了驱动项目里 sp_temp 上限 300 → 250 这次改动", "signature_id": admin.sign(
+                        "批准驱动配置变更", target=STATION, object_version=unapproved["config_version"])})
+                assert approved.status_code == 200, approved.text
+                assert approved.json()["approval"]["config_digest"] == changed_digest
                 runs = admin.get(f"/api/stations/{STATION}/adapter/acceptance").json()["runs"]
                 assert (runs[0]["trigger"], runs[0]["state"]) == ("driver_change", "queued")
-
-                _pass()  # 执行器跑那次只读级验收：通过时批准新的那份驱动配置，放开闸门
+                _pass()
                 accepted = admin.get(f"/api/stations/{STATION}/adapter").json()
                 runs = admin.get(f"/api/stations/{STATION}/adapter/acceptance").json()["runs"]
                 assert runs[0]["ok"] and runs[0]["driver_info"]["config_digest"] == changed_digest
                 assert accepted["approved_driver"]["config_digest"] == changed_digest, "验收通过时批准新的那份"
                 assert accepted["acceptance"]["required"] == "" and accepted["driver_changed"] is False
+                actions = [row["action"] for row in admin.get(f"/api/audit?target={STATION}&limit=30").json()]
+                assert "批准驱动配置变更" in actions, actions
                 with SessionLocal() as db:
                     alarm = db.query(Alarm).filter(Alarm.condition_key == f"station:{STATION}:driver_changed").one()
                     assert alarm.origin == "system" and "停派工" in alarm.message

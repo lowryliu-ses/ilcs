@@ -178,6 +178,8 @@ class Adapter(Base):
     # 两者不一致（驱动项目里改了映射又没验收）就欠验收、停派工
     driver_info: Mapped[dict] = mapped_column(JSON, default=dict)
     approved_driver: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 驱动配置变更的签名批准：批准了哪个摘要、谁、哪个签名。验收看到的正是这一份才放行、才记为已批准
+    driver_approval: Mapped[dict] = mapped_column(JSON, default=dict)
     # 套用的设备接入模板（某一版）与工位自己的连接参数；config 仍是合并后的完整配置。空表示没套模板
     template_id: Mapped[str] = mapped_column(String, default="")
     template_connection: Mapped[dict] = mapped_column(JSON, default=dict)

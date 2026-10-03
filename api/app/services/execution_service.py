@@ -1438,8 +1438,9 @@ class ExecutorLoop:
             severity=2, source_type="station", source_id=record.station_id,
             message=(f"{record.station_id} 设备服务的驱动配置变了（{approved.get('plugin')} "
                      f"{str(approved.get('config_digest'))[7:15]} → {reported.get('plugin')} "
-                     f"{str(reported['config_digest'])[7:15]}）：停派工，通过{LEVEL_LABELS[required]}接入验收后放行"),
-            response="核对驱动项目里的这次改动；接入验收通过后自动放行", owner="设备负责人",
+                     f"{str(reported['config_digest'])[7:15]}）：停派工，核对后签名批准这次变更，"
+                     f"再通过{LEVEL_LABELS[required]}接入验收后放行"),
+            response="核对驱动项目里的这次改动，在「设备连接」签名批准；接入验收通过后自动放行", owner="设备负责人",
             origin="system", condition_key=key,
         )
         for command in self.commands.acting_on_station(record.station_id):

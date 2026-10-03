@@ -196,6 +196,8 @@ td.row-end > * + * { margin-left: 6px; }
 .note { padding: 10px 12px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--ink-2); }
 .note.warn { border-color: color-mix(in srgb, var(--s-paused) 50%, var(--border)); background: color-mix(in srgb, var(--s-paused) 8%, var(--surface)); }
 .note.bad { border-color: color-mix(in srgb, var(--sev-1) 50%, var(--border)); background: color-mix(in srgb, var(--sev-1) 7%, var(--surface)); }
+.driver-approval { display: grid; gap: 6px; margin-top: 8px; }
+.driver-approval textarea { width: 100%; min-width: 0; }
 .banner { padding: 10px 14px; border-radius: var(--r); font-size: 12.5px; border: 1px solid var(--border); background: var(--surface); }
 .banner.warn { border-color: color-mix(in srgb, var(--s-paused) 50%, var(--border)); background: color-mix(in srgb, var(--s-paused) 9%, var(--surface)); }
 .banner.bad { border-color: color-mix(in srgb, var(--sev-1) 50%, var(--border)); background: color-mix(in srgb, var(--sev-1) 9%, var(--surface)); }

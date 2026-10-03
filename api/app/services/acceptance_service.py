@@ -78,12 +78,23 @@ def run_out(run: AcceptanceRun, *, full: bool = False) -> dict[str, Any]:
     return row
 
 
+def gate_reason(adapter: Adapter) -> str:
+    """闸门挡住下发时给人看的原因：驱动配置变了还没签名批准的，说清楚先要批准。"""
+    required = adapter.acceptance_required if adapter.kind == "real" else ""
+    if not required:
+        return ""
+    if driver_awaiting_approval(adapter):
+        return (f"{adapter.station_id} 设备服务的驱动配置变了，待签名批准后再{LEVEL_LABELS.get(required, required)}接入验收"
+                f"（配置 v{adapter.config_version}）")
+    return acceptance_reason(adapter.station_id, required, adapter.config_version)
+
+
 def gate_out(adapter: Adapter) -> dict[str, Any]:
     """适配器的验收闸门：还欠什么级别、为什么挡着、最近一次满足要求的验收。"""
     required = adapter.acceptance_required if adapter.kind == "real" else ""
     return {
         "required": required, "required_label": LEVEL_LABELS.get(required, ""),
-        "reason": acceptance_reason(adapter.station_id, required, adapter.config_version) if required else "",
+        "reason": gate_reason(adapter),
         "accepted_config_version": adapter.accepted_config_version, "accepted_run_id": adapter.accepted_run_id,
     }
 
@@ -177,10 +188,20 @@ def driver_drift(adapter: Adapter, reported: dict[str, Any]) -> str:
     return READONLY if approved["config_digest"] != reported["config_digest"] else ""
 
 
+def driver_awaiting_approval(adapter: Adapter, reported: dict[str, Any] | None = None) -> bool:
+    """设备服务报的驱动配置变了（不是已批准的那份），又还没有人签名批准这一份。"""
+    reported = adapter.driver_info or {} if reported is None else reported
+    if not driver_drift(adapter, reported):
+        return False
+    approval = adapter.driver_approval or {}
+    return (approval.get("config_digest"), approval.get("plugin")) != (reported.get("config_digest"), reported.get("plugin"))
+
+
 def driver_changed(db: Session, adapter: Adapter, level: str, *, org_id: str) -> str:
     """设备服务的驱动配置变了、又不是已批准的那份：照配置变更处理（调用方锁着适配器行）。
 
-    配置版本加一（按旧配置排队的验收、手动写点作废，驱动实例按新版本重建），欠验收、停派工，排一次只读级。
+    配置版本加一（按旧配置排队的验收、手动写点作废，驱动实例按新版本重建），欠验收、停派工。不自动排验收：
+    要有权限的人核对驱动项目里的这次改动、签名批准这一份（`AcceptanceService.approve_driver`），批准时排验收。
     返回欠的级别。已经欠着更高的级别不降。
     """
     adapter.config_version += 1
@@ -192,7 +213,6 @@ def driver_changed(db: Session, adapter: Adapter, level: str, *, org_id: str) ->
     ).update({"state": "cancelled", "finished_at": now(),
               "error": "设备服务的驱动配置变了：按旧配置排队的验收作废，改按新配置验收"},
              synchronize_session=False)
-    _queue(db, adapter, org_id, level=READONLY, trigger="driver_change", requested_by="执行器")
     return required
 
 
@@ -203,6 +223,8 @@ def requeue_if_needed(db: Session, adapter: Adapter, org_id: str) -> bool:
     """
     if adapter.kind != "real" or not adapter.acceptance_required or _active_runs(db, adapter.station_id):
         return False
+    if driver_awaiting_approval(adapter):
+        return False  # 驱动配置变更还没签名批准：验收跑了也放不开闸门
     last = (
         db.query(AcceptanceRun).filter(
             AcceptanceRun.station_id == adapter.station_id, AcceptanceRun.config_version == adapter.config_version,
@@ -227,8 +249,7 @@ def dispatch_hold(db: Session, adapter: Adapter, command_type: str = "dispatch")
     if adapter.kind == "real" and adapter.acceptance_required:
         if active:
             return "wait", "配置变更后的接入验收进行中"
-        return "refuse", (f"{acceptance_reason(adapter.station_id, adapter.acceptance_required, adapter.config_version)}"
-                          "；动作指令未投递，不自动重试")
+        return "refuse", f"{gate_reason(adapter)}；动作指令未投递，不自动重试"
     return "", ""
 
 
@@ -339,6 +360,9 @@ class AcceptanceService:
             raise StateConflict(f"{station_id} 现在没有欠接入验收", code="acceptance_not_required")
         if _active_runs(self.db, station_id):
             raise StateConflict(f"{station_id} 有排队或进行中的验收，等它出结论后再决定", code="acceptance_busy")
+        if driver_awaiting_approval(adapter):
+            raise StateConflict(f"{station_id} 设备服务的驱动配置变了，还没有签名批准：先批准这次驱动变更",
+                                code="driver_change_unapproved")
         signature = self.identity.consume_signature(
             signature_id, user, "签名放行接入验收", object_ref=station_id, object_version=adapter.config_version,
             strict=True,
@@ -359,6 +383,8 @@ class AcceptanceService:
         self.db.flush()
         adapter.acceptance_required = ""
         adapter.accepted_config_version, adapter.accepted_run_id = adapter.config_version, run.id
+        if driver_drift(adapter, adapter.driver_info or {}):
+            adapter.approved_driver = dict(adapter.driver_info)  # 批准过的这次驱动变更随放行生效
         self.audit.record(
             user, "签名放行接入验收", station_id, sign=True, meaning=signature.meaning, signature_id=signature.id,
             before=f"待接入验收（{LEVEL_LABELS.get(required, required)}）", after="已放行",
@@ -366,6 +392,45 @@ class AcceptanceService:
         )
         self.db.commit()
         return run_out(run)
+
+    def approve_driver(self, station_id: str, reason: str, signature_id: str | None, user: User) -> dict[str, Any]:
+        """签名批准驱动配置变更：驱动项目里改了点表或映射，有权限的人核对后批准设备服务现在报的这一份，并排一次只读级验收。
+
+        批准的是具体的摘要：之后设备服务报的摘要又变了，这个批准就不算数。验收看到的正是这一份，闸门才放开（欠动作级的
+        照旧要申请动作级验收）。
+        """
+        station, _ = self._station(station_id)
+        reason = str(reason or "").strip()
+        if len(reason) < 4:
+            raise ValidationFailed("写明核对了什么（驱动项目里的哪次改动、改了什么）", code="driver_approval_reason_required")
+        adapter = self.db.query(Adapter).filter(Adapter.station_id == station_id).with_for_update().populate_existing().one()
+        reported = dict(adapter.driver_info or {})
+        if not driver_drift(adapter, reported):
+            raise StateConflict(f"{station_id} 设备服务报的驱动配置与已批准的一致，没有要批准的变更", code="driver_not_changed")
+        if not driver_awaiting_approval(adapter):
+            raise StateConflict(f"{station_id} 的这次驱动变更已经批准过，等接入验收出结论", code="driver_already_approved")
+        signature = self.identity.consume_signature(
+            signature_id, user, "批准驱动配置变更", object_ref=station_id, object_version=adapter.config_version,
+            strict=True,
+        )
+        before = adapter.approved_driver or {}
+        adapter.driver_approval = {
+            "plugin": reported.get("plugin", ""), "config_digest": reported["config_digest"],
+            "config_version": reported.get("config_version", ""), "approved_by": user.display_name,
+            "approved_by_id": user.id, "signature_id": signature.id, "approved_at": now().isoformat(timespec="seconds"),
+            "reason": reason,
+        }
+        if not _active_runs(self.db, station_id):
+            _queue(self.db, adapter, station.org_id or self.ctx.org_id, level=READONLY, trigger="driver_change",
+                   requested_by=user.display_name, requested_by_id=user.id)
+        self.audit.record(
+            user, "批准驱动配置变更", station_id, sign=True, meaning=signature.meaning, signature_id=signature.id,
+            before=f"{before.get('plugin') or '—'} {str(before.get('config_digest') or '')[:19]}",
+            after=f"{reported.get('plugin') or '—'} {reported['config_digest'][:19]}",
+            detail=f"配置 v{adapter.config_version}；驱动配置 {reported.get('config_version') or '—'}；{reason}",
+        )
+        self.db.commit()
+        return {"gate": gate_out(adapter), "approval": dict(adapter.driver_approval)}
 
     def list_for_station(self, station_id: str, limit: int = 20) -> dict[str, Any]:
         _, adapter = self._station(station_id)
@@ -639,6 +704,9 @@ class AcceptanceRunner:
             self.db.commit()
             return False
         cleared = False
+        if driver_awaiting_approval(adapter, driver_info or {}):
+            self.db.commit()  # 验收看到的驱动配置没有人签名批准过：报告存档，闸门不动
+            return False
         if not adapter.acceptance_required or acceptance_satisfies(adapter.acceptance_required, level, ok, simulator):
             cleared = bool(adapter.acceptance_required)
             adapter.acceptance_required = ""

@@ -804,6 +804,9 @@ export type AdapterRow = {
   approved_driver?: DeviceDriverReport;
   /** 报的和批准的对不上：驱动项目里改过、还没通过接入验收 */
   driver_changed?: boolean;
+  /** 这次驱动变更还没有人签名批准（批准过的等接入验收出结论） */
+  driver_awaiting_approval?: boolean;
+  driver_approval?: { config_digest?: string; plugin?: string; approved_by?: string; approved_at?: string; reason?: string };
   /** 套用的设备接入模板（哪一版、有没有更新的发布版） */
   template?: AdapterTemplate | null;
   /** 这台设备自己的连接参数（只在受 station.edit 保护的详情接口里有） */
