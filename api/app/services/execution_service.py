@@ -18,6 +18,7 @@ from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
 from ..domain import dataquality, workflow
+from ..domain.adapter_rules import LEVEL_LABELS
 from ..domain.dosing import dosing_param, param_unit
 from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of, step_material
 from ..models import Adapter, AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
@@ -30,7 +31,9 @@ from ..repositories.materials import ReservationRepository
 from ..repositories.resources import AdapterRepository, CapabilityRepository
 from ..repositories.workflow import StepRunRepository
 from ..core.db import SessionLocal
-from .acceptance_service import AcceptanceRunner, dispatch_hold, heartbeat_keeper, requeue_if_needed
+from .acceptance_service import (
+    AcceptanceRunner, dispatch_hold, driver_changed, driver_drift, heartbeat_keeper, requeue_if_needed,
+)
 from .point_service import PointWriteRunner
 from .alarm_service import AlarmService
 from .audit_service import AuditService
@@ -1400,11 +1403,50 @@ class ExecutorLoop:
             record.site_interlock = bool(health.get("interlock"))
             record.accepts_commands = bool(health.get("accepts_commands", True))
             record.note = f"探测在线：{health.get('device_id', '')}"
+            reported = health.get("driver_info") or {}
+            if reported.get("config_digest"):
+                self._track_driver(record, reported, moment)
             if came_back:
                 # 还欠验收、上次自动验收因为连不上没通过：设备回来了，再排一次
                 station = self.db.get(Station, record.station_id)
                 requeue_if_needed(self.db, record, station.org_id if station else "")
         return probed
+
+    def _track_driver(self, record: Adapter, reported: dict, moment) -> None:
+        """设备服务报的驱动配置：记下来；和上一次报的不同、又不是已批准的那份，照配置变更处理。
+
+        驱动在 ILCS 之外改了点表或映射，ILCS 自己的配置一个字没变——靠这一步把「待接入验收」重新挂上。同一份新配置
+        只处理一次（和上一次报的比）；验收通过、批准了新配置之后，报警条件自动复位。
+        """
+        previous = record.driver_info or {}
+        record.driver_info = {**reported, "reported_at": moment.isoformat(timespec="seconds")}
+        station = self.db.get(Station, record.station_id)
+        org_id = station.org_id if station else ""
+        alarms = AlarmService(self.db, system_context(org_id, "执行器"))
+        key = f"station:{record.station_id}:driver_changed"
+        level = driver_drift(record, reported)
+        if not level:
+            alarms.resolve_condition(key, "设备服务的驱动配置与已批准的一致")
+            return
+        if (previous.get("config_digest"), previous.get("plugin")) == (reported["config_digest"], reported.get("plugin")):
+            return  # 这份新配置已经处理过：闸门挂着，等验收
+        self.db.flush()  # 探测刚写的在线、心跳先落下去：带锁重读会丢掉没刷新的改动
+        self.db.refresh(record, with_for_update=True)
+        required = driver_changed(self.db, record, level, org_id=org_id)
+        approved = record.approved_driver or {}
+        alarms.raise_alarm(
+            severity=2, source_type="station", source_id=record.station_id,
+            message=(f"{record.station_id} 设备服务的驱动配置变了（{approved.get('plugin')} "
+                     f"{str(approved.get('config_digest'))[7:15]} → {reported.get('plugin')} "
+                     f"{str(reported['config_digest'])[7:15]}）：停派工，通过{LEVEL_LABELS[required]}接入验收后放行"),
+            response="核对驱动项目里的这次改动；接入验收通过后自动放行", owner="设备负责人",
+            origin="system", condition_key=key,
+        )
+        for command in self.commands.acting_on_station(record.station_id):
+            ExecutionService(self.db, system_context(command.org_id, "执行器")).fault(
+                self.db.get(Batch, command.batch_id), command,
+                "设备服务的驱动配置在指令执行期间变了：结果未知，转人工核查", delivery="maybe_sent",
+            )
 
     def heartbeat_simulated(self) -> None:
         """只给模拟适配器补心跳。真实设备的在线状态必须由它自己上报。"""

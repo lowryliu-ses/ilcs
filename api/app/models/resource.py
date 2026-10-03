@@ -174,6 +174,10 @@ class Adapter(Base):
     # 最近一次满足要求的验收：对应的配置版本与验收记录
     accepted_config_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     accepted_run_id: Mapped[str] = mapped_column(String, default="")
+    # 驱动在 ILCS 之外的设备服务（sila2_v1 接驱动宿主）报的插件与配置摘要：最近一次探测读到的，与接入验收通过时批准的。
+    # 两者不一致（驱动项目里改了映射又没验收）就欠验收、停派工
+    driver_info: Mapped[dict] = mapped_column(JSON, default=dict)
+    approved_driver: Mapped[dict] = mapped_column(JSON, default=dict)
     # 套用的设备接入模板（某一版）与工位自己的连接参数；config 仍是合并后的完整配置。空表示没套模板
     template_id: Mapped[str] = mapped_column(String, default="")
     template_connection: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -257,6 +261,8 @@ class AcceptanceRun(Base):
     adapter_version: Mapped[str] = mapped_column(String, default="")
     config_version: Mapped[int] = mapped_column(Integer, default=0)
     config_digest: Mapped[str] = mapped_column(String, default="")
+    # 设备服务报的驱动插件与配置摘要（驱动在 ILCS 之外时）：这次验收的是哪一份驱动配置
+    driver_info: Mapped[dict] = mapped_column(JSON, default=dict)
     # 验收时工位套用的设备接入模板
     template_id: Mapped[str] = mapped_column(String, default="")
     template_code: Mapped[str] = mapped_column(String, default="")

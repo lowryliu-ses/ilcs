@@ -20,9 +20,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..adapters.base import AdapterError
+from ..adapters.base import AdapterError, AdapterUnreachable
 from ..adapters.catalog import has_tasks
-from ..adapters.jobs import MappedJobAdapter
 from ..adapters.registry import adapter_for
 from ..core.clock import now
 from ..core.context import AccessContext, system_context
@@ -53,19 +52,27 @@ def write_out(row: PointWrite) -> dict[str, Any]:
     }
 
 
-def _points_driver(adapter: Adapter) -> MappedJobAdapter:
-    """这台设备的驱动实例（要有点表）。内置模拟、按 ILCS 契约接的驱动没有点表。"""
+def _points_driver(adapter: Adapter):
+    """这台设备的驱动实例（要有点表）：映射驱动登记了 points，或 SiLA 设备服务实现了 PointAccess。
+    内置模拟、其余按 ILCS 契约接的驱动没有点表。"""
     if adapter.kind != "real":
         raise StateConflict("内置模拟没有点表：接成真实设备（映射驱动）后才能读写点位", code="points_unavailable")
     try:
         implementation = adapter_for(adapter)
     except (NotImplementedError, AdapterError) as exc:
         raise StateConflict(str(exc), code="adapter_driver_unavailable") from exc
-    if not isinstance(implementation, MappedJobAdapter) or not implementation.point_specs():
+    if not callable(getattr(implementation, "read_points", None)):
         raise StateConflict(
-            f"{adapter.driver} 没有点表：点位读写要用映射驱动（Modbus / OPC UA 点表、REST、串口命令）并登记 points",
+            f"{adapter.driver} 没有点表：点位读写要用映射驱动（Modbus / OPC UA 点表、REST、串口命令）并登记 points，"
+            "或接实现了 PointAccess 的 SiLA 设备服务",
             code="points_unavailable",
         )
+    try:
+        specs = implementation.point_specs()
+    except AdapterUnreachable as exc:
+        raise StateConflict(f"连不上设备服务，读不到点表：{exc}", code="device_unreachable") from exc
+    if not specs:
+        raise StateConflict(f"{adapter.driver} 没有登记点表（或设备服务没有实现 PointAccess）", code="points_unavailable")
     return implementation
 
 
@@ -223,7 +230,7 @@ class PointWriteRunner:
                 state = implementation.device_state()
                 if state in {"running", "held"}:
                     return self._close(row, "failed", error=f"设备在{'运行' if state == 'running' else '保持'}中：手动写会干扰它，没有写")
-            outcome = implementation.write_point_manually(row.point, value)
+            outcome = implementation.write_point_manually(row.point, value, request_id=row.id)
         except StateConflict as exc:
             return self._close(row, "failed", error=f"{exc}，没有写")
         except AdapterError as exc:

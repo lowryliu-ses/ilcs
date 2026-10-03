@@ -23,7 +23,7 @@ from ..repositories.resources import (
     adopt_asset_model, station_model,
 )
 from ..adapters.catalog import DRIVERS, has_tasks, validate_config
-from .acceptance_service import after_config_change, gate_out, requeue_if_needed, running_stations
+from .acceptance_service import after_config_change, driver_drift, gate_out, requeue_if_needed, running_stations
 from .template_service import (
     TemplateService, connection_problems, station_template_options, template_brief, template_changes,
 )
@@ -140,7 +140,8 @@ class StationService:
             "kind": adapter.kind,
             # 参与自动流程（接指令）？映射驱动只配了点表的是「只读写点位」：能读点、手动写，不接指令
             "tasks": adapter.kind != "real" or has_tasks(adapter.driver, adapter.config),
-            "points": adapter.kind == "real" and bool((adapter.config or {}).get("points")),
+            # SiLA 设备服务的点表在设备那一侧（PointAccess），读的时候才知道有没有
+            "points": adapter.kind == "real" and (bool((adapter.config or {}).get("points")) or adapter.driver == "sila2_v1"),
             "capabilities": {
                 "hold": adapter.supports_hold,
                 "abort": adapter.supports_abort,
@@ -157,6 +158,10 @@ class StationService:
             "catalog": catalog_of(adapter),
             # 配置变更后的接入验收闸门：还欠什么级别、最近一次满足要求的验收
             "acceptance": gate_out(adapter),
+            # 驱动在 ILCS 之外的设备服务：最近一次报的插件与配置摘要、接入验收批准的那份，两者对不上就是待验收的驱动改动
+            "driver_info": adapter.driver_info or {},
+            "approved_driver": adapter.approved_driver or {},
+            "driver_changed": bool(driver_drift(adapter, adapter.driver_info or {})),
             # 套用的设备接入模板（哪一版、有没有更新的发布版）与这台设备自己的连接参数
             "template": template_brief(self.db, adapter.template_id),
             "template_connection": (adapter.template_connection or {}) if include_config else {},

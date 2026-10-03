@@ -363,3 +363,58 @@ def transfer(command_id: str, source: str = "HOTEL-01/S01", target: str = "ST-05
                 "to": {"location_id": target, "station_id": target.split("/")[0], "kind": "station"}},
         batch_id="B-SIM", step_index=0, step_id="s01",
     )
+
+
+# ---------- 驱动宿主（devices/host）：ILCS 只经 SiLA 2 接设备 ----------
+
+HOST_TOKEN = "k" * 40
+if str(ROOT / "devices" / "host") not in sys.path:
+    # ilcs_host 包以 devices/host 为根。放在最后：devices/host/tests 和 api/tests 都是没有 __init__.py 的 tests 目录，
+    # 放在前面会让 `from tests.conftest import …` 找到驱动宿主的 conftest
+    sys.path.append(str(ROOT / "devices" / "host"))
+
+
+def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN) -> Path:
+    """驱动宿主的现场目录：host.json、devices/<设备>.json、令牌文件；状态目录在里面。已有的设备文件按新内容覆盖。"""
+    import json
+
+    (root / "devices").mkdir(parents=True, exist_ok=True)
+    (root / "tokens.txt").write_text(token + "\n", encoding="utf-8")
+    (root / "host.json").write_text(json.dumps({
+        "environment": "development", "address": "127.0.0.1", "allowed_hosts": "127.0.0.1",
+        "state_dir": "state", "tokens_file": "tokens.txt",
+    }), encoding="utf-8")
+    for key, device in devices.items():
+        (root / "devices" / f"{key}.json").write_text(json.dumps(device, ensure_ascii=False), encoding="utf-8")
+    return root
+
+
+@contextmanager
+def run_host(root: Path):
+    """按现场目录在本进程里起驱动宿主，每台设备一个 SiLA 服务；退出时停掉（台账留在状态目录里）。"""
+    from ilcs_host.plugins import PLUGINS
+    from ilcs_host.server import prepare, start, stop
+    from ilcs_host.site import load_site
+
+    site = load_site(root, set(PLUGINS))
+    servers = start(site, prepare(site))
+    try:
+        yield site
+    finally:
+        stop(servers)
+
+
+@contextmanager
+def driver_host(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN):
+    with run_host(write_host_site(root, devices, token)) as site:
+        yield site
+
+
+def host_plc_device(plc_port: int, *, tasks: bool = True) -> dict:
+    """驱动宿主上的一台 Modbus PLC：插件配置就是 ILCS 映射驱动的那份（plc_config）；sp_temp 可手动写。"""
+    config, _ = plc_config("modbus", plc_port)
+    config["points"]["sp_temp"].update(writable=True, min=0, max=300, unit="℃")
+    if not tasks:  # 只读写点位：只留点表，不配能力映射与状态
+        config = {key: config[key] for key in ("host", "port", "unit_id", "request_timeout_sec", "points", "identity")}
+    return {"plugin": "modbus_map", "port": free_port(), "simulator": True, "config": config,
+            "supports": {"hold": True, "abort": True, "query": True, "dedup": True}}

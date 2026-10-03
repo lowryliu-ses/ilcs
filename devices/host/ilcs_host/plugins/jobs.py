@@ -1,9 +1,9 @@
-"""没有 ILCS 任务契约的设备：驱动自己记作业台账。
+"""没有 ILCS 任务契约的设备：驱动自己记作业台账（从 ILCS 的 `adapters/jobs.py` 抽出，错误带 SiLA 错误码）。
 
 串口命令仪器、PLC 点表、厂家 REST 接口这类设备不认识 ILCS 指令号，不会按指令号查询，也不会去重。
 `MappedJobAdapter` 在驱动侧补上这一层，子类只写设备 I/O：
 
-- 每台设备一份作业台账（`ILCS_ADAPTER_STATE_ROOT/<工位>.json`），**先落盘再动设备**：执行器重启后仍能
+- 每台设备一份作业台账（驱动宿主 `state_dir` 下的 `<设备>.json`），**先落盘再动设备**：驱动宿主重启后仍能
   按原指令号回答「这条指令在设备上怎样了」；同一指令号重复投递回放原作业，不再动作。
 - 同一时刻只有一个在途作业。设备在运行或保持中就明确拒绝（DeviceBusy），不排队、不覆盖；
   设备停在上一个作业的完成 / 故障状态时先复位，复位不了也拒绝。
@@ -32,7 +32,7 @@ import string
 import threading
 import time
 
-from ..core.config import settings
+from ..settings import settings
 from .base import (
     AdapterContract, AdapterError, AdapterIndeterminate, AdapterUnreachable, CommandRequest,
     CommandResult,
@@ -304,10 +304,10 @@ class MappedJobAdapter:
             raise AdapterError("capabilities 必须是 {能力: 映射}")
         if not specs:
             raise AdapterError(f"这台设备只配了点表（只读写点位），不参与自动流程：要下发 {capability}，先在适配器配置里"
-                               "配能力映射与状态；设备没有动作")
+                               "配能力映射与状态；设备没有动作", code="NotSupported")
         spec = specs.get(capability)
         if not isinstance(spec, dict):
-            raise AdapterError(f"能力 {capability} 没有在适配器配置 capabilities 里映射到设备命令，设备没有动作")
+            raise AdapterError(f"能力 {capability} 没有在适配器配置 capabilities 里映射到设备命令，设备没有动作", code="NotSupported")
         return spec
 
     # ---------- 子类钩子 ----------
@@ -336,13 +336,13 @@ class MappedJobAdapter:
         return self.read_status({})[0]
 
     def hold_job(self, job: dict) -> None:
-        raise AdapterError("该设备的映射没有配置保持命令")
+        raise AdapterError("该设备的映射没有配置保持命令", code="NotSupported")
 
     def resume_job(self, job: dict) -> None:
-        raise AdapterError("该设备的映射没有配置恢复命令")
+        raise AdapterError("该设备的映射没有配置恢复命令", code="NotSupported")
 
     def abort_job(self, job: dict | None) -> None:
-        raise AdapterError("该设备的映射没有配置终止命令")
+        raise AdapterError("该设备的映射没有配置终止命令", code="NotSupported")
 
     def acknowledge(self) -> bool:
         """复位完成 / 故障状态；没有配置复位命令返回 False。"""
@@ -436,25 +436,25 @@ class MappedJobAdapter:
         """手动写之前的核对（不碰设备）：点登记了、声明了可写、不是控制信号、值是单个值、在范围里。"""
         specs = self.point_specs()
         if name not in specs:
-            raise AdapterError(f"点 {name} 没有在点表里登记")
+            raise AdapterError(f"点 {name} 没有在点表里登记", code="UnknownPoint")
         meta = point_meta(specs[name])
         if not meta.get("writable"):
-            raise AdapterError(f"点 {name} 没有声明可写（writable: true），不能手动写")
+            raise AdapterError(f"点 {name} 没有声明可写（writable: true），不能手动写", code="NotWritable")
         if name in self.control_points():
-            raise AdapterError(f"点 {name} 是任务用的控制信号，不能手动写：要让设备动作请走指令")
+            raise AdapterError(f"点 {name} 是任务用的控制信号，不能手动写：要让设备动作请走指令", code="ControlPoint")
         if value is None or isinstance(value, (dict, list)):
-            raise AdapterError("一次只能写一个值（数、布尔或文字）")
+            raise AdapterError("一次只能写一个值（数、布尔或文字）", code="InvalidValue")
         if isinstance(value, float) and not math.isfinite(value):
-            raise AdapterError("值必须是有限的数")
+            raise AdapterError("值必须是有限的数", code="InvalidValue")
         low, high = meta.get("min"), meta.get("max")
         if low is not None or high is not None:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise AdapterError(f"点 {name} 限定了范围（{low if low is not None else '—'}–{high if high is not None else '—'}），要写一个数")
+                raise AdapterError(f"点 {name} 限定了范围（{low if low is not None else '—'}–{high if high is not None else '—'}），要写一个数", code="InvalidValue")
             if (low is not None and value < low) or (high is not None and value > high):
                 raise AdapterError(f"{value:g} 超出点 {name} 允许的范围 {low if low is not None else '—'}–"
-                                   f"{high if high is not None else '—'}")
+                                   f"{high if high is not None else '—'}", code="OutOfRange")
 
-    def write_point_manually(self, name: str, value, request_id: str = "") -> dict:
+    def write_point_manually(self, name: str, value) -> dict:
         """先读当前值、再写、再回读。
 
         - 写之前出的错（核对不过、读不到当前值、设备明确不收）：设备没动 → AdapterError；
@@ -466,11 +466,11 @@ class MappedJobAdapter:
             try:
                 before = self.read_point_value(name)
             except (AdapterError, AdapterUnreachable, AdapterIndeterminate) as exc:
-                raise AdapterError(f"读不到 {name} 的当前值（{exc}），没有写入") from exc
+                raise AdapterError(f"读不到 {name} 的当前值（{exc}），没有写入", code="DeviceUnreachable") from exc
             try:
                 self.write_point_value(name, value)
-            except AdapterError:
-                raise
+            except AdapterError as exc:
+                raise AdapterError(str(exc), code="WriteRejected") from exc
             except (AdapterUnreachable, AdapterIndeterminate) as exc:
                 raise AdapterIndeterminate(f"写 {name} = {value!r} 没有结论（{exc}）：设备上的值可能已经变了，请核对") from exc
             try:
@@ -624,7 +624,7 @@ class MappedJobAdapter:
             existing = self.journal.find(request.command_id)
             if existing is not None:
                 if existing["state"] == "rejected":
-                    raise AdapterError(existing.get("error") or "设备曾明确拒绝这条指令")
+                    raise AdapterError(existing.get("error") or "设备曾明确拒绝这条指令", code=existing.get("code") or "InvalidParameters")
                 return self._receipt(existing, request.command_id)  # 重复投递：回放原作业，不再动作
             if request.type == "resume":
                 held = self._held_for(request)
@@ -659,6 +659,7 @@ class MappedJobAdapter:
             except AdapterError as exc:
                 job["state"] = "rejected"
                 job["error"] = str(exc)
+                job["code"] = exc.code
                 job["updated_at"] = time.time()
                 self.journal.put(job, active=False)
                 self.journal.save()
@@ -696,7 +697,7 @@ class MappedJobAdapter:
         state = self.device_state()
         if state in {"running", "held"}:
             busy = current["id"][:8] if current is not None and current["state"] not in TERMINAL else "未登记的作业"
-            raise AdapterError(f"设备忙（DeviceBusy）：正在执行 {busy}，未接受新作业")
+            raise AdapterError(f"设备忙（DeviceBusy）：正在执行 {busy}，未接受新作业", code="DeviceBusy")
         if state in {"done", "failed"} and self.acknowledge():
             state = self.device_state()
         return state
@@ -766,7 +767,7 @@ class MappedJobAdapter:
 
     def hold(self, request: CommandRequest) -> CommandResult:
         if not self.contract.supports_hold:
-            raise AdapterError("设备声明不支持保持")
+            raise AdapterError("设备声明不支持保持", code="NotSupported")
 
         def act(target):
             if target is None or target["state"] not in {"accepted", "running"} or target.get("phase") == "held":
@@ -782,7 +783,7 @@ class MappedJobAdapter:
 
     def abort(self, request: CommandRequest) -> CommandResult:
         if not self.contract.supports_abort:
-            raise AdapterError("设备声明不支持终止")
+            raise AdapterError("设备声明不支持终止", code="NotSupported")
 
         def act(target):
             self.abort_job(target)

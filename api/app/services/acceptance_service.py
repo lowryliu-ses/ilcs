@@ -46,7 +46,7 @@ ACTIVE = ("queued", "running")
 RUN_STATE_LABELS = {"queued": "排队中", "running": "执行中", "done": "已完成", "error": "出错", "cancelled": "已取消"}
 TRIGGER_LABELS = {
     "manual": "手动", "config_change": "配置变更后自动", "device_online": "设备恢复在线后自动重跑",
-    "restart": "执行器重启后自动重跑", "waiver": "签名放行",
+    "restart": "执行器重启后自动重跑", "waiver": "签名放行", "driver_change": "设备服务的驱动配置变更后自动",
 }
 LOG = logging.getLogger("ilcs.executor")
 
@@ -61,6 +61,7 @@ def run_out(run: AcceptanceRun, *, full: bool = False) -> dict[str, Any]:
         "simulator": run.simulator, "kind": run.kind, "driver": run.driver, "protocol": run.protocol,
         "adapter_version": run.adapter_version, "config_version": run.config_version,
         "config_digest": (run.config_digest or "")[:16], "identity": run.identity or {},
+        "driver_info": run.driver_info or {},
         "template": {"id": run.template_id, "code": run.template_code, "revision": run.template_revision}
         if run.template_id else None,
         "counts": counts, "error": run.error, "requested_by": run.requested_by, "approval": run.approval,
@@ -148,6 +149,9 @@ def after_config_change(db: Session, adapter: Adapter, before: dict[str, Any], *
     )
     if adapter.kind != "real":
         required = ""
+    if not light:
+        # 连的设备服务、判结论的方式可能都换了：原来批准的那份驱动配置不再算数，等这次验收重新批准
+        adapter.approved_driver = {}
     adapter.acceptance_required = required
     flag_modified(adapter, "acceptance_required")  # 值没变也要写：别让并发的验收收尾把它悄悄清掉
     # 比较并交换：执行器此刻可能刚领走一条，领走的不撤（它按领走时的配置验收，结论落不到新配置上）
@@ -159,6 +163,36 @@ def after_config_change(db: Session, adapter: Adapter, before: dict[str, Any], *
     if required:
         _queue(db, adapter, org_id, level=READONLY, trigger="config_change", requested_by=requested_by,
                requested_by_id=requested_by_id)
+    return required
+
+
+def driver_drift(adapter: Adapter, reported: dict[str, Any]) -> str:
+    """设备服务报的驱动配置和已批准的比，要补的验收级别：'' 没变（或还没有批准过——首次接入走配置变更的闸门）；
+    换了插件 → 动作级（下发、判结论的代码换了）；只是配置摘要变了 → 只读级（规则同 ILCS 里改映射）。"""
+    approved = adapter.approved_driver or {}
+    if not approved.get("config_digest") or not reported.get("config_digest"):
+        return ""
+    if approved.get("plugin") != reported.get("plugin"):
+        return PHYSICAL
+    return READONLY if approved["config_digest"] != reported["config_digest"] else ""
+
+
+def driver_changed(db: Session, adapter: Adapter, level: str, *, org_id: str) -> str:
+    """设备服务的驱动配置变了、又不是已批准的那份：照配置变更处理（调用方锁着适配器行）。
+
+    配置版本加一（按旧配置排队的验收、手动写点作废，驱动实例按新版本重建），欠验收、停派工，排一次只读级。
+    返回欠的级别。已经欠着更高的级别不降。
+    """
+    adapter.config_version += 1
+    required = PHYSICAL if PHYSICAL in {level, adapter.acceptance_required} else level
+    adapter.acceptance_required = required
+    flag_modified(adapter, "acceptance_required")
+    db.query(AcceptanceRun).filter(
+        AcceptanceRun.station_id == adapter.station_id, AcceptanceRun.state == "queued",
+    ).update({"state": "cancelled", "finished_at": now(),
+              "error": "设备服务的驱动配置变了：按旧配置排队的验收作废，改按新配置验收"},
+             synchronize_session=False)
+    _queue(db, adapter, org_id, level=READONLY, trigger="driver_change", requested_by="执行器")
     return required
 
 
@@ -537,11 +571,12 @@ class AcceptanceRunner:
             self._close(
                 run_id, "done", ok=report.ok, simulator=report.simulator, identity=report.identity,
                 checks=[check.__dict__ for check in report.checks], report_md=first + "\n" + header + rest,
-                config_digest=report.config_digest,
+                config_digest=report.config_digest, driver_info=report.driver_info,
             )
             # 动作项目一项都没真跑的动作级报告，只算只读级证据
             proven = level if level != PHYSICAL or report.physical_ran else READONLY
-            cleared = self._settle_gate(record, proven, report.ok, report.simulator, run_id, report.leftovers, org_id)
+            cleared = self._settle_gate(record, proven, report.ok, report.simulator, run_id, report.leftovers, org_id,
+                                        report.driver_info)
             counts = {state: sum(1 for check in report.checks if check.state == state) for state in (PASS, FAIL, SKIP)}
             self._audit(
                 org_id, record.station_id,
@@ -590,8 +625,11 @@ class AcceptanceRunner:
             )
 
     def _settle_gate(self, record: AcceptanceRecord, level: str, ok: bool, simulator: bool, run_id: str,
-                     leftovers: list[str], org_id: str) -> bool:
-        """验收结论落到闸门上。按最新的适配器行判断：验收期间配置又改了，这份报告不能替新配置放行。"""
+                     leftovers: list[str], org_id: str, driver_info: dict[str, Any] | None = None) -> bool:
+        """验收结论落到闸门上。按最新的适配器行判断：验收期间配置又改了，这份报告不能替新配置放行。
+
+        闸门放开时，这次验收看到的那份驱动配置（设备服务报的插件与摘要）记为已批准：之后报的摘要再变，就要重新验收。
+        """
         if leftovers:
             self._require_physical(record.station_id, org_id, f"验收留下没结论的指令：{'、'.join(leftovers)}")
             self.db.commit()
@@ -605,6 +643,8 @@ class AcceptanceRunner:
             cleared = bool(adapter.acceptance_required)
             adapter.acceptance_required = ""
             adapter.accepted_config_version, adapter.accepted_run_id = record.config_version, run_id
+        if not adapter.acceptance_required and (driver_info or {}).get("config_digest"):
+            adapter.approved_driver = dict(driver_info)
         self.db.commit()
         return cleared
 

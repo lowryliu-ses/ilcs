@@ -381,6 +381,7 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
 
       <IssueNote issues={issues} />
       {creating ? null : <CatalogNote catalog={detail.data?.catalog} />}
+      {creating || !detail.data?.driver_info?.config_digest ? null : <DriverNote adapter={detail.data} />}
       {testResult ? <div className="note">健康检查结果：<span className="mono">{JSON.stringify(testResult.health)}</span></div> : null}
       {test.error ? <div className="note bad">{test.error.message}</div> : null}
       {detail.data ? <AcceptancePanel station={station} adapter={detail.data} /> : null}
@@ -518,6 +519,28 @@ function TemplateForm({
           {creating ? '套用模板并签名接入' : current && current.id === selected ? '签名并保存连接参数' : '套用模板并签名保存'}
         </button>
       </div>
+    </div>
+  );
+}
+
+function digest(value?: string) {
+  return value ? value.replace('sha256:', '').slice(0, 12) : '—';
+}
+
+/** 驱动在 ILCS 之外的设备服务：报的驱动与配置摘要，和接入验收批准的那份对不对得上 */
+function DriverNote({ adapter }: { adapter: AdapterRow }) {
+  const reported = adapter.driver_info ?? {};
+  const approved = adapter.approved_driver ?? {};
+  return (
+    <div className={`note${adapter.driver_changed ? ' bad' : ''}`}>
+      <b>设备服务的驱动</b>：{reported.plugin || '—'} {reported.plugin_version || ''} · 配置 {reported.config_version || '—'}（{digest(reported.config_digest)}）
+      {' · '}
+      {adapter.driver_changed
+        ? `和批准的不一致（批准的是 ${approved.plugin || '—'} ${digest(approved.config_digest)}）：驱动项目里改过，通过接入验收后放行`
+        : approved.config_digest
+          ? '已通过接入验收'
+          : '还没有通过接入验收'}
+      {reported.reported_at ? <div className="small muted">最近一次探测：{time(reported.reported_at)}</div> : null}
     </div>
   );
 }

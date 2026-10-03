@@ -1,0 +1,44 @@
+{
+  "note": "ProtoForge 的 OPC UA 压力传感器：只读写点位（压力、温度、上下限报警读，Setpoint 可写 0–10 bar）",
+  "plugin": "opcua_map",
+  "port": 50202,
+  "simulator": true,
+  "config_version": "r1",
+  "device_id": "PF-OPCUA-PRESSURE",
+  "config": {
+    "endpoint": "opc.tcp://host.docker.internal:4840/protoforge",
+    "security_policy": "None",
+    "request_timeout_sec": 5,
+    "connect_timeout_sec": 3,
+    "points": {
+      "pressure": {
+        "node": "ns=2;s=Pressure",
+        "unit": "bar",
+        "label": "压力"
+      },
+      "temperature": {
+        "node": "ns=2;s=Temperature",
+        "unit": "℃",
+        "label": "温度"
+      },
+      "alarm_high": {
+        "node": "ns=2;s=AlarmHigh",
+        "label": "高报",
+        "value_type": "Boolean"
+      },
+      "alarm_low": {
+        "node": "ns=2;s=AlarmLow",
+        "label": "低报",
+        "value_type": "Boolean"
+      },
+      "setpoint": {
+        "node": "ns=2;s=Setpoint",
+        "unit": "bar",
+        "label": "压力设定",
+        "writable": true,
+        "min": 0,
+        "max": 10
+      }
+    }
+  }
+}
