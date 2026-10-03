@@ -151,6 +151,8 @@ class Adapter(Base):
     site_interlock: Mapped[bool] = mapped_column(Boolean, default=False)
     dedup_count: Mapped[int] = mapped_column(Integer, default=0)
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # 新登记、或保存了改变连接的配置之后在等第一次握手：从什么时候开始等；握手成功清空。监控在宽限期内不报失联
+    awaiting_handshake_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     current_command_id: Mapped[str] = mapped_column(String, default="")
     # 适配器契约声明：真实设备不支持的能力在 UI 禁用并说明原因，不假装通用支持
     kind: Mapped[str] = mapped_column(String, default="simulation")  # simulation | real

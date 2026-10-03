@@ -1400,6 +1400,7 @@ class ExecutorLoop:
             came_back = not record.connected
             record.connected = True
             record.last_heartbeat = moment
+            record.awaiting_handshake_since = None
             record.site_interlock = bool(health.get("interlock"))
             record.accepts_commands = bool(health.get("accepts_commands", True))
             record.note = f"探测在线：{health.get('device_id', '')}"

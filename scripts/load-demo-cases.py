@@ -716,13 +716,6 @@ def main() -> int:
         raise Failed(f"执行门未就绪：{gate['reasons']} {blocked}（外部模拟设备在线了吗？）")
     if researcher.get("/recipes"):
         print("  注意：库里已有流程，本次会再建一套案例（同名不同编号）")
-    # 工位刚切到外部模拟设备、探测到在线之前会报一次「适配器失联」；条件已恢复的确认后关闭
-    for alarm in operator.get("/alarms"):
-        if alarm["state"] == "active" and not alarm.get("condition_active") and "失联" in alarm.get("message", ""):
-            operator.post(f"/alarms/{alarm['id']}/ack")
-            operator.post(f"/alarms/{alarm['id']}/close")
-            ok("关闭已恢复的切换报警", f"{alarm['id']} {alarm['message']}")
-
     prepare(admin, operator)
     method_id = release_cycling_method(engineer, qa)
     if "--only=D" in sys.argv[1:]:

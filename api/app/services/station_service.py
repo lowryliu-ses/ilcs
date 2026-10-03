@@ -500,6 +500,7 @@ class StationService:
         adapter.connected = True
         adapter.accepts_commands = True
         adapter.last_heartbeat = now()
+        adapter.awaiting_handshake_since = None
         adapter.note = "已重新加入车队，等待任务" if station_id.startswith("AGV") else "重连后已对账最近检查点"
         station = self.stations.get(station_id)
         # 还欠验收、上次自动验收因为连不上没通过：设备回来了，再排一次
@@ -577,6 +578,7 @@ class StationService:
         adapter = Adapter(
             station_id=station.id, protocol="", driver="simulation", version="", kind="simulation", config={},
             credential_ref="", enabled=True, note="新登记，等待首次心跳", connected=False, accepts_commands=False,
+            awaiting_handshake_since=now(),
             supports_hold=True, supports_abort=True, supports_query=True, supports_dedup=True,
             template_id="", template_connection={},
         )
@@ -690,9 +692,10 @@ class StationService:
         adapter.row_version += 1
         adapter.updated_at = now()
         if not light:
-            # 配置变更后必须重新握手，不能沿用旧连接的“在线”结论。
+            # 配置变更后必须重新握手，不能沿用旧连接的“在线”结论。等握手的这段时间不是失联：监控宽限期内不报警
             adapter.connected = False
             adapter.accepts_commands = False
+            adapter.awaiting_handshake_since = now()
         reset_cache()
         station = self.stations.get(station_id)
         required = after_config_change(
@@ -1254,6 +1257,8 @@ class StationService:
         adapter.site_interlock = site_interlock
         adapter.accepts_commands = accepts_commands
         adapter.last_heartbeat = now()
+        if connected:
+            adapter.awaiting_handshake_since = None
         if came_back:
             # 推心跳的设备恢复在线：还欠验收、上次自动验收因为连不上没通过的，再排一次
             requeue_if_needed(self.db, adapter, station.org_id)
