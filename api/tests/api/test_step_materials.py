@@ -398,8 +398,8 @@ def test_dosing_hook_reports_param_unit_and_consumption_converts_it(db):
     }
     ctx = system_context("ORG-001", "测试")
     hooks = ExecutionService(db, ctx)._step_hooks(
-        SimpleNamespace(recipe_snapshot=snapshot),
-        SimpleNamespace(type="dispatch", step_index=0, capability="cap.assemble"),
+        SimpleNamespace(id="B-HOOK", recipe_snapshot=snapshot),
+        SimpleNamespace(type="dispatch", step_index=0, capability="cap.assemble", params={"electrolyte": 55}),
     )
     assert hooks["material"] == {"name": "电解液 LP57", "unit": "μL", "param": "electrolyte"}
 
