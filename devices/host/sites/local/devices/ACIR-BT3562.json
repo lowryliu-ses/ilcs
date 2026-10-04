@@ -1,0 +1,126 @@
+{
+  "note": "模拟仪表 Hioki BT3562（设备模块 devices/gateway/scpi-cell-meter 的 profile-hioki-bt3562.json，模拟容器 bt3562-sim）；映射照抄模板 TPL-SCPI-BT3562-ACIR r1，只填了连接",
+  "plugin": "line_command",
+  "port": 50213,
+  "simulator": true,
+  "config_version": "r1",
+  "supports": {
+    "hold": false,
+    "abort": false,
+    "query": true,
+    "dedup": true
+  },
+  "config": {
+    "transport": {
+      "kind": "tcp",
+      "host": "bt3562-sim",
+      "port": 2323
+    },
+    "write_terminator": "\r\n",
+    "read_terminator": "\r\n",
+    "connect_timeout_sec": 3,
+    "request_timeout_sec": 5,
+    "inter_command_delay_ms": 10,
+    "idle_after_start": "unknown",
+    "identity": {
+      "send": "*IDN?",
+      "pattern": "^(?P<vendor>[^,]*),\\s*(?P<model>[^,]*),\\s*(?P<serial>[^,]*),\\s*(?P<firmware>.*)$"
+    },
+    "methods": [
+      {
+        "program": "ACIR-OCV",
+        "name": "1 kHz 交流内阻 + 开路电压（ΩV 模式）",
+        "capability": "cap.cell_check"
+      }
+    ],
+    "capabilities": {
+      "cap.cell_check": {
+        "start": [
+          {
+            "send": "*CLS",
+            "reply": false
+          },
+          {
+            "send": ":ESE0 1",
+            "reply": false
+          },
+          {
+            "send": ":SYST:HEAD OFF",
+            "reply": false
+          },
+          {
+            "send": ":FUNC RV",
+            "reply": false
+          },
+          {
+            "send": ":AUT OFF",
+            "reply": false
+          },
+          {
+            "send": ":RES:RANG 300E-3",
+            "reply": false
+          },
+          {
+            "send": ":VOLT:RANG 6",
+            "reply": false
+          },
+          {
+            "send": ":SAMP:RATE MED",
+            "reply": false
+          },
+          {
+            "send": ":TRIG:SOUR IMM",
+            "reply": false
+          },
+          {
+            "send": ":INIT:CONT OFF",
+            "reply": false
+          },
+          {
+            "send": "*ESR?",
+            "expect": "^\\+?0$",
+            "wait_ms": 100
+          },
+          {
+            "send": ":READ?",
+            "motion": true,
+            "reject": "E\\+(?:[5-9]|\\d\\d)"
+          }
+        ],
+        "result": {
+          "pattern": "^(?P<ir_mohm>\\d+\\.\\d+)E-3,\\s*(?P<ocv_V>-?\\d+\\.\\d+E\\+0)$"
+        }
+      }
+    },
+    "status": {
+      "send": "*STB?",
+      "pattern": "^\\d*(?P<state>\\d)$",
+      "states": {
+        "0": "idle",
+        "1": "done",
+        "2": "idle",
+        "3": "done",
+        "4": "idle",
+        "5": "done",
+        "6": "idle",
+        "7": "done",
+        "8": "idle",
+        "9": "done"
+      }
+    },
+    "actuals": {
+      "send": ":FETC?",
+      "pattern": "^(?P<ir_mohm>\\d+\\.\\d+)E-3,\\s*(?P<ocv_V>-?\\d+\\.\\d+E\\+0)$"
+    },
+    "acknowledge": [
+      {
+        "send": ":INIT:CONT OFF",
+        "reply": false
+      },
+      {
+        "send": "*CLS",
+        "reply": false
+      }
+    ]
+  }
+}

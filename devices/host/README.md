@@ -13,13 +13,15 @@ ILCS 用 `sila2_v1` 连它，不再自己连 PLC、仪表。契约见 [contracts
 ## 协议插件
 
 `ilcs_host/plugins/` 是从 ILCS 的 `api/app/adapters/drivers` 抽出来的映射驱动，**配置写法与 ILCS 里的一模一样**：
-ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` 配置原样放进设备文件的 `config` 就能用。
+ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line_command_v1` 配置（连同连接参数）原样放进
+设备文件的 `config` 就能用。
 
 | 插件 | 设备 |
 |---|---|
 | `modbus_map` | 有自己寄存器表的 PLC、温控仪表（含串口转以太网后的 RTU 设备） |
 | `opcua_map` | 已有 OPC UA 服务器、节点是厂家自己的 PLC / 视觉系统 |
 | `rest_map` | 设备或调度系统自有的 REST 接口 |
+| `line_command` | 厂家给了命令手册的文本协议仪器：RS232 / RS485（经串口服务器或本机串口）、TCP 端口上一问一答（SCPI 仪表、温控仪表、机械臂仪表盘服务） |
 
 ILCS 矩阵条件的逐孔参数（`ParametersJson` 里的 `wells`）由插件按孔位**依次执行**、回执按孔位回报，写法见
 [设备适配器配置模板](../../docs/设备适配器配置模板.md)「逐孔依次执行」。
@@ -110,17 +112,31 @@ docker compose -f devices/host/deploy/compose.yml up -d
 api/.venv/bin/python -m pytest devices/host/tests
 ```
 
-在本进程里拉起外部 PLC 模拟设备（真实走 Modbus TCP / OPC UA），起宿主，用 SiLA 客户端带令牌调用：三组特性、错误码、
-令牌、设备忙、动作前连不上、重启后按台账查回不重发、在途作业时不许换配置、只读写点位的设备。ILCS 的
+在本进程里拉起外部模拟设备（PLC 真实走 Modbus TCP / OPC UA，文本命令仪器走 TCP），起宿主，用 SiLA 客户端带令牌调用：
+三组特性、错误码、令牌、设备忙、动作前连不上、重启后按台账查回不重发、在途作业时不许换配置、只读写点位的设备、逐孔依次执行。ILCS 的
 `api/tests/domain/test_driver_host.py` 会跑这一套，并从 ILCS 的 `sila2_v1` 经驱动宿主驱动 PLC；
 `api/tests/api/test_driver_host_points.py` 走 API 验证点位面板、签名手动写与驱动配置闸门。
 
-## 本机 ProtoForge 试点（`sites/protoforge`）
+## 本机现场（`sites/local`）
+
+本机在用的那份在 `data/driver-host/site`（不进仓库，内容与 `sites/local` 一致；改了仓库里的要同步过去再重启驱动宿主）：
+
+```bash
+ILCS_HOST_SITE=$PWD/data/driver-host/site docker compose -f devices/host/deploy/compose.yml up -d
+python3 scripts/load-driver-host-devices.py register [--acceptance]     # ILCS 这一侧：工位改 sila2_v1、等验收放行
+```
 
 | 设备 | 插件 | SiLA 端口 | 说明 |
 |---|---|---|---|
 | `PF-MB-PLC` | modbus_map | 50201 | 从站 2 的握手 PLC：点位 + 任务（`cap.plc_run`，写设定温度、启动、回报实测温度），矩阵条件按孔位依次执行 |
 | `PF-OPCUA` | opcua_map | 50202 | OPC UA 温控 / 压力节点：点位（`setpoint` 可写 0–10 bar）+ 温控器设定温度（`cap.tc_setpoint`：只写设定值、回读，高报为真判故障） |
 | `PF-HTTP` | rest_map | 50203 | HTTP REST 设备（接口前缀 `/api/v1`）：点位（湿度可写 0–100）+ 环境箱设定温度（`cap.chamber_setpoint`：POST 写设定、按点表回读）。它的 8080 只在 ProtoForge 自己的网络里：先 `docker network connect ilcs_backend protoforge` |
+
+| `OCV-K2450` | line_command | 50211 | 模拟 Keithley 2450（容器 k2450-sim，TCP 5025）：电芯开路电压（`cap.cell_check`），ILCS 工位 ST-OCV-SIM |
+| `OCV-K2400` | line_command | 50212 | 模拟 Keithley 2400（k2400-sim，经串口服务器 `socket://k2400-sim:4001`，9600 波特）：开路电压，ST-OCV2-SIM |
+| `ACIR-BT3562` | line_command | 50213 | 模拟 Hioki BT3562（bt3562-sim，TCP 2323）：1 kHz 交流内阻 + 开路电压，ST-ACIR-SIM |
+
+三台模拟仪表的映射照抄设备模块 `devices/gateway/scpi-cell-meter` 的模板，只填了连接；模拟设备控制口（`simulator_control`）
+留在 ILCS 工位的连接配置里，接入验收的故障项目照做。
 
 ProtoForge 的 OPC UA、HTTP 设备做不了会动作的 PLC（它的规则引擎只接 Modbus 写入）：它们承接的是设定类动作（写设定值、回读），会动作的握手只用从站 2 的 PLC 验证。

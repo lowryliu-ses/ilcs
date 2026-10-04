@@ -8,3 +8,4 @@ cryptography==50.0.1
 # 协议插件
 pymodbus==3.8.6
 asyncua==1.1.5
+pyserial==3.5
