@@ -76,6 +76,8 @@ def test_ilcs_drives_a_plc_only_through_the_driver_host(credentials):
             identity = adapter.identity()
             assert {"DeviceInfo", "PointAccess", "TaskExecution", "AuthorizationService"} <= set(identity["features"])
             assert identity["task_support"]["handoff"] == "async"
+            # 接入验收从驱动实例上读这两项：PLC 点表写下启动沿就算交接（拒绝要之后查询才看得到）；心跳 5 s 不变算失联
+            assert (adapter.handoff, adapter.offline_after_sec) == ("async", 5.0)
 
             rows = {row["name"]: row for row in adapter.read_points()}
             assert rows["serial"]["value"] == "SIM-PLC-T" and rows["serial"]["error"] == ""
