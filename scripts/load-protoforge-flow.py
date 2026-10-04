@@ -2,7 +2,7 @@
 """ProtoForge 联调线全流程：三台 ProtoForge 模拟设备经驱动宿主接入（只走 SiLA 2），按 SOP → 能力 / 设备方法 → 流程 →
 多温度矩阵方案 → 实验任务 → 排程 → 批次执行 → 数据复核 → 报告跑一遍。
 
-    python3 scripts/load-driver-host-pilot.py register            # 先把三台设备经驱动宿主接进来（见 devices/host/README.md）
+    python3 scripts/load-driver-host-devices.py register            # 先把三台设备经驱动宿主接进来（见 devices/host/README.md）
     python3 scripts/load-protoforge-flow.py register [--base http://127.0.0.1:8090]
     python3 scripts/load-protoforge-flow.py run [--temps 40,60,80] [--repeats 1]
 
@@ -158,7 +158,7 @@ def configure_stations(engineer: Actor) -> None:
     for station_id in (TC, CHAMBER):
         adapter = engineer.get(f"/stations/{station_id}/adapter")
         if adapter.get("kind") != "real":
-            raise Failed(f"{station_id} 还没接成真实设备：先跑 scripts/load-driver-host-pilot.py register")
+            raise Failed(f"{station_id} 还没接成真实设备：先跑 scripts/load-driver-host-devices.py register")
         config = dict(adapter.get("config") or {})
         wanted = {key: value for key, value in config.items() if key != "tasks"}
         wanted["environment"] = SENSORS[station_id]

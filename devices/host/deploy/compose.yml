@@ -1,4 +1,4 @@
-# 本机试点：驱动宿主接进 ILCS 的后端网络，按 sites/protoforge 托管 ProtoForge 上的设备（ILCS_HOST_SITE 可换成别的现场目录）。
+# 本机：驱动宿主接进 ILCS 的后端网络，按现场目录托管设备（缺省 sites/local；本机在用的是 data/driver-host/site，用 ILCS_HOST_SITE 指过去）。
 #   docker compose -f devices/host/deploy/compose.yml up -d
 # 令牌与证书在仓库根目录 secrets/host/（不进仓库）：tokens.txt 给驱动宿主，ilcs.token 给 ILCS 的 credential_ref，
 # 证书第一次启动时自签生成（driver-host.crt），ILCS 的 ca_file 指向它。ILCS 已经把 ../secrets 挂在 /run/secrets/ilcs。
@@ -15,7 +15,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ${ILCS_HOST_SITE:-../sites/protoforge}:/site:ro
+      - ${ILCS_HOST_SITE:-../sites/local}:/site:ro
       - ../../../secrets/host:/run/secrets/ilcs-host
       - driver-host-state:/data/state
     networks: [ilcs_backend]

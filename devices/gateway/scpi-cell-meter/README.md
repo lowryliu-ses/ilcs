@@ -14,6 +14,24 @@
 TH2523/A 操作手册列了命令，但没有 `FETCH?` 的回复格式、`*IDN?` 与错误查询，写不出能核对的回复正则）；GPIB 接口
 （`line_command_v1` 只有 TCP 与串口通道）。这几种以后拿到命令手册，照下面的写法再加一份模板即可。
 
+## 经驱动宿主接入（ILCS 只走 SiLA 2）
+
+ILCS 里的 `line_command_v1` 正在移出中控（见 [驱动宿主](../../host/README.md)）：同一份映射放进驱动宿主的设备文件
+（插件 `line_command`），ILCS 工位用 `sila2_v1` 连驱动宿主。本机的三台模拟仪表已经这样接（`devices/host/sites/local/devices/`
+的 OCV-K2450、OCV-K2400、ACIR-BT3562，`scripts/load-driver-host-devices.py register --acceptance`）。
+
+驱动宿主的设备文件：模板的 `config` 原样搬过去，加上连接 `transport`；`supports` 照抄模板：
+
+```json
+{"plugin": "line_command", "port": 50211, "config_version": "r1",
+ "supports": {"hold": false, "abort": false, "query": true, "dedup": true},
+ "config": {"transport": {"kind": "tcp", "host": "10.20.1.51", "port": 5025}, "...": "模板 config 的其余各项"}}
+```
+
+ILCS 工位的设备连接（`sila2_v1`）：`{"host": "driver-host", "port": 50211, "ca_file": …, "expected_device_id": "<仪器序列号>"}`，
+接真仪表时不要 `simulator_control`。主机白名单在驱动宿主的 `host.json`（`allowed_hosts`），不再是 ILCS 的
+`ILCS_ADAPTER_ALLOWED_HOSTS`。下面的命令说明、仪表设置、能力 / 指标 / 设备方法的建法都不变。
+
 ## 文件
 
 | 文件 | 内容 |
