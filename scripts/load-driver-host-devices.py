@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """本机经驱动宿主（ilcs-devices/host，现场 ilcs-devices/host/sites/local）接进 ILCS 的设备：ILCS 只经 SiLA 2 读写点位、下发作业。
 
-    ILCS_HOST_SITE=$PWD/data/driver-host/site docker compose -f ../ilcs-devices/host/deploy/compose.yml up -d   # 驱动宿主
+    ILCS_HOST_SITE=$PWD/data/driver-host/site docker compose -f ../ilcs-devices/deploy/compose.yml up -d   # 驱动宿主（ilcs-devices 组）
     python3 scripts/load-driver-host-devices.py register [--base http://127.0.0.1:8090] [--acceptance] [--only 工位,…]
 
 - ST-PF-MB（ProtoForge 从站 2 的握手 PLC）：工位已有，原来是 `modbus_map_v1` 直连 PLC，改成 `sila2_v1` 接驱动宿主上的

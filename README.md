@@ -338,7 +338,7 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 > `docker compose up -d`，**不要起设备仓库的 `pilot` profile**——起了只会拉起一批没有工位可接的模拟设备。下面的试点说明只适用于
 > 用 `scripts/reset-demo-cases.sh` 重新播种了老演示产线的环境。
 
-真机到位前，可用设备仓库的 `deploy/compose.yml` 按 `pilot` profile 启动外部模拟设备（接本项目的后端网络）：ST-01-A、ST-06（SiLA 2）
+真机到位前，可用设备仓库的 `deploy/sim.yml` 按 `pilot` profile 启动外部模拟设备（接本项目的后端网络）：ST-01-A、ST-06（SiLA 2）
 与 ST-07（HTTPS 网关）各接一台，只在后端网络可见、不占宿主端口；其余示例工位用内置模拟。PLC 点表、Modbus / OPC UA 任务契约、车队 REST、串口命令这几类协议的
 驱动已移出 ILCS：要接这类模拟设备，把它挂到驱动宿主上（`ilcs-devices/host/README.md`），工位用 `sila2_v1` 接驱动宿主。
 工位与模拟设备的对照、每台的故障注入见 `ilcs-devices/simulators/README.md`：
@@ -355,7 +355,7 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,gateway,simctl}
 # deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
 #   sila-sim-slurry-a,sila-sim-lh,gateway-sim-cycler
-docker compose -f /opt/ilcs-devices/deploy/compose.yml --profile pilot up -d --build
+docker compose -f /opt/ilcs-devices/deploy/sim.yml --profile pilot up -d --build
 # 按设备仓库的 simulators/pilot-devices.json 全部切换（api 容器里没有设备仓库，预设从标准输入喂进去）
 cd /opt/ilcs/deploy && docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply --preset - \
     < /opt/ilcs-devices/simulators/pilot-devices.json
@@ -377,7 +377,7 @@ PLC 点表、串口命令、REST 这类设备的映射写在驱动宿主的设�
 `docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
 拆出设备仓库之后，`pilot` / `results` / `environment` 三组服务也不在本仓库的 compose 里了：以前起过的按容器名停掉删掉
 （`docker rm -f ilcs-sila-sim-slurry-a ilcs-sila-sim-lh ilcs-gateway-sim-cycler ilcs-result-files ilcs-environment`），
-再从设备仓库的 `deploy/compose.yml` 起（服务名、容器名、主机名不变，工位配置不用改）。
+再从设备仓库起：`pilot` 在 `deploy/sim.yml`，`results` / `environment` 在 `deploy/compose.yml`（服务名、容器名、主机名不变，工位配置不用改）。
 检测软件只能导出结果文件时另起结果文件接收器（设备仓库 `deploy/compose.yml` 的 `--profile results`，见 `ilcs-devices/connectors/result_files/README.md`）。
 
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。

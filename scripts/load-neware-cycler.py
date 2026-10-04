@@ -2,10 +2,10 @@
 """登记一台 Neware 充放电柜（模拟网关），跑一个单独的实验任务：扣电上柜 → 恒流恒压循环 → QA 复核。
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署（`POST /signatures`）。设备侧是设备模块
-ilcs-devices/gateway/neware-bts 的模拟网关（假 BTS，8 通道，`deploy/compose.yml` 起的 neware-sim），ILCS 经
+ilcs-devices/gateway/neware-bts 的模拟网关（假 BTS，8 通道，设备仓库 `deploy/sim.yml` 起的 neware-sim），ILCS 经
 `http_json_v1` 走 HTTPS + 令牌接它，和接真机是同一条路，只是网关自报为模拟器：
 
-    docker compose -f ../ilcs-devices/gateway/neware-bts/deploy/compose.yml up -d --build   # 先起模拟网关
+    docker compose -f ../ilcs-devices/deploy/sim.yml up -d --build   # 先起模拟设备（单独起：gateway/neware-bts/deploy/compose.yml）
     python3 scripts/load-neware-cycler.py register [--base http://127.0.0.1:8090] [--acceptance]
     python3 scripts/load-neware-cycler.py run [--cells 4] [--first-channel 1]
     python3 scripts/load-neware-cycler.py resume --batch B-xxxxxx-xxx       # 中途失败后接着跑已建好的批次

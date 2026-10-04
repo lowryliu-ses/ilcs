@@ -3,18 +3,13 @@
 电化学工作站、电芯开路电压 / 内阻仪（Keithley 2450、Keithley 2400、Hioki BT3562）。
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署。设备侧是各设备模块的模拟容器
-（`ilcs-devices/gateway/<模块>/deploy/compose.yml`，接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
+（设备仓库 `deploy/sim.yml` 一次起齐，也能按 `gateway/<模块>/deploy/compose.yml` 单独起；接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
 thermostat-sim、potentiostat-sim）ILCS 经 `http_json_v1` 走 HTTPS + 令牌接，网关自报为模拟器；电芯检测仪表是映射模块
 （k2450-sim、k2400-sim、bt3562-sim），映射在驱动宿主里（ilcs-devices/host 的 line_command 插件，本机现场 ilcs-devices/host/sites/local），
 ILCS 用 `sila2_v1` 接驱动宿主（scripts/load-driver-host-devices.py 的那三台），另登记模拟设备的统一控制口。
 和接真机是同一条路（驱动宿主要先起来）：
 
-    docker compose -f ../ilcs-devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 每个模块各起一组
-    docker compose -f ../ilcs-devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
-    docker compose -f ../ilcs-devices/gateway/raman-seabreeze/deploy/compose.yml up -d --build
-    docker compose -f ../ilcs-devices/gateway/thermostat/deploy/compose.yml up -d --build
-    docker compose -f ../ilcs-devices/gateway/potentiostat/deploy/compose.yml up -d --build
-    docker compose -f ../ilcs-devices/gateway/scpi-cell-meter/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/deploy/sim.yml up -d --build   # 全部模拟设备（ilcs-devices-sim 组；各模块的 compose 也能单独起）
     python3 scripts/load-device-simulators.py register [--base http://127.0.0.1:8090] [--acceptance] [--only balance,chiller,…]
 
 每台：能力（`cap.weigh`、`cap.thermostat`、`cap.echem`、`cap.cell_check` 没有就登记；`cap.ely.*` 用电解液线已有的）→
