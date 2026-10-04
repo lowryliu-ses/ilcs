@@ -417,6 +417,10 @@ class BatchService:
                     "assist_station_ids": list(c.assist_station_ids or []),
                     # 前馈参数的求值记录：每个样本的来源、原始值、系数与下发的计算值
                     "bindings": list(c.bindings or []),
+                    # 按瓶拆开下发时依次执行的设备指令：第几条、哪几瓶、状态与出错原因（回执在检查点里汇总）
+                    "runs": [{"id": run.get("id"), "wells": run.get("wells") or [], "state": run.get("state"),
+                              "error": run.get("error") or "", "carried_from": run.get("carried_from") or ""}
+                             for run in c.runs or []],
                     "created_at": c.created_at.isoformat(timespec="seconds"),
                 }
                 for c in self.commands.for_batch(batch.id)

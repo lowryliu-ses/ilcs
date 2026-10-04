@@ -743,22 +743,32 @@ def wait_for(describe: str, probe: Callable[[], Any], timeout: float, every: flo
 
 
 def ensure_template(engineer: Actor, qa: Actor, spec: dict) -> dict:
-    """设备模块的接入模板：已发布就沿用；没登记就从设备仓库里模块的 profile.json 导入，QA 签名发布。"""
+    """设备模块的接入模板，以设备仓库里模块的 profile.json 为准：这一修订已发布就沿用；没登记就导入、QA 签名发布
+    （发布新修订时同编号的旧发布版自动退役，套用旧版的工位照常运行）。找不到设备仓库时退回已发布的最新修订。"""
     path = DEVICES_REPO / "gateway" / spec["module"] / "profile.json"
     rows = [row for row in _items(engineer.get("/device-templates")) if row.get("code") == spec["template"]]
-    released = [row for row in rows if row.get("state") == "released"]
-    if released:
-        return max(released, key=lambda row: int(row.get("revision") or 0))
     if not path.is_file():
-        raise Failed(f"接入模板 {spec['template']} 没有发布，设备仓库里也找不到 {path}（设 ILCS_DEVICES 指向 ilcs-devices）")
+        released = [row for row in rows if row.get("state") == "released"]
+        if not released:
+            raise Failed(f"接入模板 {spec['template']} 没有发布，设备仓库里也找不到 {path}（设 ILCS_DEVICES 指向 ilcs-devices）")
+        note(f"找不到设备仓库里的 {path}：沿用已发布的 {spec['template']}")
+        return max(released, key=lambda row: int(row.get("revision") or 0))
     profile = json.loads(path.read_text(encoding="utf-8"))
-    template = next((row for row in rows if row.get("state") == "draft"), None) or engineer.post(
-        "/device-templates/import", {"filename": path.name, "document": profile})
-    template = qa.post(f"/device-templates/{template['id']}/release", {
-        "row_version": template["row_version"],
-        "signature_id": qa.sign("发布设备接入模板", template["id"], template["row_version"]),
-    })
-    note(f"接入模板 {spec['template']} 从 {path} 导入并发布")
+    same = [row for row in rows if int(row.get("revision") or 0) == int(profile["revision"])]
+    template = next((row for row in same if row.get("state") == "released"), None) or next(iter(same), None)
+    if template is not None and template.get("digest") != profile["digest"]:
+        raise Failed(f"接入模板 {profile['code']} 修订 {profile['revision']} 已登记，但和 {path} 的摘要不同：改了要升修订号")
+    if template is None:
+        template = engineer.post("/device-templates/import", {"filename": path.name, "document": profile})
+        note(f"接入模板 {profile['code']} 修订 {profile['revision']} 从 {path} 导入")
+    if template["state"] == "draft":
+        template = qa.post(f"/device-templates/{template['id']}/release", {
+            "row_version": template["row_version"],
+            "signature_id": qa.sign("发布设备接入模板", template["id"], template["row_version"]),
+        })
+        note(f"接入模板 {profile['code']} 修订 {profile['revision']} 已发布")
+    if template["state"] != "released":
+        raise Failed(f"接入模板 {profile['code']} 修订 {profile['revision']} 状态 {template['state']}，不能套用")
     return template
 
 

@@ -9,13 +9,14 @@
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 import logging
 
 from sqlalchemy.orm import Session
 
 from ..adapters import AdapterError, AdapterUnreachable, CommandRequest, adapter_for
-from ..adapters.base import TelemetryPoint
+from ..adapters.base import CommandResult, TelemetryPoint
 from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
@@ -47,6 +48,34 @@ from .gate_service import GateService
 TRANSPORT_CAPABILITY = "cap.transfer"
 LOG = logging.getLogger("ilcs.executor")
 
+
+
+# ---------- 按瓶拆开下发（设备接入配置 wells_per_command） ----------
+# 一次只能处理一瓶的设备（秤上一个位置、单测量位）：一步要做的瓶数超过上限时，ILCS 仍记一条指令，按瓶拆成依次执行的
+# 设备指令 `<指令号>/<序号>`（commands.runs），每条只带这几瓶的孔位与参数；每瓶做完就按它的实际量入账，全部做完再按瓶
+# 汇总写检查点与检测结果。哪一瓶失败或结论未知，整条指令按它的结论走；续跑 / 重试跳过已经做完的瓶。
+RUN_ACTIVE = {"sent", "running"}
+QUALITY_ORDER = {"good": 0, "uncertain": 1, "bad": 2}
+
+
+def wells_per_command(record) -> int:
+    """适配器配置的「一条指令最多几瓶」：没配（或配得不对）就是 0，不拆。"""
+    value = (getattr(record, "config", None) or {}).get("wells_per_command")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else 0
+
+
+def current_run(command: Command) -> dict | None:
+    """按瓶拆开的指令此刻在设备上的那一条（已交给适配器、还没出结论）。"""
+    return next((run for run in command.runs or [] if run.get("state") in RUN_ACTIVE), None)
+
+
+@dataclass
+class RunCommand:
+    """按瓶拆开的一条设备指令，给消耗入账用：事件号、计划量都按这一条（这几瓶）算。"""
+    id: str
+    step_index: int
+    capability: str
+    params: dict
 
 
 def units_of(command: Command, station_id: str) -> int:
@@ -493,6 +522,11 @@ class ExecutionService:
                     # 目标动作已经结束（完成、确认未执行或已取消）：设备上没有要停的动作，不再发给设备
                     self._settle_moot(batch, command, ledger, record)
                     return
+            aimed = self.db.get(Command, target) if target else None
+            running = current_run(aimed) if aimed is not None else None
+            if running is not None:
+                # 按瓶拆开的动作：设备上在做的是这一瓶的那条指令，停它
+                target = running["id"]
         request = CommandRequest(
             command_id=command.id, station_id=command.station_id, capability=command.capability,
             params=command.params or {}, type=command.type, batch_id=batch.id,
@@ -534,6 +568,9 @@ class ExecutionService:
                     command.started_at = None
                     self.fault(batch, command, environment, delivery="unreachable")
                     self._release(record, command)
+                    return
+                if self._plan_runs(batch, command, record, request):
+                    self._drive_runs(batch, command, ledger, record, adapter, request)
                     return
                 result = adapter.submit(request)
         except AdapterUnreachable as exc:
@@ -621,6 +658,233 @@ class ExecutionService:
             self.confirm_hold(batch, command)
         if command.type == "abort":
             self._confirm_abort(batch, command, record)
+
+    # ---------- 按瓶拆开下发 ----------
+
+    def _plan_runs(self, batch: Batch, command: Command, record, request: CommandRequest) -> bool:
+        """这条设备动作要不要按瓶拆开：要就把拆分计划记进 command.runs（已经记过的沿用），返回 True。
+
+        瓶（孔位）取逐孔参数的孔位，没有逐孔参数的（检测步骤）取这一步覆盖的孔位。续跑 / 重试接续的那条指令
+        若也是拆开的，已经做完的瓶照搬过来（连同回执），不再下发——加过的料不能再加一遍。
+        """
+        if command.runs:
+            return True
+        limit = wells_per_command(record)
+        per_well = (command.params or {}).get("wells")
+        if not limit:
+            return False
+        wells = [str(well) for well in per_well] if isinstance(per_well, dict) and per_well else list(request.wells)
+        if not wells:
+            from .batch_service import BatchService
+
+            steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
+            step = steps[command.step_index] if command.step_index < len(steps) else {}
+            wells = sorted(BatchService(self.db, self.ctx)._step_targets(batch, step) or {})
+        if len(wells) <= limit:
+            return False
+        runs: list[dict] = []
+        finished: set[str] = set()
+        previous = self.db.get(Command, command.target_command_id) if command.target_command_id else None
+        for run in (previous.runs or []) if previous is not None else []:
+            if run.get("state") == "done" and set(run.get("wells") or []) <= set(wells):
+                runs.append({**run, "carried_from": previous.id})
+                finished.update(run.get("wells") or [])
+        remaining = [well for well in wells if well not in finished]
+        for start in range(0, len(remaining), limit):
+            runs.append({"id": f"{command.id}/{len(runs) + 1}", "wells": remaining[start:start + limit],
+                         "state": "pending"})
+        command.runs = runs
+        return True
+
+    def _save_runs(self, command: Command, runs: list[dict]) -> None:
+        command.runs = [dict(run) for run in runs]  # 换一个新列表：JSON 列原地改动不会被记下
+
+    @staticmethod
+    def _run_request(request: CommandRequest, command: Command, run: dict) -> CommandRequest:
+        """这一瓶（这几瓶）的设备指令：指令号 <指令号>/<序号>，参数里的 wells 只带这几瓶——没有逐孔参数的检测步骤
+        也带上孔位（参数为空），设备据此知道测的是哪一瓶。"""
+        per_well = (command.params or {}).get("wells") if isinstance((command.params or {}).get("wells"), dict) else {}
+        params = {key: value for key, value in (command.params or {}).items() if key != "wells"}
+        params["wells"] = {well: dict(per_well.get(well) or {}) for well in run["wells"]}
+        return replace(request, command_id=run["id"], params=params, wells=tuple(run["wells"]))
+
+    def _drive_runs(self, batch: Batch, command: Command, ledger: AdapterExecution, record, adapter,
+                    request: CommandRequest, result: CommandResult | None = None) -> None:
+        """推进按瓶拆开的指令：吸收当前这一瓶的回执；做完了就发下一瓶，直到有一瓶在设备上跑、出了结论不是完成、
+        或者全部做完。每发一瓶之前先把「已交给适配器」落库：崩在中间时重启按这一瓶的指令号去问设备。"""
+        runs = [dict(run) for run in command.runs or []]
+        while True:
+            if result is not None:
+                run = next(run for run in runs if run.get("state") in RUN_ACTIVE)
+                if result.state in {"accepted", "running"}:
+                    run["state"] = "running"
+                    self._save_runs(command, runs)
+                    self.settle(batch, command, ledger, record, CommandResult(
+                        command_id=command.id, state=result.state, device_ts=result.device_ts, origin=result.origin,
+                    ))
+                    return
+                if result.state != "done":
+                    run.update(state="unknown" if result.state == "unknown" else "failed", error=result.error or "")
+                    self._save_runs(command, runs)
+                    self.settle(batch, command, ledger, record, self._runs_outcome(command, runs, run, result))
+                    return
+                self._absorb_run(batch, command, run, result)
+                self._save_runs(command, runs)
+            run = next((run for run in runs if run.get("state") == "pending"), None)
+            if run is None:
+                self.settle(batch, command, ledger, record, self._runs_finished(command, runs))
+                return
+            run["state"] = "sent"
+            self._save_runs(command, runs)
+            self.db.commit()
+            label = self._run_label(runs, run)
+            try:
+                result = adapter.submit(self._run_request(request, command, run))
+            except AdapterUnreachable as exc:
+                ledger.state = "unknown"
+                self.fault(batch, command, f"{label}：设备无响应或回执无法确认（{exc}）；动作可能已执行，结果未知，"
+                                           f"不自动重试{self._done_note(runs)}", delivery="maybe_sent")
+                return
+            except AdapterError as exc:
+                run.update(state="failed", error=str(exc))
+                self._save_runs(command, runs)
+                ledger.state = "failed"
+                command.outcome = "failed"
+                self.fault(batch, command, f"{label}：适配器明确失败：{exc}{self._done_note(runs)}",
+                           delivery="delivered")
+                self._release(record, command)
+                return
+            except Exception as exc:
+                ledger.state = "unknown"
+                self.fault(batch, command, f"{label}：适配器内部错误（{exc.__class__.__name__}）；动作可能已执行，"
+                                           f"结果未知，不自动重试{self._done_note(runs)}", delivery="maybe_sent")
+                return
+            command.delivery_state = "delivered"
+
+    @staticmethod
+    def _run_label(runs: list[dict], run: dict) -> str:
+        return f"按瓶下发第 {runs.index(run) + 1}/{len(runs)} 条（{'、'.join(run['wells'])}）"
+
+    @staticmethod
+    def _done_note(runs: list[dict]) -> str:
+        done = [well for run in runs if run.get("state") == "done" for well in run.get("wells") or []]
+        return f"；已做完 {'、'.join(done)}（已按实际量入账）" if done else ""
+
+    def _absorb_run(self, batch: Batch, command: Command, run: dict, result: CommandResult) -> None:
+        """一瓶做完：记下回执，按这一瓶的实际量入账（事件号、计划量都按这一条算）。"""
+        from .consumption_service import ConsumptionService
+
+        wells = run.get("wells") or []
+        run.update(
+            state="done", delivered=result.delivered or {}, origin=result.origin, quality=result.quality,
+            device_ts=result.device_ts.isoformat(timespec="seconds") if result.device_ts else None, error="",
+            telemetry=[{"metric": point.metric, "value": point.value, "setpoint": point.setpoint,
+                        "well": point.well or (wells[0] if len(wells) == 1 else ""),
+                        "device_ts": point.device_ts.isoformat() if point.device_ts else None}
+                       for point in (TelemetryPoint(*row) for row in result.telemetry or ())],
+        )
+        per_well = (command.params or {}).get("wells") if isinstance((command.params or {}).get("wells"), dict) else {}
+        params = {key: value for key, value in (command.params or {}).items() if key != "wells"}
+        params["wells"] = {well: dict(per_well.get(well) or {}) for well in wells}
+        run["consumption"] = ConsumptionService(self.db, self.ctx).book(
+            batch, RunCommand(run["id"], command.step_index, command.capability, params), result.delivered or {},
+            step_run_id=command.step_run_id, origin=result.origin,
+        )
+
+    def _runs_outcome(self, command: Command, runs: list[dict], run: dict, result: CommandResult) -> CommandResult:
+        """哪一瓶失败或结论未知：整条指令按它的结论走，说清是第几瓶、已经做完了哪几瓶。"""
+        label = self._run_label(runs, run)
+        if result.state == "unknown":
+            error = (f"{label}：设备已收到指令，但回报结论未知；动作可能仍在进行，保留占用，转人工核查，不自动重试"
+                     f"{('（' + result.error + '）') if result.error else ''}")
+        else:
+            error = f"{label}失败：{result.error or result.state}"
+        return CommandResult(command_id=command.id, state=result.state, device_ts=result.device_ts,
+                             quality=result.quality, error=error + self._done_note(runs), origin=result.origin)
+
+    def _runs_finished(self, command: Command, runs: list[dict]) -> CommandResult:
+        """全部做完：按瓶汇总成一份回执（孔位合并、消耗按物料合计只作展示——已经逐瓶入过账）。"""
+        wells: dict = {}
+        materials: dict[tuple, dict] = {}
+        names = set()
+        telemetry: list[TelemetryPoint] = []
+        for run in runs:
+            delivered = run.get("delivered") or {}
+            rows = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else None
+            if rows:
+                wells.update(rows)
+            elif len(run.get("wells") or []) == 1:
+                rest = {key: value for key, value in delivered.items() if key not in {"wells", "materials", "material"}}
+                if rest:
+                    wells[run["wells"][0]] = rest
+            if delivered.get("material"):
+                names.add(str(delivered["material"]))
+            for item in delivered.get("materials") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = (item.get("material"), item.get("lot_id"), item.get("unit"))
+                entry = materials.setdefault(key, {k: v for k, v in item.items() if k != "quantity"} | {"quantity": 0.0})
+                try:
+                    entry["quantity"] = round(entry["quantity"] + float(item.get("quantity") or 0), 6)
+                except (TypeError, ValueError):
+                    pass
+            for point in run.get("telemetry") or []:
+                moment = point.get("device_ts")
+                telemetry.append(TelemetryPoint(point["metric"], point["value"], point.get("setpoint"),
+                                                point.get("well") or "",
+                                                datetime.fromisoformat(moment) if moment else None))
+        delivered = {"runs": [{"id": run["id"], "wells": run["wells"], "state": run["state"]} for run in runs]}
+        if wells:
+            delivered["wells"] = wells
+        if materials:
+            delivered["materials"] = list(materials.values())
+        if len(names) == 1:
+            delivered["material"] = names.pop()
+        last = runs[-1]
+        moment = last.get("device_ts")
+        quality = max((run.get("quality") or "good" for run in runs), key=lambda value: QUALITY_ORDER.get(value, 1))
+        return CommandResult(
+            command_id=command.id, state="done", device_ts=datetime.fromisoformat(moment) if moment else now(),
+            quality=quality, delivered=delivered, telemetry=tuple(telemetry),
+            origin=next((run.get("origin") for run in runs if run.get("origin")), ""),
+        )
+
+    def poll_runs(self, batch: Batch, command: Command, record, query_only: bool = False) -> None:
+        """轮询 / 对账按瓶拆开的指令：问当前这一瓶的指令号，按回执推进；当前没有在设备上的（上一瓶刚做完、
+        下一瓶还没发出去时停过）就接着发下一瓶。"""
+        adapter = adapter_for(record, tuple(self.capabilities.specs()))
+        ledger = self.executions.get(command.id)
+        if ledger is None:
+            return
+        request = self._base_request(batch, command)
+        running = current_run(command)
+        if running is None:
+            if query_only:
+                return
+            self._drive_runs(batch, command, ledger, record, adapter, request)
+            return
+        label = self._run_label(command.runs, running)
+        try:
+            result = adapter.query(running["id"])
+        except AdapterUnreachable:
+            return  # 一次查询超时不等于动作失败：下一轮接着查
+        except Exception as exc:
+            self.fault(batch, command, f"{label}：设备状态查询失败：{exc}；结果未知，转人工核查", delivery="maybe_sent")
+            return
+        if result is None:
+            self.fault(batch, command, f"{label}：设备侧查不到这条指令，可能未送达也可能已执行；结果未知，转人工核查"
+                                       f"{self._done_note(command.runs)}", delivery="maybe_sent")
+            return
+        command.delivery_state = "delivered"
+        self._drive_runs(batch, command, ledger, record, adapter, request, result)
+
+    def _base_request(self, batch: Batch, command: Command) -> CommandRequest:
+        return CommandRequest(
+            command_id=command.id, station_id=command.station_id, capability=command.capability,
+            params=command.params or {}, type=command.type, batch_id=batch.id, step_index=command.step_index,
+            step_id=self._step_id(batch, command.step_index), target_command_id=command.target_command_id,
+            method=dict(command.method or {}), **self._step_hooks(batch, command),
+        )
 
     def _control_target(self, batch: Batch, command: Command) -> list[Command]:
         """一条保持 / 终止指令确认的是哪些动作：记了目标就只是目标；旧指令按这台设备上本批次可能在动作的算。"""
@@ -911,9 +1175,14 @@ class ExecutionService:
         self.check_outputs(batch, command, step, checkpoint, result.delivered or {})
         from .consumption_service import ConsumptionService
 
-        consumption = ConsumptionService(self.db, self.ctx).book(
-            batch, command, result.delivered or {}, step_run_id=command.step_run_id, origin=result.origin,
-        )
+        if command.runs:
+            # 按瓶拆开的指令：每瓶做完时已经按它的实际量入过账，汇总回执里的消耗只作展示，不再入账
+            consumption = {key: sum(int((run.get("consumption") or {}).get(key) or 0) for run in command.runs)
+                           for key in ("booked", "rejected", "deviations")}
+        else:
+            consumption = ConsumptionService(self.db, self.ctx).book(
+                batch, command, result.delivered or {}, step_run_id=command.step_run_id, origin=result.origin,
+            )
         from .device_result_service import DeviceResultService
 
         results = DeviceResultService(self.db, self.ctx).record(
@@ -1267,13 +1536,15 @@ class ExecutorLoop:
                 warn_after = expected * settings.command_overdue_factor + grace
                 hard_after = expected * settings.command_hard_limit_factor + grace
             elif command.type in DISPATCHING:
-                expected = float(step.get("dur") or 0)
+                # 按瓶拆开的指令一瓶接一瓶做：预计时长与硬上限按条数放大
+                rounds = max(1, len(command.runs or []))
+                expected = float(step.get("dur") or 0) * rounds
                 grace = settings.command_timeout_grace_min
                 warn_after = expected * settings.command_overdue_factor + grace
                 recovery = self.capabilities.recovery_of(command.capability) or {}
                 hard_after = float(
-                    recovery.get("maxRunMin")
-                    or expected * settings.command_hard_limit_factor + grace
+                    float(recovery["maxRunMin"]) * rounds if recovery.get("maxRunMin")
+                    else expected * settings.command_hard_limit_factor + grace
                 )
             else:
                 warn_after = hard_after = settings.control_command_timeout_min
@@ -1349,6 +1620,13 @@ class ExecutorLoop:
             service = ExecutionService(self.db, system_context(command.org_id, "执行器轮询"))
             batch = self.db.get(Batch, command.batch_id)
             if batch is None:
+                continue
+            if command.runs:
+                # 按瓶拆开的指令：问当前这一瓶，做完了接着发下一瓶
+                service.poll_runs(batch, command, record)
+                self.db.commit()
+                if command.state == "done":
+                    completed += 1
                 continue
             try:
                 result = adapter_for(record).query(command.id)
@@ -1559,6 +1837,13 @@ class ExecutorLoop:
                     delivery="maybe_sent",
                 )
                 mismatches += 1
+                continue
+            if command.runs and batch is not None and service.executions.get(command.id) is not None:
+                # 按瓶拆开的指令：按当前这一瓶的指令号问设备，能确认就接着推进；问不到照旧转人工核查
+                service.poll_runs(batch, command, record)
+                self.db.commit()
+                if command.state not in {"running", "accepted", "done"}:
+                    mismatches += 1
                 continue
             try:
                 adapter = adapter_for(record)
