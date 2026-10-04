@@ -1,8 +1,9 @@
-"""对一个网关跑 ILCS 的接入验收清单（设备模块自己的测试用）。
+"""与 ILCS 的一致性测试（设备模块自己的测试用）：对一个网关跑 ILCS 的接入验收清单、按 ILCS 的口径核对 profile.json。
 
 走的是 ILCS 真正接入时的那条路：`http_json_v1` 驱动 + `api/app/adapters/acceptance.py` 的检查清单 +
-统一控制口的故障注入。要能找到 ILCS 仓库的 `api/`（设备模块放在仓库的 devices/gateway/ 下时自动找到；
-放在别处时设环境变量 ILCS_REPO 指向仓库根目录）。
+统一控制口的故障注入。要能找到 ILCS 仓库的 `api/`：设环境变量 ILCS_REPO 指向 ILCS 仓库根目录，或者设备项目就放在
+ILCS 仓库旁边 / 里面（往上找 `api/app`）。**找不到就跳过**这些一致性测试（`pytest.skip`），模块自测（驱动、假 SDK、
+网关行为）照跑——设备项目单独拿出来也能测，接 ILCS 前再带上 ILCS 仓库跑一致性测试。
 """
 from __future__ import annotations
 
@@ -13,20 +14,32 @@ import sys
 from typing import Any
 
 
-def _ilcs_api() -> Path:
+def find_ilcs_api() -> Path | None:
+    """ILCS 仓库的 api/：先看 ILCS_REPO，再从这里往上找（也找旁边的 ilcs/ 检出），找不到返回 None。"""
     candidates = [Path(os.environ["ILCS_REPO"]) / "api"] if os.environ.get("ILCS_REPO") else []
-    candidates += [parent / "api" for parent in Path(__file__).resolve().parents]
+    for parent in Path(__file__).resolve().parents:
+        candidates += [parent / "api", parent / "ilcs" / "api"]
     for candidate in candidates:
         if (candidate / "app" / "adapters" / "acceptance.py").exists():
             return candidate
-    raise RuntimeError("找不到 ILCS 仓库的 api/：设环境变量 ILCS_REPO 指向 ILCS 仓库根目录")
+    return None
+
+
+def _ilcs_api() -> Path:
+    """一致性测试用：找到 ILCS 的 api/ 并放进 sys.path；找不到就跳过这个测试（模块自测不受影响）。"""
+    api = find_ilcs_api()
+    if api is None:
+        import pytest
+
+        pytest.skip("找不到 ILCS 仓库的 api/（设环境变量 ILCS_REPO 指向 ILCS 仓库根目录）：跳过与 ILCS 的一致性测试")
+    if str(api) not in sys.path:
+        sys.path.insert(0, str(api))
+    return api
 
 
 @contextmanager
 def _ilcs_settings(credential_root: Path):
-    api = str(_ilcs_api())
-    if api not in sys.path:
-        sys.path.insert(0, api)
+    _ilcs_api()
     from app.core.config import settings
 
     saved = settings.adapter_credential_root, settings.adapter_allowed_hosts

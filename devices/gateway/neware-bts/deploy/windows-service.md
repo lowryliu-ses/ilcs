@@ -14,7 +14,7 @@
    - `data_dir`：BTS 把数据文件存到哪（结果文件接收器盯这个目录取数）；
    - `default_program`：没带设备方法的指令（包括 ILCS 的接入验收）跑哪个工步，设成一个很短、对电芯无害的（见下文）；
    - `auto_channel` 平时是 `false`：电池装在哪个通道由 ILCS 指定。
-5. 先对着假 BTS 跑一遍自测：`python -m pytest tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+5. 先对着假 BTS 跑一遍自测：`python -m pytest tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 6. 用 NSSM 注册成服务（开机自启、崩溃自动拉起）：
 
    ```bat

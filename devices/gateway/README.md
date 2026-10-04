@@ -65,7 +65,7 @@ Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices
 python scripts/new-device-module.py acme-vd80 --title "ACME 真空干燥箱" --model VD-80 --vendor ACME \
     --capability cap.vacuum_dry --param temp=60:180 --param vacuum=0.1:5
 
-# 对模拟接口跑 ILCS 的接入验收清单（含故障项目）
+# 自测：驱动、假 SDK、网关行为，外加对模拟接口跑 ILCS 的接入验收清单（含故障项目）
 api/.venv/bin/pytest devices/gateway/acme-vd80/tests
 
 # 手工联调：起模拟网关，另开一个终端用 ILCS 的验收命令对着它跑
@@ -75,6 +75,15 @@ python scripts/device-acceptance.py --adapter my-adapter.json --allow-host --phy
 
 把 `driver/` 里对假 SDK 的调用换成真实 SDK 时，测试仍然对着模拟接口跑——真实接口与模拟接口实现同一组方法，
 驱动代码只有一份。
+
+模块的测试分两层，都不连 ILCS 数据库：
+
+- **模块自测**（驱动、假 SDK、网关行为、重启后按指令号回答……）：只用本目录的 `ilcs_gateway`，不 import ILCS，
+  设备这一侧单独拿出来（不放在 ILCS 仓库里）也能跑；
+- **与 ILCS 的一致性测试**（`ilcs_gateway.testing`：用 ILCS 的 `http_json_v1` 驱动对模拟接口跑接入验收清单、
+  按 ILCS 导入模板的口径核对 `profile.json` 的摘要）：要找到 ILCS 仓库的 `api/`——设 `ILCS_REPO` 指向 ILCS 仓库
+  根目录，或者设备这一侧就在 ILCS 仓库里 / 和 ILCS 仓库放在同一个目录下。**找不到就跳过**（pytest 记为 skipped），
+  交付前要带上 ILCS 跑一遍，跳过的不算过。
 
 ### 交付与上线
 
@@ -141,6 +150,7 @@ SDK 负责（契约里容易写错的部分）：
 异常的含义是契约的一部分：`Rejected` = 设备明确没动；`ReceiptLost` = 设备动了但应答要丢（只给模拟设备用）；
 其他任何异常 = 不知道。别把厂家 SDK 的超时改判成 `Rejected`。
 
-`ilcs_gateway.testing.acceptance(...)` 对一个网关跑 ILCS 的接入验收清单（需要能找到 ILCS 仓库的 `api/`）。
+`ilcs_gateway.testing.acceptance(...)` 对一个网关跑 ILCS 的接入验收清单（要能找到 ILCS 仓库的 `api/`，找不到就跳过这个测试；
+`find_ilcs_api()` 说明怎么找）。
 `build_server(...)` 与 `serve` 参数相同，只是不开始监听（调用方自己 `start()`）。
 HTTPS 网关模拟设备（`devices/simulators/http_gateway`）也是用它起的，底下接的是设备行为模型。

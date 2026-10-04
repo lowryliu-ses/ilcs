@@ -29,7 +29,7 @@
 3. 写网关配置 `C:\ilcs-gateway\thermostat.json`（照 `config.example.json`）：`chiller.kind` 选厂家、`link` 写线；
    `min_c` / `max_c` 写这一站接受的温度范围；`settle_sec`、`tolerance_c` 按工艺定；`after` 选作业之后冷水机怎样；
    `programs` 登记 ILCS 设备方法里写的程序；`default_program` 给没带设备方法的指令（包括 ILCS 的接入验收）用。
-4. 先对着假设备跑一遍自测：`python -m pytest tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+4. 先对着假设备跑一遍自测：`python -m pytest tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 5. 只读地问一遍冷水机和每块板（只发读命令，不会让设备动）：
 
    ```bat

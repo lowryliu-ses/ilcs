@@ -30,7 +30,7 @@
 3. 写网关配置 `C:\ilcs-gateway\stirrer.json`（照 `config.example.json`）：`positions` 每块板一项；
    `ambient_c` 写手套箱 / 房间的温度（低于它的温度拒绝，等于它只搅拌不加热）；`programs` 登记 ILCS 设备方法里写的程序；
    `default_program` 给没带设备方法的指令（包括 ILCS 的接入验收）用；`auto_position` 平时是 `false`。
-4. 先对着假加热板跑一遍自测：`python -m pytest tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+4. 先对着假加热板跑一遍自测：`python -m pytest tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 5. 只读地问一遍每块板（只发读命令，不会让板子动）：
 
    ```bat
