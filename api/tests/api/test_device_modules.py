@@ -16,7 +16,7 @@ LIMITS = {"cap.test": {"rate": [0.01, 10], "vmax": [2.0, 5.0]}}
 
 def test_device_module_profiles_import_as_templates():
     """设备仓库里网关模块的 profile.json 都能按 ILCS 的规则导入成接入模板：摘要对得上、核对通过。ILCS 改了模板规则时，
-    这里先发现交付物导不进来。映射模块（如 scpi-cell-meter）的 profile-*.json 是驱动宿主的设备配置，不是模板。"""
+    这里先发现交付物导不进来。驱动宿主的设备配置模板（设备仓库 host/profiles/）不是接入模板，不在这里。"""
     from app.services.template_service import FORMAT, template_check, template_digest
 
     profiles = sorted((DEVICES / "gateway").glob("*/profile.json"))

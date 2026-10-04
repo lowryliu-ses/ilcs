@@ -10,7 +10,8 @@
   不登记能力），`sila2_v1` 接 PF-OPCUA（50202）/ PF-HTTP（50203），`"tasks": false`。HTTP 传感器要 ProtoForge 接进
   ILCS 的后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主才连得到它的 8080。
 
-- ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（模拟电芯检测仪表，设备模块 ilcs-devices/gateway/scpi-cell-meter）：工位已有，原来是
+- ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（模拟电芯检测仪表 ilcs-devices/simulators/scpi_meter，映射照抄驱动宿主的设备配置模板
+  ilcs-devices/host/profiles/scpi-cell-meter）：工位已有，原来是
   `line_command_v1` 直连模拟仪表（接入模板 TPL-SCPI-*），改成 `sila2_v1` 接驱动宿主上的 OCV-K2450（50211）/ OCV-K2400
   （50212）/ ACIR-BT3562（50213），映射照抄模板、搬到驱动宿主；模拟设备控制口（simulator_control）留在 ILCS 的连接配置里，
   验收的故障项目照做。`--acceptance` 跑动作级 + 故障项目（cap.cell_check）。
@@ -70,7 +71,7 @@ STATIONS = {
         "supports": {"supports_hold": False, "supports_abort": False, "supports_query": True, "supports_dedup": True},
         "simulator_control": {"url": f"http://{sim}:9900", "token_ref": f"file:///run/secrets/ilcs/simctl/{unit}.token"},
         "acceptance": ("cap.cell_check", {}), "faults": True,
-        "approval": "本机模拟电芯检测仪表（ilcs-devices/gateway/scpi-cell-meter），经驱动宿主接入；没有真实仪表与电芯",
+        "approval": "本机模拟电芯检测仪表（ilcs-devices/simulators/scpi_meter），经驱动宿主接入；没有真实仪表与电芯",
     } for station_id, name, port, device_id, sim, unit in (
         ("ST-OCV-SIM", "模拟 Keithley 2450 开路电压（经驱动宿主）", 50211, "ILCS-SIMULATOR-2450-01", "k2450-sim", "SIM-K2450-01"),
         ("ST-OCV2-SIM", "模拟 Keithley 2400 开路电压（经驱动宿主）", 50212, "ILCS-SIMULATOR-2400-01", "k2400-sim", "SIM-K2400-01"),
