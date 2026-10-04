@@ -37,8 +37,8 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 # 设备仓库：环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices
-DEVICES = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices")
-PROFILE = DEVICES / "gateway" / "neware-bts" / "profile.json"
+DEVICES_REPO = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices")
+PROFILE = DEVICES_REPO / "gateway" / "neware-bts" / "profile.json"
 PASSWORD = "ilcs1234"
 RUN = uuid.uuid4().hex[:6]
 

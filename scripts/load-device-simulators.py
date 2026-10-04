@@ -39,7 +39,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 # 设备仓库（模块的 profile.json 在它的 gateway/ 下）：环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices
-DEVICES = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices")
+DEVICES_REPO = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices")
 _spec = importlib.util.spec_from_file_location("load_neware_cycler", HERE / "load-neware-cycler.py")
 common = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(common)  # 复用它的 HTTP 传输、演示账号与签名、等待与输出
@@ -191,7 +191,7 @@ def ensure_station(engineer: Actor, device: dict[str, Any]) -> None:
 
 
 def ensure_template(engineer: Actor, qa: Actor, device: dict[str, Any]) -> dict:
-    path = DEVICES / "gateway" / device["module"] / device.get("profile", "profile.json")
+    path = DEVICES_REPO / "gateway" / device["module"] / device.get("profile", "profile.json")
     profile = json.loads(path.read_text(encoding="utf-8"))
     rows = [row for row in _items(engineer.get("/device-templates"))
             if row.get("code") == profile["code"] and int(row.get("revision") or 0) == int(profile["revision"])]

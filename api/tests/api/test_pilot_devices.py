@@ -28,6 +28,18 @@ def _pilot_script():
     return module
 
 
+def test_preset_is_read_from_the_devices_repo_or_stdin(monkeypatch, tmp_path):
+    """api 容器里没有设备仓库：`--preset -` 从标准输入读；给的文件不存在时说清楚怎么办，不抛 FileNotFoundError。"""
+    import io
+
+    script = _pilot_script()
+    assert Path(script.PRESET).resolve() == PRESET_FILE.resolve(), "缺省读设备仓库里的预设，和测试找的是同一个设备仓库"
+    monkeypatch.setattr("sys.stdin", io.StringIO(PRESET_FILE.read_text(encoding="utf-8")))
+    assert script._read_preset("-") == PRESETS
+    with pytest.raises(SystemExit, match="ILCS_DEVICES"):
+        script._read_preset(str(tmp_path / "missing.json"))
+
+
 def localize(value, endpoints: dict, secrets: Path):
     """把预设里的服务名:端口换成本机模拟设备，证书目录换成测试目录。"""
     if isinstance(value, dict):
