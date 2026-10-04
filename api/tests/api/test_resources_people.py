@@ -109,7 +109,11 @@ def test_expired_qualification_blocks_assignment_and_start(
 
 
 def test_seed_gives_admin_every_capability_qualification(admin, reset_runtime):
-    """管理员默认拥有全部能力资质：种子按库里登记的每项能力都发一份。"""
+    """管理员默认拥有全部能力资质：种子按库里登记的每项能力都发一份。
+
+    只核对播种时就有的能力——别的用例之后登记的能力不经过种子，不在其列。"""
+    from app.seed import data
+
     people = admin.get("/api/people").json()["items"]
     admin_person = next(row for row in people if row["user_id"] == admin.user["id"])
     detail = admin.get(f"/api/people/{admin_person['id']}").json()
@@ -117,8 +121,8 @@ def test_seed_gives_admin_every_capability_qualification(admin, reset_runtime):
         row["scope_ref"] for row in detail["qualifications"]
         if row["scope_kind"] == "capability" and row.get("status") not in {"revoked", "expired"}
     }
-    capabilities = {row["id"] for row in admin.get("/api/capabilities").json() if not row.get("retired")}
-    assert capabilities and capabilities <= held
+    seeded = {row[0] for row in data.CAPABILITIES}
+    assert seeded and seeded <= held, sorted(seeded - held)
 
 
 def test_calibration_expiring_inside_the_window_blocks_dispatch(
