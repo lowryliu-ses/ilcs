@@ -56,6 +56,10 @@ def test_plc_runs_each_well_in_turn_and_reports_each(protocol):
         assert sum(program.device.executions.values()) == 3, "每孔一个启动沿"
         assert program.memory["JobLatched"] == "CMD-W/3", "每孔写自己的运行号，按 A1、A2、A10 的顺序"
         assert len(done.telemetry) == 6, "每孔的实测值都进遥测，设定值取各孔自己的"
+        assert {(point.well, point.setpoint) for point in done.telemetry if point.metric == "temp"} == {
+            ("A1", 110.0), ("A2", 120.0), ("A10", 140.0)}, "遥测点带孔位"
+        moments = {point.well: point.device_ts for point in done.telemetry}
+        assert moments["A1"] < moments["A2"] < moments["A10"], "每孔按自己取实测的时间记（毫秒）"
 
 
 def test_a_well_the_plc_refuses_ends_the_command_and_says_which():

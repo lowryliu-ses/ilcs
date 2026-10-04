@@ -27,8 +27,8 @@ def test_measurement_completes_as_a_job_with_actuals(name):
         done = driver.submit(request("CMD-1"))
         assert (done.state, done.quality, done.origin) == ("done", "good", "real:line_command_v1")
         assert done.delivered == pytest.approx(EXPECTED[name])
-        assert {metric: value for metric, value, _ in done.telemetry} == pytest.approx(EXPECTED[name])
-        assert all(setpoint is None for _, _, setpoint in done.telemetry)
+        assert {point.metric: point.value for point in done.telemetry} == pytest.approx(EXPECTED[name])
+        assert all(point.setpoint is None for point in done.telemetry)
         assert rig.meter.motions == 1
 
         replay = driver.submit(request("CMD-1"))

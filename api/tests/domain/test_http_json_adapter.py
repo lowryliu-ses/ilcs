@@ -151,7 +151,8 @@ def test_http_json_driver_health_dedup_query_and_controls(device_gateway):
     finished = adapter.query("CMD-HTTP-1")
     assert finished.state == "done"
     assert finished.origin == "real:http_json_v1"
-    assert finished.telemetry == (("speed", 119.8, 120),)
+    assert [(point.metric, point.value, point.setpoint, point.well) for point in finished.telemetry] == [
+        ("speed", 119.8, 120, "")], "不带孔位的点：孔位为空、时间按整条回执"
     assert adapter.query("CMD-NOT-FOUND") is None
     assert adapter.hold(request("CMD-HOLD-1")).state == "done"
     assert adapter.abort(request("CMD-ABORT-1")).state == "done"

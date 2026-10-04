@@ -112,7 +112,7 @@ ILCS 重新挂上闸门的那把锁。
 2. 新增 `DeviceUnreachable`：动作之前就连不上设备，设备没动。`QueryTask` 返回它表示「现在问不到」，ILCS 下一轮再问。
    可能已经到达设备的请求不许报这个错。
 3. `ContextJson` 增加 `station_id`、`material`，预留 `wells`。设备必须忽略不认识的键。
-   矩阵条件的逐孔参数在 `ParametersJson.wells`（`{孔位: {参数: 值}}`，其余参数是缺省值）：设备服务要么自己按孔位执行，要么像驱动宿主的映射插件那样按孔位依次执行；回执的 `delivered.wells[孔位]` 按孔位回报。
+   矩阵条件的逐孔参数在 `ParametersJson.wells`（`{孔位: {参数: 值}}`，其余参数是缺省值）：设备服务要么自己按孔位执行，要么像驱动宿主的映射插件那样按孔位依次执行；回执的 `delivered.wells[孔位]` 按孔位回报，遥测点带 `well` 与这一孔的 `device_ts`（ILCS 据此关联样本、按各孔的时间记）。
 4. `TaskType` 增加 `transfer`（转运指令）。
 5. 新增属性 `TaskSupport`，内容如下。它从配置给，设备离线也能读。
    - 能力目录：每项能力的参数 JSON Schema、设备端程序；`*` 只给模拟器用；

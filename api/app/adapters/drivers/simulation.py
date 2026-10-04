@@ -16,7 +16,7 @@ from ...core.clock import now
 from ...core.rng import hash_str
 from ...domain import simulation as sim
 from ...domain.dosing import commanded_quantity
-from ..base import AdapterContract, CommandRequest, CommandResult
+from ..base import AdapterContract, CommandRequest, CommandResult, TelemetryPoint
 
 ORIGIN = "simulation"
 
@@ -116,7 +116,7 @@ class SimulationAdapter:
         if existing is not None:
             return existing  # 设备端去重：重复投递回放终态
         telemetry = tuple(
-            (metric, float(setpoint), None)
+            TelemetryPoint(metric, float(setpoint))
             for metric, setpoint in (request.params or {}).items()
             if isinstance(setpoint, (int, float)) and not isinstance(setpoint, bool)
         )

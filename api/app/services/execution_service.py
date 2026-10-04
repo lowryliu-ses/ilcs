@@ -15,6 +15,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from ..adapters import AdapterError, AdapterUnreachable, CommandRequest, adapter_for
+from ..adapters.base import TelemetryPoint
 from ..core.clock import now
 from ..core.config import settings
 from ..core.context import AccessContext, system_context
@@ -972,23 +973,36 @@ class ExecutionService:
         return flags
 
     def record_telemetry(self, batch: Batch, command: Command, step: dict, result) -> None:
-        """保存真实遥测；只有模拟适配器才生成模拟曲线。每个点带指令、步骤、值守人与（能确定时的）样本。"""
+        """保存真实遥测；只有模拟适配器才生成模拟曲线。每个点带指令、步骤、值守人与（能确定时的）样本：逐孔回报的点
+        按孔位关联样本（与设备回报结果同一口径：这一步的设备孔位 → 在用样本），按这一孔自己的设备时间记。"""
         finished = result.device_ts or now()
         owner = telemetry_context(self.db, batch, command)
         if result.origin != "simulation":
             if result.telemetry:
-                for metric, value, setpoint in result.telemetry:
+                owners: dict[str, dict] = {"": owner}
+                targets = None
+                for point in (TelemetryPoint(*row) for row in result.telemetry):
+                    if point.well not in owners:
+                        if targets is None:
+                            from .batch_service import BatchService
+
+                            targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
+                        sample = targets.get(point.well)
+                        owners[point.well] = (
+                            telemetry_context(self.db, batch, command, sample_id=sample.id) if sample is not None
+                            else telemetry_context(self.db, batch, command, well=point.well)
+                        )
                     self.db.add(
                         Telemetry(
                             station_id=command.station_id,
                             batch_id=batch.id,
-                            metric=metric,
-                            setpoint=float(setpoint) if setpoint is not None else None,
-                            value=float(value),
+                            metric=point.metric,
+                            setpoint=float(point.setpoint) if point.setpoint is not None else None,
+                            value=float(point.value),
                             quality=result.quality,
                             origin=result.origin,
-                            device_ts=finished,
-                            **owner,
+                            device_ts=point.device_ts or finished,
+                            **owners[point.well],
                         )
                     )
             # 真实设备没有回传遥测就是“无数据”，不能用设定值合成一条真实曲线。

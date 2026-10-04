@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, tzinfo
 
-from .base import AdapterIndeterminate, CommandResult
+from .base import AdapterIndeterminate, CommandResult, TelemetryPoint
 
 STATES = {"accepted", "running", "done", "failed", "unknown"}
 QUALITIES = {"good", "bad", "uncertain"}
@@ -46,9 +46,12 @@ def parse_receipt(
     telemetry = []
     for point in response.get("telemetry") or []:
         try:
-            telemetry.append((str(point["metric"]), float(point["value"]), point.get("setpoint")))
-        except (KeyError, TypeError, ValueError) as exc:
+            metric, value, well = str(point["metric"]), float(point["value"]), str(point.get("well") or "")
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise AdapterIndeterminate("设备回执 telemetry 格式无效") from exc
+        # 逐孔回报的点带孔位与这一孔的设备时间；不带的按整条回执的 device_ts 记
+        moment = device_time(point["device_ts"], device_timezone) if point.get("device_ts") else None
+        telemetry.append(TelemetryPoint(metric, value, point.get("setpoint"), well, moment))
     delivered = response.get("delivered") or {}
     if not isinstance(delivered, dict):
         raise AdapterIndeterminate("设备回执 delivered 必须是对象")

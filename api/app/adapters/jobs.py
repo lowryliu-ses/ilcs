@@ -69,8 +69,8 @@ def scalars(params: dict) -> dict:
     return {key: value for key, value in (params or {}).items() if not isinstance(value, (dict, list))}
 
 
-def _iso(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
+def _iso(epoch: float, timespec: str = "seconds") -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec=timespec)
 
 
 # ---------- 模板 ----------
@@ -574,10 +574,15 @@ class MappedJobAdapter:
             "aborted": "failed", "rejected": "failed", "unknown": "unknown", "unconfirmed": "unknown",
             "starting": "unknown",
         }[state]
-        telemetry = [
-            {"metric": metric, "value": value, "setpoint": setpoint}
-            for metric, value, setpoint in job.get("telemetry") or []
-        ]
+        telemetry = []
+        for metric, value, setpoint, *where in job.get("telemetry") or []:
+            point = {"metric": metric, "value": value, "setpoint": setpoint}
+            well, moment = (list(where) + ["", None])[:2]  # 逐孔执行：孔位与这一孔取实测的时间
+            if well:
+                point["well"] = well
+            if moment:
+                point["device_ts"] = _iso(moment, "milliseconds")
+            telemetry.append(point)
         quality = job.get("quality") or "good"
         if mapped in {"failed", "unknown"} and quality == "good":
             quality = "bad" if mapped == "failed" else "uncertain"
@@ -716,7 +721,7 @@ class MappedJobAdapter:
                                              for (material, unit), quantity in totals.items()]
         job["telemetry"] = [
             [name, value, float(run["params"][name]) if isinstance(run["params"].get(name), (int, float))
-             and not isinstance(run["params"].get(name), bool) else None]
+             and not isinstance(run["params"].get(name), bool) else None, run["well"], run.get("finished_at")]
             for run in finished for name, value in (run.get("actuals") or {}).items()
         ]
         if any(run.get("quality") == "uncertain" for run in runs[:index + 1]):
