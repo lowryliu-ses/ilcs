@@ -35,7 +35,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | 服务 | `services/` | 用例编排，一个方法 = 一个事务 | 写 SQL 细节、拼 HTTP |
 | 仓储 | `repositories/` | 聚合读写、作用域过滤、时间线查询 | 业务规则 |
 | 领域 | `domain/` | 纯函数与纯数据：能力匹配、方法校验、节点类型、依赖图、排程、多批次顺序搜索与可选 CP-SAT 模型、载具转运计划、开跑检查、恢复策略、条件矩阵、库存三量、资质判定、正式统计 | 碰数据库、碰时钟、碰框架 |
-| 适配 | `adapters/` | 设备侧契约、模拟实现；设备实现 ILCS 契约的 `http_json_v1` / `sila2_v1` / `opcua_v1` / `modbus_tcp_v1`；按设备自有接口映射的 `opcua_map_v1` / `modbus_map_v1` / `line_command_v1` / `rest_map_v1`（共用 `jobs.py` 作业台账）；驱动目录与保存前的配置检查 `catalog.py`；接入验收清单 `acceptance.py` | 业务状态迁移 |
+| 适配 | `adapters/` | 设备侧契约、模拟实现；只经两个契约接设备：`sila2_v1`（SiLA 2 设备服务：驱动宿主 `devices/host` 上的协议插件，或厂商的 SiLA 服务器）与 `http_json_v1`（HTTPS 网关）；驱动目录与保存前的配置检查 `catalog.py`；接入验收清单 `acceptance.py`。协议驱动（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令）都在驱动宿主里 | 业务状态迁移 |
 | 模型 | `models/` | SQLAlchemy 表定义 | 行为 |
 | 基础 | `core/` | 配置、会话、`Quantity` 类型、版本校验、访问上下文、时钟、随机数、口令与 JWT、领域异常、设备主机白名单（`hosts.py`） | 领域概念 |
 
@@ -121,13 +121,13 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **设备接入：改配置即生效，改代码不进 ILCS 进程**。接一台设备分三种情况，风险不同，做法也不同：
 
-- *改配置*（地址、点表、命令、状态码、超时）：「工位与接入 → 设备连接」签名保存，`config_version` 加 1；执行器每轮从库里读适配器，驱动实例按 `config_version` 缓存（`adapters/registry.adapter_for`），下一轮就换成新配置，不用重启。设备主机白名单 `ILCS_ADAPTER_ALLOWED_HOSTS` 可以写网段（`10.20.1.0/24`）与域名后缀（`.lab.internal`，`core/hosts.py`），设备网段里新接的设备不用改 `.env`；主机名不做 DNS 解析去比网段（解析结果会变）；正式环境不许 `*`、IPv4 网段不宽于 /16。
-- *一类设备怎么接*：存成**设备接入模板**（`services/template_service.py`）——驱动 + 映射配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理；起草人不能发布本人起草的模板，发布要签名，发布后内容由触发器冻结；工位 = 模板的某一版 + 自己的连接参数（`adapters.template_id / template_connection`，`config` 仍是合并后的完整配置，驱动照旧只读它）。新修订发布时旧版退役，但不自动推给工位：模板页列出还在用旧修订的工位，逐台切换、重新验收。模板的导出文件（`ilcs-device-template/1`，带内容摘要）就是设备模块交付的 `profile.json`，导入一律成草稿，摘要对不上（导出后被改过）拒绝。
-- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——设备模块（`devices/gateway/<模块>/`）基于 `devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
+- *改配置*（地址、证书、超时；点表、命令、状态码这类映射改在驱动宿主的设备文件里）：「工位与接入 → 设备连接」签名保存，`config_version` 加 1；执行器每轮从库里读适配器，驱动实例按 `config_version` 缓存（`adapters/registry.adapter_for`），下一轮就换成新配置，不用重启。设备主机白名单 `ILCS_ADAPTER_ALLOWED_HOSTS` 可以写网段（`10.20.1.0/24`）与域名后缀（`.lab.internal`，`core/hosts.py`），设备网段里新接的设备不用改 `.env`；主机名不做 DNS 解析去比网段（解析结果会变）；正式环境不许 `*`、IPv4 网段不宽于 /16。
+- *一类设备怎么接*：存成**设备接入模板**（`services/template_service.py`）——驱动 + 配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理；起草人不能发布本人起草的模板，发布要签名，发布后内容由触发器冻结；工位 = 模板的某一版 + 自己的连接参数（`adapters.template_id / template_connection`，`config` 仍是合并后的完整配置，驱动照旧只读它）。新修订发布时旧版退役，但不自动推给工位：模板页列出还在用旧修订的工位，逐台切换、重新验收。模板的导出文件（`ilcs-device-template/1`，带内容摘要）就是设备模块交付的 `profile.json`，导入一律成草稿，摘要对不上（导出后被改过）拒绝。
+- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——新协议写成驱动宿主（`devices/host`）的插件，经 `sila2_v1` 接；厂家 SDK 的设备写设备模块（`devices/gateway/<模块>/`），基于 `devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
 
 驱动在 `adapters/catalog.py` 声明自己的配置项，连同嵌套结构（`fields` 固定键、`entries` 任意键的表、`items` 列表、`options` 可选值、`ref` / `key_ref` 引用点名 / 能力 / 参数、`shorthand` 简写、`single` 单项列表）；界面按它出通用表单（`features/stations/ConfigForm.tsx`，设备连接与接入模板共用，表单编辑不了的写法就地按 JSON 改，完整 JSON 随时可切），`GET /drivers` 另给每项能力的起步写法 `capability_examples`（按能力字典的参数生成）。保存前按它查缺项与类型、再构造一次驱动实例（不连设备）——驱动自己的校验（正则、点表、白名单）就在构造时，配错了当场拒绝（`adapter_config_invalid`），不用等到测试连接；未登记的键（顶层与嵌套结构里的）只提醒。只有驱动、配置、凭据真的变了才检查：适配器坏了的时候，停用它、改说明不被挡。
 
-设备上还有可能在动作的指令（在途、已保持、结果未知且可能已送达，`CommandRepository.acting_on_station`）时，只放行说明、停用、超时与探测周期（`domain/adapter_rules.busy_blocked_changes`）：换了驱动或连接目标，新实例就查不回原指令——设备侧去重的驱动查不到它，批次判故障转人工；走作业台账的映射驱动更糟，台账按工位存，会拿旧作业去读新地址的状态，读到空闲就判完成。试点切换脚本守同一条规矩。
+设备上还有可能在动作的指令（在途、已保持、结果未知且可能已送达，`CommandRepository.acting_on_station`）时，只放行说明、停用、超时与探测周期（`domain/adapter_rules.busy_blocked_changes`）：换了驱动或连接目标，新实例就查不回原指令——设备服务按指令号记作业，换成另一台设备服务就查不到它，批次判故障转人工；改了状态映射，同一条作业就可能按另一套状态码判结论。试点切换脚本守同一条规矩。
 
 **接入验收与闸门**（`adapters/acceptance.py` + `services/acceptance_service.py`）。验收清单三级：只读（身份与方法目录、健康检查、契约声明、查询不存在的指令号）、动作（正常完成、同一指令号重复提交、重建驱动后按指令号查回、保持、终止）、故障（回执丢失、设备忙、联锁、失联）。界面申请只登记一条排队记录，**由执行器执行**：执行器是唯一驱动设备的进程，同一工位的设备 I/O 在它那里串行，验收不会和投递、轮询抢同一个串口；界面上的测试连接、读目录、重连在验收执行中被拒。动作级要签名并写明现场批准人（DEC-02），等工位上没有可能在动作的指令才开始，排队期间新的动作指令留在队列里（免得一直等不到空档）；故障项目只在非正式环境、设备自报为模拟器、登记了模拟设备统一控制口（`devices/simulators/common/control.py`，适配器配置里的 `simulator_control`）时跑。「重复提交只动作一次」要读得到设备侧动作次数才判通过：设备认 ILCS 指令号时按指令号数，不认的（串口命令、PLC 点表、天平、车队）数设备的总动作次数。验收记录出了结论就由触发器冻结、永不删除，报告带驱动、固件、配置版本、配置摘要与模板版本。
 
@@ -145,9 +145,9 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **参数规格与单位**（`domain/params.py`、迁移 `0038`）。能力的 `params` 仍是「键 → 显示名称」，界面与历史快照照旧读它；类型（数值 / 整数）、单位、是否必填另存在 `param_specs`，没登记的按「数值、单位未登记、必填」——有规格之前的行为。单位只做同一量纲内的十进制比例换算（g ↔ mg、mL ↔ μL），温度这类只认同名单位；不从显示名称里拆单位，由负责人在能力字典里登记。用到单位的地方：因子作用参数时因子单位必须与参数单位相同（水平原样下发，mL 当 μL 差一千倍）；设备方法参数登记的单位必须与能力相同；前馈换算。非必填参数流程里可以不写，设备按自己的缺省值执行；整数参数填小数校验不通过。前后端两处方法校验同时改（见「方法校验的两处实现」）。
 
-**选项型参数**（`param_specs` 的 `type: enum` + `options`）。溶剂种类、催化剂、测试协议名、气氛这类「选哪个」的参数：值是登记的选项之一，原样作为文字下发，没有单位、不能比大小。工位极限写「允许哪些选项」（登记选项的子集，`domain/params.limit_issues`；新接一项能力时缺省全部允许），`station_fits` 按 `window_fits` 判：数值落区间、选项在允许的列表里。设备方法可以收窄允许的选项并给缺省选项（`options` / `default`，不写上下限与单位）。方案因子作用于选项型参数时，水平必须是它的选项（`matrix.target_issues` 逐个核对并按工位允许的选项找可承接工位），按孔位把文字写进指令的 `params.wells`；闭环设计空间对类别因子写 `bounds.{因子}.options`，提案里的设计点逐个核对（`matrix.point_issues`），外部优化器因此也能在溶剂、催化剂之间挑。前馈只做「来源值 × 系数」的数值换算，不能作用于选项型参数；它也不能当投料量参数。配液模板的固定步骤参数与实验参数同样可以是选项。能力改了参数类型（数值 ↔ 选项）时各工位极限里的对应条目清掉、要在工位上重填（不替工位放宽能做的范围），选项减少时去掉已经没有的选项。点表映射驱动（`opcua_map_v1` / `modbus_map_v1`）的 `write` 可写 `{"point", "map": {选项: 设备代码}}`，没登记的选项拒绝下发；按 ILCS 契约接的设备收到的是文字本身。
+**选项型参数**（`param_specs` 的 `type: enum` + `options`）。溶剂种类、催化剂、测试协议名、气氛这类「选哪个」的参数：值是登记的选项之一，原样作为文字下发，没有单位、不能比大小。工位极限写「允许哪些选项」（登记选项的子集，`domain/params.limit_issues`；新接一项能力时缺省全部允许），`station_fits` 按 `window_fits` 判：数值落区间、选项在允许的列表里。设备方法可以收窄允许的选项并给缺省选项（`options` / `default`，不写上下限与单位）。方案因子作用于选项型参数时，水平必须是它的选项（`matrix.target_issues` 逐个核对并按工位允许的选项找可承接工位），按孔位把文字写进指令的 `params.wells`；闭环设计空间对类别因子写 `bounds.{因子}.options`，提案里的设计点逐个核对（`matrix.point_issues`），外部优化器因此也能在溶剂、催化剂之间挑。前馈只做「来源值 × 系数」的数值换算，不能作用于选项型参数；它也不能当投料量参数。配液模板的固定步骤参数与实验参数同样可以是选项。能力改了参数类型（数值 ↔ 选项）时各工位极限里的对应条目清掉、要在工位上重填（不替工位放宽能做的范围），选项减少时去掉已经没有的选项。驱动宿主的点表映射插件（`opcua_map` / `modbus_map`）的 `write` 可写 `{"point", "map": {选项: 设备代码}}`，没登记的选项拒绝下发；按 ILCS 契约接的设备收到的是文字本身。
 
-**程序表参数**（`param_specs` 的 `type: program`，`domain/program.py`）。充放电工步、升温程序、梯度洗脱这类「一张表」的参数：能力里登记列（数值 / 整数 / 选项列、单位、每步是否必填）与最多行数，值是行的列表，没填的格子是这一步不用这一列。数值格可以写 `{"param": "rate"}` 引用本步另一个数值参数（单位要与列相同、这一步要给它值）：程序结构随流程审批冻结，要变的量做成参数，方案因子按孔位改它；下发前 `program.resolve_command` 把引用代成具体的数——被引用的参数按孔位不同时每个孔位各代一份写进 `params.wells`，代不出来的整条指令不下发（`_refuse_unsent`），设备收到的程序表里只有具体的数。工位极限按列写 `{列: 极限}`，没写的列不约束（登记了这个参数就是能跑程序，列极限是额外的安全边界）；引用的格子不按列极限查，查被引用参数自己的极限。设备方法可以给缺省程序表（标准化成工步），流程步骤没写时补进去。程序表不能作因子水平、不能取自上游结果、不能当用量参数；点表映射驱动写不进单个点，要用按 ILCS 契约接的驱动或设备网关。能力改了列定义时工位上删掉的列的列极限一并去掉。流程编辑器、设备方法、工位极限里都有逐步 / 逐列的编辑界面（`shared/program.tsx`）。
+**程序表参数**（`param_specs` 的 `type: program`，`domain/program.py`）。充放电工步、升温程序、梯度洗脱这类「一张表」的参数：能力里登记列（数值 / 整数 / 选项列、单位、每步是否必填）与最多行数，值是行的列表，没填的格子是这一步不用这一列。数值格可以写 `{"param": "rate"}` 引用本步另一个数值参数（单位要与列相同、这一步要给它值）：程序结构随流程审批冻结，要变的量做成参数，方案因子按孔位改它；下发前 `program.resolve_command` 把引用代成具体的数——被引用的参数按孔位不同时每个孔位各代一份写进 `params.wells`，代不出来的整条指令不下发（`_refuse_unsent`），设备收到的程序表里只有具体的数。工位极限按列写 `{列: 极限}`，没写的列不约束（登记了这个参数就是能跑程序，列极限是额外的安全边界）；引用的格子不按列极限查，查被引用参数自己的极限。设备方法可以给缺省程序表（标准化成工步），流程步骤没写时补进去。程序表不能作因子水平、不能取自上游结果、不能当用量参数；驱动宿主的点表映射插件写不进单个点，要用按 ILCS 契约接的设备或设备网关。能力改了列定义时工位上删掉的列的列极限一并去掉。流程编辑器、设备方法、工位极限里都有逐步 / 逐列的编辑界面（`shared/program.tsx`）。
 
 **前馈参数**（`domain/bindings.py` + `services/binding_service.py`）。设备步骤的参数可以取自上游步骤的结果：`bindings: {参数: {source_step_id, field, scope, unit, coefficient, expect}}`，设定值 = 来源值 × 系数，换算到参数单位。来源是上游设备步骤（最近检查点回执；逐样本取 `delivered.wells` 里该样本设备孔位的值，与逐孔质检同一口径）或人工步骤（最近一次完成的记录；逐样本取按样本录入的字段 `per_sample`，值是「样本编号 → 数值」）；系数写在流程里（随流程审批冻结），或引用方案里的一个因子（按样本继承的水平取值，随方案审批冻结；方案校验多一项「前馈系数引用的因子」）；不写系数就是纯单位换算。只做「乘系数 + 单位换算」，不支持通用表达式：前馈改的是下发给设备的设定值，规则必须能逐项核对。`expect` 是流程批准的窗口：排程时值还不知道，工位极限必须覆盖整个预期范围（`capability.station_fits`）；下发时（`BatchService.issue_command`）求值，任一样本缺值、检查点质量不是 good（现场核实写入的 uncertain 不自动采用）、超出预期范围 / 设备方法范围 / 工位极限，整条指令都不下发（`_refuse_unsent`，没离开系统），挂起报警并列出样本与数值——少一个样本的设定值，不拿别的样本或缺省值顶上。逐样本的值写进 `params.wells`，与矩阵逐孔参数同一个位置（处理对象的投影 `BatchService._step_projection` 两者共用）；每个样本的来源检查点 / 记录、原始值与单位、系数及出处、计算值记在 `commands.bindings`，下发时算一次、随指令冻结，幂等重投返回原指令不重新求值。报告执行记录写明「参数 ← 来源.字段 × 系数」与计算值范围，来源记录后来被重做取代时注明。物料仍按流程 BOM 预留（与固定参数一致，BOM 按预期上限准备），实际消耗照旧按设备回报入账、超出预留报警。子流程展开时绑定的来源步骤一并改名；因子不能再作用于已声明前馈的参数；方法缺省值不补给前馈参数。
 
@@ -331,6 +331,10 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | `0046_result_series` | 曲线型检测值：`result_values` 加 `value_series`（JSON，`{traces: [{name, x, y}]}`）。只加列，已有结果不变 |
 | `0047_plan_sample_policy` | 方案指定的样本可以接着用上一步的产物：`plans` 加 `sample_policy`（fresh 一瓶一配方 / continue 接着用），已有方案都是 fresh |
 | `0048_sample_merge` | 样本合并：`physical_samples` 加 `parent_ids`（JSON，合并样的全部母样；`parent_id` 仍是第一个）。只加列，已有样本为空 |
+| `0049_point_writes` | 手动写设备点位：新表 `point_writes`（工位、点、值、原因、签名、申请人，执行器执行后的前后值与结论）。出了结论的记录由触发器禁止修改、删除 |
+| `0050_driver_config_gate` | 驱动配置摘要闸门：`adapters` 加 `driver_info`（设备服务最近一次报的插件与配置摘要）、`approved_driver`（验收通过时批准的那份）、`driver_approval`（签名批准的变更），`acceptance_runs` 加 `driver_info` |
+| `0051_awaiting_handshake` | `adapters` 加 `awaiting_handshake_since`：配置保存后在等第一次握手，宽限期内不按失联报警 |
+| `0052_inprocess_drivers_retired` | 结构不变：协议驱动移出 ILCS（`modbus_map_v1`、`opcua_map_v1`、`rest_map_v1`、`line_command_v1`、`modbus_tcp_v1`、`opcua_v1` 改由驱动宿主的插件承担），库里还有真实工位用这几个驱动时拒绝升级，先把设备迁到驱动宿主（工位改 `sila2_v1`）或切回内置模拟 |
 
 规则：
 
@@ -357,8 +361,8 @@ cd ilcs && api/.venv/bin/python scripts/smoke.py   # 端到端闭环（需 api �
 |---|---|---|
 | 数据库指令队列 + LISTEN/NOTIFY 唤醒 | NATS JetStream（多执行器分片、跨站点） | `repositories/execution.py`、`core/events.py` 与执行器循环 |
 | JWT + 本地口令 | Keycloak OIDC | `core/security.py`、`api/deps.py`；服务身份不变 |
-| 模拟适配器 | 厂商专用工位适配器 | 能用映射驱动描述的设备只写设备接入模板（`profile.json`）；厂家 SDK / 私有协议的设备按 `devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码。确实要进 ILCS 进程的新协议才在 `adapters/drivers/` 下实现 `adapters/base.py` 契约、在 `adapters/registry.py` 注册并在 `adapters/catalog.py` 声明配置项。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
-| 映射驱动在 ILCS 进程内，网关模块走 `http_json_v1` | 驱动移出 ILCS，放进独立的驱动项目，每台设备一个 SiLA 服务，ILCS 只经 SiLA 接设备 | 契约见 `devices/contracts/sila2/README.md`；驱动宿主 `devices/host`（试点中）托管从 ILCS 抽出的映射驱动；ILCS 的 `sila2_v1` 已能读写点位、按错误标识定结论，驱动配置摘要闸门在 `ExecutorLoop._track_driver` 与接入验收收尾。设备都切过去之后删掉 ILCS 里的映射驱动、作业台账与协议依赖 |
+| 模拟适配器 | 厂商专用工位适配器 | 能用映射插件描述的设备只写驱动宿主的设备文件（设备模块交付 profile）；厂家 SDK / 私有协议的设备按 `devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码；新协议写成驱动宿主的插件。ILCS 进程里不再放协议驱动。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
+| 映射驱动在 ILCS 进程内，网关模块走 `http_json_v1` | 驱动移出 ILCS，放进独立的驱动项目，每台设备一个 SiLA 服务，ILCS 只经 SiLA 接设备 | 已完成（2026-10-04）：驱动宿主 `devices/host` 托管全部协议插件（四个映射插件 + 两个任务契约插件），ILCS 只留 `sila2_v1` 与 `http_json_v1`；契约见 `devices/contracts/sila2/README.md`，驱动配置摘要闸门在 `ExecutorLoop._track_driver` 与接入验收收尾；库里还有工位用已移出的驱动时迁移 0052 拒绝升级。下一步 devices/ 独立成项目 |
 | 模拟遥测序列与模拟原始曲线 | TimescaleDB 连续聚合 / 对象存储 | `ExecutionService.record_telemetry`、`ResultService.raw_curve_rows`；读接口不变 |
 | 本地文件存储 | 对象存储 | `services/file_service.py` 一处；接口返回的是文件 ID，不是路径 |
 | 自绘 SVG 图表 | uPlot | `web/src/shared/chart.tsx` |

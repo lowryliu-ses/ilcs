@@ -1,13 +1,14 @@
-"""测试用：在本进程里拉起各协议的外部模拟设备，并构造指向它们的适配器登记。
+"""测试用：在本进程里拉起各协议的外部模拟设备与驱动宿主，并构造指向它们的适配器登记。
 
-模拟设备走真实网络协议（Modbus TCP / OPC UA / HTTPS），驱动不打桩——测的就是驱动与设备之间那一段。
+模拟设备走真实网络协议（SiLA 2 / HTTPS / Modbus TCP / OPC UA / TCP 文本命令），驱动不打桩。ILCS 只经 sila2_v1、http_json_v1
+接设备：PLC、仪表、车队这类模拟设备挂到本进程起的驱动宿主上（`driver_host`），插件配置就是 `plc_config` / `line_config` /
+`fleet_config` 这几份——和现场同一条路。插件本身的测试在 devices/host/tests。
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 import socket
 import sys
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,13 +16,6 @@ ROOT = Path(__file__).resolve().parents[2]
 DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
 if str(DEVICES) not in sys.path:
     sys.path.insert(0, str(DEVICES))
-
-# 模拟 PLC 不认参数名：能力码与参数槽位由适配器配置给出（与试点切换脚本按工位限值编号的方式一致）
-MODBUS_MAP = {
-    "capabilities": {"cap.test": 1, "cap.vacuum_dry": 2, "cap.weigh": 3},
-    "params": {"mass": 1, "rate": 2, "temp": 3, "vacuum": 4, "vmax": 5},
-}
-MATERIALS = {"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}
 
 
 def free_port() -> int:
@@ -37,65 +31,6 @@ def silent_port():
         listener.bind(("127.0.0.1", 0))
         listener.listen(64)
         yield listener.getsockname()[1]
-
-class FreezableProxy:
-    """转发到本机某个端口的 TCP 代理。`freeze()` 之后一个字节都不再转发，连接还挂着：拔了网线、交换机断了就是这样
-    （没有 RST，客户端只能等超时）。"""
-
-    def __init__(self, target_port: int):
-        self.target_port = target_port
-        self.frozen = threading.Event()
-        self.listener = socket.socket()
-        self.listener.bind(("127.0.0.1", 0))
-        self.listener.listen(16)
-        self.port = self.listener.getsockname()[1]
-        self.sockets: list[socket.socket] = []
-        threading.Thread(target=self._accept, daemon=True).start()
-
-    def freeze(self) -> None:
-        self.frozen.set()
-
-    def _accept(self) -> None:
-        while True:
-            try:
-                inbound, _ = self.listener.accept()
-            except OSError:
-                return
-            outbound = socket.create_connection(("127.0.0.1", self.target_port))
-            self.sockets += [inbound, outbound]
-            for source, target in ((inbound, outbound), (outbound, inbound)):
-                threading.Thread(target=self._pump, args=(source, target), daemon=True).start()
-
-    def _pump(self, source: socket.socket, target: socket.socket) -> None:
-        while True:
-            try:
-                data = source.recv(65536)
-            except OSError:
-                return
-            if not data:
-                return
-            if not self.frozen.is_set():
-                try:
-                    target.sendall(data)
-                except OSError:
-                    return
-
-    def close(self) -> None:
-        for sock in [self.listener, *self.sockets]:
-            try:
-                sock.close()
-            except OSError:
-                pass
-
-
-@contextmanager
-def freezable_proxy(target_port: int):
-    proxy = FreezableProxy(target_port)
-    try:
-        yield proxy
-    finally:
-        proxy.close()
-
 
 
 def record(protocol: str, config: dict, credential_ref: str = "", **flags):
@@ -135,25 +70,6 @@ def _device(device_id: str, profile: str = "generic", task_seconds: float = 0.3,
     from simulators.common.device import SimulatedDevice
 
     return SimulatedDevice(device_id, profile, task_seconds=task_seconds, **kwargs)
-
-
-@contextmanager
-def modbus_sim(device_id: str = "SIM-MB-T", **device):
-    from simulators.modbus_device.server import SimulatorRunner, parse
-
-    port = free_port()
-    args = parse(["--device-id", device_id, "--address", "127.0.0.1", "--port", str(port)])
-    runner = SimulatorRunner(args, _device(device_id, **device))
-    runner.start()
-    try:
-        yield runner.modbus.device, runner, port
-    finally:
-        runner.stop()
-
-
-def modbus_config(port: int, **extra) -> dict:
-    return {"host": "127.0.0.1", "port": port, "request_timeout_sec": 1, "connect_timeout_sec": 1,
-            "probe_interval_sec": 0.5, **MODBUS_MAP, **extra}
 
 
 @contextmanager
@@ -443,15 +359,16 @@ if str(ROOT / "devices" / "host") not in sys.path:
     sys.path.append(str(ROOT / "devices" / "host"))
 
 
-def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN) -> Path:
-    """驱动宿主的现场目录：host.json、devices/<设备>.json、令牌文件；状态目录在里面。已有的设备文件按新内容覆盖。"""
+def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN, **host) -> Path:
+    """驱动宿主的现场目录：host.json、devices/<设备>.json、令牌文件；状态目录在里面。已有的设备文件按新内容覆盖。
+    `host` 补充 host.json（如 credential_root：插件读证书、凭据文件的目录）。"""
     import json
 
     (root / "devices").mkdir(parents=True, exist_ok=True)
     (root / "tokens.txt").write_text(token + "\n", encoding="utf-8")
     (root / "host.json").write_text(json.dumps({
-        "environment": "development", "address": "127.0.0.1", "allowed_hosts": "127.0.0.1",
-        "state_dir": "state", "tokens_file": "tokens.txt",
+        "environment": "development", "address": "127.0.0.1", "allowed_hosts": "127.0.0.1,localhost",
+        "state_dir": "state", "tokens_file": "tokens.txt", **host,
     }), encoding="utf-8")
     for key, device in devices.items():
         (root / "devices" / f"{key}.json").write_text(json.dumps(device, ensure_ascii=False), encoding="utf-8")
@@ -474,8 +391,8 @@ def run_host(root: Path):
 
 
 @contextmanager
-def driver_host(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN):
-    with run_host(write_host_site(root, devices, token)) as site:
+def driver_host(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN, **host):
+    with run_host(write_host_site(root, devices, token, **host)) as site:
         yield site
 
 

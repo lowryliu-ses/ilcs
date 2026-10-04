@@ -5,8 +5,9 @@
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署。设备侧是各设备模块的模拟容器
 （`devices/gateway/<模块>/deploy/compose.yml`，接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
 thermostat-sim、potentiostat-sim）ILCS 经 `http_json_v1` 走 HTTPS + 令牌接，网关自报为模拟器；电芯检测仪表是映射模块
-（k2450-sim、k2400-sim、bt3562-sim），ILCS 用内置的 `line_command_v1` 直接连仪表口，另登记模拟设备的统一控制口。
-和接真机是同一条路：
+（k2450-sim、k2400-sim、bt3562-sim），映射在驱动宿主里（devices/host 的 line_command 插件，本机现场 devices/host/sites/local），
+ILCS 用 `sila2_v1` 接驱动宿主（scripts/load-driver-host-devices.py 的那三台），另登记模拟设备的统一控制口。
+和接真机是同一条路（驱动宿主要先起来）：
 
     docker compose -f devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 每个模块各起一组
     docker compose -f devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
@@ -18,7 +19,8 @@ thermostat-sim、potentiostat-sim）ILCS 经 `http_json_v1` 走 HTTPS + 令牌�
 
 每台：能力（`cap.weigh`、`cap.thermostat`、`cap.echem`、`cap.cell_check` 没有就登记；`cap.ely.*` 用电解液线已有的）→
 实验区 → 占位资产 → 工位（先按内置模拟登记）→
-接入模板（工程师导入模块的 profile.json、QA 发布）→ 工位套用模板连到模拟网关（签名）→ 重连 → 等执行器跑完只读级验收；
+接入模板（工程师导入模块的 profile.json、QA 发布）→ 工位套用模板连到模拟网关（签名）→ 重连 → 等执行器跑完只读级验收
+（电芯检测仪表不套模板：连接改 sila2_v1 接驱动宿主）；
 `--acceptance` 再逐项能力申请动作级 + 故障项目验收（签名 + 批准说明）并等出结论。已有的先查后用，重复运行不会多建。
 
 工位的型号取占位资产（XPE206DRQ、RCT digital、QE Pro、Unichiller 012 ……），和电解液线设备方法的适用型号不同，排程不会把电解液线的步骤
@@ -68,7 +70,6 @@ CAPABILITIES = {
                      "sideEffect": "无：源 0 A 测电压或 1 kHz 小信号测内阻", "verify": ["夹具上的电芯"]},
     },
 }
-SIMCTL = "/run/secrets/ilcs/simctl"
 DEVICES: dict[str, dict[str, Any]] = {
     "balance": {
         "station": "ST-BAL-SIM", "name": "天平称量加料站（模拟）", "asset": "AS-BAL-SIM", "model": "XPE206DRQ",
@@ -118,21 +119,15 @@ DEVICES: dict[str, dict[str, Any]] = {
         "station": "ST-OCV-SIM", "name": "电芯开路电压 Keithley 2450（模拟）", "asset": "AS-OCV-SIM", "model": "2450",
         "vendor": "Keithley", "channels": 1, "channel_unit": "sample",
         "limits": {"cap.cell_check": {}},
-        "module": "scpi-cell-meter", "profile": "profile-keithley-2450.json", "simctl": "SIM-K2450-01",
-        "connection": {"transport": {"kind": "tcp", "host": "k2450-sim", "port": 5025},
-                       "expected_device_id": "ILCS-SIMULATOR-2450-01"},
-        "control": "http://k2450-sim:9900",
+        "module": "scpi-cell-meter", "driver_host": True,
         "acceptance": [("cap.cell_check", {})],
-        "summary": "SCPI over LAN（line_command_v1 直接连仪表），源 0 A 四线测开路电压",
+        "summary": "SCPI over LAN（经驱动宿主的 line_command 插件），源 0 A 四线测开路电压",
     },
     "k2400": {
         "station": "ST-OCV2-SIM", "name": "电芯开路电压 Keithley 2400（模拟）", "asset": "AS-OCV2-SIM", "model": "2400",
         "vendor": "Keithley", "channels": 1, "channel_unit": "sample",
         "limits": {"cap.cell_check": {}},
-        "module": "scpi-cell-meter", "profile": "profile-keithley-2400.json", "simctl": "SIM-K2400-01",
-        "connection": {"transport": {"kind": "serial", "port": "socket://k2400-sim:4001", "baudrate": 9600},
-                       "expected_device_id": "ILCS-SIMULATOR-2400-01"},
-        "control": "http://k2400-sim:9900",
+        "module": "scpi-cell-meter", "driver_host": True,
         "acceptance": [("cap.cell_check", {})],
         "summary": "SCPI over RS-232（模拟时串口服务器换成 socket://），源 0 A 测开路电压",
     },
@@ -140,10 +135,7 @@ DEVICES: dict[str, dict[str, Any]] = {
         "station": "ST-ACIR-SIM", "name": "电芯交流内阻 Hioki BT3562（模拟）", "asset": "AS-ACIR-SIM", "model": "BT3562A",
         "vendor": "Hioki", "channels": 1, "channel_unit": "sample",
         "limits": {"cap.cell_check": {}},
-        "module": "scpi-cell-meter", "profile": "profile-hioki-bt3562.json", "simctl": "SIM-BT3562-01",
-        "connection": {"transport": {"kind": "tcp", "host": "bt3562-sim", "port": 2323},
-                       "expected_device_id": "ILCS-SIMULATOR"},
-        "control": "http://bt3562-sim:9900",
+        "module": "scpi-cell-meter", "driver_host": True,
         "acceptance": [("cap.cell_check", {})],
         "summary": "SCPI over LAN，1 kHz 交流内阻（mΩ）+ 开路电压",
     },
@@ -220,17 +212,11 @@ def ensure_template(engineer: Actor, qa: Actor, device: dict[str, Any]) -> dict:
 
 def connect(engineer: Actor, operator: Actor, template: dict, device: dict[str, Any], timeout: float) -> None:
     station = device["station"]
-    if "connection" in device:  # 映射模块：直接连仪表口，另登记模拟设备的统一控制口（故障项目用）
-        connection = {**device["connection"], "simulator_control": {
-            "url": device["control"], "token_ref": f"file://{SIMCTL}/{device['simctl']}.token"}}
-        credential = ""
-        where = connection["transport"].get("host") or connection["transport"].get("port")
-    else:
-        device_id = device["device_id"]
-        connection = {"base_url": f"https://{device['host']}:8443/api/v1",
-                      "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
-        credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
-        where = connection["base_url"]
+    device_id = device["device_id"]
+    connection = {"base_url": f"https://{device['host']}:8443/api/v1",
+                  "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
+    credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
+    where = connection["base_url"]
     adapter = engineer.get(f"/stations/{station}/adapter")
     if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
             or adapter.get("credential_ref") != credential:
@@ -284,6 +270,14 @@ def physical_acceptance(engineer: Actor, device: dict[str, Any]) -> None:
            + (f"，跳过 {'、'.join(skipped)}" if skipped else ""))
 
 
+def _driver_host_script():
+    """电芯检测仪表经驱动宿主接：连接与验收用 load-driver-host-devices.py 的那三台。"""
+    spec = importlib.util.spec_from_file_location("load_driver_host_devices", HERE / "load-driver-host-devices.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def register(team: dict[str, Actor], keys: list[str], args: argparse.Namespace) -> None:
     engineer, qa, operator = team["engineer"], team["qa"], team["operator"]
     step("能力与实验区")
@@ -293,6 +287,13 @@ def register(team: dict[str, Actor], keys: list[str], args: argparse.Namespace) 
         device = DEVICES[key]
         step(f"{device['name']}：{device['summary']}")
         ensure_station(engineer, device)
+        if device.get("driver_host"):
+            host = _driver_host_script()
+            spec = host.STATIONS[device["station"]]
+            host.connect(engineer, operator, device["station"], spec, args.acceptance_timeout)
+            if args.acceptance:
+                host.physical_acceptance(engineer, device["station"], spec, args.acceptance_timeout)
+            continue
         template = ensure_template(engineer, qa, device)
         connect(engineer, operator, template, device, args.acceptance_timeout)
         if args.acceptance:

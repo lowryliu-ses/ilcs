@@ -1,5 +1,5 @@
-"""ILCS PLC 模拟设备：厂家自有点表的 PLC，按 `--protocol opcua|modbus` 暴露，系统侧用 `opcua_map_v1` /
-`modbus_map_v1` 驱动接入。它不实现任何 ILCS 任务契约——这正是点表映射驱动要对接的情形。
+"""ILCS PLC 模拟设备：厂家自有点表的 PLC，按 `--protocol opcua|modbus` 暴露，系统侧经驱动宿主的
+`opcua_map` / `modbus_map` 插件接入。它不实现任何 ILCS 任务契约——这正是点表映射插件要对接的情形。
 
 PLC 程序（两种协议相同）：设定值 SP_<名>、程序号 RecipeNo、工序 Operation、指令号 JobId 由上位写入；
 上位给 CmdStart 一个上升沿就开始作业（把 JobId 锁存到 JobLatched），CmdHold / CmdResume / CmdAbort / CmdAck

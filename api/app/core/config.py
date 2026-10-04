@@ -73,9 +73,6 @@ class Settings(BaseSettings):
     # 接入验收里等一个动作做完的最长秒数（正常完成、保持后续跑、丢回执后按指令号查回都按它等）。
     # 要比验收用的那个动作长：模拟充放电柜一个循环 60 秒
     acceptance_poll_timeout_sec: float = 180.0
-    # 驱动自记的作业台账（串口命令、PLC 点表、REST 映射这类设备不认识 ILCS 指令号）。
-    # 必须放持久卷：执行器重启后要靠它按原指令号回答「设备上怎样了」。留空 = file_root 的上一级 /adapter-state
-    adapter_state_root: str = ""
 
     # ---------- 出向事件（Webhook） ----------
     # 只向列出的主机投递；正式环境只允许 https。不跟随重定向：重定向可以把请求带出允许清单
@@ -182,12 +179,6 @@ class Settings(BaseSettings):
     def simulation_allowed(self) -> bool:
         """模拟适配器只在开发与测试环境可用。正式环境没有例外开关。"""
         return self.environment != "production"
-
-    @property
-    def adapter_state_dir(self) -> str:
-        from pathlib import Path
-
-        return self.adapter_state_root or str(Path(self.file_root).resolve().parent / "adapter-state")
 
     def adapter_host_allowed(self, host: str) -> bool:
         """设备主机在不在白名单里。按主机名、IP、网段与域名后缀匹配；`*` 只在非正式环境生效。"""

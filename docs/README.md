@@ -6,7 +6,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [设备适配器配置模板](设备适配器配置模板.md) | 选哪种驱动、每种驱动的配置项、设备接入模板、接入验收、设备模块 |
+| [设备适配器配置模板](设备适配器配置模板.md) | ILCS 怎么接设备（`sila2_v1` / `http_json_v1`）、设备接入模板、环境采集、接入验收、设备模块；协议插件的写法在 [devices/host/插件配置.md](../devices/host/插件配置.md) |
 | [操作案例](操作案例.md) | 四个端到端演示案例与故障演练；`scripts/load-demo-cases.py` 按它导入 |
 | [电解液配液线](电解液配液线.md) | C 公司电解液产线（模拟阶段）：工位与能力、配液模板的生成规则、导入配方表、`scripts/load-electrolyte-line.py`、占位项与接真机前要替换的东西 |
 | [ProtoForge 联调全流程](ProtoForge联调全流程.md) | 本机 ProtoForge 三台设备（经驱动宿主）按多温度矩阵逐样本设定温度，跑通 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告；`scripts/load-protoforge-flow.py` |

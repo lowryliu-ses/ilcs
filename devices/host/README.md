@@ -12,9 +12,10 @@ ILCS 用 `sila2_v1` 连它，不再自己连 PLC、仪表。契约见 [contracts
 
 ## 协议插件
 
-`ilcs_host/plugins/` 是从 ILCS 的 `api/app/adapters/drivers` 抽出来的设备驱动，**配置写法与 ILCS 里的一模一样**：
-ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line_command_v1` / `modbus_tcp_v1` / `opcua_v1`
-配置（连同连接参数）原样放进设备文件的 `config` 就能用。
+`ilcs_host/plugins/` 是从 ILCS 的 `api/app/adapters/drivers` 搬过来的设备驱动（ILCS 里已经删掉，只经 `sila2_v1` /
+`http_json_v1` 接设备），**配置写法与原来 ILCS 里的一模一样**：工位原来的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` /
+`line_command_v1` / `modbus_tcp_v1` / `opcua_v1` 配置（连同连接参数）原样放进设备文件的 `config` 就能用，回执来源仍记原驱动名
+（如 `real:line_command_v1`）。每种插件的配置见 [插件配置.md](插件配置.md)。
 
 | 插件 | 设备 |
 |---|---|
@@ -30,10 +31,10 @@ ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line
 （分不清触发写没写下），之后按指令号问设备；设备状态报 unknown（契约里没有「运行中」）。
 
 ILCS 矩阵条件的逐孔参数（`ParametersJson` 里的 `wells`）由插件按孔位**依次执行**、回执按孔位回报，写法见
-[设备适配器配置模板](../../docs/设备适配器配置模板.md)「逐孔依次执行」。
+[插件配置](插件配置.md)「逐孔依次执行」；每个插件的配置写法见同一份文档。
 
 和 ILCS 那份只差两处：配置项读驱动宿主的 `settings`；明确失败带 SiLA 错误码（`AdapterError.code`），驱动宿主按它报定义
-错误，ILCS 按错误标识定故障类别，不靠报错文字。迁移期间 ILCS 里那几份冻结：只修 bug，修了两边一起改。
+错误，ILCS 按错误标识定故障类别，不靠报错文字。ILCS 里的原件已经删掉（ILCS 只留 sila2_v1、http_json_v1），插件只在这里维护。
 
 ## 现场配置
 

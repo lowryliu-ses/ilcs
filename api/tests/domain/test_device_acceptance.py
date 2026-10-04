@@ -1,4 +1,5 @@
-"""设备接入验收清单：对进程内的外部模拟设备跑一遍。模拟设备走真实协议，驱动不打桩。"""
+"""设备接入验收清单：对进程内的外部模拟设备跑一遍。模拟设备走真实协议，驱动不打桩；协议类设备挂在本进程起的
+驱动宿主上，ILCS 只经 SiLA 2 接（和现场一样）。"""
 from contextlib import contextmanager
 import importlib.util
 from pathlib import Path
@@ -101,15 +102,34 @@ def test_script_gateway_injector_uses_the_simulator_control_api(credential_root)
         assert injector.executions("never") == 0
 
 
-def test_job_ledger_driver_without_device_counts(credential_root):
-    """串口命令干燥箱不认 ILCS 指令号：去重靠作业台账。读不到设备侧动作次数（没登记控制口）时
+@contextmanager
+def _through_host(credential_root: Path, plugin: str, config: dict, supports: dict | None = None,
+                  credential_ref: str = ""):
+    """把一台模拟设备挂到本进程起的驱动宿主上，ILCS 这边用 sila2_v1 接它：返回 (适配器登记, 驱动工厂)。
+    插件配置就是以前进程内驱动的那份配置。"""
+    from app.adapters.drivers.sila2 import Sila2Adapter
+    from sim_harness import HOST_TOKEN, driver_host, free_port
+
+    token = credential_root / "host.token"
+    token.write_text(HOST_TOKEN, encoding="utf-8")
+    device = {"plugin": plugin, "port": free_port(), "simulator": True, "config": config,
+              "supports": supports or {"hold": True, "abort": True, "query": True, "dedup": True},
+              "credential_ref": credential_ref}
+    with driver_host(credential_root / "site", {"DEV-1": device}, credential_root=str(credential_root)):
+        rec = record("SiLA 2（驱动宿主）", {"host": "127.0.0.1", "port": device["port"], "insecure": True,
+                                           "request_timeout_sec": 5, "connect_timeout_sec": 2},
+                     f"file://{token}", driver="sila2_v1", kind="real")
+        yield rec, (lambda: Sila2Adapter(rec))
+
+
+def test_device_service_without_device_counts(credential_root):
+    """串口命令干燥箱经驱动宿主：去重靠驱动宿主的作业台账。读不到设备侧动作次数（没登记控制口）时
     「重复提交」只能判跳过，不硬判通过。"""
-    from app.adapters.drivers.line_command import LineCommandAdapter
     from sim_harness import line_config, line_sim
 
-    with line_sim(task_seconds=0.3) as (_, _, port):
-        rec = record("串口 / TCP 命令", line_config(port), driver="line_command_v1", kind="real")
-        report = _run(rec, lambda: LineCommandAdapter(rec), physical=True)
+    with line_sim(task_seconds=0.3) as (_, _, port), \
+            _through_host(credential_root, "line_command", line_config(port)) as (rec, factory):
+        report = _run(rec, factory, physical=True)
     states = {check.key: check.state for check in report.checks}
     assert states["complete"] == "pass" and states["restart_query"] == "pass", report.markdown()
     assert states["duplicate"] == "skip", report.markdown()
@@ -135,14 +155,13 @@ def test_script_runs_read_only_acceptance_against_a_registered_station(monkeypat
 def test_control_port_counts_motions_for_devices_without_command_ids(credential_root):
     """串口命令干燥箱不认 ILCS 指令号：统一控制口报设备的总动作次数，「重复提交只动作一次」照样能判。"""
     from app.adapters.acceptance import SimulatorControlInjector
-    from app.adapters.drivers.line_command import LineCommandAdapter
     from sim_harness import control_port, line_config, line_sim
 
-    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target()) as control:
-        rec = record("串口 / TCP 命令", line_config(port), driver="line_command_v1", kind="real")
+    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target()) as control, \
+            _through_host(credential_root, "line_command", line_config(port)) as (rec, factory):
         injector = SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
         assert injector.executions("ACC-x") is None and injector.motions() == 0
-        report = _run(rec, lambda: LineCommandAdapter(rec), physical=True, injector=injector)
+        report = _run(rec, factory, physical=True, injector=injector)
     states = {check.key: check.state for check in report.checks}
     assert report.ok, report.markdown()
     duplicate = next(check for check in report.checks if check.key == "duplicate")
@@ -154,19 +173,20 @@ def test_control_port_counts_motions_for_devices_without_command_ids(credential_
 def test_control_port_requires_its_token(credential_root):
     from app.adapters.acceptance import SimulatorControlInjector
     from app.adapters.base import AdapterError
-    from sim_harness import control_port, line_sim
+    from sim_harness import control_port, plc_sim
 
     token = credential_root / "simctl.token"
     token.write_text("s3cret-token")
-    with line_sim() as (device, runner, _), control_port(runner.control_target(), token="s3cret-token") as control:
+    with plc_sim("modbus") as (program, runner, _), control_port(runner.control_target(), token="s3cret-token") as control:
         with pytest.raises(AdapterError, match="401"):
             SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"}).set("busy")
         SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "token_ref": f"file://{token}"}).set("busy")
-        assert device.fault == "busy"
+        assert program.device.fault == "busy"
 
 
 def test_script_runs_without_the_database_from_an_adapter_file(tmp_path, credential_root, monkeypatch, capsys):
-    """设备开发者在自己电脑上：不连 ILCS 库，给一份适配器登记 JSON 就能跑完整清单（含故障项目）。"""
+    """设备开发者在自己电脑上：不连 ILCS 库，给一份适配器登记 JSON 就能跑完整清单（含故障项目）。这里登记的是
+    驱动宿主上的一台串口命令干燥箱（sila2_v1），模拟设备控制口照样登记在 ILCS 这边。"""
     import json
     import sys
 
@@ -177,24 +197,27 @@ def test_script_runs_without_the_database_from_an_adapter_file(tmp_path, credent
     spec.loader.exec_module(module)
     token = credential_root / "oven-control.token"
     token.write_text("oven-token")
-    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target(), token="oven-token") as control:
+    with line_sim(task_seconds=0.3) as (_, runner, port), control_port(runner.control_target(), token="oven-token") as control, \
+            _through_host(credential_root, "line_command", line_config(port)) as (rec, _):
         registration = {
-            "kind": "real", "driver": "line_command_v1", "protocol": "串口 / TCP 命令", "version": "vendor-1.2",
-            "config": {**line_config(port),
+            "kind": "real", "driver": "sila2_v1", "protocol": "SiLA 2（驱动宿主）", "version": "vendor-1.2",
+            "credential_ref": rec.credential_ref,
+            "config": {**rec.config,
                        "simulator_control": {"url": f"http://127.0.0.1:{control}", "token_ref": f"file://{token}"}},
         }
         path = tmp_path / "oven.json"
         path.write_text(json.dumps(registration, ensure_ascii=False), encoding="utf-8")
         monkeypatch.setattr(sys, "argv", [
             "device-acceptance.py", "--adapter", str(path), "--params", '{"temp": 120, "vacuum": 1}',
-            "--physical", "--faults", "--timeout", "10", "--json", str(tmp_path / "report.json"),
+            "--capability", "cap.vacuum_dry", "--physical", "--faults", "--timeout", "10",
+            "--json", str(tmp_path / "report.json"),
         ])
         assert module.main() == 0
     output = capsys.readouterr().out
     assert "设备接入验收报告：STANDALONE" in output and "| 同一指令号重复提交 | 通过 |" in output
     assert "| 回执丢失 | 通过 |" in output and "| 失联 | 通过 |" in output
     saved = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
-    assert saved["ok"] and saved["simulator"] and saved["driver"] == "line_command_v1"
+    assert saved["ok"] and saved["simulator"] and saved["driver"] == "sila2_v1"
 
 
 class StubbornDevice:
@@ -267,63 +290,56 @@ def test_cleanup_stops_what_acceptance_left_running_or_reports_it():
     assert _cleanup(None, ["ACC-T-lost"]).leftovers == ["ACC-T-lost"]
 
 
-PILOT_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet")
+HOST_SIMULATORS = ("plc_opcua", "plc_modbus", "opcua_task", "fleet", "line")
 
 
 @contextmanager
-def _pilot_simulator(kind: str, root: Path):
-    """一种试点模拟设备 + 它的统一控制口：返回 (适配器登记, 驱动工厂, 验收指令模板, 注入器)。"""
+def _host_simulator(kind: str, root: Path):
+    """一类模拟设备 + 它的统一控制口，挂在驱动宿主上（对应插件）：返回 (适配器登记, 驱动工厂, 验收指令模板, 注入器)。"""
     from app.adapters.acceptance import SimulatorControlInjector, default_template
     from sim_harness import (
-        control_port, fleet_config, fleet_sim, opcua_config, opcua_sim, plc_config, plc_sim, transfer,
+        control_port, fleet_config, fleet_sim, line_config, line_sim, opcua_config, opcua_sim, plc_config, plc_sim,
+        transfer,
     )
 
     if kind.startswith("plc_"):
-        from app.adapters.drivers.modbus_map import ModbusMapAdapter
-        from app.adapters.drivers.opcua_map import OpcUaMapAdapter
-
         protocol = kind.split("_", 1)[1]
         with plc_sim(protocol, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
-            config, credential = plc_config(protocol, port)
-            rec = record("PLC 点表", config, credential, driver=f"{protocol}_map_v1", kind="real")
-            implementation = OpcUaMapAdapter if protocol == "opcua" else ModbusMapAdapter
-            yield rec, (lambda: implementation(rec)), request("", params={"thickness": 180, "temp": 110},
-                                                              capability="cap.coat"), \
-                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+            config, _ = plc_config(protocol, port)
+            with _through_host(root, f"{protocol}_map", config) as (rec, factory):
+                yield rec, factory, request("", params={"thickness": 180, "temp": 110}, capability="cap.coat"), \
+                    SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
     elif kind == "opcua_task":
-        from app.adapters.drivers.opcua import OpcUaAdapter
-
         with opcua_sim(task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
-            config, credential = opcua_config(port)
-            rec = record("OPC UA TaskExecution", config, credential, driver="opcua_v1", kind="real")
-            yield rec, (lambda: OpcUaAdapter(rec)), request(""), \
-                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+            config, _ = opcua_config(port)
+            with _through_host(root, "opcua_task", config) as (rec, factory):
+                yield rec, factory, request(""), SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
+    elif kind == "line":
+        with line_sim(task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
+            with _through_host(root, "line_command", line_config(port)) as (rec, factory):
+                yield rec, factory, request(""), SimulatorControlInjector({"url": f"http://127.0.0.1:{control}"})
     else:
-        from app.adapters.drivers.rest_map import RestMapAdapter
-
         with fleet_sim(root, task_seconds=0.4) as (_, runner, port), control_port(runner.control_target()) as control:
             config, credential = fleet_config(port, root)
-            rec = record("REST 接口映射", config, credential, driver="rest_map_v1", kind="real")
             # 和执行器一样按缺省模板造验收指令：转运能力发 type = transfer，参数取验收缺省里的起止位置
             template = default_template("ST-SIM", {"cap.transfer": {}}, "cap.transfer", dict(transfer("").params))
             assert template.type == "transfer"
-            yield rec, (lambda: RestMapAdapter(rec)), template, \
-                SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
+            with _through_host(root, "rest_map", config, credential_ref=credential) as (rec, factory):
+                yield rec, factory, template, \
+                    SimulatorControlInjector({"url": f"http://127.0.0.1:{control}", "unit": "AGV-01"})
 
 
-@pytest.mark.parametrize("kind", PILOT_SIMULATORS)
-def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, tmp_path, monkeypatch):
-    """试点的每一类模拟设备都跑完整清单（动作 + 故障）：没有误判的不通过，也不留下没结束的验收指令。
+@pytest.mark.parametrize("kind", HOST_SIMULATORS)
+def test_every_simulator_passes_the_full_checklist_through_the_driver_host(kind, credential_root):
+    """每一类模拟设备都经驱动宿主（只走 SiLA 2）跑完整清单（动作 + 故障）：没有误判的不通过，也不留下没结束的验收指令。
 
-    模拟设备注入不了的故障（点表设备没有回执可丢）由控制口说明，清单判跳过。
+    模拟设备注入不了的故障（点表设备没有回执可丢）由控制口说明，清单判跳过。PLC 点表是异步交接（写下启动沿就算），
+    设备忙、联锁的拒绝之后查询才看得到；失联按设备服务报的判定时延（心跳超时）等足——这两项 ILCS 从 SiLA 驱动读。
     """
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "adapter_state_root", str(tmp_path / "adapter-state"))
     count = {"live": 0, "peak": 0}
 
     def counted(factory):
-        """数同时开着的驱动实例：每个实例占 OPC UA 一个会话、车队接口一条连接，轮询时不关会把设备占满。"""
+        """数同时开着的驱动实例：验收建的实例结束时都要关掉。"""
         def build():
             instance = factory()
             original = getattr(instance, "close", None)
@@ -342,14 +358,12 @@ def test_every_pilot_simulator_passes_the_full_checklist(kind, credential_root, 
 
         return build
 
-    with _pilot_simulator(kind, credential_root) as (rec, factory, template, injector):
+    with _host_simulator(kind, credential_root) as (rec, factory, template, injector):
         report = _run(rec, counted(factory), template, physical=True, injector=injector)
     states = {check.key: check.state for check in report.checks}
     assert report.ok and not report.leftovers, report.markdown()
     assert count["live"] == 0, "验收建的驱动实例结束时都要关掉"
     assert count["peak"] <= 12, f"同时开着 {count['peak']} 个驱动实例：轮询时用完就关"
-    offline = next(check.detail for check in report.checks if check.key == "offline")
-    assert "OperationalError" not in offline and "too many" not in offline, offline
     assert states["complete"] == "pass" and states["abort"] == "pass", states
     if kind in {"plc_opcua", "plc_modbus"}:
         assert states["lost_receipt"] == "skip", states

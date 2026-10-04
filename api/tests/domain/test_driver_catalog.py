@@ -1,4 +1,7 @@
-"""驱动目录的嵌套字段说明：界面按它出表单，检查按它提醒嵌套结构里拼错的键。"""
+"""驱动目录的字段说明：界面按它出表单，检查按它提醒嵌套结构里拼错的键。
+
+ILCS 只登记 sila2_v1 与 http_json_v1；协议驱动（PLC 点表、串口命令、REST……）的映射在驱动宿主的设备文件里，不在这里。
+"""
 import json
 from pathlib import Path
 
@@ -8,6 +11,10 @@ from app.adapters.catalog import DRIVERS, check_fields
 
 LIMITS = {"cap.heat": {"temp": [20, 200], "time": [1, 600]}, "cap.transfer": {}}
 PRESETS = Path(__file__).resolve().parents[3] / "devices" / "simulators" / "pilot-devices.json"
+
+
+def test_only_the_two_contract_drivers_are_registered():
+    assert set(DRIVERS) == {"sila2_v1", "http_json_v1"}
 
 
 @pytest.mark.parametrize("driver", sorted(DRIVERS))
@@ -22,58 +29,59 @@ def test_pilot_presets_pass_the_field_specs():
     stations = json.loads(PRESETS.read_text(encoding="utf-8"))["stations"]
     checked = 0
     for station, preset in stations.items():
-        if preset.get("driver") not in DRIVERS:
-            continue
+        assert preset.get("driver") in DRIVERS, f"{station} 用的驱动 {preset.get('driver')} 不在 ILCS 里"
         check = check_fields(preset["driver"], preset["config"], template=True)
         assert check.ok and check.warnings == [], (station, check.as_dict())
         checked += 1
-    assert checked >= 5
+    assert checked >= 3
 
 
 def test_misspelled_nested_keys_are_flagged_but_not_refused():
-    config = DRIVERS["opcua_map_v1"].template(LIMITS)
-    config["hold"] = {"point": "cmd_hold", "value": True, "pulse-ms": 300}
-    config["capabilities"]["cap.heat"]["start"]["pules_ms"] = 300
-    config["status"]["state"] = config["status"].pop("states")
-    check = check_fields("opcua_map_v1", config)
+    config = DRIVERS["http_json_v1"].template(LIMITS)
+    config["paths"]["helth"] = "/health"
+    config["simulator_control"] = {"url": "http://gw-sim:9900", "tokn_ref": "file:///run/secrets/x.token"}
+    config["environment"] = {"zone": "实验区 A", "points": {"humidity": "rh"}, "interval": 30}
+    check = check_fields("http_json_v1", config)
     assert check.ok, "拼错的键只提醒，不拒绝（驱动构造时另有校验）"
-    assert "hold.pulse-ms 不是登记的配置项：拼错的键会被驱动忽略，请核对" in check.warnings
-    assert any(item.startswith("capabilities.cap.heat.start.pules_ms ") for item in check.warnings)
-    assert any(item.startswith("status.state ") for item in check.warnings)
-
-
-def test_shorthand_and_single_item_forms_are_accepted():
-    config = DRIVERS["modbus_map_v1"].template(LIMITS)
-    config["heartbeat"] = "heartbeat"  # 就是 {"point": "heartbeat"}
-    config["capabilities"]["cap.heat"]["write"]["temp"] = {"point": "sp_temp", "map": {"快": 1}}
-    check = check_fields("modbus_map_v1", config)
-    assert check.ok and check.warnings == [], check.as_dict()
-
-    line = DRIVERS["line_command_v1"].template(LIMITS)
-    line["identity"] = [{"send": "*IDN?", "pattern": "^(?P<model>.+)$"}, {"send": "SN?", "pattern": "^(?P<serial>.+)$"}]
-    line["actuals"] = {"send": "PV?", "pattern": "^(?P<temp>[-0-9.]+)$"}
-    check = check_fields("line_command_v1", line)
-    assert check.ok and check.warnings == [], "身份命令、实测命令写一条或一列都行"
-    line["identity"][1]["patern"] = "x"
-    assert check_fields("line_command_v1", line).warnings == [
-        "identity[1].patern 不是登记的配置项：拼错的键会被驱动忽略，请核对",
+    assert "paths.helth 不是登记的配置项：拼错的键会被驱动忽略，请核对" in check.warnings
+    assert any(item.startswith("simulator_control.tokn_ref ") for item in check.warnings)
+    assert any(item.startswith("environment.interval ") for item in check.warnings)
+    assert check_fields("sila2_v1", {"host": "driver-host", "port": 50201, "taks": False}).warnings == [
+        "taks 不是 SiLA 2 登记的配置项：拼错的键会被驱动忽略，请核对",
     ]
+
+
+def test_shorthand_forms_are_accepted():
+    """方法目录写程序名或 {program, name, capability} 都行；对象里拼错的键照样提醒。"""
+    config = {"host": "driver-host", "port": 50211, "methods": ["OCV", {"program": "ACIR-OCV", "name": "内阻 + 电压"}]}
+    check = check_fields("sila2_v1", config)
+    assert check.ok and check.warnings == [], check.as_dict()
+    config["methods"][1]["nmae"] = "x"
+    assert check_fields("sila2_v1", config).warnings == [
+        "methods[1].nmae 不是登记的配置项：拼错的键会被驱动忽略，请核对",
+    ]
+
+
+def test_missing_and_mistyped_fields_are_problems():
+    assert any("缺少「主机」" in item for item in check_fields("sila2_v1", {"port": 50201}).problems)
+    assert any("（port）应是整数" in item for item in check_fields("sila2_v1", {"host": "h", "port": "50201"}).problems)
+    template = check_fields("sila2_v1", {"tasks": False}, template=True)
+    assert template.ok, "模板里连接参数可以不填，套用时由工位填"
+    assert "驱动 modbus_map_v1 没有登记" in check_fields("modbus_map_v1", {}).problems[0]
 
 
 def test_catalog_describes_nested_structures_for_the_form():
-    fields = {item["name"]: item for item in DRIVERS["modbus_map_v1"].as_dict(LIMITS)["fields"]}
-    points = fields["points"]
-    assert points["key_label"] == "点名" and points["entries"]["type"] == "object"
-    register = {item["name"]: item for item in points["entries"]["fields"]}
-    assert register["address"]["required"] and register["table"]["options"] == ["holding", "input", "coil", "discrete"]
-    capability = fields["capabilities"]
-    assert capability["key_ref"] == "capabilities" and capability["scope"] == "capability"
-    write = next(item for item in capability["entries"]["fields"] if item["name"] == "write")
-    assert write["key_ref"] == "params" and write["entries"]["shorthand"] == "point"
-    assert {item["name"] for item in write["entries"]["fields"]} == {"point", "map"}
-    status = {item["name"]: item for item in fields["status"]["fields"]}
-    assert status["point"]["ref"] == "points" and status["states"]["entries"]["options"] == [
-        "idle", "running", "held", "done", "failed",
-    ]
+    fields = {item["name"]: item for item in DRIVERS["http_json_v1"].as_dict(LIMITS)["fields"]}
+    paths = {item["name"] for item in fields["paths"]["fields"]}
+    assert paths == {"health", "submit", "query", "hold", "abort"}
+    control = fields["simulator_control"]
+    assert control["connection"] and {item["name"] for item in control["fields"]} >= {"url", "token_ref", "unit"}
+    environment = {item["name"]: item for item in fields["environment"]["fields"]}
+    assert environment["points"]["key_options"][:2] == ["temperature", "humidity"]
+    assert environment["points"]["entries"]["ref"] == "points"
+    methods = fields["methods"]
+    assert methods["type"] == "array" and methods["items"]["shorthand"] == "program"
+    sila = {item["name"]: item for item in DRIVERS["sila2_v1"].as_dict(LIMITS)["fields"]}
     # 平铺的字段不带多余的键：老界面照旧能读
-    assert set(fields["host"]) == {"name", "label", "type", "type_label", "required", "connection", "hint"}
+    assert set(sila["host"]) == {"name", "label", "type", "type_label", "required", "connection", "hint"}
+    assert sila["tasks"]["type"] == "boolean"

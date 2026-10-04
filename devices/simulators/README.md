@@ -1,41 +1,39 @@
 # ILCS 外部模拟设备
 
-在系统外部独立运行、走真实网络协议的模拟设备。系统侧把工位适配器配成对应的真实驱动接入，和接一台真设备
-走同一条路，用来在真机到位之前验证驱动、执行器、对账与异常处置。它们**不是**系统内置的模拟适配器。
+在系统外部独立运行、走真实网络协议的模拟设备。SiLA 2、HTTPS 网关模拟设备由 ILCS 直接接（`sila2_v1` / `http_json_v1`），
+其余挂到驱动宿主（devices/host）对应的插件上、ILCS 经 SiLA 2 接——和接一台真设备走同一条路，用来在真机到位之前验证插件、
+执行器、对账与异常处置。它们**不是**系统内置的模拟适配器。
 
 设备行为共用 `common/device.py`：长任务后台推进，可保持 / 恢复 / 终止，故障注入一致，`executions` 记录每次
 真正的物理动作——验收「不重复执行」就看它。协议层只做报文转换。其中两类设备有本质区别：
 
 - **认识 ILCS 指令号**（SiLA 2 / OPC UA TaskExecution / Modbus 任务寄存器 / HTTPS 网关）：设备自己按指令号去重、查询；
 - **不认识 ILCS 指令号**（PLC 点表、串口命令仪器、AGV 车队）：设备只知道「现在在做什么」，指令号、去重、
-  重启对账由 ILCS 驱动的作业台账负责——这是现场设备的常态。
+  重启对账由驱动宿主插件的作业台账负责——这是现场设备的常态。
 
-| 目录 | 协议 | 系统侧驱动 | 契约 / 点表 | 安全 |
+| 目录 | 协议 | 接法（ILCS 驱动 / 驱动宿主插件） | 契约 / 点表 | 安全 |
 |---|---|---|---|---|
 | `sila_device/` | SiLA 2（gRPC） | `sila2_v1` | `devices/contracts/sila2/TaskExecution.sila.xml` | TLS，自签证书 |
-| `opcua_device/` | OPC UA（ILCS TaskExecution 节点） | `opcua_v1` | `devices/contracts/opcua/TaskExecution.json` | Basic256Sha256 + SignAndEncrypt，双向证书 |
-| `modbus_device/` | Modbus TCP（ILCS 任务寄存器） | `modbus_tcp_v1` | `devices/contracts/modbus/TaskRegisters.json` | 无（隔离网段） |
+| `opcua_device/` | OPC UA（ILCS TaskExecution 节点） | 插件 `opcua_task` | `devices/contracts/opcua/TaskExecution.json` | Basic256Sha256 + SignAndEncrypt，双向证书 |
+| `modbus_device/` | Modbus TCP（ILCS 任务寄存器） | 插件 `modbus_task` | `devices/contracts/modbus/TaskRegisters.json` | 无（隔离网段） |
 | `http_gateway/` | HTTPS JSON（厂家 SDK 接口服务的样子；网关就是 `devices/gateway/ilcs_gateway`，去重与台账在网关里） | `http_json_v1` | docs/设备适配器配置模板.md「HTTPS JSON 网关驱动」 | TLS + Bearer 令牌 |
-| `plc_device/` | PLC 自有点表，`--protocol opcua` 或 `modbus` | `opcua_map_v1` / `modbus_map_v1` | 见 `plc_device/server.py` 文件头 | OPC UA 同上；Modbus 无 |
-| `line_device/` | 串口 / TCP 文本命令：`--dialect oven`（真空干燥箱温控仪表）或 `ur`（UR 仪表盘服务） | `line_command_v1` | 见 `line_device/server.py` 文件头 | 无（串口服务器 / 隔离网段） |
-| `fleet/` | AGV 车队 REST（MiR 机器人 API 子集） | `rest_map_v1` | 见 `fleet/server.py` 文件头 | Basic 认证（凭据文件） |
+| `plc_device/` | PLC 自有点表，`--protocol opcua` 或 `modbus` | 插件 `opcua_map` / `modbus_map` | 见 `plc_device/server.py` 文件头 | OPC UA 同上；Modbus 无 |
+| `line_device/` | 串口 / TCP 文本命令：`--dialect oven`（真空干燥箱温控仪表）或 `ur`（UR 仪表盘服务） | 插件 `line_command` | 见 `line_device/server.py` 文件头 | 无（串口服务器 / 隔离网段） |
+| `fleet/` | AGV 车队 REST（MiR 机器人 API 子集） | 插件 `rest_map` | 见 `fleet/server.py` 文件头 | Basic 认证（凭据文件） |
 
 ## 试点：示例工位各接一台（`docker compose --profile pilot`）
 
 | 工位 | Compose 服务 | 设备 ID | 驱动 |
 |---|---|---|---|
 | ST-01-A 高通量匀浆站 A | `sila-sim-slurry-a` | SIM-SLR-A | `sila2_v1` |
-| ST-02 中试匀浆罐 | `plc-sim-mixer`（Modbus） | SIM-MIX-01 | `modbus_map_v1` |
-| ST-03 涂布烘干线 | `plc-sim-coater`（OPC UA） | SIM-COAT-01 | `opcua_map_v1` |
-| ST-04 辊压冲切机 | `opcua-sim-calender` | SIM-CAL-01 | `opcua_v1` |
 | ST-06 手套箱组装线 | `sila-sim-lh` | SIM-LH-01 | `sila2_v1` |
 | ST-07 充放电测试柜 | `gateway-sim-cycler`（8 通道） | SIM-CYC-01 | `http_json_v1` |
-| AGV-01 / AGV-02 | `fleet-sim` | AGV-01 / AGV-02 | `rest_map_v1` |
-| ARM-01 手套箱机械臂（演示导入时登记） | `line-sim-arm`（UR 方言） | SIM-ARM-01 | `line_command_v1` |
 
-ST-01-B 高通量匀浆站 B、ST-05 真空干燥与称重站不接外部模拟设备，用系统内置的模拟适配器（从外部模拟设备切回来：`configure-pilot-adapters.py simulate --station ST-01-B --station ST-05`）。
+其余示例工位（ST-01-B、ST-02、ST-03、ST-04、ST-05、AGV、机械臂 ARM-01）用系统内置的模拟适配器（从外部模拟设备切回来：
+`configure-pilot-adapters.py simulate --station …`）。PLC 点表、任务契约、车队 REST、串口命令这几类模拟设备要接，就把它们挂到
+驱动宿主上（设备文件见 [devices/host/插件配置.md](../host/插件配置.md)），工位用 `sila2_v1` 接驱动宿主。
 
-系统侧的完整连接配置（点表、命令模板、请求模板、证书与凭据位置）在 **`pilot-devices.json`**，一次切换：
+系统侧的连接配置（地址、证书与凭据位置）在 **`pilot-devices.json`**，一次切换：
 
 ```bash
 docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset          # 全部示例工位
@@ -44,7 +42,7 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py revert --s
 ```
 
 `deploy/.env` 的 `ILCS_ADAPTER_ALLOWED_HOSTS` 要列出这些服务名，切换脚本会先核对，缺哪个一个都不改。
-证书与凭据首次启动写到 `secrets/sila`、`secrets/opcua`、`secrets/gateway`、`secrets/fleet`，统一控制口的令牌写到
+证书与凭据首次启动写到 `secrets/sila`、`secrets/gateway`，统一控制口的令牌写到
 `secrets/simctl`（属主都是 10001；`simctl` 目录没建或属主不对时控制口不开，设备照常模拟，验收的故障项目标跳过）。
 切换后执行器自动跑一次只读级接入验收，通过了工位才接指令（模拟设备自报为模拟器，只读级就够）。
 

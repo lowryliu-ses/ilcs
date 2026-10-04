@@ -1,8 +1,8 @@
 """试点设备预设（devices/simulators/pilot-devices.json）：每个示例工位的驱动与连接配置。
 
-- 每条预设都能构造出驱动（主机、证书、凭据位置都校验），声明的能力与参数和种子里的工位极限对得上；
-- 一个绑定托盘的批次按预设走真实驱动：AGV 转运走车队 REST（rest_map_v1），ST-06 注液走 SiLA 2，
-  ST-07 充放电走 HTTPS 网关（厂家 SDK 接口服务）；ST-05（干燥与称重）没有预设，一直用内置模拟适配器。
+- 每条预设都能构造出驱动（主机、证书、凭据位置都校验）；ILCS 只经 sila2_v1、http_json_v1 接设备，预设里没有别的驱动；
+- 一个绑定托盘的批次按预设走真实驱动：ST-06 注液走 SiLA 2，ST-07 充放电走 HTTPS 网关（厂家 SDK 接口服务）；
+  ST-05（干燥与称重）、AGV 转运没有预设，用内置模拟适配器。
 """
 import importlib.util
 import json
@@ -20,7 +20,6 @@ if str(DEVICES) not in sys.path:
     sys.path.insert(0, str(DEVICES))
 PRESETS = json.loads((ROOT / "devices" / "simulators" / "pilot-devices.json").read_text(encoding="utf-8"))["stations"]
 SECRETS = "/run/secrets/ilcs"
-CONTRACT_DRIVERS = {"sila2_v1", "opcua_v1", "http_json_v1", "modbus_tcp_v1"}
 
 
 def _pilot_script():
@@ -46,10 +45,6 @@ def localize(value, endpoints: dict, secrets: Path):
     return value
 
 
-def _capabilities(preset: dict) -> dict[str, dict]:
-    return preset["config"].get("capabilities") or {}
-
-
 def test_every_preset_matches_its_station_and_builds_its_driver(tmp_path, monkeypatch, db):
     from app.adapters.registry import REAL_IMPLEMENTATIONS
     from app.core.config import settings
@@ -62,7 +57,6 @@ def test_every_preset_matches_its_station_and_builds_its_driver(tmp_path, monkey
         hosts |= _pilot_script().hosts_of(preset["config"])
     monkeypatch.setattr(settings, "adapter_allowed_hosts", ",".join(sorted(hosts)))
     monkeypatch.setattr(settings, "adapter_credential_root", str(tmp_path))
-    monkeypatch.setattr(settings, "adapter_state_root", str(tmp_path / "state"))
     # 预设引用的证书 / 令牌：CA 要能真正加载，其余只校验存在
     for preset in PRESETS.values():
         for path in json.dumps(preset).split('"'):
@@ -84,34 +78,24 @@ def test_every_preset_matches_its_station_and_builds_its_driver(tmp_path, monkey
         config = localize(preset["config"], {}, tmp_path)
         credential = localize(preset.get("credential_ref", ""), {}, tmp_path)
         REAL_IMPLEMENTATIONS[preset["driver"]](record(preset["protocol"], config, credential))  # 构造即校验
-        if station_id not in stations:
-            assert station_id == "ARM-01", "只有演示用机械臂由导入脚本登记"
-            continue
-        limits = stations[station_id].limits or {}
-        declared = _capabilities(preset)
-        if preset["driver"] in CONTRACT_DRIVERS:
-            continue  # 设备实现 ILCS 契约：能力与参数按指令原样下发，不在驱动里映射
-        assert set(declared) <= set(limits), f"{station_id} 预设的能力 {set(declared) - set(limits)} 不在工位极限里"
-        for capability, spec in declared.items():
-            written = set((spec.get("write") or {}).keys())
-            assert written <= set(limits[capability]), f"{station_id} {capability} 写了工位没有的参数 {written}"
+        # 设备实现 ILCS 契约：能力与参数按指令原样下发，不在驱动里映射；工位要在种子里
+        assert station_id in stations, f"预设的工位 {station_id} 不在种子里"
 
 
 @pytest.fixture()
 def pilot(reset_runtime, tmp_path, monkeypatch):
-    """按预设把 ST-06 / ST-07 / AGV 接到本机模拟设备；ST-05 照种子用内置模拟适配器。"""
+    """按预设把 ST-06 / ST-07 接到本机模拟设备；ST-05、AGV 照种子用内置模拟适配器。"""
     from app.adapters.registry import reset_cache
     from app.core.config import settings
     from app.core.db import SessionLocal
     from app.models import Adapter
     from app.services.execution_service import ExecutorLoop
     from sim_harness import _device, free_port
-    from simulators.fleet.server import SimulatorRunner as FleetRunner, parse as fleet_args
     from simulators.http_gateway.server import SimulatorRunner as GatewayRunner, parse as gateway_args
     from simulators.sila_device.server import SimulatorRunner as SilaRunner, parse as sila_args
 
     monkeypatch.setattr(settings, "adapter_credential_root", str(tmp_path))
-    ports = {name: free_port() for name in ("sila", "gateway", "fleet")}
+    ports = {name: free_port() for name in ("sila", "gateway")}
     common = ["--address", "127.0.0.1", "--host-name", "127.0.0.1"]
     sila = SilaRunner(sila_args(["--device-id", "SIM-LH-01", "--profile", "liquid_handler", "--port", str(ports["sila"]),
                                  "--cert-dir", str(tmp_path / "sila"), *common]),
@@ -120,14 +104,11 @@ def pilot(reset_runtime, tmp_path, monkeypatch):
     gateway = GatewayRunner(gateway_args(["--device-id", "SIM-CYC-01", "--profile", "cycler", "--channels", "8",
                                           "--port", str(ports["gateway"]), "--cert-dir", str(tmp_path / "gateway"), *common]),
                             _device("SIM-CYC-01", "cycler", task_seconds=0.3, channels=8))
-    fleet = FleetRunner(fleet_args(["--robots", "AGV-01,AGV-02", "--port", str(ports["fleet"]), "--address", "127.0.0.1",
-                                    "--task-seconds", "0.3", "--cert-dir", str(tmp_path / "fleet")]))
-    runners = [sila, gateway, fleet]
+    runners = [sila, gateway]
     for runner in runners:
         runner.start()
-    endpoints = {("sila-sim-lh", 50052): ports["sila"], ("gateway-sim-cycler", 8443): ports["gateway"],
-                 ("fleet-sim", 8080): ports["fleet"]}
-    stations = ("ST-06", "ST-07", "AGV-01", "AGV-02")
+    endpoints = {("sila-sim-lh", 50052): ports["sila"], ("gateway-sim-cycler", 8443): ports["gateway"]}
+    stations = ("ST-06", "ST-07")
     originals = {}
     with SessionLocal() as db:
         for station_id in stations:
@@ -149,7 +130,7 @@ def pilot(reset_runtime, tmp_path, monkeypatch):
         offline = {s: db.get(Adapter, s).note for s in stations if not db.get(Adapter, s).connected}
         assert not offline, f"按预设接入后没有上线：{offline}"
     try:
-        yield {"sila": sila, "gateway": gateway, "fleet": fleet}
+        yield {"sila": sila, "gateway": gateway}
     finally:
         with SessionLocal() as db:
             for station_id, values in originals.items():
@@ -181,11 +162,7 @@ def test_tray_batch_runs_through_every_preset_driver(pilot, operator, clean_labw
 
     origins = {c["payload"]["origin"] for c in detail["checkpoints"]}
     assert {"real:sila2_v1", "real:http_json_v1", "simulation"} <= origins, origins
-    assert detail["labware"]["location_id"] == "ST-07/N1", "托盘由车队按转运回执送到充放电柜"
-    fleet = pilot["fleet"].fleet
-    missions = [m for robot in fleet.robots.values() for m in robot.queue]
-    assert len(missions) == 3 and all(m["state"] == "Done" for m in missions), "板库 → ST-05 → ST-06 → ST-07 三次转运"
-    assert all(m["message"].startswith("ILCS ") for m in missions), "车队任务里带着 ILCS 指令号"
+    assert detail["labware"]["location_id"] == "ST-07/N1", "托盘按转运回执送到充放电柜"
     assert all(count == 1 for count in pilot["sila"].device.executions.values())
     reservation = next(r for r in detail["reservations"])
     assert reservation["consumed_qty"] != "0.000000", "SiLA 配液站回报的实际用量入库存"
@@ -214,15 +191,13 @@ def test_preset_switch_is_audited_and_reverts(tmp_path, monkeypatch, reset_runti
     assert script.apply(blocked) == 0
     with SessionLocal() as db:
         for station_id, preset in PRESETS.items():
-            if station_id == "ARM-01":
-                continue
             adapter = db.get(Adapter, station_id)
             assert (adapter.kind, adapter.driver) == ("real", preset["driver"])
             assert adapter.config == preset["config"] and adapter.credential_ref == preset.get("credential_ref", "")
             assert adapter.connected is False, "在线与否等执行器探测"
         assert db.get(Station, "ST-07").channels == 8
         audits = db.query(AuditEvent).filter(AuditEvent.action == "试点切换设备适配器").count()
-        assert audits >= len(PRESETS) - 1
+        assert audits >= len(PRESETS)
 
     revert = Namespace(station=None, preset=None, only=None, skip_missing=False, channels=None,
                        backup_dir=str(tmp_path))
@@ -240,41 +215,41 @@ def test_simulate_switches_stations_back_to_the_builtin_adapter(tmp_path, monkey
     from app.models import AcceptanceRun, Adapter, AuditEvent
 
     script = _pilot_script()
-    monkeypatch.setattr(settings, "adapter_allowed_hosts", ",".join(sorted(script.hosts_of(PRESETS["ST-02"]["config"]))))
+    monkeypatch.setattr(settings, "adapter_allowed_hosts", ",".join(sorted(script.hosts_of(PRESETS["ST-06"]["config"]))))
     fields = ("kind", "driver", "protocol", "version", "config", "credential_ref", "note", "acceptance_required")
     with SessionLocal() as db:
-        seeded = {field: getattr(db.get(Adapter, "ST-02"), field) for field in fields}
-    real = Namespace(station=None, preset=str(ROOT / "devices" / "simulators" / "pilot-devices.json"), only=["ST-02"],
+        seeded = {field: getattr(db.get(Adapter, "ST-06"), field) for field in fields}
+    real = Namespace(station=None, preset=str(ROOT / "devices" / "simulators" / "pilot-devices.json"), only=["ST-06"],
                      skip_missing=True, channels=None, backup_dir=str(tmp_path))
     assert script.apply(real) == 0
     with SessionLocal() as db:
-        assert db.get(Adapter, "ST-02").driver == PRESETS["ST-02"]["driver"]
-        assert db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-02", AcceptanceRun.state == "queued").count()
+        assert db.get(Adapter, "ST-06").driver == PRESETS["ST-06"]["driver"]
+        assert db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-06", AcceptanceRun.state == "queued").count()
 
     assert script.simulate(Namespace(station=None, backup_dir=str(tmp_path))) == 2, "不给工位不动"
-    assert script.simulate(Namespace(station=["ST-02", "NOPE"], backup_dir=str(tmp_path))) == 2
+    assert script.simulate(Namespace(station=["ST-06", "NOPE"], backup_dir=str(tmp_path))) == 2
     with SessionLocal() as db:
-        assert db.get(Adapter, "ST-02").kind == "real", "有一个工位不存在就一个都不改"
-    assert script.simulate(Namespace(station=["ST-02"], backup_dir=str(tmp_path))) == 0
+        assert db.get(Adapter, "ST-06").kind == "real", "有一个工位不存在就一个都不改"
+    assert script.simulate(Namespace(station=["ST-06"], backup_dir=str(tmp_path))) == 0
     with SessionLocal() as db:
-        adapter = db.get(Adapter, "ST-02")
+        adapter = db.get(Adapter, "ST-06")
         assert (adapter.kind, adapter.driver, adapter.protocol) == ("simulation", "simulation", "内置模拟")
         assert adapter.config == {} and adapter.credential_ref == "" and adapter.acceptance_required == ""
         assert adapter.connected and adapter.accepts_commands
-        assert not db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-02", AcceptanceRun.state == "queued").count()
-        assert db.query(AuditEvent).filter(AuditEvent.action == "试点切回内置模拟", AuditEvent.target == "ST-02").count() == 1
+        assert not db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-06", AcceptanceRun.state == "queued").count()
+        assert db.query(AuditEvent).filter(AuditEvent.action == "试点切回内置模拟", AuditEvent.target == "ST-06").count() == 1
 
-    # 两份备份：revert 取包含 ST-02 的最近一份，还原的是切回模拟之前（按预设接的真实驱动）
+    # 两份备份：revert 取包含 ST-06 的最近一份，还原的是切回模拟之前（按预设接的真实驱动）
     assert len(list(tmp_path.glob("pilot-adapters-*.json"))) >= 1
-    revert = Namespace(station=["ST-02"], preset=None, only=None, skip_missing=False, channels=None, backup_dir=str(tmp_path))
+    revert = Namespace(station=["ST-06"], preset=None, only=None, skip_missing=False, channels=None, backup_dir=str(tmp_path))
     assert script.revert(revert) == 0
     with SessionLocal() as db:
-        adapter = db.get(Adapter, "ST-02")
-        assert adapter.driver == PRESETS["ST-02"]["driver"]
+        adapter = db.get(Adapter, "ST-06")
+        assert adapter.driver == PRESETS["ST-06"]["driver"]
         # 交还种子里的模拟适配器；验收记录只追加不删，排着的作废
         for field, value in seeded.items():
             setattr(adapter, field, value)
         adapter.connected = adapter.accepts_commands = True
-        db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-02", AcceptanceRun.state == "queued").update(
+        db.query(AcceptanceRun).filter(AcceptanceRun.station_id == "ST-06", AcceptanceRun.state == "queued").update(
             {"state": "cancelled"}, synchronize_session=False)
         db.commit()

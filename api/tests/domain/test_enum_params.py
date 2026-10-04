@@ -1,8 +1,8 @@
-"""选项型参数（溶剂种类、测试协议、气氛）：规格、工位极限、方法规则、流程校验、方案因子与设计点、驱动下发。"""
+"""选项型参数（溶剂种类、测试协议、气氛）：规格、工位极限、方法规则、流程校验、方案因子与设计点。
+
+驱动按设备代码下发选项（点表映射的 write.<参数>.map）在驱动宿主测：devices/host/tests/test_plugin_transports.py。"""
 import pytest
 
-from app.adapters.base import AdapterError
-from app.adapters.drivers.point_map import PointMapAdapter
 from app.domain import matrix
 from app.domain.bindings import binding_issues
 from app.domain.capability import StationSpec, out_of_range, station_fits
@@ -106,16 +106,3 @@ def test_factor_levels_and_design_points_for_options():
     assert any("高于设计空间上限 100" in issue for issue in issues)
     assert matrix.ordered_levels(["THF", 3, "DMF", 1, "THF"]) == [1, 3, "DMF", "THF"]
     assert matrix.material_demand([{**factors[0], "material": {"name": "x", "unit": "g", "per": 1}}], 1) == []
-
-
-class _Map(PointMapAdapter):
-    DRIVER = "test_map"
-
-
-def test_point_map_writes_option_codes():
-    item = {"point": "sp_solvent", "map": {"THF": 1, "DMF": 2}}
-    assert _Map._coded("solvent", item, "DMF") == 2
-    assert _Map._coded("temp", "sp_temp", 60) == 60
-    with pytest.raises(AdapterError) as error:
-        _Map._coded("solvent", item, "Toluene")
-    assert "没有在 write.solvent.map 里登记" in str(error.value)

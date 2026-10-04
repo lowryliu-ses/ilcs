@@ -1,8 +1,8 @@
 """ILCS OPC UA 模拟设备。
 
 在系统外部独立运行的 OPC UA 服务器，按 `devices/contracts/opcua/TaskExecution.json` 在 `Objects/ILCS/TaskExecution`
-上提供任务方法与设备身份变量，外加仅模拟器才有的 `Objects/ILCS/SimulatorControl` 故障注入。系统侧用
-`opcua_v1` 驱动接入，和接一台真设备走同一条路。
+上提供任务方法与设备身份变量，外加仅模拟器才有的 `Objects/ILCS/SimulatorControl` 故障注入。系统侧经
+驱动宿主的 `opcua_task` 插件接入，和接一台真设备走同一条路。
 
     python devices/simulators/opcua_device/server.py --device-id SIM-CAL-01 --port 4840 \\
         --cert-dir /run/secrets/ilcs/opcua --host-name opcua-sim-calender

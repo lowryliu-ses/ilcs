@@ -8,9 +8,10 @@
     python scripts/device-acceptance.py ST-07 --physical --confirm ST-07 --output /data/acceptance-ST-07.md
     python scripts/device-acceptance.py ST-07 --physical --faults   # 模拟设备的故障项目：丢回执、设备忙、联锁、失联
 
-    # 二、不连 ILCS 库：给一份适配器登记 JSON（docs/设备适配器配置模板.md「通用结构」），设备开发者在自己电脑上用
-    python scripts/device-acceptance.py --adapter my-oven.json --allow-host
-    python scripts/device-acceptance.py --adapter my-oven.json --capability cap.vacuum_dry --params '{"temp": 120}' \\
+    # 二、不连 ILCS 库：给一份适配器登记 JSON（sila2_v1 或 http_json_v1，docs/设备适配器配置模板.md「通用结构」），
+    #    设备开发者在自己电脑上对着自己的网关或驱动宿主跑
+    python scripts/device-acceptance.py --adapter my-gateway.json --allow-host
+    python scripts/device-acceptance.py --adapter my-gateway.json --capability cap.vacuum_dry --params '{"temp": 120}' \\
         --physical --confirm STANDALONE --allow-host
 
 界面上的「接入验收」走同一份清单，由执行器执行、报告入库（工位配置 → 适配器配置 → 接入验收）。
@@ -25,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,9 +76,6 @@ def _standalone(args) -> tuple[AcceptanceRecord, dict, tuple[str, ...]]:
             raise SystemExit("--allow-host 只用于开发机联调；正式环境按 ILCS_ADAPTER_ALLOWED_HOSTS")
         hosts = sorted(_hosts_of(record.config))
         settings.adapter_allowed_hosts = ",".join([settings.adapter_allowed_hosts, *hosts])
-    # 驱动作业台账放临时目录：不连 ILCS 时不碰任何部署目录
-    if not settings.adapter_state_root:
-        settings.adapter_state_root = tempfile.mkdtemp(prefix="ilcs-acceptance-")
     declared = record.config.get("capabilities")
     names = set(declared) if isinstance(declared, dict) else set()
     return record, {}, tuple(sorted(names))

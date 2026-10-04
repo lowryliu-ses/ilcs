@@ -1,5 +1,6 @@
-"""设备点位读写走真实 API：只配点表的工位只欠只读级验收；读点在 API 里做；手动写点要签名、写明原因，
-执行器先读、写、再回读，前后值与签名留痕，出了结论的记录不许改。PLC 是真实走 Modbus TCP 的外部模拟设备。"""
+"""设备点位读写走真实 API：只读写点位的工位（tasks: false）只欠只读级验收；读点在 API 里做；手动写点要签名、写明原因，
+执行器先读、写、再回读，前后值与签名留痕，出了结论的记录不许改。PLC 是外部模拟设备，经驱动宿主（modbus_map 插件，
+真实走 Modbus TCP）用 SiLA 2 接。"""
 import time
 
 import pytest
@@ -31,15 +32,16 @@ def _write(admin, point: str, value, reason: str = "联调：手动调设定值"
 
 @pytest.fixture()
 def point_station(admin, reset_runtime, tmp_path, monkeypatch):
-    """一台只配点表的 Modbus PLC：设定值 sp_temp 可手动写（0–200 ℃），其余只读。"""
+    """一台只读写点位的 Modbus PLC，经驱动宿主接：设定值 sp_temp 可手动写（0–200 ℃），其余只读。"""
     from app.adapters.registry import reset_cache
     from app.core.config import settings
     from app.core.db import SessionLocal
     from app.models import Station
-    from sim_harness import plc_modbus_points, plc_sim
+    from sim_harness import HOST_TOKEN, driver_host, free_port, plc_modbus_points, plc_sim
 
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "127.0.0.1")
-    monkeypatch.setattr(settings, "adapter_state_root", str(tmp_path / "state"))
+    monkeypatch.setattr(settings, "adapter_credential_root", str(tmp_path))
+    (tmp_path / "host.token").write_text(HOST_TOKEN, encoding="utf-8")
     reset_cache()
     with SessionLocal() as db:
         exists = db.get(Station, STATION) is not None
@@ -52,14 +54,20 @@ def point_station(admin, reset_runtime, tmp_path, monkeypatch):
         assert created.status_code == 201, created.text
     else:
         assert admin.post(f"/api/stations/{STATION}/retire", {"retired": False}).status_code == 200
-    with plc_sim("modbus", setpoints=("temp",)) as (program, _, port):
+    with plc_sim("modbus", setpoints=("temp",)) as (program, _, plc_port):
         points = plc_modbus_points(("temp",))
         points["sp_temp"] = {**points["sp_temp"], "writable": True, "min": 0, "max": 200, "unit": "℃"}
-        config = {"host": "127.0.0.1", "port": port, "unit_id": 1, "request_timeout_sec": 1, "points": points}
-        saved = _patch(admin, STATION, kind="real", driver="modbus_map_v1", protocol="Modbus TCP 点表", config=config,
-                       credential_ref="", supports_hold=False, supports_abort=False)
-        assert saved.status_code == 200, saved.text
-        yield program, config, saved.json()
+        device = {"plugin": "modbus_map", "port": free_port(), "simulator": True,
+                  "supports": {"hold": False, "abort": False, "query": True, "dedup": True},
+                  "config": {"host": "127.0.0.1", "port": plc_port, "unit_id": 1, "request_timeout_sec": 1,
+                             "points": points, "identity": {"device_id": "serial", "model": "model"}}}
+        with driver_host(tmp_path / "site", {"PLC-PT": device}):
+            config = {"host": "127.0.0.1", "port": device["port"], "insecure": True, "tasks": False,
+                      "expected_device_id": "SIM-PLC-T", "request_timeout_sec": 3}
+            saved = _patch(admin, STATION, kind="real", driver="sila2_v1", protocol="SiLA 2（驱动宿主）", config=config,
+                           credential_ref=f"file://{tmp_path / 'host.token'}", supports_hold=False, supports_abort=False)
+            assert saved.status_code == 200, saved.text
+            yield program, config, saved.json()
     _patch(admin, STATION, kind="simulation", driver="simulation", protocol="sim", config={}, credential_ref="")
     assert admin.post(f"/api/stations/{STATION}/retire", {"retired": True}).status_code == 200
     reset_cache()
@@ -142,6 +150,6 @@ def test_finished_point_writes_cannot_be_changed_or_deleted(admin, point_station
 
 
 def test_drivers_without_a_point_table_say_so(admin):
-    """内置模拟、按 ILCS 契约接的驱动没有点表：明确说明，不返回空表冒充读到了。"""
+    """内置模拟、HTTPS 网关没有点表：明确说明，不返回空表冒充读到了。"""
     response = admin.get("/api/stations/ST-05/adapter/points")
     assert response.status_code == 409 and response.json()["detail"]["code"] == "points_unavailable", response.text

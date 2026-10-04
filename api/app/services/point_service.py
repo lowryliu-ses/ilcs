@@ -1,8 +1,9 @@
 """设备点位读写：不参与自动流程也能用的那一层。
 
-映射驱动（Modbus / OPC UA 点表、REST、串口命令）只配点表就能接：
+点表在设备服务那一侧（SiLA 2 PointAccess：驱动宿主上的 PLC 点表、REST、串口命令插件，或厂商的 SiLA 服务器），
+只读写点位的设备在 ILCS 这边配 `tasks: false`：
 
-- **读点**（界面「读取点位」）：在 API 进程里按点表逐个读，和「测试已保存配置」一样只读、不动设备；
+- **读点**（界面「读取点位」）：在 API 进程里经设备服务批量读，和「测试已保存配置」一样只读、不动设备；
   接入验收正在驱动这台设备时不读（会和它抢同一个串口 / 会话）；
 - **手动写点**：只对点表里声明了可写（`writable: true`，可带 `min` / `max`）的点。人签名、写明原因申请，登记一条排队记录；
   **执行器执行**（执行器是唯一驱动设备的进程，同一台设备的 I/O 在它那里串行，不会和投递、轮询抢设备）：
@@ -54,18 +55,16 @@ def write_out(row: PointWrite) -> dict[str, Any]:
 
 
 def _points_driver(adapter: Adapter):
-    """这台设备的驱动实例（要有点表）：映射驱动登记了 points，或 SiLA 设备服务实现了 PointAccess。
-    内置模拟、其余按 ILCS 契约接的驱动没有点表。"""
+    """这台设备的驱动实例（要有点表）：SiLA 设备服务实现了 PointAccess。内置模拟、HTTPS 网关没有点表。"""
     if adapter.kind != "real":
-        raise StateConflict("内置模拟没有点表：接成真实设备（映射驱动）后才能读写点位", code="points_unavailable")
+        raise StateConflict("内置模拟没有点表：经驱动宿主接成 sila2_v1 后才能读写点位", code="points_unavailable")
     try:
         implementation = adapter_for(adapter)
     except (NotImplementedError, AdapterError) as exc:
         raise StateConflict(str(exc), code="adapter_driver_unavailable") from exc
     if not callable(getattr(implementation, "read_points", None)):
         raise StateConflict(
-            f"{adapter.driver} 没有点表：点位读写要用映射驱动（Modbus / OPC UA 点表、REST、串口命令）并登记 points，"
-            "或接实现了 PointAccess 的 SiLA 设备服务",
+            f"{adapter.driver} 没有点表：点位读写要接实现了 PointAccess 的 SiLA 设备服务（驱动宿主上配了 points 的设备）",
             code="points_unavailable",
         )
     try:
@@ -105,7 +104,7 @@ class PointService:
         implementation = _points_driver(adapter)
         try:
             points = implementation.read_points()
-        except AdapterUnreachable as exc:  # SiLA 设备服务在截止时间内没有答复（映射驱动按行报错，不抛）
+        except AdapterUnreachable as exc:  # SiLA 设备服务在截止时间内没有答复（单个点读不到按行报错，不抛）
             raise StateConflict(f"设备服务没有及时答复，读不到点位：{exc}", code="device_unreachable") from exc
         except AdapterError as exc:
             raise StateConflict(str(exc), code="point_read_refused") from exc

@@ -334,7 +334,7 @@ export function AdapterEditor({ station, onClose }: { station: StationRow; onClo
           </div>
           <div className="grid cols-2">
             <Field label="协议名称">
-              <input value={draft.protocol} placeholder="SiLA 2 / OPC UA / Modbus TCP" onChange={(event) => update('protocol', event.target.value)} />
+              <input value={draft.protocol} placeholder="SiLA 2（驱动宿主）/ HTTPS JSON" onChange={(event) => update('protocol', event.target.value)} />
             </Field>
             <Field label="协议/驱动版本">
               <input value={draft.version} onChange={(event) => update('version', event.target.value)} />

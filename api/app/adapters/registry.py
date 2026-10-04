@@ -1,19 +1,13 @@
 """适配器注册表。
 
-当前内置模拟适配器与这些真实驱动：
+ILCS 只经两个契约接设备，外加内置模拟适配器：
 
 | 驱动 | 设备侧 | 指令号 / 去重 / 查询 |
 |---|---|---|
-| `http_json_v1` | 实现 ILCS 网关契约的 HTTPS 服务（含厂家 SDK 接口服务） | 设备侧 |
-| `sila2_v1` | 实现 ILCS TaskExecution 特性的 SiLA 2 服务器 | 设备侧 |
-| `opcua_v1` | 实现 ILCS TaskExecution 节点的 OPC UA 服务器 | 设备侧 |
-| `modbus_tcp_v1` | 按 ILCS 任务寄存器表编程的 PLC | 设备侧 |
-| `opcua_map_v1` | 设备自有 OPC UA 节点（PLC、视觉系统） | 驱动作业台账 |
-| `modbus_map_v1` | 设备自有 Modbus 寄存器表（PLC、温控仪表） | 驱动作业台账 |
-| `line_command_v1` | 串口 / TCP 文本命令（RS232、RS485、仪表盘服务） | 驱动作业台账 |
-| `rest_map_v1` | 设备或调度系统自有 REST 接口（AGV 车队等） | 驱动作业台账 + 设备任务号 |
+| `sila2_v1` | SiLA 2 设备服务：驱动宿主（devices/host，托管 PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令等协议插件）或厂商的 SiLA 服务器 | 设备服务 |
+| `http_json_v1` | 实现 ILCS 网关契约的 HTTPS 服务（设备模块的网关、厂家 SDK 接口服务） | 设备侧 |
 
-执行层始终按 Adapter.kind/driver 取实现。
+协议驱动都在 ILCS 进程之外（驱动宿主、网关），ILCS 不再自己连 PLC、仪表。执行层始终按 Adapter.kind/driver 取实现。
 """
 from __future__ import annotations
 
@@ -21,12 +15,6 @@ from ..core.config import settings
 from ..models import Adapter
 from .base import AdapterContract, AdapterError, DeviceAdapter
 from .drivers.http_json import DRIVER as HTTP_JSON_DRIVER, HttpJsonAdapter
-from .drivers.line_command import DRIVER as LINE_COMMAND_DRIVER, LineCommandAdapter
-from .drivers.modbus_map import DRIVER as MODBUS_MAP_DRIVER, ModbusMapAdapter
-from .drivers.modbus_tcp import DRIVER as MODBUS_TCP_DRIVER, ModbusTcpAdapter
-from .drivers.opcua import DRIVER as OPCUA_DRIVER, OpcUaAdapter
-from .drivers.opcua_map import DRIVER as OPCUA_MAP_DRIVER, OpcUaMapAdapter
-from .drivers.rest_map import DRIVER as REST_MAP_DRIVER, RestMapAdapter
 from .drivers.sila2 import DRIVER as SILA2_DRIVER, Sila2Adapter
 from .drivers.simulation import SimulationAdapter
 
@@ -34,18 +22,14 @@ _CACHE: dict[str, DeviceAdapter] = {}
 REAL_IMPLEMENTATIONS: dict[str, type] = {
     HTTP_JSON_DRIVER: HttpJsonAdapter,
     SILA2_DRIVER: Sila2Adapter,
-    MODBUS_TCP_DRIVER: ModbusTcpAdapter,
-    OPCUA_DRIVER: OpcUaAdapter,
-    OPCUA_MAP_DRIVER: OpcUaMapAdapter,
-    MODBUS_MAP_DRIVER: ModbusMapAdapter,
-    LINE_COMMAND_DRIVER: LineCommandAdapter,
-    REST_MAP_DRIVER: RestMapAdapter,
+}
+# 已经移出 ILCS 的进程内驱动：对应的设备经驱动宿主（devices/host 的同名插件）用 sila2_v1 接
+RETIRED_DRIVERS = {
+    "modbus_map_v1": "modbus_map", "opcua_map_v1": "opcua_map", "rest_map_v1": "rest_map",
+    "line_command_v1": "line_command", "modbus_tcp_v1": "modbus_task", "opcua_v1": "opcua_task",
 }
 # 这些协议的设备不会往系统推心跳：在线状态由执行器按周期读取设备身份得到
-PROBE_DRIVERS = {
-    SILA2_DRIVER, MODBUS_TCP_DRIVER, OPCUA_DRIVER, OPCUA_MAP_DRIVER, MODBUS_MAP_DRIVER, LINE_COMMAND_DRIVER,
-    REST_MAP_DRIVER,
-}
+PROBE_DRIVERS = {SILA2_DRIVER}
 
 
 def adapter_for(record: Adapter, capabilities: tuple[str, ...] = ()) -> DeviceAdapter:
@@ -56,9 +40,11 @@ def adapter_for(record: Adapter, capabilities: tuple[str, ...] = ()) -> DeviceAd
     if record.kind == "real":
         implementation = REAL_IMPLEMENTATIONS.get(record.driver)
         if implementation is None:
+            moved = RETIRED_DRIVERS.get(record.driver)
             raise NotImplementedError(
                 f"工位 {record.station_id} 声明驱动 {record.driver}（{record.protocol}）为真实设备，"
                 f"但当前版本没有登记该驱动；已登记的驱动：{', '.join(sorted(REAL_IMPLEMENTATIONS))}"
+                + (f"。这个驱动已移出 ILCS：设备改经驱动宿主（插件 {moved}）用 sila2_v1 接" if moved else "")
             )
         instance = implementation(record)
     else:
@@ -113,8 +99,8 @@ def catalog_of(record: Adapter) -> dict:
 def describe(instance: DeviceAdapter, record: Adapter) -> dict:
     """读设备自报的身份与方法目录。
 
-    SiLA 2 / OPC UA / HTTP 网关的设备身份是一段 JSON，带了 `methods` / `commands` 就按设备自报；
-    Modbus 这类寄存器协议带不了目录，按适配器配置里登记的 `methods`（来源标 config）。
+    SiLA 2 设备服务、HTTP 网关的设备身份带了 `methods` / `commands` 就按设备自报；带不了目录的，按适配器配置里
+    登记的 `methods`（来源标 config）。
     读身份失败照常抛异常（结果按离线处理），不返回假目录。
     """
     identity = getattr(instance, "identity", None)
@@ -164,8 +150,8 @@ def reset_cache() -> None:
 def probe_interval(record: Adapter) -> float | None:
     """由执行器主动探测在线的适配器返回探测周期（秒）；设备自己推心跳的返回 None。
 
-    `heartbeat_mode` 可在适配器配置里显式指定；除 http_json_v1 外的真实驱动默认探测，
-    http_json_v1 默认推送（网关也可以配成 probe，由执行器读 /health）。
+    `heartbeat_mode` 可在适配器配置里显式指定；sila2_v1 默认探测，http_json_v1 默认推送（网关也可以配成 probe，
+    由执行器读 /health）。
     """
     if record.kind != "real":
         return None

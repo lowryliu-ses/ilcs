@@ -1,7 +1,7 @@
 {
   "id": "ilcs-plc-modbus",
   "name": "ILCS 联调：Modbus PLC（启动握手）",
-  "description": "ILCS 写设定值 sp、置线圈 cmd_start → 状态字 state = 1（运行）→ 5 s 后写实测值 pv、state = 3（完成）；置线圈 cmd_ack → state = 0（空闲）。从站 2，不影响已有的从站 1。给 ILCS 的 modbus_map_v1 联调用。",
+  "description": "ILCS 写设定值 sp、置线圈 cmd_start → 状态字 state = 1（运行）→ 5 s 后写实测值 pv、state = 3（完成）；置线圈 cmd_ack → state = 0（空闲）。从站 2，不影响已有的从站 1。给驱动宿主的 modbus_map 插件联调用。",
   "devices": [
     {
       "id": "ilcs-plc-modbus",

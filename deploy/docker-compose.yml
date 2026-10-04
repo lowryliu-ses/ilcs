@@ -140,14 +140,11 @@ services:
   #
   #   工位       模拟设备               协议 / 驱动
   #   ST-01-A    sila-sim-slurry-a      SiLA 2 / sila2_v1
-  #   ST-02      plc-sim-mixer          Modbus TCP 点表 / modbus_map_v1
-  #   ST-03      plc-sim-coater         OPC UA 节点映射 / opcua_map_v1
-  #   ST-04      opcua-sim-calender     OPC UA TaskExecution / opcua_v1
   #   ST-06      sila-sim-lh            SiLA 2 / sila2_v1
   #   ST-07      gateway-sim-cycler     HTTPS JSON（厂家 SDK 接口服务）/ http_json_v1
-  #   AGV-01/02  fleet-sim              REST（MiR 风格车队接口）/ rest_map_v1
-  #   ARM-01     line-sim-arm           UR 仪表盘服务（TCP 命令）/ line_command_v1
-  #   ST-01-B、ST-05 用系统内置的模拟适配器，不接外部模拟设备
+  #   其余示例工位（ST-01-B、ST-02、ST-03、ST-04、ST-05、AGV-01/02、ARM-01）用系统内置的模拟适配器。
+  #   PLC 点表、Modbus / OPC UA 任务契约、REST 车队、串口命令这几类协议的驱动已移出 ILCS：要接这类模拟设备，
+  #   在驱动宿主（devices/host）的现场配置里登记，工位用 sila2_v1 接驱动宿主（见 devices/host/README.md）。
   sila-sim-slurry-a:
     <<: *pilot-sim
     container_name: ilcs-sila-sim-slurry-a
@@ -165,61 +162,6 @@ services:
       - ../secrets/sila:/run/secrets/ilcs/sila
       - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "devices/simulators/sila_device/server.py"]
-
-  plc-sim-mixer:
-    <<: *pilot-sim
-    container_name: ilcs-plc-sim-mixer
-    environment:
-      SIM_PROTOCOL: modbus
-      SIM_MACHINE: Mixer
-      SIM_DEVICE_ID: SIM-MIX-01
-      SIM_MODEL: PILOT-MIX-8
-      SIM_SETPOINTS: mass,volume,rate,temp,rpm,vacuum
-      SIM_PORT: "5021"
-      SIM_TASK_SECONDS: "20"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-MIX-01.token
-    volumes:
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/plc_device/server.py"]
-
-  plc-sim-coater:
-    <<: *pilot-sim
-    container_name: ilcs-plc-sim-coater
-    environment:
-      SIM_PROTOCOL: opcua
-      SIM_MACHINE: Coater
-      SIM_DEVICE_ID: SIM-COAT-01
-      SIM_MODEL: COATER-150
-      SIM_SETPOINTS: thickness,temp
-      SIM_PORT: "4841"
-      SIM_HOST_NAME: plc-sim-coater
-      SIM_CERT_DIR: /run/secrets/ilcs/opcua
-      SIM_TASK_SECONDS: "30"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-COAT-01.token
-    volumes:
-      - ../secrets/opcua:/run/secrets/ilcs/opcua
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/plc_device/server.py"]
-
-  opcua-sim-calender:
-    <<: *pilot-sim
-    container_name: ilcs-opcua-sim-calender
-    environment:
-      SIM_DEVICE_ID: SIM-CAL-01
-      SIM_MODEL: CALENDER-P2
-      SIM_PROFILE: generic
-      SIM_PORT: "4840"
-      SIM_HOST_NAME: opcua-sim-calender
-      SIM_CERT_DIR: /run/secrets/ilcs/opcua
-      SIM_TASK_SECONDS: "20"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-CAL-01.token
-    volumes:
-      - ../secrets/opcua:/run/secrets/ilcs/opcua
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/opcua_device/server.py"]
 
   sila-sim-lh:
     <<: *pilot-sim
@@ -257,37 +199,6 @@ services:
       - ../secrets/gateway:/run/secrets/ilcs/gateway
       - ../secrets/simctl:/run/secrets/ilcs/simctl
     command: ["python", "devices/simulators/http_gateway/server.py"]
-
-  fleet-sim:
-    <<: *pilot-sim
-    container_name: ilcs-fleet-sim
-    environment:
-      SIM_ROBOTS: AGV-01,AGV-02
-      SIM_PORT: "8080"
-      SIM_TASK_SECONDS: "8"
-      SIM_CERT_DIR: /run/secrets/ilcs/fleet
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/fleet.token
-    volumes:
-      - ../secrets/fleet:/run/secrets/ilcs/fleet
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/fleet/server.py"]
-
-  line-sim-arm:
-    <<: *pilot-sim
-    container_name: ilcs-line-sim-arm
-    environment:
-      SIM_DIALECT: ur
-      SIM_DEVICE_ID: SIM-ARM-01
-      SIM_MODEL: UR5e
-      SIM_METHODS: load_glovebox
-      SIM_PORT: "29999"
-      SIM_TASK_SECONDS: "10"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-ARM-01.token
-    volumes:
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/line_device/server.py"]
 
   # 结果文件接收器（可选，--profile results）：检测软件导出目录 → 关联检测任务 → 结果回传。
   # 先在「系统治理」创建服务身份并授权检测任务，口令写到 ../secrets/result-files/secret，
