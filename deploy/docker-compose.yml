@@ -115,9 +115,9 @@ services:
 
   # ---------- 设备侧的可选服务：在设备仓库（ilcs-devices）里 ----------
   # 试点模拟设备（pilot）、结果文件接收器（results）、环境读数连接器（environment）原来在这里用 ilcs-api 镜像跑，
-  # 拆仓库后搬到设备仓库的 deploy/compose.yml（镜像 ilcs-devices，服务名、容器名、主机名不变，接这里的 backend 网络）：
-  #   docker compose -f ../../ilcs-devices/deploy/compose.yml --profile pilot up -d --build
-  # 驱动宿主（ilcs-devices/host/deploy）与各设备模块的模拟网关（ilcs-devices/gateway/<模块>/deploy）同样在设备仓库里起。
+  # 拆仓库后搬到设备仓库（镜像 ilcs-devices，服务名、容器名、主机名不变，接这里的 backend 网络）。设备仓库的本机容器分两组：
+  #   docker compose -f ../../ilcs-devices/deploy/compose.yml up -d            # ilcs-devices：驱动宿主（--profile results / environment 加连接器）
+  #   docker compose -f ../../ilcs-devices/deploy/sim.yml up -d --build        # ilcs-devices-sim：全部模拟设备（--profile pilot 加试点模拟设备）
 
   web:
     image: nginx:alpine

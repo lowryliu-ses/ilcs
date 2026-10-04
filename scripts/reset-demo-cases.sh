@@ -84,7 +84,7 @@ PY
 
   echo "==> 启 api / executor 与模拟设备（镜像更新过就按新镜像重建容器；模拟设备在设备仓库里起）"
   docker compose up -d
-  docker compose -f "$DEVICES/deploy/compose.yml" --profile pilot up -d --build
+  docker compose -f "$DEVICES/deploy/sim.yml" --profile pilot up -d --build
 
   echo "==> 等 API 就绪"
   for _ in $(seq 1 60); do

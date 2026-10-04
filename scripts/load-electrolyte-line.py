@@ -18,7 +18,7 @@
   run 要求执行器在跑（本机部署的 executor），它负责投递与推进。
   一瓶一配方：配过液的瓶子不能再导入，同一张表（含缺省参考配方）run 过一次后再 run 会在导入时被拒，换新序列号的表。
 - connect：gateways.json 列出的工位（现在是配液天平、配粉天平、拉曼）套用设备接入模板、连到设备网关（模拟阶段是设备仓库
-  ilcs-devices 的 deploy/compose.yml 里 electrolyte profile 起的模拟站），等执行器跑完只读级验收放行；之后 run 的这几步就走
+  ilcs-devices 的 deploy/sim.yml 起的模拟站），等执行器跑完只读级验收放行；之后 run 的这几步就走
   http_json_v1：网关核对加的料、回报天平称出来的实际量，消耗按实际量入账。disconnect 把它们切回内置模拟。
   模拟站的主机名要先加进 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS（deploy/.env）。
 - 资产只给新登记的工位建 AS-<工位> 占位；已登记的工位沿用它现在关联的资产，不补建、不改。
