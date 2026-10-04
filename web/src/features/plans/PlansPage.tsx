@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type { PlanTemplateRow, MetricRow, PlanSummary, RecipeSummary } from '../../shared/types';
@@ -148,6 +149,7 @@ export function PlansPage() {
                         删除
                       </button>
                     ) : null}
+                    {plan.delete_blockers.length ? <ForceDeleteButton kind="plan" id={plan.id} /> : null}
                   </td>
                 </tr>
               ))}

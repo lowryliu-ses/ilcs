@@ -19,6 +19,8 @@ export type User = {
   password_changed_at: string | null;
   /** 测试环境开关：系统管理员可审批本人内容 */
   admin_self_approval?: boolean;
+  /** 测试环境开关：系统管理员可级联强制删除 */
+  admin_force_delete?: boolean;
   /** 启用的可选模块（如 formulation 配液模板）；界面据此决定出不出对应菜单 */
   modules?: string[];
 };

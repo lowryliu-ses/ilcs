@@ -284,9 +284,7 @@ class MaterialService:
             "usable": not self.inventory.lot_blockers(lot),
             "use_blockers": self.inventory.lot_blockers(lot),
             "editable_fields": sorted(lot_editable_fields(lot.release, lot.state)),
-            "delete_blockers": lot_delete_blockers(
-                self.reservations.count_for_lot(lot.id), lot.state
-            ),
+            "delete_blockers": self._lot_delete_blockers(lot),
         }
 
     @staticmethod
@@ -446,17 +444,22 @@ class MaterialService:
         self.db.commit()
         return self.lot_out(lot)
 
-    def delete_lot(self, lot_id: str, user: User) -> dict:
-        lot = self.lots.require(lot_id, "批号不存在")
-        blockers = lot_delete_blockers(self.reservations.count_for_lot(lot_id), lot.state)
+    def _lot_delete_blockers(self, lot: Lot) -> list[str]:
+        """列表上的删除按钮与删除接口用同一份理由。"""
+        blockers = lot_delete_blockers(self.reservations.count_for_lot(lot.id), lot.state)
         # 只有进过生产使用的流水才阻止删除：入库与盘点是这条批号自己的登记痕迹，
         # 录错重录时它们不该把人锁在一个错的批号上。
         used = [
-            line for line in self.inventory.events.ledger_for_lot(lot_id)
+            line for line in self.inventory.events.ledger_for_lot(lot.id)
             if line.reservation_id or line.batch_id
         ]
         if used:
             blockers.append(f"已有 {len(used)} 条投料 / 消耗流水，只能报废不能删除")
+        return blockers
+
+    def delete_lot(self, lot_id: str, user: User) -> dict:
+        lot = self.lots.require(lot_id, "批号不存在")
+        blockers = self._lot_delete_blockers(lot)
         if blockers:
             raise StateConflict("批号不可删除", {"blocked": [{"key": "lot", "label": b} for b in blockers]})
         self.audit.record(

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { api, idempotencyKey } from '../../shared/api';
 import { FlagList } from '../../shared/flags';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock, num, params as formatParams, time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
@@ -156,7 +157,9 @@ export function BatchDetailPage() {
             <button className="btn danger" onClick={() => setDialog('delete')}>
               删除批次
             </button>
-          ) : null}
+          ) : (
+            <ForceDeleteButton kind="batch" id={data.id} className="btn danger" onDone={() => navigate('/batches')} />
+          )}
         </div>
       </div>
       <GateBanner gate={data.gate} />

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
 import { CurveOverlay } from '../../shared/curves';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock, num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -429,6 +430,7 @@ function TaskDialog({ taskId, onClose, onOpen }: { taskId: string; onClose: () =
                 取消
               </button>
             ) : null}
+            <ForceDeleteButton kind="task" id={task.id} onDone={onClose} />
           </div>
 
           {task.cancel_reason ? <div className="note warn">取消原因：{task.cancel_reason}</div> : null}

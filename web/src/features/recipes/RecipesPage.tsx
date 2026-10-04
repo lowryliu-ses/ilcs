@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import type { RecipeSummary } from '../../shared/types';
@@ -97,6 +98,7 @@ export function RecipesPage() {
                         删除
                       </button>
                     ) : null}
+                    {recipe.delete_blockers.length ? <ForceDeleteButton kind="recipe" id={recipe.id} /> : null}
                     <Link className="btn sm" to={`/recipes/${recipe.id}`}>
                       详情
                     </Link>

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -157,6 +158,7 @@ export function BatchesPage() {
                         删除
                       </button>
                     ) : null}
+                    {batch.delete_blockers.length ? <ForceDeleteButton kind="batch" id={batch.id} /> : null}
                   </td>
                 </tr>
               ))}

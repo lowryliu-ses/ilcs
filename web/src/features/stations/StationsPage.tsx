@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { ApiError, api, pageQuery } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { day, time } from '../../shared/format';
 import { columnSpec, defaultWindow, isOptionWindow, paramSpec, windowProblem } from '../../shared/params';
 import { useMutation, useQuery } from '../../shared/query';
@@ -346,6 +347,7 @@ function LedgerPanel({
                       删除
                     </button>
                   ) : null}
+                  <ForceDeleteButton kind="station" id={station.id} />
                 </td>
               </tr>
             );

@@ -6,6 +6,7 @@
 import { useState } from 'react';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock } from '../../shared/format';
 import { paramSpec } from '../../shared/params';
 import { ProgramTableEditor } from '../../shared/program';
@@ -126,7 +127,9 @@ export function MethodsPage() {
                       <button className="btn sm" disabled={act.pending} onClick={() => run(row, 'delete')}>
                         删除
                       </button>
-                    ) : null}
+                    ) : (
+                      <ForceDeleteButton kind="method" id={row.id} />
+                    )}
                   </td>
                 </tr>
               ))}

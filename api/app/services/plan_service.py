@@ -615,7 +615,7 @@ class PlanService:
                 if self.versions.find(plan.id, plan.version) is not None else []
             ),
             "is_matrix": plan.plan_type == MATRIX,
-            "delete_blockers": plan_delete_blockers(plan.state, bound),
+            "delete_blockers": self._delete_blockers(plan, bound),
         }
         if detail:
             checks = self.lock_checks(plan)
@@ -1106,15 +1106,21 @@ class PlanService:
             }
         )
 
+    def _delete_blockers(self, plan: Plan, bound: list[str]) -> list[str]:
+        """列表上的删除按钮与删除接口用同一份理由，按钮能点就不会被服务端拒。"""
+        blockers = plan_delete_blockers(plan.state, bound)
+        tasks = self.tasks.for_plan(plan.id)
+        if tasks:
+            blockers.append(f"{len(tasks)} 个实验任务引用它")
+        if plan.approval_state == "approved":
+            blockers.append("已批准的方案不删除，请改用修订或停用")
+        return blockers
+
     def delete(self, plan_id: str, user: User) -> dict:
         plan = self.plans.get(plan_id)
         if not plan:
             raise NotFound("实验方案不存在")
-        blockers = plan_delete_blockers(plan.state, self.plans.bound_batch_ids(plan_id))
-        if self.tasks.for_plan(plan_id):
-            blockers.append(f"{len(self.tasks.for_plan(plan_id))} 个实验任务引用它")
-        if plan.approval_state == "approved":
-            blockers.append("已批准的方案不删除，请改用修订或停用")
+        blockers = self._delete_blockers(plan, self.plans.bound_batch_ids(plan_id))
         if blockers:
             raise StateConflict(
                 "实验方案不可删除", {"blocked": [{"key": "plan", "label": b} for b in blockers]}

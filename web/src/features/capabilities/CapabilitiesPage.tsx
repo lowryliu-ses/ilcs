@@ -7,6 +7,7 @@ import { Fragment, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { useSignature } from '../../shared/signature';
@@ -139,6 +140,7 @@ export function CapabilitiesPage() {
                         >
                           删除
                         </button>
+                        {capability.delete_blockers.length ? <ForceDeleteButton kind="capability" id={capability.id} /> : null}
                       </>
                     ) : null}
                   </td>
