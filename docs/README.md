@@ -9,7 +9,7 @@
 | [设备适配器配置模板](设备适配器配置模板.md) | 选哪种驱动、每种驱动的配置项、设备接入模板、接入验收、设备模块 |
 | [操作案例](操作案例.md) | 四个端到端演示案例与故障演练；`scripts/load-demo-cases.py` 按它导入 |
 | [电解液配液线](电解液配液线.md) | C 公司电解液产线（模拟阶段）：工位与能力、配液模板的生成规则、导入配方表、`scripts/load-electrolyte-line.py`、占位项与接真机前要替换的东西 |
-| [ProtoForge 联调全流程](ProtoForge联调全流程.md) | 本机 ProtoForge 三台设备（经驱动宿主）跑通 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告；`scripts/load-protoforge-flow.py` |
+| [ProtoForge 联调全流程](ProtoForge联调全流程.md) | 本机 ProtoForge 三台设备（经驱动宿主）按多温度矩阵逐样本设定温度，跑通 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告；`scripts/load-protoforge-flow.py` |
 | [验收记录](acceptance-record.md) | 验收用例 AC-01 至 AC-40 与自动化测试的对应关系、只有手工证据的项 |
 | [SOP 模板](SOP模板.md) | 受控 SOP 起草模板（SOP 页面有链接） |
 | [上线前输入与授权清单](上线前输入与授权清单.md) | 正式上线前要由现场填写的事实与授权 |

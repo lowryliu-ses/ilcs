@@ -1,9 +1,9 @@
 {
-  "note": "ProtoForge 的 HTTP REST 传感器（设备 http-rest，接口前缀 /api/v1）：读温度、湿度、气压、状态；湿度可写 0–100 用来验证写入与回读。ProtoForge 要接进 ilcs_backend 网络（docker network connect ilcs_backend protoforge）",
+  "note": "ProtoForge 的 HTTP REST 设备（http-rest，接口前缀 /api/v1）：读温度、湿度、气压、状态，湿度可写 0–100；环境箱设定温度（cap.chamber_setpoint）：POST /temperature 写设定、按点表读回温度，状态 normal 即空闲。ProtoForge 要接进 ilcs_backend 网络（docker network connect ilcs_backend protoforge）",
   "plugin": "rest_map",
   "port": 50203,
   "simulator": true,
-  "config_version": "r1",
+  "config_version": "r2",
   "config": {
     "base_url": "http://protoforge:8080/api/v1",
     "allow_insecure_http": true,
@@ -51,6 +51,37 @@
         "label": "状态",
         "value_type": "String"
       }
+    },
+    "status": {
+      "method": "GET",
+      "path": "/status",
+      "field": "value",
+      "states": {
+        "normal": "idle",
+        "error": "failed",
+        "fault": "failed"
+      }
+    },
+    "capabilities": {
+      "cap.chamber_setpoint": {
+        "method": "POST",
+        "path": "/temperature",
+        "body": {
+          "value": "{temp}"
+        },
+        "idle_after_start": "done",
+        "actuals": {
+          "temp": {
+            "point": "temperature"
+          }
+        }
+      }
     }
+  },
+  "supports": {
+    "hold": false,
+    "abort": false,
+    "query": true,
+    "dedup": true
   }
 }

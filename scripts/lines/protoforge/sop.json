@@ -1,26 +1,82 @@
 {
-  "_说明": "ProtoForge 联调线的作业指导书：三台 ProtoForge 模拟设备经驱动宿主接入 ILCS（只走 SiLA 2），按 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告跑一遍全流程。load-protoforge-flow.py 按它登记结构化步骤、上传同目录的附件 PDF（render-sop.py 生成）并走评审发布。改了内容就升版本号、重新生成 PDF。",
+  "_说明": "ProtoForge 联调线的作业指导书：三台 ProtoForge 模拟设备经驱动宿主接入 ILCS（只走 SiLA 2），按 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告跑一遍全流程。load-protoforge-flow.py 按它登记结构化步骤、上传同目录的附件 PDF（render-sop.py 生成）并走评审发布。改了内容就升版本号、重新生成 PDF。v2（2026-10-04）相对 v1：三台设备都参与温度设定（多温度矩阵，每个样本一个温度，设备按样本依次执行）；温度不再当环境指标，环境只核对湿度与压力。v3（2026-10-04）相对 v2：压力要求放宽到 0.5–10 bar（与温控节点的压力设定范围一致）。v4（2026-10-04）相对 v3：握手 PLC 不回报设定回读——ProtoForge 场景的规则触发时会把设定寄存器写回 0，PLC 的逐样本设定看指令参数与遥测。",
   "code": "SOP-PF-01",
-  "title": "ProtoForge 握手 PLC 控温运行联调规程",
-  "version": "v1",
+  "title": "ProtoForge 多温度矩阵控温联调规程",
+  "version": "v4",
   "category": "设备联调",
-  "capability_scope": ["cap.plc_run"],
-  "sample_types": ["联调样品"],
+  "capability_scope": [
+    "cap.plc_run",
+    "cap.tc_setpoint",
+    "cap.chamber_setpoint"
+  ],
+  "sample_types": [
+    "联调样品"
+  ],
   "requires_training_ack": true,
-  "purpose": "规定 ProtoForge 联调线（HTTP REST 温湿度传感器、OPC UA 压力传感器、Modbus TCP 握手 PLC，均经驱动宿主以 SiLA 2 接入）按设定温度做一次控温运行的操作：开工前核对环境与设备在线，装样核对设定，PLC 按设定温度运行并回报实测温度，QA 复核数据。用于验证 ILCS 从 SOP、流程、方案、任务到排程、批次执行、数据复核与报告的全链路。设备都是模拟设备，数据带「模拟」标记，不作实测结论。",
-  "safety": "联调用模拟设备，无真实样品、加热体与压力容器。开工前确认三台设备在「工位与接入」里经驱动宿主在线、实验区温湿度与 PLC 工位压力读数在要求范围内且未过期；读数缺失、过期或超限时不开工，排查传感器与驱动宿主后再继续。运行中不得在 ProtoForge 管理界面手动改写 PLC 的状态字与启动线圈。",
+  "purpose": "规定 ProtoForge 联调线（Modbus TCP 握手 PLC、OPC UA 温控 / 压力节点、HTTP REST 环境箱，均经驱动宿主以 SiLA 2 接入）按多温度矩阵做控温运行的操作：方案用设计点给每个样本一个设定温度，三台设备依次为每个样本设定温度并回读（一次只做一个设定的设备由驱动按样本依次执行），开工前核对环境与设备在线，QA 复核数据。用于验证 ILCS 从 SOP、流程、矩阵方案、任务到排程、批次执行、数据复核与报告的全链路。设备都是模拟设备，数据带「模拟」标记，不作实测结论。",
+  "safety": "联调用模拟设备，无真实样品、加热体与压力容器。开工前确认三台设备在「工位与接入」里经驱动宿主在线、实验区相对湿度与 PLC 工位压力读数在要求范围内且未过期；读数缺失、过期或超限时不开工，排查传感器与驱动宿主后再继续。运行中不得在 ProtoForge 管理界面手动改写 PLC 的状态字与启动线圈、温控节点与环境箱温度。",
   "steps": [
-    {"title": "核对环境与设备在线", "kind": "manual", "duration_min": 2,
-     "instructions": "在「环境监测」核对设备模拟联调区的温度（10–45 ℃）、相对湿度（≤ 80 %RH）与 ST-PF-MB 的压力（0.5–5 bar）读数在范围内且未过期；在「工位与接入」核对 ST-PF-HTTP、ST-PF-OPCUA、ST-PF-MB 在线。",
-     "checks": ["温湿度、压力读数在范围内且未过期", "三台设备在线"]},
-    {"title": "装样并核对设定温度", "kind": "manual", "duration_min": 2,
-     "instructions": "按批次样本清单核对联调样品，确认流程里 PLC 控温运行的设定温度为 60 ℃。",
-     "checks": ["样品与清单一致", "设定温度 60 ℃"]},
-    {"title": "PLC 控温运行", "kind": "device", "capability": "cap.plc_run", "duration_min": 1,
-     "instructions": "由系统下发：PLC 写设定温度、置启动，运行约 5 s 后回报实测温度并复位。下发前系统再核对一次环境要求。",
-     "checks": ["状态字回到空闲", "回报实测温度"]},
-    {"title": "QA 复核运行数据", "kind": "review", "duration_min": 2,
-     "instructions": "QA 核对设备回报的实测温度、环境读数与审计记录，确认数据完整后批准。",
-     "checks": ["实测温度已回报", "环境核对记录完整"]}
+    {
+      "title": "核对环境与设备在线",
+      "kind": "manual",
+      "duration_min": 2,
+      "instructions": "在「环境监测」核对设备模拟联调区的相对湿度（≤ 80 %RH）与 ST-PF-MB 的压力（0.5–10 bar）读数在范围内且未过期；在「工位与接入」核对 ST-PF-HTTP、ST-PF-OPCUA、ST-PF-MB 在线。",
+      "checks": [
+        "湿度、压力读数在范围内且未过期",
+        "三台设备在线"
+      ]
+    },
+    {
+      "title": "装样并核对各样本设定温度",
+      "kind": "manual",
+      "duration_min": 2,
+      "instructions": "按批次样本清单核对联调样品，按方案的设计点核对每个样本的设定温度（同一样本三台设备同一个温度）。",
+      "checks": [
+        "样品与清单一致",
+        "每个样本的设定温度与方案一致"
+      ]
+    },
+    {
+      "title": "PLC 控温运行",
+      "kind": "device",
+      "capability": "cap.plc_run",
+      "duration_min": 1,
+      "instructions": "由系统下发：PLC 按样本依次写设定温度、置启动，每个样本运行约 5 s 后回报实测温度并复位。下发前系统再核对一次环境要求。ProtoForge 场景的实测温度是规则写死的值（61.5 ℃），规则触发时还会把设定寄存器写回 0：逐样本的设定温度在批次的指令参数与遥测里核对。",
+      "checks": [
+        "每个样本都运行并回报了实测温度",
+        "指令里每个样本的设定温度与设计温度一致",
+        "状态字回到空闲"
+      ]
+    },
+    {
+      "title": "温控器设定温度",
+      "kind": "device",
+      "capability": "cap.tc_setpoint",
+      "duration_min": 1,
+      "instructions": "由系统下发：OPC UA 温控节点按样本依次写设定温度并回读；高报为真时判故障，后面的样本不再执行。",
+      "checks": [
+        "每个样本的回读温度与设计温度一致"
+      ]
+    },
+    {
+      "title": "环境箱设定温度",
+      "kind": "device",
+      "capability": "cap.chamber_setpoint",
+      "duration_min": 1,
+      "instructions": "由系统下发：HTTP 环境箱按样本依次写设定温度并回读；状态不是 normal 时判故障。",
+      "checks": [
+        "每个样本的回读温度与设计温度一致"
+      ]
+    },
+    {
+      "title": "QA 复核运行数据",
+      "kind": "review",
+      "duration_min": 2,
+      "instructions": "QA 逐样本核对设计温度、PLC 实测温度与设定（指令参数 / 遥测）、温控器与环境箱的回读、环境读数与审计记录，确认数据完整后批准。",
+      "checks": [
+        "每个样本三项回报齐全",
+        "环境核对记录完整"
+      ]
+    }
   ]
 }
