@@ -1311,10 +1311,15 @@ function GateDecisionDialog({
         scope?: string;
         failed?: string[];
         undecided?: string[];
+        quality?: string;
+        untrusted?: Record<string, string>;
       }
     | undefined;
   const perSample = measured?.scope === 'sample';
-  const candidates = perSample ? [...(measured?.failed ?? []), ...(measured?.undecided ?? [])] : [];
+  const untrusted = Object.entries(measured?.untrusted ?? {});
+  const candidates = perSample
+    ? [...(measured?.failed ?? []), ...(measured?.undecided ?? []), ...untrusted.map(([well]) => well)]
+    : [];
   return (
     <Modal
       title={`质检判定 · ${run.step_name}`}
@@ -1343,6 +1348,7 @@ function GateDecisionDialog({
         <div className="small mono">
           {measured.field} = {String(measured.value ?? '无数值')}（下限 {String(measured.min ?? '—')}，上限{' '}
           {String(measured.max ?? '—')}）
+          {measured.quality && measured.quality !== 'good' ? `；设备回执质量 ${measured.quality}` : ''}
         </div>
       ) : null}
       {perSample ? (
@@ -1350,6 +1356,7 @@ function GateDecisionDialog({
           {measured?.field}（下限 {String(measured?.min ?? '—')}，上限 {String(measured?.max ?? '—')}）：不合格{' '}
           {measured?.failed?.length ? measured.failed.join('、') : '无'}；无读数{' '}
           {measured?.undecided?.length ? measured.undecided.join('、') : '无'}
+          {untrusted.length ? `；读数不可信 ${untrusted.map(([well, quality]) => `${well}（${quality}）`).join('、')}` : ''}
         </div>
       ) : null}
       <Field label="结论">
@@ -2002,7 +2009,7 @@ function BranchDecisionDialog({
       },
     },
   );
-  const evidence = run.form_data as { field?: string; value?: unknown };
+  const evidence = run.form_data as { field?: string; value?: unknown; quality?: string };
   const submit = async () => {
     if (!needsSignature) {
       await decide.run(null).catch(() => undefined);
@@ -2031,6 +2038,7 @@ function BranchDecisionDialog({
       {evidence?.field ? (
         <div className="small mono">
           判据 {evidence.field} = {String(evidence.value ?? '无数值')}
+          {evidence.quality && evidence.quality !== 'good' ? `（设备回执质量 ${evidence.quality}）` : ''}
         </div>
       ) : null}
       <Field label="出口">

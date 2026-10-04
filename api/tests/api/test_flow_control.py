@@ -70,6 +70,59 @@ def test_measure_branch_takes_one_path_prunes_the_other_and_returns_its_windows(
     assert _runs(detail, test_id)[-1]["state"] == "completed", "汇合只等走到的那条路"
 
 
+def _device_reports_quality(monkeypatch, step_id: str, quality: str) -> None:
+    """模拟设备在这一步的回执里自己报质量（如探头自检报警时的 uncertain）。"""
+    from dataclasses import replace
+
+    from app.adapters.drivers.simulation import SimulationAdapter
+
+    original = SimulationAdapter.submit
+
+    def submit(self, request):
+        result = original(self, request)
+        if request.step_id != step_id:
+            return result
+        patched = replace(result, quality=quality)
+        self._ledger[request.command_id] = patched
+        return patched
+
+    monkeypatch.setattr(SimulationAdapter, "submit", submit)
+
+
+def test_unreliable_reading_holds_the_branch_even_with_a_default_exit(
+    operator, qa, reset_runtime, db, executor, monkeypatch,
+):
+    """判据读数落在「合格」出口里、也有默认出口，但设备回执质量 uncertain：不自动选出口，等人选；选了之后照常走。"""
+    def shape(steps):
+        dry, weigh, assemble, test = steps
+        return [
+            dry, {**weigh, "after": [dry["step_id"]]},
+            _branch([weigh["step_id"]], weigh["step_id"], [
+                {"key": "ok", "label": "重量合格", "min": 0.01},
+                {"key": "light", "label": "偏轻", "max": 0.01},
+            ], default="ok"),
+            {**assemble, "after": ["b1"], "when": {"b1": "ok"}},
+            {**_strip_hard(test), "after": [assemble["step_id"]]},
+        ]
+
+    batch_id = _graph_batch(operator, db, shape)
+    weigh_id = operator.get(f"/api/batches/{batch_id}").json()["snapshot"]["steps"][1]["step_id"]
+    _device_reports_quality(monkeypatch, weigh_id, "uncertain")
+    _dispatch(operator, batch_id)
+    held = _run(operator, batch_id, executor, until=("paused", "done", "fault", "aborted"))
+    assert held["state"] == "paused", held["failure_reason"]
+    branch = _runs(held, "b1")[-1]
+    assert branch["state"] == "ready" and "质量为 uncertain" in branch["reason"], branch["reason"]
+    decided = qa.post(f"/api/step-runs/{branch['id']}/branch-decision", {
+        "case": "ok", "reason": "复称 15.2 mg，合格", "row_version": branch["row_version"],
+        "signature_id": qa.sign("分支判定属实", target=branch["id"]),
+    })
+    assert decided.status_code == 200, decided.text
+    detail = _run(operator, batch_id, executor)
+    assert detail["state"] == "done", detail["failure_reason"]
+    assert _runs(detail, "b1")[-1]["conclusion"] == "ok"
+
+
 def test_loop_repeats_up_to_the_limit_then_waits_for_qa(operator, qa, reset_runtime, db, executor):
     def shape(steps):
         dry, weigh, assemble, test = steps

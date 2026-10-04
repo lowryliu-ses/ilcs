@@ -33,6 +33,7 @@ from ..repositories.resources import AdapterRepository, StationRepository
 from .acceptance_service import driver_awaiting_approval, running_stations
 from .audit_service import AuditService
 from .identity_service import IdentityService
+from .leadership import verify as verify_leadership
 
 ACTIVE = ("queued", "running")
 STATE_LABELS = {"queued": "排队中", "running": "写入中", "done": "已写入", "failed": "没有写", "unknown": "结果未知",
@@ -227,6 +228,7 @@ class PointWriteRunner:
         if refusal:
             return self._close(row, "failed", error=refusal)
         adapter = self.db.get(Adapter, row.station_id)
+        verify_leadership(self.db, "写设备点位")  # 已经失锁的旧执行器不再写设备（services/leadership）
         changed = self.db.query(PointWrite).filter(PointWrite.id == write_id, PointWrite.state == "queued").update(
             {"state": "running", "started_at": now()}, synchronize_session=False)
         self.db.commit()

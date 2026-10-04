@@ -77,13 +77,15 @@ class CommandRequest:
     # 步骤引用的设备方法：{id, code, version, name, program}；驱动按 program 选设备端程序
     method: dict = field(default_factory=dict)
     # 这一步投的物料：{name, unit, param}——用量取自下发参数里的 param（逐孔位时取各孔之和），单位是快照 BOM
-    # 的单位。只在执行设备动作的指令上填，是给驱动的内部挂钩：真实驱动的线协议不带它（上位机的物料映射
-    # 接口定了再接），内置模拟据此回报消耗
+    # 的单位。只在执行设备动作的指令上填；线协议带它（`http_json_v1` 请求体、`sila2_v1` 的 ContextJson），
+    # 称量加料的设备据此核对装的料、按这个名字回报实际消耗，内置模拟据此回报消耗
     material: dict = field(default_factory=dict)
-    # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required, metric_id}）；同样只是内部挂钩
+    # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required, metric_id}）；只是内部挂钩，
+    # 内置模拟按它给示意值，不上线协议
     outputs: tuple = ()
-    # 这一步处理的孔位（设备认的孔位键 → 在用样本，与逐孔参数同一口径）。没有逐孔参数的检测步骤也要逐样本回报读数，
-    # 驱动据此知道这条指令覆盖哪几个孔位；内置模拟按它逐孔给示意值。同样只是内部挂钩，不上线协议
+    # 这条指令处理的孔位（设备认的孔位键，与逐孔参数同一口径）：有逐孔参数就是它的孔位，没有的取这一步的处理对象，
+    # 按样本拆开下发时是这一条的那几个。线协议带它（同 material）：没有逐孔参数的检测步骤，设备靠它知道测的是哪几瓶、
+    # 按孔位回报读数；内置模拟按它逐孔给示意值
     wells: tuple = ()
 
 

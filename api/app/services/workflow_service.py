@@ -21,7 +21,7 @@ from ..core.errors import (
     DomainError, NotFound, PermissionDenied, StateConflict, ValidationFailed,
 )
 from ..models.base import uid as uid_hex
-from ..domain import graph, workflow
+from ..domain import dataquality, graph, workflow
 from ..domain.access import same_person
 from ..domain.steps import (
     BRANCH, DEVICE, GATE, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, WAIT, KIND_NAMES, TIMEOUT_ACTIONS, branch_cases, branch_config,
@@ -719,8 +719,9 @@ class WorkflowService:
     def _evaluate_gate(self, batch: Batch, run: StepRun, index: int) -> dict:
         """读测量来源步骤最近一次检查点里的测量值，按阈值判定。
 
-        取不到数值不等于合格：一律转人工判断。逐孔位判定时不合格的样本单独剔除，
-        其余样本继续；全部不合格才按关卡的不合格去向处理整批。
+        取不到数值不等于合格：一律转人工判断。设备回执的质量不是 good（设备说读数不可信、现场核实写入的值）
+        同样转人工判断，数值落在范围里也不自动放行（`dataquality.receipt_quality`）。逐孔位判定时不合格的样本
+        单独剔除，其余样本继续；全部不合格才按关卡的不合格去向处理整批。
         """
         from ..repositories.execution import CheckpointRepository
 
@@ -733,6 +734,7 @@ class WorkflowService:
             if source in ids else None
         )
         delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
+        overall, per_well = dataquality.receipt_quality(checkpoint.payload if checkpoint else None)
         field = gate.get("field")
         low, high = gate.get("min"), gate.get("max")
         name = (run.step_snapshot or {}).get("name") or "质检关卡"
@@ -746,24 +748,37 @@ class WorkflowService:
             positions = SampleService(self.db, self.ctx).device_wells(batch.id)
             active = self._active_samples(batch)
             values, failed, undecided = {}, [], []
+            untrusted: dict[str, str] = {}
             # 先记结论，判定过程中不改样本状态：去向（剔除后继续、返工、保持、报废）定了才改
             for sample in active:
-                value = (wells.get(positions.get(sample.id, sample.well)) or {}).get(field)
+                well = positions.get(sample.id, sample.well)
+                value = (wells.get(well) or {}).get(field)
                 values[sample.well] = value
+                quality = per_well.get(well, overall)
+                if quality != "good":
+                    untrusted[sample.well] = quality  # 设备说这次读数不可信：不按数值判
+                    continue
                 verdict = workflow.judge(value, low, high)
                 if verdict is True:
                     continue
                 (undecided if verdict is None else failed).append(sample.well)
             run.form_data = {"field": field, "min": low, "max": high, "scope": "sample",
                              "values": values, "failed": failed, "undecided": undecided,
+                             "quality": overall, "untrusted": untrusted,
                              "checkpoint_id": checkpoint.id if checkpoint else ""}
             if not active:
                 return self._gate_hold(batch, run, f"{name}：没有在用样本可判定")
-            if undecided:
-                # 取不到数值不等于合格，也不等于不合格：转人工判断，不剔除、不自动返工
+            if undecided or untrusted:
+                # 取不到数值、读数不可信，都不等于合格，也不等于不合格：转人工判断，不剔除、不自动返工
+                reasons = []
+                if untrusted:
+                    listed = "、".join(f"{well} {quality}" for well, quality in list(untrusted.items())[:4])
+                    reasons.append(f"{len(untrusted)} 个样本的 {field} 读数设备标为不可信（{listed}"
+                                   f"{'…' if len(untrusted) > 4 else ''}）")
+                if undecided:
+                    reasons.append(f"{len(undecided)} 个样本没有 {field} 读数")
                 return self._gate_hold(batch, run, (
-                    f"{len(undecided)} 个样本没有 {field} 读数，无法判定"
-                    + (f"；另有 {len(failed)} 个不合格" if failed else "")
+                    "；".join(reasons) + "，无法判定" + (f"；另有 {len(failed)} 个不合格" if failed else "")
                 ))
             if failed and len(failed) == len(values):
                 # 全部不合格：按关卡的不合格去向处理整批。返工重测全部样本，不预先剔除
@@ -788,7 +803,11 @@ class WorkflowService:
             f"下限 {low}" if low is not None else "", f"上限 {high}" if high is not None else "",
         ) if part)
         run.form_data = {"field": field, "min": low, "max": high, "scope": "batch", "value": value,
-                         "checkpoint_id": checkpoint.id if checkpoint else ""}
+                         "quality": overall, "checkpoint_id": checkpoint.id if checkpoint else ""}
+        if overall != "good":
+            return self._gate_hold(
+                batch, run, f"测量来源的设备回执质量为 {overall}（{field}={value}）：读数不可信，不能自动判定，请复核或重测",
+            )
         if verdict is True:
             self._close_run(run, workflow.COMPLETED, f"{field}={value} 合格")
             self.audit.record(None, "质检关卡判定", batch.id, before="待判定", after="合格",
@@ -1006,7 +1025,8 @@ class WorkflowService:
     # ---------- 条件分支与回环 ----------
 
     def _branch_value(self, batch: Batch, config: dict):
-        """分支判据的取值：上游设备步骤最近检查点里的测量值，或上游人工记录的字段值。"""
+        """分支判据的取值：上游设备步骤最近检查点里的测量值（连同回执质量），或上游人工记录的字段值。
+        返回（值, 依据, 质量）；人工记录没有设备质量，按 good。"""
         from ..repositories.execution import CheckpointRepository
 
         steps = self.steps_of(batch)
@@ -1014,19 +1034,20 @@ class WorkflowService:
         source = str(config.get("source_step_id") or "")
         field = str(config.get("field") or "")
         if source not in ids:
-            return None, ""
+            return None, "", "good"
         if config.get("mode") == "measure":
             checkpoint = CheckpointRepository(self.db).latest_for_step(batch.id, ids.index(source))
             delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
-            return delivered.get(field), checkpoint.id if checkpoint else ""
+            quality, _ = dataquality.receipt_quality(checkpoint.payload if checkpoint else None)
+            return delivered.get(field), checkpoint.id if checkpoint else "", quality
         runs = [
             row for row in self.runs.for_batch(batch.id)
             if row.step_id == source and row.state == workflow.COMPLETED
         ]
         if not runs:
-            return None, ""
+            return None, "", "good"
         latest = runs[-1]
-        return ((latest.form_data or {}).get("values") or {}).get(field), latest.id
+        return ((latest.form_data or {}).get("values") or {}).get(field), latest.id, "good"
 
     def _evaluate_branch(self, batch: Batch, run: StepRun, index: int) -> dict:
         """按判据选出口。人工选择的分支留作待办；判据缺失又没有默认出口时保持待人工判断。"""
@@ -1038,8 +1059,14 @@ class WorkflowService:
             return {"next": self.run_out(run), "batch_state": batch.state, "awaiting_choice": True}
         if config.get("per_sample"):
             return self._evaluate_per_sample(batch, run, index)
-        value, evidence = self._branch_value(batch, config)
-        run.form_data = {"field": config.get("field"), "value": value, "evidence": evidence, "mode": config.get("mode")}
+        value, evidence, quality = self._branch_value(batch, config)
+        run.form_data = {"field": config.get("field"), "value": value, "evidence": evidence, "mode": config.get("mode"),
+                         "quality": quality}
+        if quality != "good":
+            # 设备说这次读数不可信：落在哪个出口都不能自动走（默认出口也不行），等人选
+            return self._branch_hold(
+                batch, run, f"判据 {config.get('field')}={value} 来自质量为 {quality} 的设备回执：读数不可信，不能自动选出口",
+            )
         case = match_case(step, value)
         if case is None:
             reason = (
@@ -1049,9 +1076,10 @@ class WorkflowService:
             return self._branch_hold(batch, run, f"{reason}，且没有默认出口")
         return self._take_branch(batch, run, index, case, auto=True)
 
-    def _sample_values(self, batch: Batch, config: dict) -> tuple[dict, str]:
+    def _sample_values(self, batch: Batch, config: dict) -> tuple[dict, str, dict]:
         """按样本分流的判据：来源设备步骤最近检查点里每个孔位的读数，孔位按这一步当时的处理对象换成样本。
-        某孔没有这项读数就用整批的读数（设备只报了一个值）。返回 ({运行分配: 值}, 检查点编号)。"""
+        某孔没有这项读数就用整批的读数（设备只报了一个值）。返回 ({运行分配: 值}, 检查点编号,
+        {运行分配: 质量}——只列回执质量不是 good 的样本，它们的读数不能自动拿去分流、定份数）。"""
         from ..repositories.execution import CheckpointRepository
         from .batch_service import BatchService
 
@@ -1060,16 +1088,20 @@ class WorkflowService:
         source = str(config.get("source_step_id") or "")
         field = str(config.get("field") or "")
         if source not in ids:
-            return {}, ""
+            return {}, "", {}
         checkpoint = CheckpointRepository(self.db).latest_for_step(batch.id, ids.index(source))
         delivered = ((checkpoint.payload or {}).get("delivered") or {}) if checkpoint else {}
+        overall, per_well = dataquality.receipt_quality(checkpoint.payload if checkpoint else None)
         wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
         targets = BatchService(self.db, self.ctx)._step_targets(batch, steps[ids.index(source)]) or {}
-        values = {}
+        values, untrusted = {}, {}
         for well, sample in targets.items():
             row = wells.get(well) if isinstance(wells.get(well), dict) else {}
             values[sample.id] = row.get(field, delivered.get(field))
-        return values, checkpoint.id if checkpoint else ""
+            quality = per_well.get(well, overall)
+            if quality != "good":
+                untrusted[sample.id] = quality
+        return values, checkpoint.id if checkpoint else "", untrusted
 
     def _evaluate_per_sample(self, batch: Batch, run: StepRun, index: int, assign: dict[str, str] | None = None,
                              reason: str = "") -> dict:
@@ -1077,25 +1109,35 @@ class WorkflowService:
         有样本对不上任何出口、又没有默认出口时保持，待 QA 给这些样本选出口（`assign`）。"""
         step = run.step_snapshot or {}
         config = branch_config(step)
-        values, evidence = self._sample_values(batch, config)
+        values, evidence, untrusted = self._sample_values(batch, config)
         routing: dict[str, list[str]] = {}
         unrouted: list[str] = []
         for sample_id, value in sorted(values.items()):
-            case = (assign or {}).get(sample_id) or match_case(step, value)
+            # 读数不可信的样本不按数值分流（默认出口也不自动走），等人给它选出口
+            case = (assign or {}).get(sample_id) or (None if sample_id in untrusted else match_case(step, value))
             if case is None:
                 unrouted.append(sample_id)
             else:
                 routing.setdefault(case, []).append(sample_id)
         run.form_data = {**(run.form_data or {}), "field": config.get("field"), "mode": "measure", "evidence": evidence,
-                         "values": values, "per_sample": routing, "unrouted": unrouted}
+                         "values": values, "per_sample": routing, "unrouted": unrouted, "untrusted": untrusted}
         if not values:
             return self._branch_hold(batch, run, f"判据 {config.get('field')} 没有任何样本的读数，且没有默认出口")
         if unrouted:
-            return self._branch_hold(
-                batch, run,
-                f"{len(unrouted)} 个样本（{'、'.join(unrouted[:4])}{'…' if len(unrouted) > 4 else ''}）的 {config.get('field')} "
-                f"没有取值或不满足任何出口条件，且没有默认出口",
-            )
+            distrusted = [sample_id for sample_id in unrouted if sample_id in untrusted]
+            others = [sample_id for sample_id in unrouted if sample_id not in untrusted]
+            reasons = []
+            if distrusted:
+                reasons.append(
+                    f"{len(distrusted)} 个样本（{'、'.join(f'{sample_id} {untrusted[sample_id]}' for sample_id in distrusted[:4])}"
+                    f"{'…' if len(distrusted) > 4 else ''}）的 {config.get('field')} 读数设备标为不可信，不能自动分流"
+                )
+            if others:
+                reasons.append(
+                    f"{len(others)} 个样本（{'、'.join(others[:4])}{'…' if len(others) > 4 else ''}）的 {config.get('field')} "
+                    f"没有取值或不满足任何出口条件，且没有默认出口"
+                )
+            return self._branch_hold(batch, run, "；".join(reasons))
         cases = [str(case.get("key")) for case in branch_cases(step) if str(case.get("key")) in routing]
         run.conclusion = "、".join(cases)
         run.form_data = {**run.form_data, "cases": cases, "decision_reason": reason}
@@ -1464,7 +1506,14 @@ class WorkflowService:
             values = {sample.id: (list(sample.levels or [])[position] if position < len(sample.levels or []) else None)
                       for sample in parents}
         else:
-            values, _ = self._sample_values(batch, {"source_step_id": source["source_step_id"], "field": source["field"]})
+            values, _, untrusted = self._sample_values(
+                batch, {"source_step_id": source["source_step_id"], "field": source["field"]},
+            )
+            distrusted = [f"{sample.id}（{untrusted[sample.id]}）" for sample in parents if sample.id in untrusted]
+            if distrusted:
+                # 设备说读数不可信：不拿它定份数，也不退回缺省份数
+                return {}, (f"{len(distrusted)} 个样本的 {source['field']} 读数设备标为不可信："
+                            f"{'、'.join(distrusted[:4])}{'…' if len(distrusted) > 4 else ''}，不能自动定拆分份数")
         counts: dict[str, int] = {}
         bad: list[str] = []
         for sample in parents:

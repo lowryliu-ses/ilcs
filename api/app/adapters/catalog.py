@@ -122,9 +122,9 @@ class DriverInfo:
 
 # ---------- 公共字段 ----------
 
-def _timeouts(request: float = 10) -> tuple[ConfigField, ...]:
+def _timeouts(request: float = 10, connect: str = "只约束建立连接（含 TLS 握手）") -> tuple[ConfigField, ...]:
     return (
-        ConfigField("connect_timeout_sec", "连接超时（秒）", "number", hint="只约束建立连接（含 TLS 握手）"),
+        ConfigField("connect_timeout_sec", "连接超时（秒）", "number", hint=connect),
         ConfigField("request_timeout_sec", "请求超时（秒）", "number", hint=f"连接建立后的读写，缺省 {request:g} 秒"),
         ConfigField("probe_interval_sec", "探测周期（秒）", "number", hint="执行器多久读一次设备身份判在线"),
     )
@@ -210,7 +210,8 @@ DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
          ConfigField("insecure", "不加密", "boolean", hint="只限非正式环境"),
          ConfigField("tasks", "参与自动流程", "boolean",
                      hint="缺省是；只读写点位的设备（设备服务没有实现 TaskExecution）填 false"),
-         ConfigField("device_timezone", "设备时区", "string"), *_timeouts(), *COMMON),
+         ConfigField("device_timezone", "设备时区", "string"),
+         *_timeouts(connect="探测端口；探通后建客户端（TLS、读特性清单）最多再等连接超时 + 请求超时"), *COMMON),
         lambda limits: {"host": "sila-device.lab.internal", "port": 50052, "ca_file": "/run/secrets/ilcs/sila/<设备>.crt",
                         "request_timeout_sec": 10, "probe_interval_sec": 10},
         credential="file:///run/secrets/ilcs/sila/<驱动宿主>.token",

@@ -43,6 +43,7 @@ from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .file_service import FileService
 from .gate_service import GateService
+from .leadership import verify as verify_leadership
 
 # 搬运能力：AGV、机械臂转运这类承运工位不承接工步，没有校准档案要核（与迁移核对同一口径）
 TRANSPORT_CAPABILITY = "cap.transfer"
@@ -173,6 +174,8 @@ class ExecutionService:
             self._refuse(batch, command, f"适配器不可用：{exc}；指令未投递，不自动重试")
             return True
 
+        # 执行权：主备切换的那几秒里，已经失锁的旧执行器不能再领走指令（services/leadership）
+        verify_leadership(self.db, "投递指令")
         # 比较并交换：只有仍在队列里的指令才能被领走，与撤回互斥
         claimed = (
             self.db.query(Command)
@@ -664,22 +667,16 @@ class ExecutionService:
     def _plan_runs(self, batch: Batch, command: Command, record, request: CommandRequest) -> bool:
         """这条设备动作要不要逐样本拆开：要就把拆分计划记进 command.runs（已经记过的沿用），返回 True。
 
-        样本（孔位）取逐孔参数的孔位，没有逐孔参数的（检测步骤）取这一步覆盖的孔位。续跑 / 重试接续的那条指令
-        若也是拆开的，已经做完的样本照搬过来（连同回执），不再下发——加过的料不能再加一遍。
+        样本（孔位）取指令处理的孔位（`request.wells`：逐孔参数的孔位，没有逐孔参数的取这一步的处理对象，见
+        `_step_hooks`）。续跑 / 重试接续的那条指令若也是拆开的，已经做完的样本照搬过来（连同回执），不再下发——
+        加过的料不能再加一遍。
         """
         if command.runs:
             return True
         limit = wells_per_command(record)
-        per_well = (command.params or {}).get("wells")
         if not limit:
             return False
-        wells = [str(well) for well in per_well] if isinstance(per_well, dict) and per_well else list(request.wells)
-        if not wells:
-            from .batch_service import BatchService
-
-            steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
-            step = steps[command.step_index] if command.step_index < len(steps) else {}
-            wells = sorted(BatchService(self.db, self.ctx)._step_targets(batch, step) or {})
+        wells = list(request.wells)
         if len(wells) <= limit:
             return False
         runs: list[dict] = []
@@ -713,6 +710,8 @@ class ExecutionService:
         """推进逐样本拆开的指令：吸收当前这个样本的回执；做完了就发下一个样本，直到有一个样本在设备上跑、出了结论不是完成、
         或者全部做完。每发一个样本之前先把「已交给适配器」落库：崩在中间时重启按这个样本的指令号去问设备。"""
         runs = [dict(run) for run in command.runs or []]
+        if result is not None:
+            verify_leadership(self.db, "落设备回执")
         while True:
             if result is not None:
                 run = next(run for run in runs if run.get("state") in RUN_ACTIVE)
@@ -734,6 +733,7 @@ class ExecutionService:
             if run is None:
                 self.settle(batch, command, ledger, record, self._runs_finished(command, runs))
                 return
+            verify_leadership(self.db, "下发下一个样本")
             run["state"] = "sent"
             self._save_runs(command, runs)
             self.db.commit()
@@ -833,7 +833,8 @@ class ExecutionService:
                 telemetry.append(TelemetryPoint(point["metric"], point["value"], point.get("setpoint"),
                                                 point.get("well") or "",
                                                 datetime.fromisoformat(moment) if moment else None))
-        delivered = {"runs": [{"id": run["id"], "wells": run["wells"], "state": run["state"]} for run in runs]}
+        delivered = {"runs": [{"id": run["id"], "wells": run["wells"], "state": run["state"],
+                               "quality": run.get("quality") or "good"} for run in runs]}
         if wells:
             delivered["wells"] = wells
         if materials:
@@ -1041,11 +1042,12 @@ class ExecutionService:
         return self.runs.latest(batch.id, self._step_id(batch, command.step_index))
 
     def _step_hooks(self, batch: Batch, command: Command) -> dict:
-        """执行设备动作的指令带给驱动的步骤信息：投哪种料（名称、用量参数及其单位）与方法输出规则。
+        """执行设备动作的指令带给驱动的步骤信息：处理哪几个样本（孔位）、投哪种料（名称、用量参数及其单位）与方法输出规则。
 
-        从批次快照按步骤序号取（与 complete_device_step 同一取法），不进 params——params 原样下发给设备，
-        真实驱动的线协议不因此改变。用量参数按 `dosing.dosing_param` 取（与消耗对账同一条规则）：没写时
-        该能力里单位等于物料单位的参数恰好一个才用，有歧义就不填，宁可不回报消耗，也不拿错参数去对账。
+        从批次快照按步骤序号取（与 complete_device_step 同一取法），不进 params——params 原样下发给设备。
+        孔位与物料是线协议的附加字段（`http_json_v1` 请求体、`sila2_v1` 的 ContextJson），设备据此知道这条指令处理的是
+        哪几个样本、投的是什么料；输出规则只给内置模拟用。用量参数按 `dosing.dosing_param` 取（与消耗对账同一条规则）：
+        没写时该能力里单位等于物料单位的参数恰好一个才用，有歧义就不填，宁可不回报消耗，也不拿错参数去对账。
         """
         if command.type not in DISPATCHING:
             return {}
@@ -1056,7 +1058,12 @@ class ExecutionService:
         outputs = (step.get("method") or {}).get("outputs") or []
         if outputs:
             hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
-            # 要回报读数的步骤带上它覆盖的孔位：检测步骤一般没有逐孔参数，驱动也得知道逐样本回报哪几个样本
+        # 这条指令处理的孔位：有逐孔参数就是它的孔位（与设备按孔位执行的口径一致），没有的（检测步骤、整批同一参数的步骤）
+        # 取这一步的处理对象。设备一次只处理一个样本、指令又没拆开时，只有靠它才知道测的是哪一瓶
+        per_well = (command.params or {}).get("wells")
+        if isinstance(per_well, dict) and per_well:
+            hooks["wells"] = tuple(str(well) for well in per_well)
+        else:
             from .batch_service import BatchService
 
             targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
@@ -1186,7 +1193,7 @@ class ExecutionService:
         from .device_result_service import DeviceResultService
 
         results = DeviceResultService(self.db, self.ctx).record(
-            batch, command, step, result.delivered or {}, result.origin,
+            batch, command, step, result.delivered or {}, result.origin, quality=result.quality,
         )
         self.audit.record(
             None, "步骤检查点", batch.id,
@@ -1651,6 +1658,7 @@ class ExecutorLoop:
             if ledger is None:
                 continue
             finished = result.state not in {"accepted", "running"}
+            verify_leadership(self.db, "落设备回执")
             service.settle(batch, command, ledger, record, result)
             # 逐条提交：终止回执在批次锁内汇总，锁不能带到下一条指令的设备查询里
             self.db.commit()
@@ -1866,6 +1874,7 @@ class ExecutorLoop:
                 mismatches += 1
                 continue
             # 设备侧能按原 command_id 给出结论：复用原命令身份继续，不重复动作
+            verify_leadership(self.db, "落对账结论")
             command.delivery_state = "delivered"
             service.settle(batch, command, ledger, record, found)
             self.db.commit()

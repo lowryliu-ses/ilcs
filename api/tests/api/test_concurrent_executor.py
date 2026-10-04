@@ -3,6 +3,8 @@
 - 通知与业务写入同事务：提交才发、回滚不发；心跳这类高频无意义更新不推送。
 - 并发执行器走完整条批次，与串行回路结论一致。
 - 一台工位的回路卡住，只拖住它自己：其他工位照常投递，执行器心跳照常写。
+- 失锁即熔断：看门狗发现持锁连接断了就取消排队的工位任务、立即退出；工位线程领取前核对执行权，失锁的旧执行器
+  不再领走指令。
 """
 import json
 import select
@@ -202,7 +204,149 @@ def test_only_one_executor_process_dispatches_at_a_time():
         assert module.acquire_singleton() is False, "锁被占着时第二个执行器待命，不工作"
     finally:
         module._Stop.requested = False
-        first.close()
+        # 真断开会话（进程退出就是这样）：close() 只是把连接还回连接池，会话级锁还在池里的那条连接上
+        first.invalidate()
     takeover = module.acquire_singleton()
     assert takeover, "主副本退出后待命的副本接管"
-    takeover.close()
+    takeover.invalidate()
+
+
+def _load_executor_main():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "executor" / "main.py"
+    spec = importlib.util.spec_from_file_location("ilcs_executor_main_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _hold_executor_lock():
+    """另开一条连接拿执行器锁（像一个执行器那样），返回（连接, 后端进程号）。"""
+    from sqlalchemy import text
+
+    from app.core.db import ADVISORY_NAMESPACE, engine
+    from app.services.leadership import LOCK_KEY
+
+    holder = engine.connect()
+    acquired = holder.execute(text("SELECT pg_try_advisory_lock(:namespace, hashtext(:key))"),
+                              {"namespace": ADVISORY_NAMESPACE, "key": LOCK_KEY}).scalar()
+    assert acquired, "执行器锁没被别人占着"
+    pid = holder.execute(text("SELECT pg_backend_pid()")).scalar()
+    holder.commit()
+    return holder, pid
+
+
+def _kill_backend(db, pid):
+    """库端断开持锁连接（运维 kill、连接被代理掐掉）：锁随会话一起释放。"""
+    from sqlalchemy import text
+
+    db.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+    db.commit()
+
+
+def test_execution_right_follows_the_lock_connection(db):
+    """执行权按持锁连接的后端进程号认：锁在就放行；持锁连接被库端断开、锁随之释放，就不再放行。"""
+    from app.core.db import ADVISORY_NAMESPACE
+    from app.services.leadership import Leadership
+
+    holder, pid = _hold_executor_lock()
+    leadership = Leadership(pid, ADVISORY_NAMESPACE)
+    try:
+        assert leadership.holds(db)
+        assert not Leadership(pid + 100000, ADVISORY_NAMESPACE).holds(db), "别的进程号不算持锁"
+        _kill_backend(db, pid)
+        deadline = time.monotonic() + 3
+        while leadership.holds(db) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not leadership.holds(db)
+    finally:
+        holder.invalidate()
+
+
+def test_lease_watch_exits_the_executor_when_the_lock_connection_dies(db):
+    """看门狗每个周期在持锁连接上核对一次：连接被断开就熔断，执行器取消排队的工位任务、立即以 3 退出。"""
+    from app.core.db import ADVISORY_NAMESPACE
+    from app.services.leadership import Leadership, LeaseWatch
+
+    module = _load_executor_main()
+    exits: list[int] = []
+    fenced: list[bool] = []
+
+    class Runtime:
+        def fence(self):
+            fenced.append(True)
+
+    holder, pid = _hold_executor_lock()
+    leadership = Leadership(pid, ADVISORY_NAMESPACE)
+    watch = LeaseWatch(holder, leadership, interval=0.05,
+                       on_lost=lambda reason: module.abandon(Runtime(), reason, exit_=exits.append)).start()
+    try:
+        time.sleep(0.3)
+        assert not exits and not leadership.lost.is_set(), "锁还在：看门狗不动"
+        _kill_backend(db, pid)
+        deadline = time.monotonic() + 3
+        while not exits and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert exits == [3] and fenced == [True]
+        assert leadership.lost.is_set() and "持锁连接" in leadership.reason
+    finally:
+        watch.stop()
+        holder.invalidate()
+
+
+def test_executor_that_lost_the_lock_does_not_claim_commands(running_batch, db, executor):
+    """失锁的旧执行器（看门狗还没发现）在领取前核对执行权：指令留在队列里、没有台账，接管的副本照常投递。"""
+    from app.core.db import ADVISORY_NAMESPACE, SessionLocal
+    from app.models import AdapterExecution, Command
+    from app.services import leadership
+    from app.services.execution_service import ExecutorLoop
+
+    leadership.install(leadership.Leadership(0, ADVISORY_NAMESPACE))  # 进程号 0：没有哪个会话持着锁
+    try:
+        with SessionLocal() as session:
+            with pytest.raises(leadership.LeadershipLost):
+                ExecutorLoop(session).tick()
+            session.rollback()
+        assert leadership.fenced()
+        command = db.query(Command).filter(Command.batch_id == running_batch, Command.type == "dispatch").one()
+        assert (command.state, command.delivery_state) == ("sent", "queued")
+        assert db.get(AdapterExecution, command.id) is None
+    finally:
+        leadership.install(None)
+    executor()
+    db.expire_all()
+    assert db.get(Command, command.id).delivery_state != "queued", "接管的执行器照常投递"
+
+
+def test_fenced_runtime_cancels_station_jobs_that_have_not_started(monkeypatch):
+    """熔断时还在排队的工位任务取消、不再开始（shutdown(wait=False) 不会取消它们）；熔断之后不再开始新的一轮。"""
+    from app.core.db import SessionLocal
+    from app.services import execution_service
+    from app.services.executor_runtime import ConcurrentExecutor
+    from app.services.leadership import LeadershipLost
+
+    release = threading.Event()
+    served: list[str] = []
+
+    def fake_pass(self, station_id, **_kwargs):
+        if station_id == "ST-A":
+            release.wait(10)
+        served.append(station_id)
+        return {"executed": 1}
+
+    monkeypatch.setattr(execution_service.ExecutorLoop, "station_pass", fake_pass)
+    monkeypatch.setattr(execution_service.ExecutorLoop, "stations_needing_work", lambda self: {"ST-A", "ST-B"})
+    runtime = ConcurrentExecutor(SessionLocal, workers=1, station_wait_sec=0.2)
+    try:
+        runtime.cycle()
+        runtime.fence()
+        release.set()
+        runtime.drain(timeout=10)
+        assert served == ["ST-A"], "只有已经在跑的那个做完；排队的 ST-B 被取消"
+        with pytest.raises(LeadershipLost):
+            runtime.cycle()
+    finally:
+        release.set()
+        runtime.shutdown()

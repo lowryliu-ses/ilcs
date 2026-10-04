@@ -7,6 +7,9 @@
 - **逻辑冲突**（前后指标之间的约束，如放电容量不能大于充电容量）：按规则的级别打标或拒收。
 
 打标（flag）是 `{code, message, rule_id?}`，挂在结果值或步骤执行上；不改变值本身。
+
+设备回执自带的质量（`quality`：good / bad / uncertain）是另一回事：设备说这次读数不可信，值再落在范围里也不能
+自动拿去判定（`receipt_quality`）。
 """
 from __future__ import annotations
 
@@ -35,6 +38,24 @@ def _num(value: Any) -> float | None:
 
 def flag(code: str, message: str, **extra: Any) -> dict[str, Any]:
     return {"code": code, "message": message, **extra}
+
+
+def receipt_quality(payload: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
+    """检查点（设备回执）的质量：整条的，加上按样本拆开下发时每个孔位那一条的（`delivered.runs[].quality`）。
+
+    good 以外（bad、uncertain；现场核实写入的检查点也是 uncertain）的读数不能自动拿去判定：质检关卡、测量条件分支、
+    按读数定拆分份数都转人工，与前馈参数同一口径；写成的检测结果打「设备质量」标记、置可疑。
+    孔位查不到自己那一条时按整条的（拆开时整条取各条里最差的）。
+    """
+    payload = payload or {}
+    overall = str(payload.get("quality") or "good")
+    per_well: dict[str, str] = {}
+    delivered = payload.get("delivered") if isinstance(payload.get("delivered"), dict) else {}
+    for run in delivered.get("runs") or []:
+        if isinstance(run, dict) and run.get("quality"):
+            for well in run.get("wells") or []:
+                per_well[str(well)] = str(run["quality"])
+    return overall, per_well
 
 
 def range_flags(value_type: str, rules: dict, value: Any, label: str = "") -> list[dict]:

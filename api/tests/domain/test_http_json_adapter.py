@@ -265,3 +265,15 @@ def test_http_json_payload_carries_the_material_only_for_dosing_steps():
     assert "material" not in plain and plain["params"] == {"mass": 1.2}
     dosed = HttpJsonAdapter._payload(CommandRequest(**base, material={"name": "LiPF6", "unit": "g", "param": "mass"}))
     assert dosed["material"] == {"name": "LiPF6", "unit": "g", "param": "mass"} and dosed["params"] == {"mass": 1.2}
+
+
+def test_http_json_payload_carries_the_wells_the_command_covers():
+    """指令处理的孔位（样本）作为附加字段下发：没有逐孔参数的检测步骤，设备靠它知道测的是哪几瓶；不处理样本的不带。"""
+    from app.adapters.base import CommandRequest
+    from app.adapters.drivers.http_json import HttpJsonAdapter
+
+    base = {"command_id": "CMD-W", "station_id": "ST-HTTP-TEST", "capability": "cap.raman", "params": {"repeats": 1},
+            "type": "dispatch", "batch_id": "B-1", "step_index": 3}
+    assert "wells" not in HttpJsonAdapter._payload(CommandRequest(**base))
+    measured = HttpJsonAdapter._payload(CommandRequest(**base, wells=("B3",)))
+    assert measured["wells"] == ["B3"] and measured["params"] == {"repeats": 1}

@@ -10,6 +10,7 @@
   留版本链，重新待复核。
 - 曲线型输出（`{"x": [...], "y": [...]}` 或几条 `traces`）按曲线指标记；曲线声明了派生的数值指标时一并写
   （要求指标里含这些派生指标，建任务时一起冻结）。回传事件里只留曲线的概要，完整的点在结果里。
+- 设备回执的质量不是 good（设备自己说读数可能无效）：照写、置可疑、打「设备质量」标记，复核时下结论。
 - 值不成立（类型、单位不对）不写并报警；越界照写、置可疑、打标，与回传同一口径。内置模拟给的是示意值：
   打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。走真实协议接入的
   外部模拟设备（工位当前采用的接入验收由自报为模拟器的设备通过）回报的值同样打这个标记：驱动是真的，数不是实测。
@@ -70,8 +71,9 @@ class DeviceResultService:
         self.analysis = AnalysisService(db, ctx)
         self.alarms = AlarmService(db, ctx)
 
-    def record(self, batch: Batch, command: Command, step: dict, delivered: dict, origin: str) -> dict[str, Any]:
-        """写这一步的检测结果。返回 {written, samples, problems}；不提交。"""
+    def record(self, batch: Batch, command: Command, step: dict, delivered: dict, origin: str,
+               quality: str = "good") -> dict[str, Any]:
+        """写这一步的检测结果。返回 {written, samples, problems}；不提交。`quality` 是回执的质量。"""
         rules = linked_rules(step)
         if not rules:
             return {"written": 0, "samples": 0, "problems": []}
@@ -86,6 +88,7 @@ class DeviceResultService:
         definitions = self.metrics.many([str(rule["metric_id"]).strip() for rule in rules])
         required = self._required(batch.recipe_snapshot or {})
         wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
+        overall, per_well = dataquality.receipt_quality({"quality": quality, "delivered": delivered})
         source = f"device:{command.station_id}"
         collected_at = command.updated_at if isinstance(command.updated_at, datetime) else now()
         written = 0
@@ -133,6 +136,13 @@ class DeviceResultService:
             for problem in self.analysis._logic_check(others, prepared):
                 for row in prepared:
                     row["flags"] = [*row["flags"], dataquality.flag("logic", problem["label"])]
+            # 设备说这次读数不可信：值照写，置可疑、打标，复核的人下结论
+            well_quality = per_well.get(well, overall)
+            if well_quality != "good":
+                for row in prepared:
+                    row["flags"] = [*row["flags"], dataquality.flag(
+                        "device_quality", f"设备回执质量为 {well_quality}：设备标记这次读数可能无效",
+                    )]
             # 曲线在事件里只留概要：完整的点已经在结果里，也还在设备回执里
             recorded = {row["key"]: curves.summary(row["value"]) if row["definition"].value_type == "series" else row["value"]
                         for row in prepared}
@@ -140,7 +150,8 @@ class DeviceResultService:
                 org_id=batch.org_id, source=source, analysis_task_id=task.id, event_id=event_id,
                 digest=digest({"command": command.id, "well": well, "values": recorded}),
                 payload={"batch_id": batch.id, "command_id": command.id, "step_index": command.step_index,
-                         "station_id": command.station_id, "well": well, "origin": origin, "values": recorded},
+                         "station_id": command.station_id, "well": well, "origin": origin, "quality": well_quality,
+                         "values": recorded},
                 state="accepted",
             )
             self.db.add(event)

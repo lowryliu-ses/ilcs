@@ -36,6 +36,7 @@ from app.services.acceptance_service import AcceptanceRunner  # noqa: E402
 from app.services.point_service import PointWriteRunner  # noqa: E402
 from app.services.execution_service import ExecutorLoop  # noqa: E402
 from app.services.executor_runtime import ConcurrentExecutor  # noqa: E402
+from app.services.leadership import LEASE_CHECK_SEC, LOCK_KEY, Leadership, LeaseWatch, install  # noqa: E402
 
 POLL_SEC = float(os.environ.get("ILCS_EXECUTOR_POLL_SEC", settings.advance_poll_sec))
 # 只给模拟适配器补心跳。真实设备的在线状态必须由它自己上报，否则「在线」是我们编的。
@@ -44,6 +45,8 @@ SIMULATE_HEARTBEAT = settings.simulate_heartbeat
 
 
 STANDBY_POLL_SEC = 5.0
+# 拿到锁之后先等这么久再对账、投递：上一个持锁的执行器若是失锁（不是退出），它的看门狗这段时间里已经熔断退出
+TAKEOVER_GRACE_SEC = 3 * LEASE_CHECK_SEC
 MONITOR_ASSETS_SEC = 60 * 60
 MODE = os.environ.get("ILCS_EXECUTOR_MODE", "concurrent").strip().lower()
 
@@ -97,14 +100,15 @@ def acquire_singleton():
 
     指令领取、对账与轮询都按「只有我在处理这些指令」写的：两个副本同时对账，会把对方
     正在网络调用中的指令判成不一致。PostgreSQL 上用会话级 advisory lock 做主备——拿不到
-    锁的副本待命，主副本退出或断线后自动接管。
+    锁的副本待命，主副本退出或断线后自动接管。拿到锁之后这条连接交给看门狗，失锁即熔断退出
+    （services/leadership）。
     """
     announced = False
     while True:
         connection = engine.connect()
         acquired = connection.execute(
-            text("SELECT pg_try_advisory_lock(:namespace, hashtext('ilcs-executor'))"),
-            {"namespace": ADVISORY_NAMESPACE},
+            text("SELECT pg_try_advisory_lock(:namespace, hashtext(:key))"),
+            {"namespace": ADVISORY_NAMESPACE, "key": LOCK_KEY},
         ).scalar()
         connection.commit()
         if acquired:
@@ -166,15 +170,33 @@ class QueueWaiter:
         self.raw = None
 
 
-def singleton_alive(connection) -> bool:
-    if connection is None:
-        return True
-    try:
-        connection.execute(text("SELECT 1"))
-        connection.commit()
-        return True
-    except Exception:
-        return False
+def backend_pid(connection) -> int:
+    """持锁连接在库里的后端进程号：领取前核对执行权时按它认锁是不是还在本进程手里（services/leadership）。"""
+    pid = connection.execute(text("SELECT pg_backend_pid()")).scalar()
+    connection.commit()
+    return int(pid)
+
+
+def abandon(runtime, reason: str, exit_=os._exit) -> None:
+    """失去执行权（看门狗线程里调）：取消还没开始的工位任务，立即退出进程，由容器重启后重新竞争。
+
+    不等在跑的工位任务做完：它们在设备上的那一下照「投递中途崩溃」处理——领取时已把「可能已发出」落库，
+    接管的副本按指令号去问设备。等它们做完才退，就是和接管的副本同时投递、同时落回执。
+    """
+    if runtime is not None:
+        runtime.fence()
+    log.error("执行器失去执行权，立即退出以免与接管的副本同时投递", extra={"fields": {"reason": reason}})
+    for handler in log.handlers:
+        handler.flush()
+    exit_(3)
+
+
+def wait_for_takeover() -> bool:
+    """拿到锁后的接管等待；收到退出信号返回 False。"""
+    deadline = time.monotonic() + TAKEOVER_GRACE_SEC
+    while not _Stop.requested and time.monotonic() < deadline:
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+    return not _Stop.requested
 
 
 def main() -> int:
@@ -192,6 +214,15 @@ def main() -> int:
     singleton = acquire_singleton()
     if singleton is False:
         return 0
+    leadership = Leadership(backend_pid(singleton), ADVISORY_NAMESPACE)
+    install(leadership)
+    runtime = ConcurrentExecutor(SessionLocal) if MODE != "serial" else None
+    # 持锁连接从此只归看门狗用：每秒核对一次，失锁就取消排队的工位任务、立即退出
+    watch = LeaseWatch(singleton, leadership, on_lost=lambda reason: abandon(runtime, reason)).start()
+    if not wait_for_takeover():
+        watch.stop()
+        singleton.close()
+        return 0
     with SessionLocal() as db:
         # 上一个执行器没做完的接入验收：判出错，写明要现场核对（单活锁保证此刻没有别人在跑它们）
         interrupted = AcceptanceRunner(db).interrupt_orphans()
@@ -205,17 +236,14 @@ def main() -> int:
         "执行器已启动", revision=revision, poll_sec=POLL_SEC, simulate_heartbeat=SIMULATE_HEARTBEAT,
         pid=os.getpid(), mode=MODE, workers=settings.executor_workers,
     )
-    runtime = ConcurrentExecutor(SessionLocal) if MODE != "serial" else None
     waiter = QueueWaiter()
     last_file_cleanup: float | None = None
     last_asset_monitor: float | None = None
     failures = 0
     while not _Stop.requested:
-        if not singleton_alive(singleton):
-            # 持锁连接断了，锁可能已被备用副本接管；退出由容器重启后重新竞争
-            log.error("执行器互斥锁连接中断，退出以免与接管的副本同时投递")
-            if runtime is not None:
-                runtime.shutdown(wait_for_stations=False)
+        if leadership.lost.is_set():
+            # 看门狗发现失锁时已经直接退出进程；走到这里说明它的退出没成，照样不再开始新的一轮
+            abandon(runtime, leadership.reason)
             return 3
         cycle_started = time.monotonic()
         try:
@@ -265,8 +293,9 @@ def main() -> int:
     if runtime is not None:
         runtime.drain(timeout=30)
         runtime.shutdown()
-    if singleton is not None:
-        singleton.close()
+    # 先停看门狗再关持锁连接：关连接本身会被看门狗当成失锁
+    watch.stop()
+    singleton.close()
     info("执行器已退出")
     return 0
 

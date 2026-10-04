@@ -51,3 +51,17 @@ def test_saved_matrices_pick_up_permissions_added_later():
     assert merged["auditor"] == ["audit.read"], "矩阵里没有的新角色取出厂默认"
     known = merge_saved_matrix(saved, sorted(__import__("app.domain.permissions", fromlist=["PERMISSIONS"]).PERMISSIONS))
     assert "environment.record" not in known["operator"], "管理员保存时已经有这个键：按他的选择"
+
+
+def test_receipt_quality_is_per_well_when_the_command_was_split():
+    """回执质量：整条的，加上按样本拆开下发时每个孔位那一条的；没有回执按 good。"""
+    assert dataquality.receipt_quality(None) == ("good", {})
+    assert dataquality.receipt_quality({"quality": "uncertain", "delivered": {"wells": {"A1": {}}}}) == ("uncertain", {})
+    split = {"quality": "bad", "delivered": {"runs": [
+        {"id": "C/1", "wells": ["A1", "A2"], "state": "done", "quality": "good"},
+        {"id": "C/2", "wells": ["A3"], "state": "done", "quality": "bad"},
+        {"id": "C/3", "wells": ["A4"], "state": "done"},  # 改动之前的检查点：没有逐条质量，按整条的
+    ]}}
+    overall, per_well = dataquality.receipt_quality(split)
+    assert overall == "bad" and per_well == {"A1": "good", "A2": "good", "A3": "bad"}
+    assert per_well.get("A4", overall) == "bad"

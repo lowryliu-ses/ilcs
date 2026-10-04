@@ -125,3 +125,40 @@ def test_samples_matching_no_exit_hold_the_branch_until_qa_routes_them(operator,
     run = db.query(StepRun).filter(StepRun.batch_id == batch_id, StepRun.step_id == "b1").one()
     low = {row["id"] for row in samples if row["levels"][1] == 50}
     assert set(run.form_data["per_sample"]["low"]) == low and len(run.form_data["per_sample"]["high"]) == 4
+
+
+def test_samples_whose_reading_the_device_flagged_are_not_routed_automatically(
+    operator, qa, reset_runtime, db, executor, monkeypatch,
+):
+    """注液组装的回执质量 bad：读数照样在，但不按它分流（有出口能接也不行）——分支保持，QA 选出口后照常走。"""
+    from app.models import Batch, StepRun
+    from test_flow_control import _device_reports_quality
+
+    batch_id = _graph_batch(operator, db, _shape)
+    batch = db.get(Batch, batch_id)
+    assemble_id = batch.recipe_snapshot["steps"][2]["step_id"]
+    samples = operator.get(f"/api/batches/{batch_id}").json()["samples"]
+    plan = dict(batch.plan_snapshot)
+    plan["factors"] = [dict(row) for row in plan["factors"]]
+    plan["factors"][1]["target"] = {"step_id": assemble_id, "param": "electrolyte"}
+    plan["condition_params"] = {assemble_id: {row["well"]: {"electrolyte": row["levels"][1]} for row in samples}}
+    batch.plan_snapshot = plan
+    flag_modified(batch, "plan_snapshot")
+    db.commit()
+    _device_reports_quality(monkeypatch, assemble_id, "bad")
+
+    _dispatch(operator, batch_id)
+    held = _run(operator, batch_id, executor, rounds=30, until=("paused", "done", "fault"))
+    assert held["state"] == "paused" and "读数设备标为不可信" in held["failure_reason"], held["failure_reason"]
+    branch = _runs(held, "b1")[-1]
+    db.expire_all()
+    run = db.get(StepRun, branch["id"])
+    assert set(run.form_data["untrusted"]) == {row["id"] for row in samples}
+    assert run.form_data["per_sample"] == {}
+    decided = qa.post(f"/api/step-runs/{branch['id']}/branch-decision", {
+        "case": "high", "reason": "注液量按工艺单核对过，全部按高注液量复称", "row_version": branch["row_version"],
+        "signature_id": qa.sign("分支判定属实", target=branch["id"]),
+    })
+    assert decided.status_code == 200, decided.text
+    detail = _run(operator, batch_id, executor, rounds=40)
+    assert detail["state"] == "done", detail["failure_reason"]
