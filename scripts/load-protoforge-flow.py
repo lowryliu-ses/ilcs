@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """ProtoForge 联调线全流程：三台 ProtoForge 模拟设备经驱动宿主接入（只走 SiLA 2），按 SOP → 能力 / 设备方法 → 流程 →
-方案 → 实验任务 → 排程 → 批次执行 → 数据复核 → 报告跑一遍。
+多温度矩阵方案 → 实验任务 → 排程 → 批次执行 → 数据复核 → 报告跑一遍。
 
     python3 scripts/load-driver-host-pilot.py register            # 先把三台设备经驱动宿主接进来（见 devices/host/README.md）
     python3 scripts/load-protoforge-flow.py register [--base http://127.0.0.1:8090]
-    python3 scripts/load-protoforge-flow.py run [--samples 3] [--temp 60]
+    python3 scripts/load-protoforge-flow.py run [--temps 40,60,80] [--repeats 1]
 
-三台设备各管一段：
-- ST-PF-HTTP（HTTP REST 温湿度传感器，只读写点位）：环境采集，把温度、相对湿度记成「设备模拟联调区」的环境读数；
-- ST-PF-OPCUA（OPC UA 压力传感器，只读写点位）：环境采集，把压力记成 ST-PF-MB 工位的读数；
-- ST-PF-MB（Modbus TCP 握手 PLC）：执行「PLC 控温运行」（cap.plc_run，写设定温度、置启动，约 5 s 后回报实测温度）。
+三台设备都参与温度设定，每个样本一个温度（方案的设计点），一次只做一个设定的设备由驱动按样本依次执行：
+- ST-PF-MB（Modbus TCP 握手 PLC）：「PLC 控温运行」（cap.plc_run）写设定温度、置启动，约 5 s 后回报实测温度
+  （ProtoForge 场景的规则写死 61.5 ℃，规则触发时还会把设定寄存器写回 0：PLC 的逐样本设定看指令参数与遥测）；
+- ST-PF-OPCUA（OPC UA 温控 / 压力节点）：「温控器设定温度」（cap.tc_setpoint）写温度节点、回读；
+- ST-PF-HTTP（HTTP REST 设备）：「环境箱设定温度」（cap.chamber_setpoint）POST 写温度、回读。
+两台同时还是环境传感器：HTTP 的相对湿度记成「设备模拟联调区」的读数、OPC UA 的压力记成 ST-PF-MB 的读数；流程步骤写了
+环境要求，开跑检查与设备步骤下发前都按最新读数核对（温度被设定步骤改写，不再当环境温度）。
 
-流程的步骤写了环境要求（实验区温湿度、PLC 工位压力）：开跑检查、PLC 步骤下发前都按两台传感器的最新读数核对，
-没有读数、过期、超限都不放行。
-
-- register：两台传感器的环境采集（连接配置 environment，签名保存，不用重新握手）、能力 cap.plc_run 与工位范围、检测指标
-  「PLC 实测温度」、设备方法（工程师起草、QA 发布）、操作员资质、SOP-PF-01（scripts/lines/protoforge/sop.json，研究员起草、
-  QA 批准发布、操作员阅读确认）、流程（研究员起草、关联 SOP、QA 批准发布）。已有的先查后用，重复运行不会多建。
-- run：先照 register 补齐，再 方案（单条件、N 个联调样品，QA 批准）→ 实验任务（研究员建、分配给操作员、操作员接受）→
-  批次 → 排程 → 开跑检查（含环境核对）→ 签名下发 → 两个人工节点 → PLC 控温运行（执行器经驱动宿主下发）→ QA 审核节点 →
-  设备回报的实测温度 QA 逐条复核 → 报告发布。要求执行器在跑、三台设备在线。
+- register：两台传感器接成参与自动流程、环境采集（签名保存）；设备服务报了新的驱动配置就签名批准；欠验收的申请动作级
+  验收并等放行；三项能力、四个检测指标、三个设备方法（工程师起草、QA 发布）、操作员资质、SOP-PF-01（研究员起草、QA 批准
+  发布、操作员阅读确认）、流程（研究员起草、关联 SOP、QA 批准发布）。已有的先查后用，重复运行不会多建。
+- run：先照 register 补齐，再 矩阵方案（三个设定温度因子按设计点对齐，每个样本一个温度，QA 批准）→ 实验任务 → 批次 →
+  排程 → 开跑检查（含环境核对）→ 签名下发 → 人工节点 → 三个设备步骤（执行器经驱动宿主下发，驱动按样本依次执行）→
+  QA 审核节点 → 逐样本列出设计温度与三台设备的回读 → 结果复核 → 报告发布。要求执行器在跑、三台设备在线。
 
 数据来自模拟设备：结果带「模拟」标记，不进闭环训练数据。正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
 """
@@ -41,32 +41,54 @@ Actor, Failed, actors, http_transport = common.Actor, common.Failed, common.acto
 step, ok, note, _items = common.step, common.ok, common.note, common._items
 
 SOP = HERE / "lines" / "protoforge" / "sop.json"
-PLC = "ST-PF-MB"
+PLC, TC, CHAMBER = "ST-PF-MB", "ST-PF-OPCUA", "ST-PF-HTTP"
 AMBIENT = "设备模拟联调区"
 OPERATOR = "P-003"
 SAMPLE_TYPE = "联调样品"
-CAPABILITY = "cap.plc_run"
 TEMP_RANGE = (0, 100)
-# 两台只读写点位的传感器：环境采集（连接配置 environment）
+RECOVERY = {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "设定类动作没有保持",
+            "sideEffect": "重试会再写一次设定值", "verify": ["设定回读"]}
+# 三个设定温度的设备：能力、工位、方法、输出 → 指标
+DEVICES = {
+    "plc": {"station": PLC, "capability": "cap.plc_run", "capability_name": "PLC 控温运行", "step": "s03",
+            "step_name": "PLC 控温运行", "factor": "PLC 设定温度",
+            "method": "ProtoForge PLC 控温运行", "dur_min": 1,
+            "method_note": "握手 PLC：写设定温度 sp、置启动 cmd_start，状态字 1 运行 → 3 完成，取实测温度 pv，复位 cmd_ack",
+            "outputs": {"temp": "pf_plc_temp"}},
+    "tc": {"station": TC, "capability": "cap.tc_setpoint", "capability_name": "温控器设定温度", "step": "s04",
+           "step_name": "温控器设定温度", "factor": "温控器设定温度",
+           "method": "ProtoForge 温控器设定温度", "dur_min": 1,
+           "method_note": "OPC UA 温控节点：写 Temperature、回读；只写设定值，没有启动信号；高报为真时判故障",
+           "outputs": {"temp": "pf_tc_temp"}},
+    "chamber": {"station": CHAMBER, "capability": "cap.chamber_setpoint", "capability_name": "环境箱设定温度", "step": "s05",
+                "step_name": "环境箱设定温度", "factor": "环境箱设定温度",
+                "method": "ProtoForge 环境箱设定温度", "dur_min": 1,
+                "method_note": "HTTP REST：POST /temperature 写设定、按点表读回温度；状态 normal 即空闲",
+                "outputs": {"temp": "pf_chamber_temp"}},
+}
+METRICS = {
+    "pf_plc_temp": ("PLC 实测温度", "℃"),
+    "pf_tc_temp": ("温控器回读温度", "℃"), "pf_chamber_temp": ("环境箱回读温度", "℃"),
+}
+# 设备步骤要核对工位的资产（校准与容量）：两台设定类设备登记占位资产（模拟设备，校准不适用）
+ASSETS = {
+    TC: {"asset_no": "AS-PF-OPCUA", "name": "ProtoForge 温控 / 压力节点（OPC UA）", "model": "ProtoForge OPC UA",
+         "note": "ProtoForge OPC UA 设备（Pressure / Temperature / Setpoint 节点），经驱动宿主 PF-OPCUA 接入"},
+    CHAMBER: {"asset_no": "AS-PF-HTTP", "name": "ProtoForge 环境箱（HTTP REST）", "model": "ProtoForge HTTP REST",
+              "note": "ProtoForge HTTP 设备 http-rest，经驱动宿主 PF-HTTP 接入"},
+}
+# 两台设备兼作环境传感器（连接配置 environment）；温度会被设定步骤改写，环境只取湿度与压力
 SENSORS = {
-    "ST-PF-HTTP": {"zone": AMBIENT, "interval_sec": 30, "points": {"temperature": "temperature", "humidity": "humidity"}},
-    "ST-PF-OPCUA": {"zone": PLC, "interval_sec": 30, "points": {"pressure": "pressure"}},
+    CHAMBER: {"zone": AMBIENT, "interval_sec": 30, "points": {"humidity": "humidity"}},
+    TC: {"zone": PLC, "interval_sec": 30, "points": {"pressure": "pressure"}},
 }
-# 步骤的环境要求：两台传感器给的读数
-AMBIENT_REQUIREMENTS = [
-    {"metric": "temperature", "min": 10, "max": 45, "zone": AMBIENT},
-    {"metric": "humidity", "max": 80, "zone": AMBIENT},
-]
-PROCESS_REQUIREMENTS = [{"metric": "pressure", "min": 0.5, "max": 5, "zone": PLC}]
-METRIC = {"code": "pf_plc_temp", "name": "PLC 实测温度", "unit": "℃", "rules": {"min": 0, "max": 150}}
-METHOD = {
-    "name": "ProtoForge PLC 控温运行", "capability_id": CAPABILITY, "program": "", "params": {},
-    "dur_min": 1, "note": "握手 PLC：写设定温度 sp、置启动 cmd_start，状态字 1 运行 → 3 完成，取实测温度 pv，复位 cmd_ack",
-}
+AMBIENT_REQUIREMENTS = [{"metric": "humidity", "max": 80, "zone": AMBIENT}]
+PROCESS_REQUIREMENTS = [{"metric": "pressure", "min": 0.5, "max": 10, "zone": PLC}]
 RECIPE_NAME = "ProtoForge PLC 控温运行联调"
-RISK = "RA-PF-01 v1（联调占位：ProtoForge 模拟设备，无真实样品、加热体与压力容器）"
-RECIPE_DESIGN = ("三台 ProtoForge 设备经驱动宿主接入：HTTP 传感器给实验区温湿度、OPC UA 传感器给 PLC 工位压力（步骤环境要求核对），"
-                 "Modbus 握手 PLC 按设定温度运行并回报实测温度；QA 复核")
+RISK = "RA-PF-01 v4（联调占位：ProtoForge 模拟设备，无真实样品、加热体与压力容器）"
+RECIPE_DESIGN = ("三台 ProtoForge 设备经驱动宿主接入、都参与温度设定：握手 PLC 控温运行（回报实测温度）、OPC UA 温控器与 "
+                 "HTTP 环境箱写设定温度并回读；每个样本一个温度（方案设计点），设备按样本依次执行。两台设备兼作环境传感器"
+                 "（湿度、压力），步骤环境要求核对；QA 复核")
 
 
 def refuse_production() -> None:
@@ -84,25 +106,115 @@ def wait_for(describe: str, probe: Callable[[], Any], timeout: float, every: flo
     raise Failed(f"{describe}：{timeout:.0f} 秒内没有达成")
 
 
-# ---------------------------------------------------------------- register
+# ---------------------------------------------------------------- 设备：能力、接入、闸门、环境采集
 
 
-def register_environment(engineer: Actor, timeout: float) -> None:
-    """两台传感器的连接配置加环境采集（签名保存；改它不用重新握手），等执行器记下第一批读数。"""
-    for station_id, spec in SENSORS.items():
+def register_capabilities(engineer: Actor) -> None:
+    """三项能力（参数 temp ℃）。新登记的连同工位一起登记，工位的范围缺省 0–100 ℃。"""
+    existing = {row["id"]: row for row in engineer.get("/capabilities")}
+    for device in DEVICES.values():
+        capability = device["capability"]
+        current = existing.get(capability)
+        if current is None:
+            engineer.post("/capabilities", {
+                "id": capability, "name": device["capability_name"], "params": {"temp": "设定温度"},
+                "param_specs": {"temp": {"type": "number", "unit": "℃"}}, "recovery": RECOVERY,
+                "stations": [device["station"]], "signature_id": engineer.sign("能力模型变更批准", capability),
+            })
+            ok("能力", f"{capability} {device['capability_name']}（新登记，落在 {device['station']}）")
+            continue
+        if "temp" not in (current.get("params") or {}):
+            raise Failed(f"能力 {capability} 已存在但没有参数 temp")
+        if device["station"] not in (current.get("stations") or []):
+            raise Failed(f"能力 {capability} 已存在但 {device['station']} 没有声明实现它：在能力字典里加上这台工位")
+        ok("能力", f"{capability} {current['name']}（沿用）")
+    stations = {row["id"]: row for row in engineer.get("/stations")}
+    for device in DEVICES.values():
+        window = ((stations[device["station"]].get("limits") or {}).get(device["capability"]) or {}).get("temp")
+        if not window or float(window[0]) > TEMP_RANGE[0] or float(window[1]) < TEMP_RANGE[1]:
+            raise Failed(f"{device['station']} 的 {device['capability']} 温度范围是 {window}，要覆盖 {TEMP_RANGE}")
+
+
+def register_assets(engineer: Actor) -> None:
+    """两台设定类设备的工位关联占位资产（开跑检查按资产核对校准与容量）：模拟设备，校准不适用并写明豁免理由。"""
+    stations = {row["id"]: row for row in engineer.get("/stations")}
+    for station_id, spec in ASSETS.items():
+        station = stations[station_id]
+        if station.get("asset_id"):
+            ok("资产", f"{station_id}（沿用已关联的资产）")
+            continue
+        found = [row for row in _items(engineer.get(f"/assets?keyword={spec['asset_no']}&page_size=100"))
+                 if row["asset_no"] == spec["asset_no"]]
+        asset_id = found[0]["id"] if found else engineer.post("/assets", {
+            **spec, "vendor": "ProtoForge", "capacity": 1, "calibration_applicable": False,
+            "calibration_exempt_reason": "ProtoForge 模拟设备，联调占位；接真机前按实物登记序列号与校准",
+        })["id"]
+        engineer.patch(f"/stations/{station_id}", {"asset_id": asset_id, "row_version": station["row_version"]})
+        ok("资产", f"{station_id} 关联 {spec['asset_no']} {spec['name']}（校准不适用：模拟设备）")
+
+
+def configure_stations(engineer: Actor) -> None:
+    """两台传感器：参与自动流程（去掉 tasks: false）、环境采集。改了就签名保存（改 tasks 要重新握手、欠动作级验收）。"""
+    for station_id in (TC, CHAMBER):
         adapter = engineer.get(f"/stations/{station_id}/adapter")
         if adapter.get("kind") != "real":
             raise Failed(f"{station_id} 还没接成真实设备：先跑 scripts/load-driver-host-pilot.py register")
-        config = adapter.get("config") or {}
-        if config.get("environment") != spec:
-            engineer.patch(f"/stations/{station_id}/adapter", {
-                "config": {**config, "environment": spec}, "row_version": adapter["row_version"],
-                "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
-            })
-            ok("环境采集", f"{station_id} → {spec['zone']}：{'、'.join(spec['points'])}（每 {spec['interval_sec']} s，已签名保存）")
-        else:
-            ok("环境采集", f"{station_id} → {spec['zone']}（沿用）")
+        config = dict(adapter.get("config") or {})
+        wanted = {key: value for key, value in config.items() if key != "tasks"}
+        wanted["environment"] = SENSORS[station_id]
+        if wanted == config:
+            ok("设备连接", f"{station_id}：参与自动流程，环境采集 {SENSORS[station_id]['zone']}（沿用）")
+            continue
+        engineer.patch(f"/stations/{station_id}/adapter", {
+            "config": wanted, "row_version": adapter["row_version"],
+            "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
+        })
+        ok("设备连接", f"{station_id}：参与自动流程，环境采集 {SENSORS[station_id]['zone']}：{'、'.join(SENSORS[station_id]['points'])}"
+                       "（已签名保存）")
 
+
+def clear_gates(engineer: Actor, timeout: float) -> None:
+    """三台设备的接入闸门：设备服务报了新的驱动配置就签名批准（随后只读级验收）；欠动作级的按自己的能力申请动作级验收。"""
+    for device in DEVICES.values():
+        station_id = device["station"]
+
+        def adapter():
+            return engineer.get(f"/stations/{station_id}/adapter")
+
+        current = wait_for(f"{station_id} 握上手", lambda: (lambda row: row if row["connected"] or row["driver_awaiting_approval"]
+                                                         or row["acceptance"]["required"] else None)(adapter()), timeout)
+        if current.get("driver_awaiting_approval"):
+            reported = current.get("driver_info") or {}
+            engineer.post(f"/stations/{station_id}/adapter/driver-approval", {
+                "reason": f"核对了驱动项目里的改动（{reported.get('plugin')} 配置 {reported.get('config_version')}："
+                          "多温度矩阵联调新增设定类能力 / 设定回读），批准这一份",
+                "signature_id": engineer.sign("批准驱动配置变更", station_id, current["config_version"]),
+            })
+            ok("批准驱动配置变更", f"{station_id} {reported.get('plugin')} {str(reported.get('config_digest') or '')[:19]}")
+        current = wait_for(f"{station_id} 只读级验收出结论", lambda: (lambda row: row if row["acceptance"]["required"] != "readonly"
+                                                                  and not row["driver_awaiting_approval"] else None)(adapter()),
+                           timeout)
+        if current["acceptance"]["required"] == "physical":
+            requested = engineer.post(f"/stations/{station_id}/adapter/acceptance", {
+                "level": "physical", "faults": False, "capability": device["capability"], "params": {"temp": 45},
+                "approval": "ProtoForge 模拟设备，经驱动宿主接入；没有真实设备与样品",
+                "signature_id": engineer.sign("批准设备接入验收", station_id, current["config_version"]),
+            })
+            run = wait_for(f"{station_id} 动作级验收出结论", lambda: (lambda row: row if row["state"] in {"done", "error", "cancelled"}
+                                                                   else None)(engineer.get(f"/acceptance-runs/{requested['id']}")),
+                           timeout, every=2)
+            if not run.get("ok"):
+                states = {check["key"]: check["state"] for check in run.get("checks") or []}
+                raise Failed(f"{station_id} 动作级验收没通过：{states}\n{run.get('report_md', '')[:1500]}")
+            ok("接入验收（动作级）", f"{station_id} {device['capability']} 通过")
+        current = adapter()
+        if current["acceptance"]["required"]:
+            raise Failed(f"{station_id} 还欠 {current['acceptance']['required_label']}：{current['acceptance']['reason']}")
+        approved = (current.get("approved_driver") or {}).get("config_digest", "")
+        ok("接入闸门", f"{station_id} 已放行；批准的驱动配置 {str(approved)[:19]}")
+
+
+def wait_environment(engineer: Actor, timeout: float) -> None:
     wanted = {(spec["zone"], metric) for spec in SENSORS.values() for metric in spec["points"]}
 
     def sampled():
@@ -112,74 +224,95 @@ def register_environment(engineer: Actor, timeout: float) -> None:
 
     latest = wait_for("执行器记下传感器的环境读数", sampled, timeout=timeout)
     ok("环境读数", "；".join(f"{zone} {row['metric_label']} {row['value']:g}{row['unit']}"
-                            for (zone, _), row in sorted(latest.items()) if (zone, row["metric"]) in wanted))
+                            for (zone, metric), row in sorted(latest.items()) if (zone, metric) in wanted))
 
 
-def register_capability(engineer: Actor) -> None:
-    current = next((row for row in engineer.get("/capabilities") if row["id"] == CAPABILITY), None)
-    if current is None or "temp" not in (current.get("params") or {}):
-        raise Failed(f"能力 {CAPABILITY} 不存在或没有参数 temp：先跑 scripts/load-driver-host-pilot.py register")
-    station = next(row for row in engineer.get("/stations") if row["id"] == PLC)
-    limits = ((station.get("limits") or {}).get(CAPABILITY) or {}).get("temp")
-    if not limits or float(limits[0]) > TEMP_RANGE[0] or float(limits[1]) < TEMP_RANGE[1]:
-        raise Failed(f"{PLC} 的 {CAPABILITY} 温度范围是 {limits}，要覆盖 {TEMP_RANGE}")
-    ok("能力", f"{CAPABILITY} {current['name']}（参数 temp ℃；{PLC} 可做 {limits[0]:g}–{limits[1]:g} ℃）")
+# ---------------------------------------------------------------- 指标、方法、资质
 
 
-def register_metric(researcher: Actor) -> str:
+def register_metrics(researcher: Actor) -> dict[str, str]:
     existing = {(row["code"], row.get("version")): row for row in _items(researcher.get("/metrics?page_size=200"))}
-    row = existing.get((METRIC["code"], "v1")) or researcher.post("/metrics", {
-        "code": METRIC["code"], "name": METRIC["name"], "unit": METRIC["unit"], "value_type": "number",
-        "sample_types": [SAMPLE_TYPE], "rules": METRIC["rules"],
-    })
-    ok("检测指标", f"{METRIC['name']} {METRIC['unit']}（{row['id']}）")
-    return row["id"]
+    ids = {}
+    for code, (name, unit) in METRICS.items():
+        row = existing.get((code, "v1")) or researcher.post("/metrics", {
+            "code": code, "name": name, "unit": unit, "value_type": "number", "sample_types": [SAMPLE_TYPE],
+            "rules": {"min": 0, "max": 150}})
+        ids[code] = row["id"]
+    ok("检测指标", "、".join(f"{name} {unit}" for name, unit in METRICS.values()))
+    return ids
 
 
-def register_method(engineer: Actor, qa: Actor, metric_id: str) -> str:
-    """工程师起草、QA 发布：输出 temp（PLC 回报的实测温度）写成「PLC 实测温度」检测结果。"""
-    released = [row for row in engineer.get(f"/device-methods?state=released&capability_id={CAPABILITY}")
-                if row["name"] == METHOD["name"]]
-    if released:
-        ok("设备方法", f"{released[0]['code']} v{released[0]['version']} {METHOD['name']}（已发布，沿用）")
+def _outputs(device: dict, metrics: dict[str, str]) -> list[dict]:
+    return [{"key": key, "label": METRICS[code][0], "unit": METRICS[code][1], "lo": 0, "required": True,
+             "metric_id": metrics[code]} for key, code in device["outputs"].items()]
+
+
+def _same_outputs(current: list[dict], wanted: list[dict]) -> bool:
+    return sorted((row.get("key"), row.get("metric_id")) for row in current or []) == \
+        sorted((row["key"], row["metric_id"]) for row in wanted)
+
+
+def register_method(engineer: Actor, qa: Actor, device: dict, metrics: dict[str, str]) -> str:
+    """工程师起草、QA 发布：输出项关联指标（设备回报写成检测结果）。已发布的输出项不一致就出修订版。"""
+    capability, outputs = device["capability"], _outputs(device, metrics)
+    released = [row for row in engineer.get(f"/device-methods?state=released&capability_id={capability}")
+                if row["name"] == device["method"]]
+    if released and _same_outputs(engineer.get(f"/device-methods/{released[0]['id']}").get("outputs"), outputs):
+        ok("设备方法", f"{released[0]['code']} v{released[0]['version']} {device['method']}（已发布，沿用）")
         return released[0]["id"]
-    drafts = [row for row in engineer.get(f"/device-methods?state=draft&capability_id={CAPABILITY}")
-              if row["name"] == METHOD["name"]]
-    draft = drafts[0] if drafts else engineer.post("/device-methods", {
-        **METHOD, "outputs": [{"key": "temp", "label": METRIC["name"], "unit": METRIC["unit"], "lo": 0,
-                               "required": True, "metric_id": metric_id}],
-    })
+    drafts = [row for row in engineer.get(f"/device-methods?state=draft&capability_id={capability}")
+              if row["name"] == device["method"]]
+    if drafts:
+        draft = drafts[0]
+    elif released:
+        draft = engineer.post(f"/device-methods/{released[0]['id']}/revise")
+    else:
+        draft = engineer.post("/device-methods", {
+            "name": device["method"], "capability_id": capability, "program": "", "params": {}, "outputs": outputs,
+            "dur_min": device["dur_min"], "note": device["method_note"]})
+    if not _same_outputs(draft.get("outputs"), outputs):
+        draft = engineer.patch(f"/device-methods/{draft['id']}", {"outputs": outputs, "note": device["method_note"],
+                                                                  "row_version": draft["row_version"]})
     done = qa.post(f"/device-methods/{draft['id']}/release", {"row_version": draft["row_version"]})
-    ok("设备方法已发布", f"{done['code']} v{done['version']} {done['name']}：回报实测温度（关联指标，写成检测结果）")
+    ok("设备方法已发布", f"{done['code']} v{done['version']} {done['name']}：回报 "
+                        + "、".join(METRICS[code][0] for code in device["outputs"].values()))
     return done["id"]
 
 
-def grant_qualification(admin: Actor) -> None:
+def grant_qualifications(admin: Actor) -> None:
     person = next((row for row in _items(admin.get(f"/people?keyword={OPERATOR}")) if row.get("code") == OPERATOR), None)
     if person is None:
         raise Failed(f"人员 {OPERATOR} 不存在")
     held = {row["scope_ref"] for row in admin.get(f"/people/{person['id']}/qualifications")
             if row.get("scope_kind") == "capability" and row.get("status") not in {"revoked", "expired"}}
-    if CAPABILITY not in held:
-        admin.post(f"/people/{person['id']}/qualifications", {
-            "scope_kind": "capability", "scope_ref": CAPABILITY, "label": "PLC 控温运行"})
-    ok("操作员资质", f"{OPERATOR} 有 {CAPABILITY}")
+    for device in DEVICES.values():
+        if device["capability"] not in held:
+            admin.post(f"/people/{person['id']}/qualifications", {
+                "scope_kind": "capability", "scope_ref": device["capability"], "label": device["capability_name"]})
+    ok("操作员资质", f"{OPERATOR} 有 " + "、".join(device["capability"] for device in DEVICES.values()))
 
 
-def recipe_steps(method_id: str, temp: float) -> list[dict]:
-    return [
+# ---------------------------------------------------------------- 流程
+
+
+def recipe_steps(methods: dict[str, str]) -> list[dict]:
+    steps = [
         {"step_id": "s01", "kind": "manual", "name": "核对环境与设备在线", "dur": 2, "requires_signature": False,
          "environment": AMBIENT_REQUIREMENTS,
          "form": [{"key": "devices_online", "label": "ST-PF-HTTP、ST-PF-OPCUA、ST-PF-MB 在线", "type": "bool",
                    "required": True}]},
-        {"step_id": "s02", "kind": "manual", "name": "装样并核对设定温度", "dur": 2, "requires_signature": False,
+        {"step_id": "s02", "kind": "manual", "name": "装样并核对各样本设定温度", "dur": 2, "requires_signature": False,
          "requires_sample_check": True,
-         "form": [{"key": "setpoint_ok", "label": f"已核对设定温度 {temp:g} ℃", "type": "bool", "required": True}]},
-        {"step_id": "s03", "kind": "device", "name": "PLC 控温运行", "cap": CAPABILITY, "params": {"temp": temp},
-         "dur": METHOD["dur_min"], "method": {"id": method_id},
-         "environment": [*PROCESS_REQUIREMENTS, *AMBIENT_REQUIREMENTS]},
-        {"step_id": "s04", "kind": "review", "name": "QA 复核运行数据", "review_role": "qa"},
+         "form": [{"key": "setpoint_ok", "label": "已按方案核对每个样本的设定温度", "type": "bool", "required": True}]},
     ]
+    for key, device in DEVICES.items():
+        steps.append({
+            "step_id": device["step"], "kind": "device", "name": device["step_name"], "cap": device["capability"],
+            "params": {"temp": 60}, "dur": device["dur_min"], "method": {"id": methods[key]},
+            "environment": [*PROCESS_REQUIREMENTS, *AMBIENT_REQUIREMENTS] if key == "plc" else AMBIENT_REQUIREMENTS,
+        })
+    steps.append({"step_id": "s06", "kind": "review", "name": "QA 复核运行数据", "review_role": "qa"})
+    return steps
 
 
 def _sop_steps(sop_id: str, researcher: Actor) -> dict[str, str]:
@@ -188,20 +321,22 @@ def _sop_steps(sop_id: str, researcher: Actor) -> dict[str, str]:
     return {row["title"]: row["key"] for row in detail.get("steps") or [] if row.get("key")}
 
 
-def release_recipe(researcher: Actor, qa: Actor, method_id: str, sop: dict, temp: float) -> str:
-    """同名已发布的流程（步骤、风险评估、SOP 都一致）沿用；不一致出修订版；没有就新建。研究员起草，QA 批准发布。"""
-    steps = recipe_steps(method_id, temp)
+def release_recipe(researcher: Actor, qa: Actor, methods: dict[str, str], sop: dict) -> str:
+    """同名已发布的流程（步骤与方法、风险评估、SOP 都一致）沿用；不一致出修订版；没有就新建。研究员起草，QA 批准发布。"""
+    steps = recipe_steps(methods)
     keys = _sop_steps(sop["id"], researcher)
-    titles = ["核对环境与设备在线", "装样并核对设定温度", "PLC 控温运行", "QA 复核运行数据"]
-    for index, (row, title) in enumerate(zip(steps, titles), start=1):
-        if keys.get(title):  # 节点记 SOP 步骤的稳定标识（批次页据此把 SOP 说明带到执行人面前）与序号
-            row["sop_step_key"], row["sop_step"] = keys[title], index
+    for index, row in enumerate(steps, start=1):
+        if keys.get(row["name"]):  # 节点记 SOP 步骤的稳定标识（批次页据此把 SOP 说明带到执行人面前）与序号
+            row["sop_step_key"], row["sop_step"] = keys[row["name"]], index
+
+    def shape(rows):
+        return [(row.get("step_id"), row.get("kind"), (row.get("method") or {}).get("id")) for row in rows]
+
     released = [row for row in _items(researcher.get("/recipes")) if row.get("name") == RECIPE_NAME and row.get("state") == "released"]
     for row in released:
         detail = researcher.get(f"/recipes/{row['id']}")
-        same = ([(s.get("step_id"), s.get("kind"), (s.get("params") or {}).get("temp")) for s in detail.get("steps") or []]
-                == [(s["step_id"], s["kind"], (s.get("params") or {}).get("temp")) for s in steps])
-        if same and detail.get("risk") == RISK and (detail.get("sop_version_id") or "") == sop["id"]:
+        if shape(detail.get("steps") or []) == shape(steps) and detail.get("risk") == RISK \
+                and (detail.get("sop_version_id") or "") == sop["id"]:
             ok("流程", f"{row['id']} {RECIPE_NAME}（已发布，沿用）")
             return row["id"]
     if released:
@@ -225,34 +360,44 @@ def release_recipe(researcher: Actor, qa: Actor, method_id: str, sop: dict, temp
         qa.post(f"/recipes/{draft['id']}/transition", {
             "target_state": target, "signature_id": qa.sign(meaning, draft["id"], fresh["row_version"]),
         })
-    ok("流程已发布", f"{draft['id']} {RECIPE_NAME}（核对环境 → 装样 → PLC 控温运行 → QA 复核，关联 {sop['code']} {sop['version']}）")
+    ok("流程已发布", f"{draft['id']} {RECIPE_NAME}（核对环境 → 装样 → PLC 控温运行 → 温控器设定 → 环境箱设定 → QA 复核，"
+                    f"关联 {sop['code']} {sop['version']}）"
+       + (f"；原版 {released[0]['id']} 随之退役" if released else ""))
     return draft["id"]
 
 
 def register(team: dict[str, Actor], args: argparse.Namespace) -> dict:
     engineer, qa, operator, researcher, admin = (team[k] for k in ("engineer", "qa", "operator", "researcher", "admin"))
-    step("设备与环境采集")
-    register_environment(engineer, args.timeout)
-    register_capability(engineer)
+    step("设备：能力、接入、闸门、环境采集")
+    register_capabilities(engineer)
+    register_assets(engineer)
+    configure_stations(engineer)
+    clear_gates(engineer, args.timeout)
+    wait_environment(engineer, args.timeout)
     step("指标、设备方法、资质")
-    metric_id = register_metric(researcher)
-    method_id = register_method(engineer, qa, metric_id)
-    grant_qualification(admin)
+    metrics = register_metrics(researcher)
+    methods = {key: register_method(engineer, qa, device, metrics) for key, device in DEVICES.items()}
+    grant_qualifications(admin)
     step("SOP 与流程")
     sop = common.register_sop(researcher, qa, operator, SOP)
-    recipe_id = release_recipe(researcher, qa, method_id, sop, args.temp)
-    return {"metric": metric_id, "method": method_id, "sop": sop, "recipe": recipe_id}
+    recipe_id = release_recipe(researcher, qa, methods, sop)
+    return {"metrics": metrics, "methods": methods, "sop": sop, "recipe": recipe_id}
 
 
 # ---------------------------------------------------------------- run
 
 
-def approve_plan(researcher: Actor, qa: Actor, recipe_id: str, metric_id: str, samples: int, temp: float, name: str) -> str:
+def approve_plan(researcher: Actor, qa: Actor, recipe_id: str, metrics: dict[str, str], temps: list[float],
+                 repeats: int, name: str) -> str:
+    """多温度矩阵：三个设定温度因子分别落到三个设备步骤，设计点把它们对齐成「每个样本一个温度」。"""
+    factors = [{"name": device["factor"], "unit": "℃", "levels": temps,
+                "target": {"step_id": device["step"], "param": "temp"}} for device in DEVICES.values()]
     plan = researcher.post("/plans", {
-        "name": name, "recipe_id": recipe_id, "plan_type": "single_condition", "sample_count": samples,
-        "goal": (f"{samples} 个联调样品在 {PLC} 上按 {temp:g} ℃ 控温运行：验证经驱动宿主下发、环境核对（两台传感器的读数）、"
-                 "设备回报、复核与报告全链路（模拟设备）"),
-        "required_metrics": [metric_id],
+        "name": name, "recipe_id": recipe_id, "plan_type": "matrix", "repeats": repeats, "layout": "sequential",
+        "factors": factors, "design_points": [[temp] * len(factors) for temp in temps],
+        "goal": (f"{len(temps)} 个设定温度（{'、'.join(f'{t:g}' for t in temps)} ℃）× {repeats} 次重复：三台 ProtoForge 设备经驱动宿主"
+                 "按样本依次设定温度并回读，验证矩阵条件下发、逐样本执行、环境核对、复核与报告全链路（模拟设备）"),
+        "required_metrics": list(metrics.values()),
     })
     plan_id = plan["id"]
     detail = researcher.get(f"/plans/{plan_id}")
@@ -264,13 +409,13 @@ def approve_plan(researcher: Actor, qa: Actor, recipe_id: str, metric_id: str, s
     fresh = qa.get(f"/plans/{plan_id}")
     qa.post(f"/plans/{plan_id}/decision", {
         "conclusion": "approved", "signature_id": qa.sign("批准实验方案", plan_id, fresh["row_version"])})
-    ok("方案已批准", f"{plan_id} {name}")
+    ok("方案已批准", f"{plan_id} {name}（矩阵：{len(temps)} 个设计点 × {repeats} 次重复 = {len(temps) * repeats} 个样品）")
     return plan_id
 
 
 def create_task(researcher: Actor, operator: Actor, plan_id: str, title: str) -> str:
     task = researcher.post("/experiment-tasks", {"plan_id": plan_id, "title": title, "priority": 2,
-                                                  "note": "ProtoForge 联调线全流程"})
+                                                  "note": "ProtoForge 联调线全流程（多温度矩阵）"})
     researcher.post(f"/experiment-tasks/{task['id']}/assign", {"assignee_user_id": operator.id})
     operator.post(f"/experiment-tasks/{task['id']}/accept")
     ok("实验任务", f"{task['id']} {title}（研究员建、分配给操作员 {OPERATOR}、已接受）")
@@ -286,7 +431,7 @@ def launch(operator: Actor, plan_id: str, task_id: str, note_text: str) -> str:
     kinds = {"work": "", "clean": "清洁 "}
     windows = [f"第 {row['step_index'] + 1} 步 {row.get('station_id')} {kinds.get(row.get('kind'), row.get('kind') + ' ')}"
                f"{str(row.get('starts_at', ''))[11:16]}–{str(row.get('ends_at', ''))[11:16]}"
-               for row in scheduled.get("allocations") or [] if row.get("kind") != "assist"]
+               for row in scheduled.get("allocations") or [] if row.get("kind") == "work"]
     ok("已排程", f"{batch_id}：" + "；".join(windows) + "（UTC；人工步骤不占工位）")
     preflight = operator.get(f"/batches/{batch_id}/preflight?manual_review=true")
     if not preflight["ok"]:
@@ -305,7 +450,7 @@ def launch(operator: Actor, plan_id: str, task_id: str, note_text: str) -> str:
 
 
 def drive(operator: Actor, qa: Actor, batch_id: str, timeout: float) -> dict:
-    """推到批次结束：两个人工节点由操作员提交，审核节点由 QA 批准；PLC 步骤由执行器经驱动宿主下发。"""
+    """推到批次结束：人工节点由操作员提交，审核节点由 QA 批准；设备步骤由执行器经驱动宿主下发、驱动按样本依次执行。"""
     handled: set[str] = set()
     started = time.monotonic()
 
@@ -320,8 +465,7 @@ def drive(operator: Actor, qa: Actor, batch_id: str, timeout: float) -> dict:
             if run["id"] in handled or run["state"] not in {"ready", "running"}:
                 continue
             if run["kind"] == "manual":
-                form = {"devices_online": True} if run.get("step_id") == "s01" or "核对环境" in run["step_name"] \
-                    else {"setpoint_ok": True}
+                form = {"devices_online": True} if "核对环境" in run["step_name"] else {"setpoint_ok": True}
                 body = {"form_data": form, "checks": {"samples": True, "materials": bool(detail["reservations"])},
                         "note": "ProtoForge 联调脚本", "row_version": run["row_version"]}
                 if run["requires_signature"]:
@@ -339,12 +483,30 @@ def drive(operator: Actor, qa: Actor, batch_id: str, timeout: float) -> dict:
 
     detail = wait_for(f"批次 {batch_id} 完成", advance, timeout=timeout, every=2)
     ok("批次已完成", f"{batch_id}，用时 {time.monotonic() - started:.0f} 秒")
-    for checkpoint in sorted(detail["checkpoints"], key=lambda row: row["step_index"]):
-        payload = checkpoint.get("payload") or {}
-        if payload.get("origin", "").startswith("real:"):
-            ok(f"第 {checkpoint['step_index'] + 1} 步设备回报", f"{payload.get('station_id')} · {payload.get('origin')} · "
-                                                         f"回报 {payload.get('delivered')}")
     return detail
+
+
+def show_wells(detail: dict) -> None:
+    """逐样本：方案给的设计温度、三台设备回报的值（设备按样本依次执行，回执按孔位）。"""
+    steps = {device["step"]: key for key, device in DEVICES.items()}
+    snapshot_steps = (detail.get("snapshot") or {}).get("steps") or []
+    by_step: dict[str, dict] = {}
+    for checkpoint in detail.get("checkpoints") or []:
+        index = checkpoint["step_index"]
+        step_id = snapshot_steps[index].get("step_id") if index < len(snapshot_steps) else ""
+        wells = ((checkpoint.get("payload") or {}).get("delivered") or {}).get("wells") or {}
+        if step_id in steps and wells:
+            by_step[steps[step_id]] = wells
+    step("逐样本回报（设计温度 → PLC 实测 · 温控器回读 · 环境箱回读）")
+    for sample in sorted(detail["samples"], key=lambda row: row["position"]):
+        well = sample["well"]
+        plc = by_step.get("plc", {}).get(well, {})
+        tc = by_step.get("tc", {}).get(well, {})
+        chamber = by_step.get("chamber", {}).get(well, {})
+        levels = sample.get("levels") or []
+        designed = f"{levels[0]:g} ℃" if levels else "—"
+        ok(f"{well} {sample['id']}", f"设计 {designed} → PLC 实测 {plc.get('temp', '—')} · "
+                                    f"温控器 {tc.get('temp', '—')} · 环境箱 {chamber.get('temp', '—')}")
 
 
 def device_results(actor: Actor, detail: dict) -> list[dict]:
@@ -368,19 +530,20 @@ def review_results(qa: Actor, researcher: Actor, detail: dict) -> list[dict]:
             continue
         qa.post(f"/result-values/{row['id']}/review", {
             "conclusion": "approved", "quality": "valid", "result_version": row["result_version"],
-            "reason": "ProtoForge 模拟 PLC 回报的值，复核只为验证接入与数据链路",
+            "reason": "ProtoForge 模拟设备回报的值，复核只为验证接入、矩阵下发与数据链路",
             "signature_id": qa.sign("数据复核通过", row["id"], row["result_version"])})
     fresh = device_results(researcher, detail)
-    ok("设备回报结果已复核", f"{len(fresh)} 条：" + "、".join(f"{row.get('value')}{row.get('unit') or ''}" for row in fresh))
+    ok("设备回报结果已复核", f"{len(fresh)} 条（{len(detail['samples'])} 个样品 × {len(METRICS)} 个指标）")
     return fresh
 
 
-def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, results: list[dict], temp: float) -> str:
+def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, results: list[dict], temps: list[float]) -> str:
     conclusion = (
-        f"批次 {batch_id} 按 {RECIPE_NAME} 在 {PLC}（ProtoForge 握手 PLC，经驱动宿主以 SiLA 2 接入）上完成 {len(detail['samples'])} 个"
-        f"联调样品的 {temp:g} ℃ 控温运行；开跑检查与下发前按 ST-PF-HTTP、ST-PF-OPCUA 的环境读数核对了实验区温湿度与工位压力；"
-        f"PLC 回报的实测温度 {len(results)} 条已复核。模拟设备：数值不是实测，只用于验证 SOP、流程、方案、任务、排程、执行、复核与"
-        "报告链路。")
+        f"批次 {batch_id} 按 {RECIPE_NAME}（多温度矩阵）完成 {len(detail['samples'])} 个联调样品：设定温度 "
+        f"{'、'.join(f'{t:g}' for t in temps)} ℃，每个样品一个温度；ST-PF-MB（握手 PLC）、ST-PF-OPCUA（温控器）、ST-PF-HTTP（环境箱）"
+        "均经驱动宿主以 SiLA 2 接入，驱动按样本依次执行并按样本回报；开跑检查与下发前按两台设备的环境读数核对了湿度与压力；"
+        f"{len(results)} 条设备回报已复核。模拟设备：数值不是实测（握手 PLC 的实测温度是 ProtoForge 场景规则写死的值），"
+        "只用于验证 SOP、流程、矩阵方案、任务、排程、执行、复核与报告链路。")
     report = researcher.post("/reports", {"batch_id": batch_id, "conclusion": conclusion})
     researcher.post(f"/reports/{report['id']}/submit")
     fresh = qa.get(f"/reports/{report['id']}")
@@ -395,41 +558,52 @@ def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, re
 def run(team: dict[str, Actor], context: dict, args: argparse.Namespace) -> dict:
     researcher, qa, operator = team["researcher"], team["qa"], team["operator"]
     gate = operator.get("/gate")
-    if not gate["open"] or PLC in (gate.get("blocked_stations") or {}):
-        raise Failed(f"执行门没开或 {PLC} 被挡：{gate.get('reasons')} {gate.get('blocked_stations')}")
-    name = args.plan_name or f"ProtoForge 联调：{args.samples} 个样品 {args.temp:g} ℃ 控温运行"
+    blocked = {station: reason for station, reason in (gate.get("blocked_stations") or {}).items()
+               if station in {device["station"] for device in DEVICES.values()}}
+    if not gate["open"] or blocked:
+        raise Failed(f"执行门没开或设备被挡：{gate.get('reasons')} {blocked}")
+    temps = args.temps
+    name = args.plan_name or f"ProtoForge 联调：{'/'.join(f'{t:g}' for t in temps)} ℃ 多温度矩阵 × {args.repeats}"
     step("方案与实验任务")
-    plan_id = approve_plan(researcher, qa, context["recipe"], context["metric"], args.samples, args.temp, name)
+    plan_id = approve_plan(researcher, qa, context["recipe"], context["metrics"], temps, args.repeats, name)
     task_id = create_task(researcher, operator, plan_id, name)
     step("排程与下发")
-    batch_id = launch(operator, plan_id, task_id, f"ProtoForge 联调：{args.samples} 个样品")
+    batch_id = launch(operator, plan_id, task_id, f"ProtoForge 联调：{len(temps) * args.repeats} 个样品多温度矩阵")
     step("执行")
     detail = drive(operator, qa, batch_id, args.timeout)
+    show_wells(detail)
     step("数据复核与报告")
     results = review_results(qa, researcher, detail)
-    report_id = publish_report(researcher, qa, batch_id, detail, results, args.temp)
+    report_id = publish_report(researcher, qa, batch_id, detail, results, temps)
     return {"plan": plan_id, "task": task_id, "batch": batch_id, "report": report_id}
 
 
+def _temps(text: str) -> list[float]:
+    values = [float(part) for part in text.split(",") if part.strip()]
+    if not 2 <= len(values) <= 8 or len(set(values)) != len(values):
+        raise argparse.ArgumentTypeError("给 2–8 个互不相同的温度，逗号分隔")
+    if any(not TEMP_RANGE[0] <= value <= TEMP_RANGE[1] for value in values):
+        raise argparse.ArgumentTypeError(f"温度要在 {TEMP_RANGE[0]}–{TEMP_RANGE[1]} ℃")
+    return values
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="ProtoForge 联调线全流程（经驱动宿主、只走 SiLA 2）")
+    parser = argparse.ArgumentParser(description="ProtoForge 联调线全流程（经驱动宿主、只走 SiLA 2，多温度矩阵）")
     parser.add_argument("command", choices=("register", "run"))
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
-    parser.add_argument("--samples", type=int, default=3, help="联调样品数（1–8）")
-    parser.add_argument("--temp", type=float, default=60, help="设定温度 ℃（0–100）")
+    parser.add_argument("--temps", type=_temps, default=[40.0, 60.0, 80.0], help="设计温度 ℃，逗号分隔（2–8 个）")
+    parser.add_argument("--repeats", type=int, default=1, help="每个温度的重复次数（1–2）")
     parser.add_argument("--plan-name", default="")
-    parser.add_argument("--timeout", type=float, default=600, help="等读数、等批次完成的秒数")
+    parser.add_argument("--timeout", type=float, default=600, help="等握手、验收、读数、批次完成的秒数")
     args = parser.parse_args(argv)
     try:
         refuse_production()
-        if not 1 <= args.samples <= 8:
-            raise Failed("样品数 1–8")
-        if not TEMP_RANGE[0] <= args.temp <= TEMP_RANGE[1]:
-            raise Failed(f"设定温度要在 {TEMP_RANGE[0]}–{TEMP_RANGE[1]} ℃")
+        if not 1 <= args.repeats <= 2 or len(args.temps) * args.repeats > 8:
+            raise Failed("样品数（温度个数 × 重复次数）不能超过 8，重复次数 1–2")
         team = actors(http_transport(args.base))
         context = register(team, args)
         if args.command == "register":
-            print(f"\n完成：SOP {context['sop']['code']} {context['sop']['version']} · 流程 {context['recipe']} · 设备方法 {context['method']}")
+            print(f"\n完成：SOP {context['sop']['code']} {context['sop']['version']} · 流程 {context['recipe']}")
             return 0
         outcome = run(team, context, args)
         print(f"\n完成：方案 {outcome['plan']} · 任务 {outcome['task']} · 批次 {outcome['batch']} · 报告 {outcome['report']}")

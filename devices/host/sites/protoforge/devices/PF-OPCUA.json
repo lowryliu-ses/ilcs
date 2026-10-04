@@ -1,9 +1,9 @@
 {
-  "note": "ProtoForge 的 OPC UA 压力传感器：只读写点位（压力、温度、上下限报警读，Setpoint 可写 0–10 bar）",
+  "note": "ProtoForge 的 OPC UA 温控 / 压力节点：读压力、温度、上下限报警，Setpoint 可写 0–10 bar；温控器设定温度（cap.tc_setpoint）：写 Temperature 节点、回读，只写设定值、没有启动信号，高报为真时判故障",
   "plugin": "opcua_map",
   "port": 50202,
   "simulator": true,
-  "config_version": "r1",
+  "config_version": "r2",
   "device_id": "PF-OPCUA-PRESSURE",
   "config": {
     "endpoint": "opc.tcp://host.docker.internal:4840/protoforge",
@@ -39,6 +39,33 @@
         "min": 0,
         "max": 10
       }
+    },
+    "status": {
+      "point": "alarm_high",
+      "states": {
+        "false": "idle",
+        "true": "failed"
+      }
+    },
+    "capabilities": {
+      "cap.tc_setpoint": {
+        "write": {
+          "temp": "temperature"
+        },
+        "start": {
+          "write_only": true
+        },
+        "idle_after_start": "done",
+        "actuals": {
+          "temp": "temperature"
+        }
+      }
     }
+  },
+  "supports": {
+    "hold": false,
+    "abort": false,
+    "query": true,
+    "dedup": true
   }
 }
