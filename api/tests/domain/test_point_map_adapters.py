@@ -87,7 +87,7 @@ def test_point_map_job_runs_to_done_and_replays_duplicates(protocol, isolated):
         done = _wait(adapter, "CMD-1")
         assert done.state == "done"
         assert abs(done.delivered["thickness"] - 180) < 2 and abs(done.delivered["temp"] - 110) < 2
-        assert {name for name, _, _ in done.telemetry} == {"thickness", "temp"}
+        assert {point.metric for point in done.telemetry} == {"thickness", "temp"}
 
         # 上一个作业停在「完成」：下一条先复位（CmdAck）再启动
         adapter.submit(_coat("CMD-2"))

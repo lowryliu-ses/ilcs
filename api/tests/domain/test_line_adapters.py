@@ -52,7 +52,7 @@ def test_oven_runs_to_done_with_actuals_and_replays_duplicates():
         done = _wait(adapter, "CMD-1", device)
         assert done.state == "done" and done.quality == "good"
         assert abs(done.delivered["temp"] - 120) < 1 and abs(done.delivered["vacuum"] - 1) < 0.1
-        assert {(name, setpoint) for name, _, setpoint in done.telemetry} == {("temp", 120.0), ("vacuum", 1.0)}
+        assert {(point.metric, point.setpoint) for point in done.telemetry} == {("temp", 120.0), ("vacuum", 1.0)}
         assert adapter.query("CMD-NEVER-SEEN") is None
 
         # 上一个作业停在 DONE：下一条先 ACK 复位再启动

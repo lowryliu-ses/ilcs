@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 
 class AdapterError(Exception):
@@ -87,6 +87,15 @@ class CommandRequest:
     wells: tuple = ()
 
 
+class TelemetryPoint(NamedTuple):
+    """回执里的一个遥测点。逐孔执行时带孔位与这一孔取实测的设备时间：落库时按孔位关联样本、按各自的时间记。"""
+    metric: str
+    value: float
+    setpoint: float | None = None
+    well: str = ""
+    device_ts: datetime | None = None
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command_id: str
@@ -94,7 +103,7 @@ class CommandResult:
     device_ts: datetime | None = None
     quality: str = "good"
     delivered: dict = field(default_factory=dict)
-    telemetry: tuple[tuple[str, float, float | None], ...] = ()
+    telemetry: tuple[TelemetryPoint, ...] = ()
     error: str = ""
     origin: str = "simulation"
 

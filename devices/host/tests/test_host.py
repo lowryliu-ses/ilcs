@@ -137,6 +137,9 @@ def test_wells_run_one_after_another_and_report_each_well(tmp_path, plc):
         assert all(abs(row["thickness"] - 180) < 2.5 for row in wells.values()), "固定参数是每孔的缺省值"
         assert sum(program.device.executions.values()) == 3, "每孔一个启动沿"
         assert program.memory["JobLatched"] == "CMD-W/3", "每孔写自己的运行号：最后锁存的是第 3 孔（A10）的"
+        points = sorted((row for row in done["telemetry"] if row["metric"] == "temp"), key=lambda row: row["device_ts"])
+        assert [(row["well"], row["setpoint"]) for row in points] == [("A1", 110.0), ("A2", 120.0), ("A10", 140.0)], (
+            "SiLA 回执里的遥测点带孔位与各孔自己的设备时间")
         assert _submit(c, "CMD-W", params)["state"] == "done", "重复投递回放原作业，不再动作"
         assert sum(program.device.executions.values()) == 3
 

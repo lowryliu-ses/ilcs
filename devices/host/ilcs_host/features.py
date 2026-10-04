@@ -48,6 +48,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _telemetry_point(point) -> dict:
+    """回执里的遥测点：逐孔执行的点照带孔位与这一孔的设备时间（UTC）。"""
+    row = {"metric": point.metric, "value": point.value, "setpoint": point.setpoint}
+    if point.well:
+        row["well"] = point.well
+    if point.device_ts:
+        row["device_ts"] = point.device_ts.replace(tzinfo=timezone.utc).isoformat(timespec="milliseconds")
+    return row
+
+
 class DeviceRuntime:
     """一台设备：插件实例、点位写入台账，以及「在途作业时不许换配置」的启动检查。"""
 
@@ -255,8 +265,7 @@ class TaskExecutionImpl(FeatureImplementationBase):
         return json.dumps({
             "command_id": result.command_id, "state": result.state, "device_ts": moment.isoformat(timespec="seconds"),
             "quality": result.quality, "delivered": result.delivered,
-            "telemetry": [{"metric": metric, "value": value, "setpoint": setpoint}
-                          for metric, value, setpoint in result.telemetry],
+            "telemetry": [_telemetry_point(point) for point in result.telemetry],
             "error": result.error,
         }, ensure_ascii=False)
 
