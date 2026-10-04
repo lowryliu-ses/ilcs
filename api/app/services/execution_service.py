@@ -43,6 +43,7 @@ from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .file_service import FileService
 from .gate_service import GateService
+from .leadership import verify as verify_leadership
 
 # 搬运能力：AGV、机械臂转运这类承运工位不承接工步，没有校准档案要核（与迁移核对同一口径）
 TRANSPORT_CAPABILITY = "cap.transfer"
@@ -173,6 +174,8 @@ class ExecutionService:
             self._refuse(batch, command, f"适配器不可用：{exc}；指令未投递，不自动重试")
             return True
 
+        # 执行权：主备切换的那几秒里，已经失锁的旧执行器不能再领走指令（services/leadership）
+        verify_leadership(self.db, "投递指令")
         # 比较并交换：只有仍在队列里的指令才能被领走，与撤回互斥
         claimed = (
             self.db.query(Command)
@@ -707,6 +710,8 @@ class ExecutionService:
         """推进逐样本拆开的指令：吸收当前这个样本的回执；做完了就发下一个样本，直到有一个样本在设备上跑、出了结论不是完成、
         或者全部做完。每发一个样本之前先把「已交给适配器」落库：崩在中间时重启按这个样本的指令号去问设备。"""
         runs = [dict(run) for run in command.runs or []]
+        if result is not None:
+            verify_leadership(self.db, "落设备回执")
         while True:
             if result is not None:
                 run = next(run for run in runs if run.get("state") in RUN_ACTIVE)
@@ -728,6 +733,7 @@ class ExecutionService:
             if run is None:
                 self.settle(batch, command, ledger, record, self._runs_finished(command, runs))
                 return
+            verify_leadership(self.db, "下发下一个样本")
             run["state"] = "sent"
             self._save_runs(command, runs)
             self.db.commit()
@@ -1651,6 +1657,7 @@ class ExecutorLoop:
             if ledger is None:
                 continue
             finished = result.state not in {"accepted", "running"}
+            verify_leadership(self.db, "落设备回执")
             service.settle(batch, command, ledger, record, result)
             # 逐条提交：终止回执在批次锁内汇总，锁不能带到下一条指令的设备查询里
             self.db.commit()
@@ -1866,6 +1873,7 @@ class ExecutorLoop:
                 mismatches += 1
                 continue
             # 设备侧能按原 command_id 给出结论：复用原命令身份继续，不重复动作
+            verify_leadership(self.db, "落对账结论")
             command.delivery_state = "delivered"
             service.settle(batch, command, ledger, record, found)
             self.db.commit()

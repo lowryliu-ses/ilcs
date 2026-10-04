@@ -14,6 +14,9 @@
 主备语义不变：仍然只有持有 advisory lock 的那个进程在工作，线程池是进程内的并发。
 每个线程用自己的数据库会话；批次行锁、指令比较并交换、步骤行锁与推进去重表本来就是
 为「API 与执行器同时写」设计的，工位之间的并发落在同一套保护之内。
+
+失锁时（`services/leadership`）主线程退出不会让这些工位线程停下：`fence()` 取消还没开始的工位任务、不再派活，
+在跑的任务在下一次领取或落回执之前的执行权核对处停下，进程随即由看门狗直接退出。
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from ..core.config import settings
 from .acceptance_service import running_stations
 from .execution_service import ExecutorLoop
 from .gate_service import GateService
+from .leadership import LeadershipLost, fenced
 
 log = logging.getLogger("ilcs.executor")
 
@@ -54,6 +58,7 @@ class ConcurrentExecutor:
     def __post_init__(self) -> None:
         self.pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="ilcs-station")
         self.running: dict[str, _Running] = {}
+        self.fenced = False
 
     def _webhooks_due(self) -> bool:
         from ..models import WebhookDelivery
@@ -66,10 +71,21 @@ class ConcurrentExecutor:
     def shutdown(self, wait_for_stations: bool = True) -> None:
         self.pool.shutdown(wait=wait_for_stations)
 
+    def fence(self) -> None:
+        """失去执行权：不再派活，还没开始的工位任务取消。在跑的那些由执行权核对挡住新的动作（shutdown(wait=False)
+        本身不打断它们，排队的也照样会开始——所以要 cancel_futures）。"""
+        self.fenced = True
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
     def _station_job(self, station_id: str, dispatch_open: bool) -> dict:
+        if self.fenced or fenced():
+            return {}  # 已经失锁：取消之前就被线程领走的任务也不开始
         db = self.session_factory()
         try:
             return ExecutorLoop(db).station_pass(station_id, dispatch_open=dispatch_open)
+        except LeadershipLost:
+            db.rollback()  # 领取前核对发现失锁：这一轮的未提交改动作废，进程由看门狗退出
+            return {}
         except Exception:
             db.rollback()
             raise
@@ -95,6 +111,8 @@ class ConcurrentExecutor:
             if not running.future.done():
                 continue
             del self.running[station_id]
+            if running.future.cancelled():
+                continue  # 失锁熔断时取消的：没开始过
             try:
                 result = running.future.result()
             except Exception:
@@ -113,6 +131,8 @@ class ConcurrentExecutor:
         report: dict = {key: 0 for key in SUMMED}
         report.update(station_errors=0, stations_dispatched=0, stations_busy=0, stations_stuck=[])
         started = time.monotonic()
+        if self.fenced or fenced():
+            raise LeadershipLost("执行器已失去执行权，不再开始新的一轮")
 
         with self.session_factory() as db:
             loop = ExecutorLoop(db)

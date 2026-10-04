@@ -42,6 +42,7 @@ from ..repositories.resources import StationRepository
 from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .identity_service import IdentityService
+from .leadership import verify as verify_leadership
 
 ACTIVE = ("queued", "running")
 RUN_STATE_LABELS = {"queued": "排队中", "running": "执行中", "done": "已完成", "error": "出错", "cancelled": "已取消"}
@@ -592,6 +593,8 @@ class AcceptanceRunner:
 
         record = AcceptanceRecord.of(adapter)
         device_template = template_brief(self.db, adapter.template_id) or {}
+        # 执行权：已经失锁的旧执行器不再开始让设备动作的验收（services/leadership）
+        verify_leadership(self.db, "开始接入验收")
         # 领取：排队 → 执行中，与取消是同一个比较并交换；只领按当前配置排的——申请时签的是那一版配置
         claimed = self.db.query(AcceptanceRun).filter(
             AcceptanceRun.id == run_id, AcceptanceRun.state == "queued",

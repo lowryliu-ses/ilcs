@@ -46,6 +46,7 @@ cd ilcs && api/.venv/bin/python executor/main.py
 
 **执行器同一时刻只允许一个在工作。** PostgreSQL 上执行器启动时争用一把会话级 advisory lock，
 拿不到的副本待命、主副本退出或断线后自动接管；不要为了"提高吞吐"并行跑多个执行器。
+持锁连接断了，主副本的看门狗一秒内熔断、以退出码 3 直接退出（不等在跑的工位任务做完），由容器重启后重新竞争。
 吞吐靠进程内按工位并发（`ILCS_EXECUTOR_WORKERS`，默认 8）：一台设备网关卡住只拖住它自己的线程。
 新指令入队经 PostgreSQL `LISTEN/NOTIFY` 立即唤醒执行器，轮询周期只是兜底；界面经 `/api/stream`
 接收变更推送，顶栏显示「实时 / 轮询」。
