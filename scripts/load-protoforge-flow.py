@@ -280,16 +280,10 @@ def register_method(engineer: Actor, qa: Actor, device: dict, metrics: dict[str,
 
 
 def grant_qualifications(admin: Actor) -> None:
-    person = next((row for row in _items(admin.get(f"/people?keyword={OPERATOR}")) if row.get("code") == OPERATOR), None)
-    if person is None:
-        raise Failed(f"人员 {OPERATOR} 不存在")
-    held = {row["scope_ref"] for row in admin.get(f"/people/{person['id']}/qualifications")
-            if row.get("scope_kind") == "capability" and row.get("status") not in {"revoked", "expired"}}
-    for device in DEVICES.values():
-        if device["capability"] not in held:
-            admin.post(f"/people/{person['id']}/qualifications", {
-                "scope_kind": "capability", "scope_ref": device["capability"], "label": device["capability_name"]})
-    ok("操作员资质", f"{OPERATOR} 有 " + "、".join(device["capability"] for device in DEVICES.values()))
+    capabilities = {device["capability"]: device["capability_name"] for device in DEVICES.values()}
+    for label, code in (("操作员资质", OPERATOR), ("管理员资质", common.ADMIN_PERSON)):
+        common.grant_capabilities(admin, code, capabilities)
+        ok(label, f"{code} 有 " + "、".join(capabilities))
 
 
 # ---------------------------------------------------------------- 流程

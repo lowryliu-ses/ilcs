@@ -49,6 +49,8 @@ MODEL = "CT-4008T-5V6A"
 DEVICE_ID = "SIM-NW-BTS-01"
 CHANNELS = 8
 OPERATOR = "P-003"
+# 管理员默认拥有全部能力资质（和种子一致）
+ADMIN_PERSON = "P-005"
 
 CAPABILITY = {
     "id": "cap.test", "name": "电池充放电测试", "params": {"channel": "通道"},
@@ -370,17 +372,28 @@ def register_method(engineer: Actor, qa: Actor, metrics: dict[str, str]) -> str:
     return done["id"]
 
 
-def grant_qualification(admin: Actor) -> None:
-    person = next((row for row in _items(admin.get(f"/people?keyword={OPERATOR}")) if row.get("code") == OPERATOR), None)
+def grant_capabilities(admin: Actor, person_code: str, capabilities: dict[str, str]) -> int:
+    """给人员档案补发能力资质（能力 id → 名称）；已有有效资质的跳过。返回新增几项。"""
+    person = next((row for row in _items(admin.get(f"/people?keyword={person_code}"))
+                   if row.get("code") == person_code), None)
     if person is None:
-        raise Failed(f"人员 {OPERATOR} 不存在")
+        raise Failed(f"人员 {person_code} 不存在")
     held = {row["scope_ref"] for row in admin.get(f"/people/{person['id']}/qualifications")
             if row.get("scope_kind") == "capability" and row.get("status") not in {"revoked", "expired"}}
-    if CAPABILITY["id"] not in held:
-        admin.post(f"/people/{person['id']}/qualifications", {
-            "scope_kind": "capability", "scope_ref": CAPABILITY["id"], "label": CAPABILITY["name"],
-        })
-    ok("操作员资质", f"{OPERATOR} 有 {CAPABILITY['id']} {CAPABILITY['name']}")
+    added = 0
+    for capability_id, name in capabilities.items():
+        if capability_id not in held:
+            admin.post(f"/people/{person['id']}/qualifications", {
+                "scope_kind": "capability", "scope_ref": capability_id, "label": name,
+            })
+            added += 1
+    return added
+
+
+def grant_qualification(admin: Actor) -> None:
+    for label, code in (("操作员资质", OPERATOR), ("管理员资质", ADMIN_PERSON)):
+        grant_capabilities(admin, code, {CAPABILITY["id"]: CAPABILITY["name"]})
+        ok(label, f"{code} 有 {CAPABILITY['id']} {CAPABILITY['name']}")
 
 
 # ---------------------------------------------------------------- run

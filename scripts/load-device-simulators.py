@@ -286,7 +286,11 @@ def _driver_host_script():
 def register(team: dict[str, Actor], keys: list[str], args: argparse.Namespace) -> None:
     engineer, qa, operator = team["engineer"], team["qa"], team["operator"]
     step("能力与实验区")
-    ensure_capabilities(engineer, {cap for key in keys for cap in DEVICES[key]["limits"]})
+    needed = {cap for key in keys for cap in DEVICES[key]["limits"]}
+    ensure_capabilities(engineer, needed)
+    names = {row["id"]: row["name"] for row in engineer.get("/capabilities")}
+    added = common.grant_capabilities(team["admin"], common.ADMIN_PERSON, {cap: names[cap] for cap in sorted(needed)})
+    ok("管理员资质", f"{common.ADMIN_PERSON} 有 " + "、".join(sorted(needed)) + f"（新增 {added}）")
     ensure_island(engineer)
     for key in keys:
         device = DEVICES[key]

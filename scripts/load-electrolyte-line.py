@@ -177,6 +177,10 @@ def load_line(path: Path = LINE) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+# 管理员默认拥有全部能力资质（和种子一致）：产线登记的能力也给它发一份
+ADMIN_PERSON = "P-005"
+
+
 def _items(payload: Any) -> list:
     return payload.get("items", []) if isinstance(payload, dict) else payload
 
@@ -428,21 +432,29 @@ def register_metrics(researcher: Actor, line: dict) -> dict[str, str]:
     return ids
 
 
-def grant_qualifications(admin: Actor, line: dict) -> None:
-    code = line["operator"]
-    person = next((row for row in _items(admin.get(f"/people?keyword={code}")) if row.get("code") == code), None)
+def grant_capabilities(admin: Actor, person_code: str, capabilities: dict[str, str]) -> int:
+    """给人员档案补发能力资质（能力 id → 名称）；已有有效资质的跳过。返回新增几项。"""
+    person = next((row for row in _items(admin.get(f"/people?keyword={person_code}"))
+                   if row.get("code") == person_code), None)
     if person is None:
-        raise Failed(f"人员 {code} 不存在")
+        raise Failed(f"人员 {person_code} 不存在")
     held = {row["scope_ref"] for row in admin.get(f"/people/{person['id']}/qualifications")
             if row.get("scope_kind") == "capability" and row.get("status") not in {"revoked", "expired"}}
     added = 0
-    for cap in line["capabilities"]:
-        if cap["id"] not in held:
+    for capability_id, name in capabilities.items():
+        if capability_id not in held:
             admin.post(f"/people/{person['id']}/qualifications", {
-                "scope_kind": "capability", "scope_ref": cap["id"], "label": cap["name"],
+                "scope_kind": "capability", "scope_ref": capability_id, "label": name,
             })
             added += 1
-    ok("操作员资质", f"{code} 获得全部 {len(line['capabilities'])} 项产线能力（新增 {added}）")
+    return added
+
+
+def grant_qualifications(admin: Actor, line: dict) -> None:
+    capabilities = {cap["id"]: cap["name"] for cap in line["capabilities"]}
+    for label, code in (("操作员资质", line["operator"]), ("管理员资质", ADMIN_PERSON)):
+        added = grant_capabilities(admin, code, capabilities)
+        ok(label, f"{code} 获得全部 {len(capabilities)} 项产线能力（新增 {added}）")
 
 
 def template_config(line: dict, methods: dict[str, str], metrics: dict[str, str]) -> dict:
