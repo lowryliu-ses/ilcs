@@ -223,9 +223,14 @@ docs/        现行文档（设备适配器配置模板、操作案例、验收�
 ```
 
 设备那一侧（驱动宿主、网关 SDK 与设备模块、外部模拟设备、连接器、SiLA 等契约）在**独立的设备仓库 `ilcs-devices`** 里
-（2026-10-04 从本仓库的 `devices/` 拆出去），和本仓库并排放：`<目录>/ilcs`、`<目录>/ilcs-devices`。本仓库的测试与脚本按
-环境变量 `ILCS_DEVICES` 找它，缺省就是旁边的 `../ilcs-devices`；找不到时，要用设备侧代码的测试跳过（`pytest -rs` 看原因）。
-ILCS 运行时不依赖它：只经 `sila2_v1` / `http_json_v1` 两个契约接设备。
+（2026-10-04 从本仓库的 `devices/` 拆出去；GitHub 私有仓库 `lowryliu-ses/ilcs-devices`），和本仓库并排放：
+
+```bash
+git clone https://github.com/lowryliu-ses/ilcs-devices.git ../ilcs-devices   # 在本仓库根目录执行
+```
+
+本仓库的测试与脚本按环境变量 `ILCS_DEVICES` 找它，缺省就是旁边的 `../ilcs-devices`；找不到时，要用设备侧代码的测试跳过
+（`pytest -rs` 看原因）。ILCS 运行时不依赖它：只经 `sila2_v1` / `http_json_v1` 两个契约接设备。
 
 ## 部署（10.10.106.51:8090）
 
