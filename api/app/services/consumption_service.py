@@ -6,6 +6,9 @@
   预留依次分摊（有效期早的先扣），一个事件多条明细——预留跨了两个批号时单条预留装不下整步的量。
 - 找不到预留、预留合计装不下或单位换算不了就不入账，报警转人工。一项回报整体入账或整体不入账（保存点），
   不会留下没有明细的空事件，也不会只扣了一部分批号。
+- 称量加料总有上下浮动：实际量比剩余预留多出的部分不超过偏差阈值（计划量的 `consumption_deviation_pct`，取不到
+  计划量时按回报量算），且同一批号还有没被占用的可用量，就先记一笔系统来源的「追加预留」（事件 `<指令>#<序号>:topup`，
+  进流水与审计）再按实际量入账；多出更多、或批号没有余量可补，照旧整项拒绝、报警转人工。
 - 与计划量偏差超过阈值照常入账，但报警并标记待复核：计划量只是对照基准，账上记的永远是设备称出来的量。
   方案给出用量的物料（快照 BOM 里 `source: plan`），计划量就是这条指令下发的量（各孔用量参数之和）：
   中途剔除的瓶子、同一种料分几步投都不会误报。流程 BOM 列的物料照旧按「BOM 量 ÷ 声明投这种料的消耗
@@ -33,7 +36,15 @@ from .inventory_service import InventoryService
 
 
 class Refused(ValueError):
-    """预留装不下这项回报：和库存校验拒绝同一口径报「消耗被拒」。"""
+    """预留装不下这项回报：和库存校验拒绝同一口径报「消耗被拒」。
+
+    带上差多少（物料基础单位）、可以往哪条预留上补：差得少时由调用方按偏差阈值决定是否自动追加预留。"""
+
+    def __init__(self, message: str, *, shortfall: Decimal = Decimal(0), reservation=None, lot: Lot | None = None,
+                 amount: Decimal = Decimal(0), base_unit: str = ""):
+        super().__init__(message)
+        self.shortfall, self.reservation, self.lot = shortfall, reservation, lot
+        self.amount, self.base_unit = amount, base_unit
 
 
 class ConsumptionService:
@@ -59,23 +70,38 @@ class ConsumptionService:
                 # 重复回执：已经入过账。不再按现在的余量重新分摊——预留已被第一次扣掉，重分只会误报「装不下」
                 booked += 1
                 continue
+            overdraw: Refused | None = None
             try:
                 lines, lot, actual, base_unit = self._allocate(batch, usage)
             except Refused as exc:
-                self._alarm(
-                    batch, key,
-                    f"第 {command.step_index + 1} 步设备回报的 {self._label(usage)} 消耗被拒：{exc}", 2,
-                )
-                rejected += 1
-                continue
+                if not self._tolerated(batch, command, exc):
+                    self._alarm(
+                        batch, key,
+                        f"第 {command.step_index + 1} 步设备回报的 {self._label(usage)} 消耗被拒：{exc}", 2,
+                    )
+                    rejected += 1
+                    continue
+                overdraw, lot = exc, exc.lot
             except ValueError as exc:
                 self._alarm(batch, key, f"第 {command.step_index + 1} 步设备回报的消耗无法入账：{exc}", 2)
                 rejected += 1
                 continue
             note = f"{'模拟设备回执' if origin == 'simulation' else '设备回执'} {command.id}"
             try:
-                # 保存点：任一条明细被拒，事件行与前面几条明细对批号余额、预留的改动一起撤销
+                # 保存点：任一条明细被拒，事件行与前面几条明细对批号余额、预留的改动一起撤销（连同自动追加的预留）
                 with self.db.begin_nested():
+                    if overdraw is not None:
+                        inventory.post(
+                            source="system", event_id=f"{event_id}:topup", event_type="reserve",
+                            items=[{"lot_id": overdraw.lot.id, "reservation_id": overdraw.reservation.id,
+                                    "quantity": str(overdraw.shortfall), "unit": overdraw.base_unit, "note": note}],
+                            batch_id=batch.id, step_run_id=step_run_id, command_id=command.id,
+                            reason=(f"第 {command.step_index + 1} 步设备实际用量比剩余预留多 "
+                                    f"{overdraw.shortfall:f}{overdraw.base_unit}（在 "
+                                    f"{settings.consumption_deviation_pct:g}% 偏差阈值内），自动追加预留后按实际量入账"),
+                            commit=False,
+                        )
+                        lines, lot, actual, base_unit = self._allocate(batch, usage)
                     inventory.post(
                         source="device", event_id=event_id, event_type="consume",
                         items=[
@@ -86,8 +112,9 @@ class ConsumptionService:
                         batch_id=batch.id, step_run_id=step_run_id, command_id=command.id,
                         reason=f"第 {command.step_index + 1} 步设备回报实际消耗", commit=False,
                     )
-            except DomainError as exc:
-                blocked = (exc.detail or {}).get("blocked") if isinstance(exc.detail, dict) else None
+            except (DomainError, Refused) as exc:
+                detail = getattr(exc, "detail", None)
+                blocked = detail.get("blocked") if isinstance(detail, dict) else None
                 reason = "；".join(row.get("label", "") for row in blocked or []) or str(exc)
                 self._alarm(
                     batch, key, f"第 {command.step_index + 1} 步设备回报的 {self._label(usage, lot)} 消耗被拒：{reason}", 2,
@@ -110,6 +137,15 @@ class ConsumptionService:
                     deviations += 1
         return {"booked": booked, "rejected": rejected, "deviations": deviations}
 
+    def _tolerated(self, batch: Batch, command: Command, refused: Refused) -> bool:
+        """预留差的这点量能不能自动补：差额不超过计划量（取不到就按回报量）的偏差阈值，且有预留可以往上加。
+        批号还有没有可用量由追加预留那一笔的库存校验把关。"""
+        if refused.reservation is None or refused.lot is None or refused.shortfall <= 0:
+            return False
+        planned = self._planned(batch, command, refused.lot, refused.base_unit)
+        basis = planned if planned is not None and planned > 0 else refused.amount
+        return refused.shortfall <= basis * Decimal(str(settings.consumption_deviation_pct)) / 100
+
     @staticmethod
     def _label(usage, lot: Lot | None = None) -> str:
         usage = usage if isinstance(usage, dict) else {}
@@ -121,7 +157,8 @@ class ConsumptionService:
 
         带批号的照旧整笔记到该批号的预留（优先仍有余量的那条）。只写物料名的按这种料仍有余量的预留
         依次分摊：有效期早的先扣，同一批号按建预留的先后——和 reserve_for_batch 选批号的顺序一致。
-        合计余量装不下就整项拒绝：超预留要先以明确动作追加预留，不在消耗里默默放大占用。
+        合计余量装不下就整项拒绝（`Refused` 带上差额和可以往上补的预留）：差得多要先以明确动作追加预留，
+        不在消耗里默默放大占用；差额在偏差阈值内的由 `book` 记一笔追加预留再入账。
         """
         if not isinstance(usage, dict):
             raise ValueError("回执 materials 的每一项必须是对象")
@@ -167,9 +204,12 @@ class ConsumptionService:
                 lines.append((reservation, lot, take))
                 remaining -= take
         if remaining > 0:
+            # 差的量补到正在扣的那条预留（同一批号）上；一条都没扣到时补到排在最前的那条
+            reservation, lot = lines[-1][:2] if lines else candidates[0]
             raise Refused(
                 f"实际用量 {amount:f}{base_unit} 超出本批次 {material_name} 的剩余预留合计 {available:f}{base_unit}，"
-                f"请先追加预留并校验可用量"
+                f"请先追加预留并校验可用量",
+                shortfall=remaining, reservation=reservation, lot=lot, amount=amount, base_unit=base_unit,
             )
         return lines, first, amount, base_unit
 

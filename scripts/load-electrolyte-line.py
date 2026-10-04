@@ -7,6 +7,8 @@
 
     python3 scripts/load-electrolyte-line.py register [--base http://127.0.0.1:8090]
     python3 scripts/load-electrolyte-line.py run [--table 配方表.xlsx] [--bottles 2 --volume 30] [--plan-name 名称]
+    python3 scripts/load-electrolyte-line.py connect      # gateways.json 里的工位改接设备网关（真实接入链路）
+    python3 scripts/load-electrolyte-line.py disconnect   # 这几个工位切回内置模拟
 
 - register：能力、资产、工位（接好后重连一次）、设备方法（工程师起草、QA 发布）、物料主数据与测试批号
   （QA 复验放行）、检测指标、操作员资质、配液模板 FT-ELY-01。已有的先查后用，重复运行不会多建。
@@ -15,6 +17,10 @@
   签名下发 → 人工节点按表单填写，直到批次完成 → 打印每步检查点、消耗入账、检测值与报警。
   run 要求执行器在跑（本机部署的 executor），它负责投递与推进。
   一瓶一配方：配过液的瓶子不能再导入，同一张表（含缺省参考配方）run 过一次后再 run 会在导入时被拒，换新序列号的表。
+- connect：gateways.json 列出的工位（现在是配液天平、配粉天平、拉曼）套用设备接入模板、连到设备网关（模拟阶段是设备仓库
+  ilcs-devices 的 deploy/compose.yml 里 electrolyte profile 起的模拟站），等执行器跑完只读级验收放行；之后 run 的这几步就走
+  http_json_v1：网关核对加的料、回报天平称出来的实际量，消耗按实际量入账。disconnect 把它们切回内置模拟。
+  模拟站的主机名要先加进 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS（deploy/.env）。
 - 资产只给新登记的工位建 AS-<工位> 占位；已登记的工位沿用它现在关联的资产，不补建、不改。
 
 正式环境（ILCS_ENVIRONMENT=production）拒绝运行：它会登记模拟工位与测试批号。服务端在正式环境同样拒绝
@@ -39,6 +45,9 @@ from typing import Any, Callable
 
 HERE = Path(__file__).resolve().parent
 LINE = HERE / "lines" / "c-electrolyte" / "line.json"
+GATEWAYS = HERE / "lines" / "c-electrolyte" / "gateways.json"
+# 设备仓库（设备模块的 profile.json 在它的 gateway/<模块>/ 下）：环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices
+DEVICES_REPO = Path(os.environ.get("ILCS_DEVICES") or HERE.parent.parent / "ilcs-devices")
 FORMULA = HERE / "lines" / "c-electrolyte" / "formula-20260929.csv"
 SOP = HERE / "lines" / "c-electrolyte" / "sop.json"
 PASSWORD = "ilcs1234"
@@ -721,9 +730,112 @@ def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, re
     return report["id"]
 
 
+# ---------- 改走真实接入链路：工位接设备网关（gateways.json） ----------
+
+def wait_for(describe: str, probe: Callable[[], Any], timeout: float, every: float = 3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = probe()
+        if found:
+            return found
+        time.sleep(every)
+    raise Failed(f"等不到：{describe}（{timeout:.0f} s）")
+
+
+def ensure_template(engineer: Actor, qa: Actor, spec: dict) -> dict:
+    """设备模块的接入模板：已发布就沿用；没登记就从设备仓库里模块的 profile.json 导入，QA 签名发布。"""
+    path = DEVICES_REPO / "gateway" / spec["module"] / "profile.json"
+    rows = [row for row in _items(engineer.get("/device-templates")) if row.get("code") == spec["template"]]
+    released = [row for row in rows if row.get("state") == "released"]
+    if released:
+        return max(released, key=lambda row: int(row.get("revision") or 0))
+    if not path.is_file():
+        raise Failed(f"接入模板 {spec['template']} 没有发布，设备仓库里也找不到 {path}（设 ILCS_DEVICES 指向 ilcs-devices）")
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    template = next((row for row in rows if row.get("state") == "draft"), None) or engineer.post(
+        "/device-templates/import", {"filename": path.name, "document": profile})
+    template = qa.post(f"/device-templates/{template['id']}/release", {
+        "row_version": template["row_version"],
+        "signature_id": qa.sign("发布设备接入模板", template["id"], template["row_version"]),
+    })
+    note(f"接入模板 {spec['template']} 从 {path} 导入并发布")
+    return template
+
+
+def _accepted(engineer: Actor, station_id: str, config_version: int):
+    listed = engineer.get(f"/stations/{station_id}/adapter/acceptance")
+    gate, runs = listed["gate"], listed.get("runs") or []
+    if gate["required"] == "" and gate.get("accepted_config_version") == config_version:
+        return next((row for row in runs if row["id"] == gate.get("accepted_run_id")), {"id": gate.get("accepted_run_id")})
+    latest = next((row for row in runs if row.get("config_version") == config_version), None)
+    if latest and latest.get("state") == "done" and not latest.get("ok") and latest.get("level") == "readonly":
+        raise Failed(f"{station_id} 只读级验收没通过：{latest.get('error') or latest.get('report_md', '')[:500]}")
+    return None
+
+
+def connect(team: dict[str, Actor], gateways: dict, timeout: float) -> None:
+    """工位套用接入模板、连接参数指向设备网关；重连一次，等执行器跑完只读级验收（模拟网关只读级就放行）。"""
+    engineer, qa, operator = team["engineer"], team["qa"], team["operator"]
+    step("工位改接设备网关（真实接入链路）")
+    for station_id, spec in gateways["stations"].items():
+        template = ensure_template(engineer, qa, spec)
+        device_id = spec["device_id"]
+        connection = {"base_url": f"https://{spec['host']}:8443/api/v1",
+                      "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
+        credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
+        adapter = engineer.get(f"/stations/{station_id}/adapter")
+        if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
+                or adapter.get("credential_ref") != credential:
+            adapter = engineer.patch(f"/stations/{station_id}/adapter", {
+                "template_id": template["id"], "template_connection": connection, "credential_ref": credential,
+                "row_version": adapter["row_version"],
+                "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
+            })
+            ok(f"工位 {station_id}", f"套用 {template['code']} r{template['revision']}：{connection['base_url']}，"
+               f"设备编号 {device_id}（已签名保存）")
+        else:
+            ok(f"工位 {station_id}", f"{connection['base_url']}（沿用）")
+        if (operator.get("/gate").get("blocked_stations") or {}).get(station_id):
+            operator.post(f"/stations/{station_id}/adapter/reconnect", expect=(200, 201, 409))
+        run_row = wait_for(f"{station_id} 接入验收放行",
+                           lambda: _accepted(engineer, station_id, adapter["config_version"]), timeout=timeout)
+        wait_for(f"{station_id} 在线", lambda: not (operator.get("/gate").get("blocked_stations") or {}).get(station_id),
+                 timeout=60)
+        ok(f"接入验收 {station_id}", f"配置 v{adapter['config_version']} 已由 {run_row['id']} 放行")
+        # 读设备自报的方法目录：之后排程只往报过这个程序的工位排；型号和工位资产对不上时这里就报出来
+        described = engineer.post(f"/stations/{station_id}/adapter/describe")
+        if described.get("warning"):
+            raise Failed(f"{station_id}：{described['warning']}")
+        programs = "、".join(str(row.get("program") or row.get("code") or row.get("name") or "")
+                            for row in described.get("methods") or []) or "—"
+        ok(f"方法目录 {station_id}", f"型号 {described.get('reported_model') or '—'}，程序 {programs}")
+
+
+def disconnect(team: dict[str, Actor], gateways: dict, line: dict) -> None:
+    """gateways.json 里的工位切回内置模拟（与 register 新登记时一样：打开示意检测值），重连一次。"""
+    engineer, operator = team["engineer"], team["operator"]
+    adapter_defaults = line.get("adapter") or {}
+    step("工位切回内置模拟")
+    for station_id in gateways["stations"]:
+        adapter = engineer.get(f"/stations/{station_id}/adapter")
+        if adapter.get("kind") == "simulation":
+            ok(f"工位 {station_id}", "已是内置模拟")
+            continue
+        engineer.patch(f"/stations/{station_id}/adapter", {
+            "kind": "simulation", "driver": "simulation", "protocol": adapter_defaults.get("protocol", "内置模拟"),
+            "config": adapter_defaults.get("adapter_config") or {}, "credential_ref": "", "template_id": "",
+            "row_version": adapter["row_version"],
+            "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
+        })
+        operator.post(f"/stations/{station_id}/adapter/reconnect", expect=(200, 201, 409))
+        wait_for(f"{station_id} 在线", lambda: not (operator.get("/gate").get("blocked_stations") or {}).get(station_id),
+                 timeout=60)
+        ok(f"工位 {station_id}", "切回内置模拟（已签名保存）")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="登记 C 公司电解液产线，按配方表跑一批（模拟阶段）")
-    parser.add_argument("command", choices=("register", "run"))
+    parser.add_argument("command", choices=("register", "run", "connect", "disconnect"))
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
     parser.add_argument("--line", default=str(LINE), help="产线定义（缺省 scripts/lines/c-electrolyte/line.json）")
     parser.add_argument("--table", default=str(FORMULA), help="配方表 .xlsx / .csv（缺省参考配方）")
@@ -731,10 +843,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--volume", type=float, help="每瓶分装量 mL（缺省按模板）")
     parser.add_argument("--plan-name", default="")
     parser.add_argument("--timeout", type=float, default=1800, help="等批次完成的秒数")
+    parser.add_argument("--gateways", default=str(GATEWAYS), help="哪些工位接哪台设备网关（connect / disconnect 用）")
+    parser.add_argument("--acceptance-timeout", type=float, default=180, help="connect 等只读级验收放行的秒数")
     args = parser.parse_args(argv)
     try:
         refuse_production()
         team = actors(http_transport(args.base))
+        if args.command in ("connect", "disconnect"):
+            gateways = json.loads(Path(args.gateways).read_text(encoding="utf-8"))
+            if args.command == "connect":
+                connect(team, gateways, args.acceptance_timeout)
+            else:
+                disconnect(team, gateways, load_line(Path(args.line)))
+            print(f"\n完成：{'、'.join(gateways['stations'])} 已{'接设备网关' if args.command == 'connect' else '切回内置模拟'}")
+            return 0
         context = register(team, load_line(Path(args.line)))
         if args.command == "register":
             print("\n完成：产线已登记。导入配方表：scripts/load-electrolyte-line.py run --table <文件>")
