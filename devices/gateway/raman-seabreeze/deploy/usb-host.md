@@ -22,7 +22,7 @@
    - `max_repeats`、`max_integration_ms`：和 ILCS 工位能力极限一致（`repeats`，登记了的话还有 `integration_ms`）；
    - `correct_dark_counts`、`correct_nonlinearity`：先关着；确认这台型号支持（有遮光像素、EEPROM 里有非线性系数）再打开，
      不支持时每次采谱都会失败并写明原因。
-7. 先对着假光谱仪跑一遍自测：`python -m pytest module/tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+7. 先对着假光谱仪跑一遍自测：`python -m pytest module/tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 8. 注册成服务（开机自启、崩溃自动拉起）。
 
    Windows（NSSM）：

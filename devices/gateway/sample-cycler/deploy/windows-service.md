@@ -6,7 +6,7 @@
    经 pythonnet 调 .NET DLL 的再装 `pythonnet`。
 2. 把仓库里的 `devices/gateway/ilcs_gateway/` 拷到 `C:\ilcs-gateway\sdk\ilcs_gateway\`、本模块目录拷到 `C:\ilcs-gateway\module\`，写一个厂家 SDK 的包装模块（提供 `connect()`，
    返回 `driver/vendor_sdk.py` 里 `VendorSdk` 那组方法），设环境变量 `VENDOR_SDK_MODULE=<包装模块名>`。
-3. 先对着模拟接口跑一遍自测：`python -m pytest tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+3. 先对着模拟接口跑一遍自测：`python -m pytest tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 4. 用 NSSM 注册成服务（开机自启、崩溃自动拉起）：
 
    ```bat

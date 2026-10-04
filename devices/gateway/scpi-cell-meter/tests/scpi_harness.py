@@ -2,7 +2,8 @@
 
 - 插件直接测（`record` / `adapter`）：驱动宿主里的插件、作业台账原样代码，不打桩；
 - 接入验收（`acceptance`）走现场那条路：假仪表挂到本进程起的驱动宿主上（设备文件 = profile 的映射 + 连接参数），
-  ILCS 用 sila2_v1 接它，跑 ILCS 的接入验收清单；故障项目经假仪表的统一控制口注入。
+  ILCS 用 sila2_v1 接它，跑 ILCS 的接入验收清单；故障项目经假仪表的统一控制口注入。这是与 ILCS 的一致性测试：找不到 ILCS
+  仓库就跳过（`ilcs_gateway.testing._ilcs_api`）。
 """
 from __future__ import annotations
 
@@ -100,6 +101,9 @@ def _free_port() -> int:
 @contextmanager
 def through_host(rig: Bench, root: Path):
     """假仪表挂到本进程起的驱动宿主上（一台设备一个 SiLA 服务），返回 ILCS 那边 sila2_v1 的设备登记。"""
+    from ilcs_gateway.testing import _ilcs_api
+
+    _ilcs_api()  # 找不到 ILCS 就跳过：下面要用 ILCS 的设备登记与 sila2_v1 驱动
     from app.adapters.acceptance import AcceptanceRecord
     from ilcs_host.plugins import PLUGINS
     from ilcs_host.server import prepare, start, stop

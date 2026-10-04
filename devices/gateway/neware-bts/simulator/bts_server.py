@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import socketserver
 import sys
@@ -20,8 +19,7 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import quoteattr
 
 HERE = Path(__file__).resolve().parents[1]
-REPO = Path(os.environ["ILCS_REPO"]) if os.environ.get("ILCS_REPO") else HERE.parents[2]
-for path in (HERE, REPO / "devices" / "gateway"):
+for path in (HERE, HERE.parent):  # 模块目录与网关 SDK（ilcs_gateway 在模块的上一级目录）
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

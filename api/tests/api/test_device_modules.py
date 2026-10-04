@@ -38,7 +38,8 @@ def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
     module = tmp_path / "acme-vd80"
     profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
     assert profile["code"] == "TPL-ACME-VD80" and profile["acceptance"]["capability"] == "cap.vacuum_dry"
-    result = _pytest(module / "tests", ILCS_REPO=str(ROOT))
+    # 生成在别处的模块：网关 SDK 不在它的上一级目录，用 PYTHONPATH 指过去；ILCS_REPO 让它找到 ILCS 跑一致性测试
+    result = _pytest(module / "tests", ILCS_REPO=str(ROOT), PYTHONPATH=str(ROOT / "devices" / "gateway"))
     assert result.returncode == 0, result.stdout + result.stderr
 
 

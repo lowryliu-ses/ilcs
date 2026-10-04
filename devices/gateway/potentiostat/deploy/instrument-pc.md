@@ -25,7 +25,7 @@
      一台工作站换着接电导池和扣电时，把 `cell` 写在各自的程序里；
    - `limits`、`params`：和 ILCS 工位能力极限一致；
    - `programs`：键是 ILCS 设备方法里的「程序」；`default_program` 设成不加电位的开路电位短程序（接入验收跑它）。
-6. 先对着假仪器跑一遍自测：`python -m pytest module/tests`（需要 ILCS 仓库的 `api/`，设 `ILCS_REPO` 指向仓库根目录）。
+6. 先对着假仪器跑一遍自测：`python -m pytest module/tests`（模块自测不需要 ILCS；与 ILCS 的一致性测试要设 `ILCS_REPO` 指向 ILCS 仓库根目录，找不到 ILCS 会跳过——交付前要带上 ILCS 跑全）。
 7. 只读地问一遍仪器：
 
    ```bash
