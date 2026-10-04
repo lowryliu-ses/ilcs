@@ -160,12 +160,17 @@ class RestMapAdapter(MappedJobAdapter):
     # ---------- 请求 ----------
 
     def _send(self, spec: dict, values: dict, *, allow_not_found: bool = False):
+        method, path, body = self._compose(spec, values)
+        return self.transport.request(method, path, body, allow_not_found=allow_not_found, allow_empty=True, detail=True)
+
+    @staticmethod
+    def _compose(spec: dict, values: dict) -> tuple[str, str, object]:
         method = str(spec.get("method") or "GET").upper()
         # 路径里的值（设备返回的任务号、指令号）按路径段转义：一个带 / 或 .. 的任务号不能把请求改到别的接口上
         escaped = {key: quote(value, safe="") if isinstance(value, str) else value for key, value in values.items()}
         path = render(str(spec["path"]), escaped)
         body = render_value(spec["body"], values) if "body" in spec else None
-        return self.transport.request(method, path, body, allow_not_found=allow_not_found, allow_empty=True, detail=True)
+        return method, path, body
 
     def values_for(self, request, spec: dict, params: dict | None = None) -> dict:
         values = super().values_for(request, spec, params)
@@ -220,6 +225,9 @@ class RestMapAdapter(MappedJobAdapter):
             return "idle"  # 调度系统自己排队：设备级不判忙
         value = field(self._send(spec, {}), spec.get("field", ""))
         return "running" if value in (spec.get("values") or []) else "idle"
+
+    def check_start(self, spec: dict, values: dict) -> None:
+        self._compose(spec, values)  # 路径与请求体先拼一遍：缺参数在发请求之前就拒绝
 
     def start_job(self, job: dict, spec: dict, values: dict) -> None:
         response = self._send(spec, values)

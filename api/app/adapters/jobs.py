@@ -339,6 +339,10 @@ class MappedJobAdapter:
     def precheck(self, spec: dict) -> None:
         """启动前的就绪 / 联锁检查；不满足抛 AdapterError（设备没动）。"""
 
+    def check_start(self, spec: dict, values: dict) -> None:
+        """不碰设备，把这一次启动要发的东西（写点、请求、命令）先整套拼一遍：缺参数、格式不对、选项没登记代码，在发出第一条
+        之前就抛 AdapterError。提交时每一次运行都核对——逐孔执行不会跑完前几孔才发现后面的孔拼不出来。"""
+
     def start_job(self, job: dict, spec: dict, values: dict) -> dict | None:
         raise NotImplementedError
 
@@ -539,11 +543,14 @@ class MappedJobAdapter:
 
     def runs_for(self, request: CommandRequest, spec: dict) -> list[dict]:
         """这条指令要在设备上跑几次：一般一次；带了逐孔参数（`params.wells`）就按孔位顺序每孔一次，每孔用固定参数叠上
-        自己的参数、带自己的运行号（`<指令号>/<序号>`，模板里还能用 `{well}`）。每一孔的参数都先核对：有一孔不对就整条拒绝。"""
+        自己的参数、带自己的运行号（`<指令号>/<序号>`，模板里还能用 `{well}`）。每一孔都先核对参数、再把整套启动拼一遍
+        （`check_start`）：有一孔不对就整条拒绝，设备一次都没动。"""
         params = dict(request.params or {})
         wells = params.pop("wells", None)
         if wells is None:
-            return [{"well": "", "params": params, "values": self.values_for(request, spec, params)}]
+            values = self.values_for(request, spec, params)
+            self.check_start(spec, values)
+            return [{"well": "", "params": params, "values": values}]
         if not isinstance(wells, dict) or not wells or not all(isinstance(row, dict) for row in wells.values()):
             raise AdapterError("逐孔参数 wells 必须是 {孔位: {参数: 值}}，设备没有动作")
         runs = []
@@ -551,9 +558,10 @@ class MappedJobAdapter:
             merged = {**params, **wells[well]}
             try:
                 values = self.values_for(request, spec, merged)
+                values.update({"command_id": f"{request.command_id}/{index}", "well": str(well)})
+                self.check_start(spec, values)
             except AdapterError as exc:
                 raise AdapterError(f"孔位 {well} 的参数不对：{exc}；整条指令没有下发，设备没有动作") from exc
-            values.update({"command_id": f"{request.command_id}/{index}", "well": str(well)})
             runs.append({"well": str(well), "params": merged, "values": values})
         return runs
 

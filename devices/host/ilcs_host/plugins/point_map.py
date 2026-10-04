@@ -252,7 +252,8 @@ class PointMapAdapter(MappedJobAdapter):
         if interlock.get("point") and not self._matches(self._read(interlock["point"]), interlock.get("ok") or [True]):
             raise AdapterError("设备联锁未解除（Interlocked），未发出启动信号", code="Interlocked")
 
-    def start_job(self, job: dict, spec: dict, values: dict) -> None:
+    def _start_writes(self, spec: dict, values: dict) -> list[tuple[str, object]]:
+        """启动前要写的点（常量、程序号、设定值），按写入顺序；缺参数、程序号或选项没登记代码就拒绝——这时一个点都还没写。"""
         writes: list[tuple[str, object]] = list((spec.get("constants") or {}).items())
         recipe = spec.get("recipe") or {}
         if recipe.get("point"):
@@ -268,6 +269,16 @@ class PointMapAdapter(MappedJobAdapter):
             if parameter not in values:
                 raise AdapterError(f"参数 {parameter} 指令里没有、配置也没有缺省值")
             writes.append((self._point_name(item), self._coded(parameter, item, values[parameter])))
+        return writes
+
+    def check_start(self, spec: dict, values: dict) -> None:
+        self._start_writes(spec, values)
+        method = (spec.get("start") or {}).get("method")
+        if method:
+            render_value(list(method.get("args") or []), values)
+
+    def start_job(self, job: dict, spec: dict, values: dict) -> None:
+        writes = self._start_writes(spec, values)
         job_id = self.config.get("job_id") or {}
         if job_id.get("write"):
             writes.append((job_id["write"], job.get("run_id") or job["id"]))  # 逐孔时每孔一个运行号

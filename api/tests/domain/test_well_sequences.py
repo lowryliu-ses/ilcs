@@ -81,6 +81,18 @@ def test_one_bad_well_rejects_the_whole_command_before_anything_moves():
         assert sum(program.device.executions.values()) == 0, "整条拒绝，设备一次都没动"
 
 
+def test_a_well_missing_a_setpoint_is_caught_at_submit_not_after_the_first_wells_ran():
+    """缺参数（不只是多了没登记的参数）也在提交时整条拒绝：每一孔的写点先整套拼一遍，不会跑完 A1 才发现 A2 拼不出来。"""
+    from app.adapters import AdapterError
+
+    with plc_sim("modbus") as (program, _, port):
+        adapter = _plc("modbus", port)
+        uneven = {"wells": {"A1": {"temp": 110, "thickness": 180}, "A2": {"temp": 120}}}
+        with pytest.raises(AdapterError, match="孔位 A2 的参数不对：参数 thickness"):
+            adapter.submit(request("CMD-M", params=uneven, capability="cap.coat"))
+        assert sum(program.device.executions.values()) == 0, "整条拒绝，A1 也没有跑"
+
+
 def test_write_only_setpoint_runs_each_well_without_a_start_signal():
     """设定类动作（温控器设定值）：写完设定点就生效、没有启动信号；每孔写自己的设定、回读。"""
     from app.adapters import AdapterError
@@ -160,3 +172,9 @@ def test_rest_setpoint_runs_each_well_and_reads_the_actual_from_a_point(monkeypa
         assert {well: row["temp"] for well, row in done.delivered["wells"].items()} == {"A1": 110, "A2": 120, "A10": 140}
         assert [row["value"] for row in posts] == [110, 120, 140], "按孔位顺序一孔一个设定，数值保持数类型"
         assert state["temperature"] == 140
+
+        from app.adapters import AdapterError
+
+        with pytest.raises(AdapterError, match="孔位 A2 的参数不对：请求模板需要参数 temp"):
+            adapter.submit(request("CMD-H2", params={"wells": {"A1": {"temp": 60}, "A2": {}}}, capability="cap.temp_set"))
+        assert len(posts) == 3 and state["temperature"] == 140, "缺参数的孔在提交时就拒绝：A1 也没有写"
