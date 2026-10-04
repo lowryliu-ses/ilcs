@@ -97,6 +97,10 @@ class RestMapAdapter(MappedJobAdapter):
             raise AdapterError("positions 必须是 {ILCS 位置编号: 设备站点编号}")
         for capability, spec in (self.config.get("capabilities") or {}).items():
             self._check_request(spec, f"capabilities.{capability}")
+            for name, source in (spec.get("actuals") or {}).items():
+                # 实测值：字符串是状态响应里的字段路径；{"point": 点名} 按点表读这个点（状态响应里没有实测值的设备）
+                if isinstance(source, dict) and source.get("point") not in self.points:
+                    raise AdapterError(f"capabilities.{capability}.actuals.{name} 引用的点 {source.get('point')} 不在点表里")
         # 没有身份请求就没法判断在线：健康检查不能返回假在线（只读写点位的设备读第一个点代替）
         self._request("identity", required=not self.points)
         for name in ("busy", "hold", "resume", "abort", "lookup"):
@@ -156,15 +160,20 @@ class RestMapAdapter(MappedJobAdapter):
     # ---------- 请求 ----------
 
     def _send(self, spec: dict, values: dict, *, allow_not_found: bool = False):
+        method, path, body = self._compose(spec, values)
+        return self.transport.request(method, path, body, allow_not_found=allow_not_found, allow_empty=True, detail=True)
+
+    @staticmethod
+    def _compose(spec: dict, values: dict) -> tuple[str, str, object]:
         method = str(spec.get("method") or "GET").upper()
         # 路径里的值（设备返回的任务号、指令号）按路径段转义：一个带 / 或 .. 的任务号不能把请求改到别的接口上
         escaped = {key: quote(value, safe="") if isinstance(value, str) else value for key, value in values.items()}
         path = render(str(spec["path"]), escaped)
         body = render_value(spec["body"], values) if "body" in spec else None
-        return self.transport.request(method, path, body, allow_not_found=allow_not_found, allow_empty=True, detail=True)
+        return method, path, body
 
-    def values_for(self, request, spec: dict) -> dict:
-        values = super().values_for(request, spec)
+    def values_for(self, request, spec: dict, params: dict | None = None) -> dict:
+        values = super().values_for(request, spec, params)
         for end in ("from", "to"):
             location = values.get(f"{end}.location_id")
             if location is None:
@@ -217,20 +226,24 @@ class RestMapAdapter(MappedJobAdapter):
         value = field(self._send(spec, {}), spec.get("field", ""))
         return "running" if value in (spec.get("values") or []) else "idle"
 
+    def check_start(self, spec: dict, values: dict) -> None:
+        self._compose(spec, values)  # 路径与请求体先拼一遍：缺参数在发请求之前就拒绝
+
     def start_job(self, job: dict, spec: dict, values: dict) -> None:
         response = self._send(spec, values)
         handle = field(response, spec.get("handle", "")) if spec.get("handle") else None
         if handle in (None, ""):
             if spec.get("handle"):
                 raise AdapterIndeterminate(f"设备接受了请求，但响应里没有任务号 {spec['handle']}，无法跟踪")
-            handle = job["id"]
+            handle = job.get("run_id") or job["id"]  # 逐孔时每孔一个运行号
         job["handle"] = str(handle)
         job["delivered"] = {"remote_id": str(handle)}
 
     def read_status(self, job: dict) -> tuple[str, str]:
         if not job.get("handle"):
             return self.device_state(), ""
-        response = self._send(self.status, {"handle": job["handle"], "command_id": job["id"]}, allow_not_found=True)
+        response = self._send(self.status, {"handle": job["handle"], "command_id": job.get("run_id") or job["id"]},
+                              allow_not_found=True)
         if response is None:
             raise AdapterIndeterminate(f"设备侧查不到任务 {job['handle']}")
         value = field(response, self.status["field"])
@@ -242,12 +255,19 @@ class RestMapAdapter(MappedJobAdapter):
 
     def read_actuals(self, job: dict, spec: dict) -> dict:
         mapping = spec.get("actuals") or {}
-        if not mapping or not job.get("handle"):
+        if not mapping:
             return {}
-        response = self._send(self.status, {"handle": job["handle"], "command_id": job["id"]})
+        response = None
         actuals = {}
         for name, path in mapping.items():
-            value = field(response, path)
+            if isinstance(path, dict):  # {"point": 点名}：按点表读
+                value = self.read_point_value(path["point"])
+            else:
+                if not job.get("handle"):
+                    continue
+                if response is None:
+                    response = self._send(self.status, {"handle": job["handle"], "command_id": job.get("run_id") or job["id"]})
+                value = field(response, path)
             try:
                 actuals[name] = float(value)
             except (TypeError, ValueError):
@@ -258,7 +278,7 @@ class RestMapAdapter(MappedJobAdapter):
         spec = self.config.get("lookup") or {}
         if not spec:
             return False
-        values = {"command_id": job["id"]}
+        values = {"command_id": job.get("run_id") or job["id"]}
         wanted = render(str(spec.get("match") or "{command_id}"), values)
         items = self._send(spec, values)
         if not isinstance(items, list):

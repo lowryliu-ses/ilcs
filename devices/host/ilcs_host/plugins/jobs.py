@@ -15,6 +15,13 @@
 
 设备没有时钟时，回执里的 device_ts 用驱动观测到状态的时间；遥测的设定值取指令参数里的同名数值。
 
+**逐孔依次执行**：ILCS 矩阵条件让一条指令带上逐孔参数（`params.wells = {孔位: {参数: 值}}`，固定参数是缺省值）。
+这类设备一次只做一个设定，驱动就按孔位顺序一个一个跑：每孔用固定参数叠上自己的参数，写参数、启动、等完成、取实测、
+复位，再启动下一孔；回执按孔位回报（`delivered.wells[孔位]`）。提交时先把每一孔的参数都核对一遍，有一孔不对整条拒绝、
+设备一次都没动。每孔有自己的运行号（`<指令号>/<序号>`，写指令号、回显、设备侧去重都按它），启动前先落盘：中途重启
+按台账接着查当前孔、不重发已经启动过的孔。某一孔没做成（故障、拒绝启动、被终止）整条指令到此结束，回执写明是第几孔、
+后面几孔没有执行。
+
 **点位读写和任务执行是两层**：点表（`points`）登记了点就能按点读值；点上写了 `writable: true`（可带
 `min` / `max`）的还能由人手动写一个值（`write_point_manually`：先读、再写、再回读）。只读写点位的设备不配能力映射
 与状态，不参与自动流程；要参与自动流程（下发指令、确认做没做完），才要求能力映射与状态点。任务用的控制信号
@@ -50,6 +57,16 @@ BUILTINS = {"command_id", "batch_id", "step_id", "capability", "program", "type"
 POINT_META = ("label", "unit", "writable", "min", "max")
 _FORMATTER = string.Formatter()
 _FIELD = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+
+
+def well_order(well: str) -> tuple:
+    """孔位按板上的顺序排：A1、A2…A10、B1（字母行、数字列）；不是这种写法的排在后面、按原文。"""
+    match = re.fullmatch(r"([A-Za-z]+)(\d+)", str(well))
+    return (0, match.group(1).upper(), int(match.group(2)), "") if match else (1, "", 0, str(well))
+
+
+def scalars(params: dict) -> dict:
+    return {key: value for key, value in (params or {}).items() if not isinstance(value, (dict, list))}
 
 
 def _iso(epoch: float) -> str:
@@ -322,6 +339,10 @@ class MappedJobAdapter:
     def precheck(self, spec: dict) -> None:
         """启动前的就绪 / 联锁检查；不满足抛 AdapterError（设备没动）。"""
 
+    def check_start(self, spec: dict, values: dict) -> None:
+        """不碰设备，把这一次启动要发的东西（写点、请求、命令）先整套拼一遍：缺参数、格式不对、选项没登记代码，在发出第一条
+        之前就抛 AdapterError。提交时每一次运行都核对——逐孔执行不会跑完前几孔才发现后面的孔拼不出来。"""
+
     def start_job(self, job: dict, spec: dict, values: dict) -> dict | None:
         raise NotImplementedError
 
@@ -499,8 +520,8 @@ class MappedJobAdapter:
 
     # ---------- 参数与模板取值 ----------
 
-    def values_for(self, request: CommandRequest, spec: dict) -> dict:
-        params = request.params or {}
+    def values_for(self, request: CommandRequest, spec: dict, params: dict | None = None) -> dict:
+        params = (request.params or {}) if params is None else params
         accepted = self.accepted_params(spec)
         if request.type != "transfer" and accepted is not None:
             for name, value in params.items():
@@ -519,6 +540,30 @@ class MappedJobAdapter:
             "capability": request.capability, "program": program, "type": request.type,
         })
         return values
+
+    def runs_for(self, request: CommandRequest, spec: dict) -> list[dict]:
+        """这条指令要在设备上跑几次：一般一次；带了逐孔参数（`params.wells`）就按孔位顺序每孔一次，每孔用固定参数叠上
+        自己的参数、带自己的运行号（`<指令号>/<序号>`，模板里还能用 `{well}`）。每一孔都先核对参数、再把整套启动拼一遍
+        （`check_start`）：有一孔不对就整条拒绝，设备一次都没动。"""
+        params = dict(request.params or {})
+        wells = params.pop("wells", None)
+        if wells is None:
+            values = self.values_for(request, spec, params)
+            self.check_start(spec, values)
+            return [{"well": "", "params": params, "values": values}]
+        if not isinstance(wells, dict) or not wells or not all(isinstance(row, dict) for row in wells.values()):
+            raise AdapterError("逐孔参数 wells 必须是 {孔位: {参数: 值}}，设备没有动作", code="InvalidParameters")
+        runs = []
+        for index, well in enumerate(sorted(wells, key=well_order), start=1):
+            merged = {**params, **wells[well]}
+            try:
+                values = self.values_for(request, spec, merged)
+                values.update({"command_id": f"{request.command_id}/{index}", "well": str(well)})
+                self.check_start(spec, values)
+            except AdapterError as exc:
+                raise AdapterError(f"孔位 {well} 的参数不对：{exc}；整条指令没有下发，设备没有动作", code="InvalidParameters") from exc
+            runs.append({"well": str(well), "params": merged, "values": values})
+        return runs
 
     # ---------- 回执 ----------
 
@@ -565,6 +610,9 @@ class MappedJobAdapter:
         actuals = {name: round(float(value), 6) for name, value in raw.items()
                    if isinstance(value, (int, float)) and not isinstance(value, bool)}
         texts = {name: value for name, value in raw.items() if name not in actuals}
+        if job.get("wells"):
+            self._finish_well(job, spec, state, error, actuals, texts)
+            return
         delivered = {**(job.get("delivered") or {}), **texts, **actuals}
         materials = self._materials(actuals)
         if materials:
@@ -580,6 +628,106 @@ class MappedJobAdapter:
         job["phase"] = ""
         if error:
             job["error"] = error
+        job["updated_at"] = time.time()
+        self.journal.put(job, active=False)
+
+    # ---------- 逐孔依次执行 ----------
+
+    def _finish_well(self, job: dict, spec: dict, state: str, error: str, actuals: dict, texts: dict) -> None:
+        """记下当前这一孔的结论；做完了、后面还有孔就复位并启动下一孔，否则结束整条指令。"""
+        index = job["well_index"]
+        run = job["wells"][index]
+        run.update({
+            "state": state, "error": error, "quality": job.get("quality") or "good", "actuals": actuals,
+            "delivered": {**(job.get("delivered") or {}), **texts, **actuals}, "finished_at": time.time(),
+        })
+        if state == "done" and index + 1 < len(job["wells"]):
+            if self._start_next_well(job, spec):
+                return
+            state = "failed"
+        self._close_wells(job, state)
+
+    def _start_next_well(self, job: dict, spec: dict) -> bool:
+        """上一孔做完：复位、核对就绪，先落盘再启动下一孔。设备明确不接（没就绪、联锁、参数写不进）→ 这一孔没有动作，
+        返回 False；发出启动却没拿到确认 → 这一孔记「未确认」并照常抛出（下一轮按回显 / 状态再判）。"""
+        index = job["well_index"] + 1
+        run = job["wells"][index]
+        try:
+            pre_state = self.device_state()
+            if pre_state in {"done", "failed"} and self.acknowledge():
+                pre_state = self.device_state()
+            if pre_state in {"running", "held"}:
+                raise AdapterError("上一孔做完了，设备却还在运行 / 保持，没有启动下一孔")
+            self.precheck(spec)
+        except AdapterError as exc:
+            job["well_index"] = index
+            run.update({"state": "rejected", "error": f"没有启动：{exc}"})
+            return False
+        job.update({
+            "well_index": index, "run_id": run["values"]["command_id"], "state": "starting", "phase": "",
+            "seen_running": False, "pre_state": pre_state, "unconfirmed": False, "quality": run.get("quality") or "good",
+            "params": dict(run["params"]), "started_at": time.time(), "updated_at": time.time(), "delivered": {},
+            "actuals": {},
+        })
+        job.pop("handle", None)
+        run["state"] = "starting"
+        self.journal.put(job)
+        self.journal.save()  # 先落盘再动设备：重启后知道这一孔可能已经启动
+        try:
+            result = self.start_job(job, spec, run["values"])
+        except AdapterUnreachable as exc:
+            job.update({"state": "unconfirmed", "unconfirmed": True, "updated_at": time.time(),
+                        "error": f"第 {index + 1} 孔（{run['well']}）的启动命令已发出但没有拿到确认：{exc}"})
+            self.journal.put(job)
+            self._save_quietly()
+            raise
+        except AdapterError as exc:
+            run.update({"state": "rejected", "error": f"没有启动：{exc}"})
+            return False
+        except Exception as exc:
+            job.update({"state": "unconfirmed", "unconfirmed": True, "error": f"驱动内部错误：{exc}"})
+            self.journal.put(job)
+            self._save_quietly()
+            raise AdapterIndeterminate(f"驱动内部错误（{exc.__class__.__name__}），第 {index + 1} 孔的启动命令可能已发出") from exc
+        if isinstance(result, dict):  # 即时动作：这一孔当场有结果，接着做下一孔
+            job.update({"delivered": dict(result.get("delivered") or {}), "actuals": dict(result.get("actuals") or {}),
+                        "seen_running": True})
+            self._finish(job, "failed" if result.get("error") else "done", result.get("error", ""))
+            return True
+        job["state"] = "accepted"
+        job["updated_at"] = time.time()
+        self.journal.put(job)
+        self._saved(f"第 {index + 1} 孔的启动")
+        return True
+
+    def _close_wells(self, job: dict, state: str) -> None:
+        """整条指令结束：按孔位回报做完的孔；没做成的写明是第几孔、为什么、后面几孔没有执行。"""
+        runs = job["wells"]
+        index = job["well_index"]
+        finished = [run for run in runs if run.get("state") == "done"]
+        job["delivered"] = {"wells": {run["well"]: run.get("delivered") or {} for run in runs if run.get("delivered")}}
+        totals: dict[tuple[str, str], float] = {}
+        for run in finished:
+            for row in self._materials(run.get("actuals") or {}):
+                key = (row["material"], row["unit"])
+                totals[key] = round(totals.get(key, 0.0) + row["quantity"], 6)
+        if totals:
+            job["delivered"]["materials"] = [{"material": material, "unit": unit, "quantity": quantity}
+                                             for (material, unit), quantity in totals.items()]
+        job["telemetry"] = [
+            [name, value, float(run["params"][name]) if isinstance(run["params"].get(name), (int, float))
+             and not isinstance(run["params"].get(name), bool) else None]
+            for run in finished for name, value in (run.get("actuals") or {}).items()
+        ]
+        if any(run.get("quality") == "uncertain" for run in runs[:index + 1]):
+            job["quality"] = "uncertain"
+        if state != "done":
+            current = runs[index]
+            left = len(runs) - index - 1
+            job["error"] = (f"第 {index + 1}/{len(runs)} 孔（{current['well']}）：{current.get('error') or '没有做成'}"
+                            + (f"；后面 {left} 孔没有执行" if left else ""))
+        job["state"] = state
+        job["phase"] = ""
         job["updated_at"] = time.time()
         self.journal.put(job, active=False)
 
@@ -648,18 +796,25 @@ class MappedJobAdapter:
                 if held is not None:
                     return self._resume(held, request)
             spec = self.capability_spec(request.capability)
-            values = self.values_for(request, spec)
+            runs = self.runs_for(request, spec)
+            values = runs[0]["values"]
             pre_state = self._ensure_idle()
             self.precheck(spec)
             job = {
                 "id": request.command_id, "capability": request.capability, "program": values.get("program", ""),
-                "params": {k: v for k, v in (request.params or {}).items() if not isinstance(v, (dict, list))},
+                "params": scalars(runs[0]["params"]),
                 "context": {"batch_id": request.batch_id, "step_id": request.step_id},
                 "state": "starting", "phase": "", "seen_running": False, "quality": "good",
                 "pre_state": pre_state, "idle_after_start": spec.get("idle_after_start")
                 or self.config.get("idle_after_start") or "unknown",
                 "started_at": time.time(), "updated_at": time.time(), "delivered": {}, "telemetry": [], "error": "",
             }
+            if runs[0]["well"]:  # 逐孔：每孔一次运行，先跑第一孔
+                job["wells"] = [{"well": run["well"], "params": scalars(run["params"]), "values": run["values"],
+                                 "state": "pending"} for run in runs]
+                job["wells"][0]["state"] = "starting"
+                job["well_index"] = 0
+                job["run_id"] = values["command_id"]
             # 先落盘再动设备：执行器在这之后任何时刻重启，都知道这条指令可能已经发给设备
             self.journal.put(job, active=True)
             self.journal.save()

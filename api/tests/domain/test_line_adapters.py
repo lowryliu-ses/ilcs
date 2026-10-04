@@ -74,15 +74,33 @@ def test_executor_restart_answers_from_the_journal_without_resending(journal_dir
         assert _wait(restarted, "CMD-R", device).state == "done"
 
 
+def test_oven_runs_each_well_in_turn_with_its_own_setpoint():
+    """一次只能干燥一份样品的烘箱：矩阵条件的逐孔参数按孔位一孔一孔跑，每孔发自己的设定、各自 RUN，回执按孔位回报。"""
+    with line_sim(task_seconds=0.2, methods=[{"program": "VD-120"}]) as (device, runner, port):
+        adapter = _line(port)
+        wells = {"B1": {"temp": 90}, "A1": {"temp": 80}}
+        adapter.submit(request("CMD-WL", program="VD-120", params={"vacuum": 2, "wells": wells}))
+        done = _wait(adapter, "CMD-WL", device, seconds=10)
+        assert done.state == "done", done
+        assert sum(device.executions.values()) == 2, "每孔一次 RUN"
+        assert {well: round(row["temp"]) for well, row in done.delivered["wells"].items()} == {"A1": 80, "B1": 90}
+        assert all(abs(row["vacuum"] - 2) < 0.1 for row in done.delivered["wells"].values()), "固定参数是每孔的缺省值"
+        assert runner.dialect.setpoints["temp"] == 90, "按孔位顺序：A1 先、B1 后"
+
+
 def test_rejections_before_the_run_command_mean_the_oven_did_not_move():
     from app.adapters import AdapterError
 
-    with line_sim(task_seconds=5, methods=[{"program": "VD-120"}]) as (device, _, port):
+    with line_sim(task_seconds=5, methods=[{"program": "VD-120"}]) as (device, runner, port):
         adapter = _line(port)
         with pytest.raises(AdapterError, match="没有对应的写入点或命令"):
             adapter.submit(request("CMD-P", params={"temp": 120, "vacuum": 1, "speed": 3}))
         with pytest.raises(AdapterError, match="结构化参数"):
+            adapter.submit(request("CMD-S", params={"temp": {"A1": 1}}))
+        # 逐孔参数照样逐孔执行，但每一孔的整套命令先渲染一遍：缺真空度时 PROG、SP 都不发（以前会先把设定温度改成 1）
+        with pytest.raises(AdapterError, match="孔位 A1 的参数不对：命令模板需要参数 vacuum"):
             adapter.submit(request("CMD-W", params={"wells": {"A1": {"temp": 1}}}))
+        assert (runner.dialect.program, runner.dialect.setpoints["temp"]) == ("", 25.0), "被拒绝的逐孔指令一条命令都没发"
         with pytest.raises(AdapterError, match="ERR PROG"):
             adapter.submit(request("CMD-G", program="VD-999"))
         with pytest.raises(AdapterError, match="没有在适配器配置 capabilities"):

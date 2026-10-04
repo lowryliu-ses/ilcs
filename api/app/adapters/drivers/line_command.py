@@ -441,6 +441,11 @@ class LineCommandAdapter(MappedJobAdapter):
         if identity.get("accepts_commands") is False:
             raise AdapterError("设备未就绪（未处于远程 / 自动模式），未发出启动命令")
 
+    def check_start(self, spec: dict, values: dict) -> None:
+        # 整套启动命令先渲染一遍：缺参数、格式不对在第一条发出之前就拒绝，不会只发出半套设定
+        for step in spec.get("start") or []:
+            render(str(step["send"]), values)
+
     def start_job(self, job: dict, spec: dict, values: dict) -> dict | None:
         steps = spec["start"]
         motion = next((index for index, step in enumerate(steps) if step.get("motion")), len(steps) - 1)

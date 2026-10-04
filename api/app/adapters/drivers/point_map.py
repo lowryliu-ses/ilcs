@@ -94,8 +94,16 @@ class PointMapAdapter(MappedJobAdapter):
             if not isinstance(spec, dict):
                 raise AdapterError(f"capabilities.{capability} 必须是对象")
             start = spec.get("start") or {}
-            if not start.get("point") and not start.get("method"):
-                raise AdapterError(f"capabilities.{capability}.start 必须指定启动点（point）或方法（method）")
+            if start.get("write_only"):
+                # 设定类动作（温控器设定值、阀门开度）：写完设定点就生效，没有启动信号，也没有「运行中」可查
+                if not spec.get("write"):
+                    raise AdapterError(f"capabilities.{capability}.start.write_only：只写设定值的动作要配 write（写哪些点）")
+                if (spec.get("idle_after_start") or self.config.get("idle_after_start")) != "done":
+                    raise AdapterError(f"capabilities.{capability}：只写设定值、没有启动信号的动作要配 idle_after_start: done"
+                                       "（写完、状态回到空闲就是做完）")
+            elif not start.get("point") and not start.get("method"):
+                raise AdapterError(f"capabilities.{capability}.start 必须指定启动点（point）、方法（method），"
+                                   "或只写设定值（write_only: true）")
             if start.get("point"):
                 names.add(start["point"])
             names |= set((spec.get("constants") or {}).keys())
@@ -244,7 +252,8 @@ class PointMapAdapter(MappedJobAdapter):
         if interlock.get("point") and not self._matches(self._read(interlock["point"]), interlock.get("ok") or [True]):
             raise AdapterError("设备联锁未解除（Interlocked），未发出启动信号")
 
-    def start_job(self, job: dict, spec: dict, values: dict) -> None:
+    def _start_writes(self, spec: dict, values: dict) -> list[tuple[str, object]]:
+        """启动前要写的点（常量、程序号、设定值），按写入顺序；缺参数、程序号或选项没登记代码就拒绝——这时一个点都还没写。"""
         writes: list[tuple[str, object]] = list((spec.get("constants") or {}).items())
         recipe = spec.get("recipe") or {}
         if recipe.get("point"):
@@ -260,9 +269,19 @@ class PointMapAdapter(MappedJobAdapter):
             if parameter not in values:
                 raise AdapterError(f"参数 {parameter} 指令里没有、配置也没有缺省值")
             writes.append((self._point_name(item), self._coded(parameter, item, values[parameter])))
+        return writes
+
+    def check_start(self, spec: dict, values: dict) -> None:
+        self._start_writes(spec, values)
+        method = (spec.get("start") or {}).get("method")
+        if method:
+            render_value(list(method.get("args") or []), values)
+
+    def start_job(self, job: dict, spec: dict, values: dict) -> None:
+        writes = self._start_writes(spec, values)
         job_id = self.config.get("job_id") or {}
         if job_id.get("write"):
-            writes.append((job_id["write"], job["id"]))
+            writes.append((job_id["write"], job.get("run_id") or job["id"]))  # 逐孔时每孔一个运行号
         for point, value in writes:
             try:
                 self._write(point, value)
@@ -271,6 +290,8 @@ class PointMapAdapter(MappedJobAdapter):
             except AdapterError as exc:
                 raise AdapterError(f"写 {point} = {value!r} 被设备拒绝（{exc}）；启动信号没有发出") from exc
         start = spec["start"]
+        if start.get("write_only"):
+            return None  # 设定类动作：写完设定点就生效，没有启动信号
         if start.get("method"):
             self.call_method(start["method"], render_value(list(start["method"].get("args") or []), values))
         else:
@@ -326,10 +347,11 @@ class PointMapAdapter(MappedJobAdapter):
         echo = (self.config.get("job_id") or {}).get("echo")
         if not echo:
             return False
-        if str(self._read(echo) or "").strip() != job["id"]:
+        run_id = job.get("run_id") or job["id"]
+        if str(self._read(echo) or "").strip() != run_id:
             return False
-        # PLC 回显了这条指令号：启动信号确实到了
-        job["handle"] = job["id"]
+        # PLC 回显了这条指令号（逐孔时是这一孔的运行号）：启动信号确实到了
+        job["handle"] = run_id
         job["unconfirmed"] = False
         job["state"] = "accepted"
         return True
