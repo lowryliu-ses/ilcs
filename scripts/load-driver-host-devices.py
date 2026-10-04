@@ -15,6 +15,15 @@
   （50212）/ ACIR-BT3562（50213），映射照抄模板、搬到驱动宿主；模拟设备控制口（simulator_control）留在 ILCS 的连接配置里，
   验收的故障项目照做。`--acceptance` 跑动作级 + 故障项目（cap.cell_check）。
 
+- 设备模块的模拟网关（ilcs-devices/gateway/<模块>，ILCS 网关契约）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
+  ST-ECHEM-SIM（scripts/load-device-simulators.py）、ST-NW-01（load-neware-cycler.py）、EL-D-BAL、EL-D-PWD、EL-T-RAM
+  （load-electrolyte-line.py connect）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的
+  GW-*（50231–50239，驱动宿主的 http_json 插件，在设备管理台里加的）。网关照旧在原来的容器里跑；模拟设备控制口指向网关自己的
+  API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`（一条指令最多几个样本）照模块的
+  profile.json 写进连接配置。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
+  （配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
+  `--acceptance` 逐项能力跑动作级 + 故障项目。
+
 都用驱动宿主的自签证书（`secrets/host/driver-host.crt`）和给 ILCS 的令牌（`secrets/host/ilcs.token`），等执行器跑完只读级验收
 ——首次接入的验收通过时，同时批准设备服务报的这一份驱动配置。只走 HTTP，签名用演示账号口令逐次签署；已经接好的不重复改。
 正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
@@ -23,12 +32,17 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
+# 设备仓库（设备模块的 profile.json 在它的 gateway/<模块>/ 下）：环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices
+DEVICES_REPO = Path(os.environ.get("ILCS_DEVICES") or HERE.parent.parent / "ilcs-devices")
+# 网关模板里给 ILCS 自己用的连接配置键：换成经驱动宿主接以后照样写进工位的 sila2_v1 配置（例如一条指令最多几个样本）
+ILCS_KEYS = ("wells_per_command",)
 _spec = importlib.util.spec_from_file_location("load_neware_cycler", HERE / "load-neware-cycler.py")
 common = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(common)  # 复用它的 HTTP 传输、演示账号与签名、等待与输出
@@ -62,7 +76,43 @@ STATIONS = {
         ("ST-OCV2-SIM", "模拟 Keithley 2400 开路电压（经驱动宿主）", 50212, "ILCS-SIMULATOR-2400-01", "k2400-sim", "SIM-K2400-01"),
         ("ST-ACIR-SIM", "模拟 Hioki BT3562 交流内阻（经驱动宿主）", 50213, "ILCS-SIMULATOR", "bt3562-sim", "SIM-BT3562-01"),
     )},
+    # 设备模块的模拟网关：经驱动宿主的 http_json 插件转成 SiLA 服务（驱动宿主对网关一次调用最长 连接 3 s + 请求超时）
+    **{station_id: {
+        "name": name, "port": port, "device_id": device_id, "tasks": True,
+        "supports": {"supports_hold": False, "supports_abort": True, "supports_query": True, "supports_dedup": True},
+        "simulator_control": {"url": f"https://{host}:8443/api/v1", "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt",
+                              "token_ref": f"file:///run/secrets/ilcs/gateway/{device_id}.token"},
+        "request_timeout_sec": 3 + gateway_timeout + 5, "acceptance": acceptance, "faults": True, "describe": True,
+        "module": module, "approval": f"本机设备模块的模拟网关（{host}），经驱动宿主接入；没有真实设备与样品",
+    } for station_id, name, port, device_id, host, module, gateway_timeout, acceptance in (
+        ("ST-BAL-SIM", "天平称量加料站（模拟，经驱动宿主）", 50231, "SIM-BAL-DOSE-01", "balance-sim", "balance-dosing", 10,
+         [("cap.weigh", {}), ("cap.ely.dose_solid", {"mass": 0.05}), ("cap.ely.dose_liquid", {"mass": 1.0})]),
+        ("ST-STIR-SIM", "IKA 加热搅拌（模拟，经驱动宿主）", 50232, "SIM-IKA-STIR-01", "ika-stirrer-sim", "ika-stirrer", 10,
+         [("cap.ely.stir", {"temp": 40, "time": 2, "rpm": 300})]),
+        ("ST-RAM-SIM", "拉曼光谱仪（模拟，经驱动宿主）", 50233, "SIM-RAMAN-01", "raman-sim", "raman-seabreeze", 10,
+         [("cap.ely.raman", {"repeats": 1})]),
+        ("ST-CHILL-SIM", "冷水机制冷搅拌（模拟，经驱动宿主）", 50234, "SIM-CHILL-01", "thermostat-sim", "thermostat", 10,
+         [("cap.thermostat", {"temp": 20, "time": 1}), ("cap.ely.stir", {"temp": 20, "time": 2, "rpm": 300})]),
+        ("ST-ECHEM-SIM", "电化学工作站（模拟，经驱动宿主）", 50235, "SIM-ECHEM-01", "potentiostat-sim", "potentiostat", 20,
+         [("cap.echem", {})]),
+        ("ST-NW-01", "Neware 充放电柜（模拟，经驱动宿主）", 50236, "SIM-NW-BTS-01", "neware-sim", "neware-bts", 10,
+         [("cap.test", {"channel": 1})]),
+        ("EL-D-BAL", "电解液线配液天平（模拟，经驱动宿主）", 50237, "SIM-EL-D-BAL", "el-d-bal-sim", "balance-dosing", 10,
+         [("cap.ely.dose_liquid", {"mass": 1.0})]),
+        ("EL-D-PWD", "电解液线配粉天平（模拟，经驱动宿主）", 50238, "SIM-EL-D-PWD", "el-d-pwd-sim", "balance-dosing", 10,
+         [("cap.ely.dose_solid", {"mass": 0.05})]),
+        ("EL-T-RAM", "电解液线拉曼（模拟，经驱动宿主）", 50239, "SIM-EL-T-RAM", "el-t-ram-sim", "raman-seabreeze", 10,
+         [("cap.ely.raman", {"repeats": 1})]),
+    )},
 }
+# 经驱动宿主接的网关工位：别的登记脚本（load-device-simulators.py、load-neware-cycler.py、load-electrolyte-line.py）
+# 见到工位已经这样接着，就沿用、不改回直连
+GATEWAY_STATIONS = {station_id for station_id, station in STATIONS.items() if station.get("describe")}
+
+
+def via_driver_host(adapter: dict) -> bool:
+    """工位现在经驱动宿主接（sila2_v1 连 driver-host）。"""
+    return adapter.get("driver") == "sila2_v1" and (adapter.get("config") or {}).get("host") == HOST
 
 
 def refuse_production() -> None:
@@ -72,10 +122,13 @@ def refuse_production() -> None:
 
 def config_of(station: dict[str, Any]) -> dict[str, Any]:
     config = {"host": HOST, "port": station["port"], "ca_file": f"{SECRETS}/driver-host.crt",
-              "expected_device_id": station["device_id"], "connect_timeout_sec": 3, "request_timeout_sec": 10,
-              "probe_interval_sec": 10}
+              "expected_device_id": station["device_id"], "connect_timeout_sec": 3,
+              "request_timeout_sec": station.get("request_timeout_sec", 10), "probe_interval_sec": 10}
     if station.get("simulator_control"):
         config["simulator_control"] = station["simulator_control"]
+    if station.get("module"):
+        profile = json.loads((DEVICES_REPO / "gateway" / station["module"] / "profile.json").read_text(encoding="utf-8"))
+        config.update({key: profile["config"][key] for key in ILCS_KEYS if key in profile["config"]})
     return config if station["tasks"] else {**config, "tasks": False}
 
 
@@ -110,11 +163,16 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
         operator.post(f"/stations/{station_id}/adapter/reconnect")
 
     def accepted():
+        current = engineer.get(f"/stations/{station_id}/adapter")
+        if current.get("driver_awaiting_approval"):  # 驱动宿主上的设备文件改过：核对后签名批准，随后只读级验收
+            approve_driver(engineer, station_id, current)
+            return None
         listed = engineer.get(f"/stations/{station_id}/adapter/acceptance")
         gate, runs = listed["gate"], listed.get("runs") or []
-        if gate["required"] == "" and gate.get("accepted_config_version") == adapter["config_version"]:
+        version = current["config_version"]  # 发现驱动配置变了，ILCS 会把配置版本加一：按当前的比
+        if gate["required"] == "" and gate.get("accepted_config_version") == version:
             return next((row for row in runs if row["id"] == gate.get("accepted_run_id")), {"id": gate.get("accepted_run_id")})
-        latest = next((row for row in runs if row.get("config_version") == adapter["config_version"]), None)
+        latest = next((row for row in runs if row.get("config_version") == version), None)
         if latest and latest.get("state") == "done" and not latest.get("ok") and latest.get("level") == "readonly":
             raise Failed(f"{station_id} 只读级验收没通过：{latest.get('error') or latest.get('report_md', '')[:800]}")
         return None
@@ -122,12 +180,30 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
     run = wait_for(f"{station_id} 接入验收放行", accepted, timeout=timeout)
     current = engineer.get(f"/stations/{station_id}/adapter")
     driver = current.get("approved_driver") or {}
-    ok("接入验收", f"{station_id} 配置 v{adapter['config_version']} 已由 {str(run['id'])[:8]} 放行；批准驱动配置 "
+    ok("接入验收", f"{station_id} 配置 v{current['config_version']} 已由 {str(run['id'])[:8]} 放行；批准驱动配置 "
        f"{driver.get('plugin') or '—'} {str(driver.get('config_digest') or '')[:19]}")
 
 
+def approve_driver(engineer: Actor, station_id: str, current: dict[str, Any]) -> None:
+    """设备服务报的驱动配置和批准的那份不一样（驱动宿主上改了设备文件）：签名批准这一份。"""
+    reported = current.get("driver_info") or {}
+    engineer.post(f"/stations/{station_id}/adapter/driver-approval", {
+        "reason": f"驱动宿主上的设备文件改了（{reported.get('plugin')} 配置 {reported.get('config_version') or '—'}），"
+                  "核对后批准这一份",
+        "signature_id": engineer.sign("批准驱动配置变更", station_id, current["config_version"]),
+    })
+    ok("批准驱动配置变更", f"{station_id} {reported.get('plugin')} {str(reported.get('config_digest') or '')[:19]}")
+
+
 def physical_acceptance(engineer: Actor, station_id: str, station: dict[str, Any], timeout: float) -> None:
-    capability, params = station["acceptance"]
+    """逐项能力跑动作级（带故障项目的设备再跑故障项目）。`acceptance` 是一项 (能力, 参数) 或它们的列表。"""
+    rows = station["acceptance"] if isinstance(station["acceptance"], list) else [station["acceptance"]]
+    for capability, params in rows:
+        _physical(engineer, station_id, station, capability, params, timeout)
+
+
+def _physical(engineer: Actor, station_id: str, station: dict[str, Any], capability: str, params: dict,
+              timeout: float) -> None:
     adapter = engineer.get(f"/stations/{station_id}/adapter")
     requested = engineer.post(f"/stations/{station_id}/adapter/acceptance", {
         "level": "physical", "faults": bool(station.get("faults")), "capability": capability, "params": params,
@@ -145,6 +221,15 @@ def physical_acceptance(engineer: Actor, station_id: str, station: dict[str, Any
        + (f"，跳过 {'、'.join(skipped)}" if skipped else ""))
 
 
+def describe(engineer: Actor, station_id: str) -> None:
+    """重读设备自报的方法目录（经驱动宿主时取自 TaskSupport）：排程只往报过这个程序的工位排。"""
+    described = engineer.post(f"/stations/{station_id}/adapter/describe")
+    if described.get("warning"):
+        raise Failed(f"{station_id}：{described['warning']}")
+    programs = "、".join(str(row.get("program") or "") for row in described.get("methods") or []) or "—"
+    ok("方法目录", f"{station_id}：{programs}（来源 {described.get('described_from') or '—'}）")
+
+
 def register(team: dict[str, Actor], args: argparse.Namespace, keys: list[str]) -> None:
     engineer, operator = team["engineer"], team["operator"]
     for station_id in keys:
@@ -152,6 +237,8 @@ def register(team: dict[str, Actor], args: argparse.Namespace, keys: list[str]) 
         step(f"{station_id}：{station['name']}")
         ensure_station(engineer, station_id, station)
         connect(engineer, operator, station_id, station, args.timeout)
+        if station.get("describe"):
+            describe(engineer, station_id)
         if args.acceptance and station.get("acceptance"):
             physical_acceptance(engineer, station_id, station, args.timeout)
 

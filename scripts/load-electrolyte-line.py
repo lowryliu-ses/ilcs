@@ -783,6 +783,11 @@ def _accepted(engineer: Actor, station_id: str, config_version: int):
     return None
 
 
+def via_driver_host(adapter: dict) -> bool:
+    """工位已经改经驱动宿主接（scripts/load-driver-host-devices.py：sila2_v1 连 driver-host）：沿用，不改回直连网关。"""
+    return adapter.get("driver") == "sila2_v1" and (adapter.get("config") or {}).get("host") == "driver-host"
+
+
 def connect(team: dict[str, Actor], gateways: dict, timeout: float) -> None:
     """工位套用接入模板、连接参数指向设备网关；重连一次，等执行器跑完只读级验收（模拟网关只读级就放行）。"""
     engineer, qa, operator = team["engineer"], team["qa"], team["operator"]
@@ -794,7 +799,10 @@ def connect(team: dict[str, Actor], gateways: dict, timeout: float) -> None:
                       "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt", "expected_device_id": device_id}
         credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
         adapter = engineer.get(f"/stations/{station_id}/adapter")
-        if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
+        if via_driver_host(adapter):
+            ok(f"工位 {station_id}", f"经驱动宿主接 driver-host:{adapter['config'].get('port')}"
+               "（沿用；见 scripts/load-driver-host-devices.py）")
+        elif (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
                 or adapter.get("credential_ref") != credential:
             adapter = engineer.patch(f"/stations/{station_id}/adapter", {
                 "template_id": template["id"], "template_connection": connection, "credential_ref": credential,

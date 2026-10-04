@@ -266,6 +266,11 @@ def register_template(engineer: Actor, qa: Actor) -> dict:
     return template
 
 
+def via_driver_host(adapter: dict) -> bool:
+    """工位已经改经驱动宿主接（scripts/load-driver-host-devices.py：sila2_v1 连 driver-host）：沿用，不改回直连网关。"""
+    return adapter.get("driver") == "sila2_v1" and (adapter.get("config") or {}).get("host") == "driver-host"
+
+
 def _gate(actor: Actor) -> dict:
     return actor.get(f"/stations/{STATION}/adapter/acceptance")
 
@@ -276,7 +281,9 @@ def connect(engineer: Actor, operator: Actor, template: dict, args: argparse.Nam
                   "expected_device_id": args.device_id}
     credential = f"file:///run/secrets/ilcs/gateway/{args.device_id}.token"
     adapter = engineer.get(f"/stations/{STATION}/adapter")
-    if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
+    if via_driver_host(adapter):
+        ok("设备连接", f"经驱动宿主接 driver-host:{adapter['config'].get('port')}（沿用；见 scripts/load-driver-host-devices.py）")
+    elif (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
             or adapter.get("credential_ref") != credential:
         adapter = engineer.patch(f"/stations/{STATION}/adapter", {
             "template_id": template["id"], "template_connection": connection, "credential_ref": credential,
