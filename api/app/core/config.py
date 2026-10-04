@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # 仅测试 / 演示：允许系统管理员审批、复核自己提交或录入的内容，每次放行都留审计。
     # 正式环境开启即判配置不合格，服务不进入健康状态
     admin_self_approval: bool = False
+    # 仅测试 / 演示：系统管理员可以级联强制删除（连同依赖它的数据），每次签名并留审计。
+    # 正式环境开启即判配置不合格
+    admin_force_delete: bool = False
     secret_key: str = "ilcs-dev-change-me"
     # 口令摘要的 pepper 与 JWT 密钥分离；轮换令牌密钥不应使全部账号口令失效。
     # 为空时仅为兼容已有开发库而回落到 secret_key。
@@ -226,6 +229,8 @@ class Settings(BaseSettings):
             )
         if self.admin_self_approval:
             issues.append("production 模式不允许 ILCS_ADMIN_SELF_APPROVAL=1；职责分离必须对所有人强制")
+        if self.admin_force_delete:
+            issues.append("production 模式不允许 ILCS_ADMIN_FORCE_DELETE=1；用过的记录只能停用、退役或报废")
         if self.executor_simulate_heartbeat:
             issues.append("production 模式不允许 ILCS_EXECUTOR_SIMULATE_HEARTBEAT=1；设备在线状态必须由设备上报")
         if self.executor_stale_sec <= 0:

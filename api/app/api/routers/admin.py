@@ -3,7 +3,8 @@ from fastapi import APIRouter
 
 from ...core.schema import EXPECTED_REVISION, current_revision
 from ...core.errors import ValidationFailed
-from ...schemas import AccountCreateIn, AccountPatchIn, RolePermissionsIn
+from ...schemas import AccountCreateIn, AccountPatchIn, ForceDeleteIn, RolePermissionsIn
+from ...services.force_delete_service import ForceDeleteService
 from ...services.identity_service import IdentityService
 from ...services.migration_report_service import MigrationReportService
 from ..deps import Ctx, CurrentUser, DbSession, require
@@ -158,3 +159,18 @@ def access_log(db: DbSession, ctx=require("org.admin"), limit: int = 100):
         }
         for row in AccessLogRepository(db).recent(min(500, max(1, limit)), org_id=ctx.org_id)
     ]
+
+
+@router.get("/force-delete/{kind}/{object_id}")
+def force_delete_preview(kind: str, object_id: str, db: DbSession, user: CurrentUser, ctx=require("org.admin")):
+    """测试环境的级联强制删除：先看会连带删掉什么。只在 ILCS_ADMIN_FORCE_DELETE 开启时对系统管理员开放。"""
+    return ForceDeleteService(db, ctx).preview(kind, object_id, user)
+
+
+@router.post("/force-delete/{kind}/{object_id}")
+def force_delete(
+    kind: str, object_id: str, payload: ForceDeleteIn, db: DbSession, user: CurrentUser,
+    ctx=require("org.admin"),
+):
+    """连同依赖它的数据一起删掉；签名针对「类型:编号」，写明原因，留一条审计。"""
+    return ForceDeleteService(db, ctx).execute(kind, object_id, payload.reason, payload.signature_id, user)

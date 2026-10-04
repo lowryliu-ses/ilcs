@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock, num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -182,6 +183,7 @@ export function MaterialsPage() {
                       删除
                     </button>
                   ) : null}
+                  {lot.delete_blockers.length ? <ForceDeleteButton kind="lot" id={lot.id} /> : null}
                 </td>
               </tr>
             ))}
@@ -290,6 +292,7 @@ export function MaterialsPage() {
                       >
                         移除
                       </button>
+                      {tank.delete_blockers.length ? <ForceDeleteButton kind="waste" id={tank.id} /> : null}
                     </>
                   ) : null}
                 </td>

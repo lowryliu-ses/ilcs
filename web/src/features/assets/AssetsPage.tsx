@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, pageQuery } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock, day, stamp } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -163,6 +164,7 @@ export function AssetsPage() {
                           删除
                         </button>
                       ) : null}
+                      <ForceDeleteButton kind="asset" id={row.id} />
                     </td>
                   </tr>
                 ))}

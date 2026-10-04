@@ -1453,6 +1453,10 @@ class CommandEventIn(BaseModel):
 
 # ---------- 报警 ----------
 
+class ForceDeleteIn(Signed):
+    reason: str
+
+
 class AlarmClearIn(Signed):
     reason: str
 

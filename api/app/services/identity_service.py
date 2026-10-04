@@ -157,6 +157,10 @@ class IdentityService:
             "admin_self_approval": bool(
                 settings.admin_self_approval and settings.environment != "production" and ADMIN in roles_of(user)
             ),
+            # 测试环境开关：系统管理员可级联强制删除（界面据此出「强制删除」按钮）
+            "admin_force_delete": bool(
+                settings.admin_force_delete and settings.environment != "production" and ADMIN in roles_of(user)
+            ),
             "password_changed_at": (
                 user.password_changed_at.isoformat(timespec="seconds")
                 if user.password_changed_at else None

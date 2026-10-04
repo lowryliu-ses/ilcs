@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { clock } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -155,7 +156,9 @@ export function DeviceTemplatesTab() {
                     </button>
                     {row.state === 'draft' && can('station.edit') ? (
                       <button className="btn sm" disabled={act.pending} onClick={() => run(row, 'delete')}>删除</button>
-                    ) : null}
+                    ) : (
+                      <ForceDeleteButton kind="template" id={row.id} />
+                    )}
                   </td>
                 </tr>
               ))}

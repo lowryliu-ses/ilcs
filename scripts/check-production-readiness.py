@@ -145,6 +145,8 @@ def inspect(values: dict[str, str], initial_seed: bool = False) -> tuple[list[st
         errors.append("正式环境不允许模拟心跳：ILCS_EXECUTOR_SIMULATE_HEARTBEAT 必须为 0 或删除")
     if values.get("ILCS_ADMIN_SELF_APPROVAL", "0").strip().lower() in {"1", "true", "yes", "on"}:
         errors.append("正式环境不允许管理员自审：ILCS_ADMIN_SELF_APPROVAL 必须为 0 或删除")
+    if values.get("ILCS_ADMIN_FORCE_DELETE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        errors.append("正式环境不允许管理员强制删除：ILCS_ADMIN_FORCE_DELETE 必须为 0 或删除")
 
     stale = values.get("ILCS_EXECUTOR_STALE_SEC", "60").strip()
     try:

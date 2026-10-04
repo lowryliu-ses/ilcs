@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { api } from '../../shared/api';
+import { ForceDeleteButton } from '../../shared/forceDelete';
 import { num } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
@@ -185,6 +186,9 @@ export function PlanDetailPage() {
             >
               删除
             </button>
+          ) : null}
+          {data.delete_blockers.length ? (
+            <ForceDeleteButton kind="plan" id={data.id} className="btn danger" onDone={() => navigate('/plans')} />
           ) : null}
         </div>
       </div>
