@@ -49,12 +49,15 @@ class ConfigField:
     scope: str = ""  # capability / param：往下走时记住键是哪项能力 / 哪个参数，给下层的 key_ref 用
     shorthand: str = ""  # 只填这一个键时可以简写成它的值（"sp_temp" 就是 {"point": "sp_temp"}）
     single: bool = False  # array：只有一项时也可以不写成列表
+    minimum: float | None = None  # integer / number：最小值
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "name": self.name, "label": self.label, "type": self.type, "type_label": TYPE_LABELS[self.type],
             "required": self.required, "connection": self.connection, "hint": self.hint,
         }
+        if self.minimum is not None:
+            out["minimum"] = self.minimum
         if self.fields:
             out["fields"] = [item.as_dict() for item in self.fields]
         if self.entries is not None:
@@ -142,6 +145,10 @@ COMMON = (
         ConfigField("capability", "对应能力", "string", ref="capabilities"),
     ), shorthand="program"), hint="协议带不了目录时登记：[\"VD-120\"] 或 [{program, name, capability}]"),
     _list("commands", "设备接受的指令类型", _value("指令类型", "string")),
+    ConfigField("wells_per_command", "一条指令最多几瓶", "integer", minimum=1,
+                hint="设备一次只能处理一瓶（秤上一个位置、单测量位）时填 1：一步要做的瓶（孔位）超过它，ILCS 按瓶拆开、"
+                     "依次下发（设备指令号 <指令号>/<序号>，每条只带这几瓶的孔位与参数），每瓶做完就按实际量入账；"
+                     "不填就一条指令带全部瓶"),
     ConfigField("vendor", "厂商（按登记）", "string"),
     ConfigField("firmware", "固件（按登记）", "string"),
     _record("simulator_control", "模拟设备控制口", (
@@ -249,6 +256,9 @@ def check_fields(driver: str, config: dict, *, template: bool = False) -> Config
         expected = TYPES[item.type]
         if isinstance(value, bool) and item.type in {"integer", "number"} or not isinstance(value, expected):
             check.problems.append(f"「{item.label}」（{name}）应是{TYPE_LABELS[item.type]}")
+            continue
+        if item.minimum is not None and value < item.minimum:
+            check.problems.append(f"「{item.label}」（{name}）不能小于 {item.minimum:g}")
             continue
         check.warnings.extend(nested_warnings(item, value, name))
     return check

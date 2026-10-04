@@ -86,3 +86,12 @@ def test_catalog_describes_nested_structures_for_the_form():
     # 平铺的字段不带多余的键：老界面照旧能读
     assert set(sila["host"]) == {"name", "label", "type", "type_label", "required", "connection", "hint"}
     assert sila["tasks"]["type"] == "boolean"
+
+
+def test_wells_per_command_must_be_at_least_one():
+    """一条指令最多几瓶：设备一次只能处理一瓶时填 1；填 0 或负数没有意义，保存前就拒绝。"""
+    base = {"base_url": "https://gw.lab.internal/api/v1"}
+    assert check_fields("http_json_v1", {**base, "wells_per_command": 1}).ok
+    check = check_fields("http_json_v1", {**base, "wells_per_command": 0})
+    assert not check.ok and "不能小于 1" in check.problems[0]
+    assert not check_fields("sila2_v1", {"host": "h", "port": 1, "wells_per_command": True}).ok, "布尔值不是整数"

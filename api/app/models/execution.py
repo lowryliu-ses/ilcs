@@ -57,6 +57,10 @@ class Command(Base):
     # 取自上游结果的参数（前馈）：每个样本一条，记来源步骤与检查点 / 记录、原始值与单位、系数及其出处、
     # 下发的计算值。下发时算一次、随指令冻结；重投同一指令不重新求值
     bindings: Mapped[list] = mapped_column(JSON, default=list)
+    # 按瓶拆开下发（设备接入配置 wells_per_command）：依次执行的设备指令，每条 {id: <指令号>/<序号>, wells, state,
+    # delivered, telemetry, origin, quality, device_ts, error}。state：pending 还没发 / sent 已交给适配器、没确认 /
+    # running / done / failed / unknown。为空就是不拆，整条指令照旧一次下发
+    runs: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ExecutorHeartbeat(Base):
