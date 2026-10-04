@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,14 @@ def _content_hash(recipe: Recipe) -> str:
 STATE_LABEL = {
     "draft": "草稿", "review": "评审中", "approved": "已批准", "released": "已发布", "retired": "已退役",
 }
+
+
+_REVISION_SUFFIX = re.compile(r"(?:-r\d+)+$")
+
+
+def revision_root(recipe_id: str) -> str:
+    """修订链的根编号：R-203-r2 → R-203；旧数据里叠起来的 R-203-r1-r1 同样归到 R-203。"""
+    return _REVISION_SUFFIX.sub("", recipe_id) or recipe_id
 
 
 class RecipeService:
@@ -483,26 +492,22 @@ class RecipeService:
         source = self._require(recipe_id)
         if source.state != "released":
             raise StateConflict("只有已发布流程可新建修订草稿")
-        # 修订号取已有最大号 + 1，不按数量算：删掉 r1 后按数量会再造一个 r2 撞主键
-        siblings = [
-            row.id for row in self.db.query(Recipe).filter(Recipe.id.like(f"{recipe_id}-r%")).all()
-        ]
-        numbers = [
-            int(rid[len(recipe_id) + 2:]) for rid in siblings if rid[len(recipe_id) + 2:].isdigit()
-        ]
+        # 修订号在整条修订链上编：R-203 → R-203-r1 → R-203-r2，修订的修订不再叠成 R-203-r1-r1（旧数据里叠起来的
+        # 也归到同一条链）。取已有最大号 + 1，不按数量算：删掉 r1 后按数量会再造一个 r2 撞主键
+        root = revision_root(recipe_id)
+        chain = [source, *self.db.query(Recipe).filter(Recipe.id.like(f"{root}-r%")).all()]
+        numbers = [int(row.id[len(root) + 2:]) for row in chain if row.id[len(root) + 2:].isdigit()]
         sequence = max(numbers, default=0) + 1
         major, minor, _ = (source.version.split(".") + ["0", "0"])[:3]
-        # 版本号同理：同一来源的两个修订不能拿到同一个版本号
-        sibling_minors = [
-            int((row.version.split(".") + ["0", "0"])[1])
-            for row in self.db.query(Recipe).filter(Recipe.parent == recipe_id).all()
-            if (row.version.split(".") + ["0", "0"])[1].isdigit()
-            and row.version.split(".")[0] == major
+        # 版本号同理：同一条链上的两个修订（同一来源的两个草稿、来源退役前留下的草稿）不能拿到同一个版本号
+        chain_minors = [
+            int(parts[1]) for parts in ((row.version.split(".") + ["0", "0"]) for row in chain)
+            if parts[1].isdigit() and parts[0] == major
         ]
-        next_minor = max([int(minor), *sibling_minors]) + 1
+        next_minor = max([int(minor), *chain_minors]) + 1
         version = f"{major}.{next_minor}.0"
         revision = Recipe(
-            id=f"{recipe_id}-r{sequence}",
+            id=f"{root}-r{sequence}",
             name=source.name,
             version=version,
             state="draft",

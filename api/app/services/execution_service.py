@@ -33,7 +33,8 @@ from ..repositories.resources import AdapterRepository, CapabilityRepository
 from ..repositories.workflow import StepRunRepository
 from ..core.db import SessionLocal
 from .acceptance_service import (
-    AcceptanceRunner, dispatch_hold, driver_changed, driver_drift, heartbeat_keeper, requeue_if_needed,
+    AcceptanceRunner, dispatch_hold, driver_change_alarm, driver_changed, driver_drift, heartbeat_keeper,
+    requeue_if_needed,
 )
 from .point_service import PointWriteRunner
 from .alarm_service import AlarmService
@@ -1418,14 +1419,14 @@ class ExecutorLoop:
         """设备服务报的驱动配置：记下来；和上一次报的不同、又不是已批准的那份，照配置变更处理。
 
         驱动在 ILCS 之外改了点表或映射，ILCS 自己的配置一个字没变——靠这一步把「待接入验收」重新挂上。同一份新配置
-        只处理一次（和上一次报的比）；验收通过、批准了新配置之后，报警条件自动复位。
+        只处理一次（和上一次报的比）；批准的新配置放行时报警条件当场复位，这里每次探测再兜底一次。
         """
         previous = record.driver_info or {}
         record.driver_info = {**reported, "reported_at": moment.isoformat(timespec="seconds")}
         station = self.db.get(Station, record.station_id)
         org_id = station.org_id if station else ""
         alarms = AlarmService(self.db, system_context(org_id, "执行器"))
-        key = f"station:{record.station_id}:driver_changed"
+        key = driver_change_alarm(record.station_id)
         level = driver_drift(record, reported)
         if not level:
             alarms.resolve_condition(key, "设备服务的驱动配置与已批准的一致")

@@ -109,6 +109,22 @@ def test_revision_numbers_versions_and_supersession(researcher, qa, reset_runtim
         "修订版发布后来源版本退役，不能同时存在两个已发布版本"
     )
 
+    # 修订的修订在同一条链上接着编号，不叠成 -r2-r1；版本号沿链递增，不和来源退役前留下的草稿撞号
+    fourth = researcher.post(f"/api/recipes/{second['id']}/revision").json()
+    assert fourth["id"] == f"{source}-r4" and fourth["parent"] == second["id"], fourth
+    def number(version: str) -> tuple:
+        return tuple(int(part) for part in version.split("."))
+
+    versions = [researcher.get(f"/api/recipes/{rid}").json()["version"] for rid in (second["id"], third.json()["id"])]
+    assert number(fourth["version"]) > max(map(number, versions)), (fourth["version"], versions)
+
+
+def test_revision_root_folds_legacy_nested_ids():
+    from app.services.recipe_service import revision_root
+
+    assert [revision_root(rid) for rid in ("R-203", "R-203-r2", "R-203-r1-r1-r1", "R-210")] == [
+        "R-203", "R-203", "R-203", "R-210"]
+
 
 # ---------- A5：重排锚点与状态 ----------
 

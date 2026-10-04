@@ -39,6 +39,7 @@ from ..domain.adapter_rules import (
 from ..models import AcceptanceRun, Adapter, DeviceTemplate, Station, User
 from ..repositories.execution import CommandRepository
 from ..repositories.resources import StationRepository
+from .alarm_service import AlarmService
 from .audit_service import AuditService
 from .identity_service import IdentityService
 
@@ -195,6 +196,24 @@ def driver_awaiting_approval(adapter: Adapter, reported: dict[str, Any] | None =
         return False
     approval = adapter.driver_approval or {}
     return (approval.get("config_digest"), approval.get("plugin")) != (reported.get("config_digest"), reported.get("plugin"))
+
+
+def driver_change_alarm(station_id: str) -> str:
+    """驱动配置变更报警的条件键：探测发现设备服务报了没批准的驱动配置时挂上。"""
+    return f"station:{station_id}:driver_changed"
+
+
+def settle_driver_change_alarm(db: Session, adapter: Adapter, detail: str) -> None:
+    """闸门放开、已批准的驱动配置就是设备服务现在报的那份：当场复位驱动变更报警的条件（确认、关闭仍留给人）。
+
+    不等下一轮探测（探测时同样会复位，这里只是提前）：闸门已经显示放行，这段时间里开跑检查不该还被这条报警挡住。
+    """
+    reported = adapter.driver_info or {}
+    if not reported.get("config_digest") or driver_drift(adapter, reported):
+        return
+    station = db.get(Station, adapter.station_id)
+    alarms = AlarmService(db, system_context(station.org_id if station else "", "接入验收"))
+    alarms.resolve_condition(driver_change_alarm(adapter.station_id), detail)
 
 
 def driver_changed(db: Session, adapter: Adapter, level: str, *, org_id: str) -> str:
@@ -385,6 +404,7 @@ class AcceptanceService:
         adapter.accepted_config_version, adapter.accepted_run_id = adapter.config_version, run.id
         if driver_drift(adapter, adapter.driver_info or {}):
             adapter.approved_driver = dict(adapter.driver_info)  # 批准过的这次驱动变更随放行生效
+            settle_driver_change_alarm(self.db, adapter, "批准的驱动配置已签名放行")
         self.audit.record(
             user, "签名放行接入验收", station_id, sign=True, meaning=signature.meaning, signature_id=signature.id,
             before=f"待接入验收（{LEVEL_LABELS.get(required, required)}）", after="已放行",
@@ -713,6 +733,7 @@ class AcceptanceRunner:
             adapter.accepted_config_version, adapter.accepted_run_id = record.config_version, run_id
         if not adapter.acceptance_required and (driver_info or {}).get("config_digest"):
             adapter.approved_driver = dict(driver_info)
+            settle_driver_change_alarm(self.db, adapter, "批准的驱动配置接入验收通过，闸门放行")
         self.db.commit()
         return cleared
 
