@@ -9,10 +9,9 @@ ENVIRONMENT = {"zone": "联调区", "interval_sec": 30, "points": {"temperature"
 def test_environment_is_a_registered_config_item_and_a_light_change():
     from app.adapters.catalog import validate_config
     from app.domain.adapter_rules import busy_blocked_changes
-    from sim_harness import plc_config
 
-    config, _ = plc_config("modbus", 502)
-    check = validate_config("modbus_map_v1", {**config, "environment": ENVIRONMENT})
+    config = {"host": "127.0.0.1", "port": 50202, "insecure": True, "tasks": False}
+    check = validate_config("sila2_v1", {**config, "environment": ENVIRONMENT})
     assert check.ok and not [w for w in check.warnings if "environment" in w], check.warnings
     assert busy_blocked_changes({"config": config}, {"config": {**config, "environment": ENVIRONMENT}}) == [], \
         "改环境采集不改连谁、怎么判结论：不用重新握手"
@@ -42,8 +41,8 @@ def test_probing_records_point_readings_as_environment_readings(reset_runtime, m
     with SessionLocal() as db:
         adapter = db.get(Adapter, STATION)
         saved = (adapter.kind, adapter.driver, adapter.config)
-        adapter.kind, adapter.driver = "real", "modbus_map_v1"
-        adapter.config = {"host": "127.0.0.1", "port": 502, "environment": ENVIRONMENT}
+        adapter.kind, adapter.driver = "real", "sila2_v1"
+        adapter.config = {"host": "127.0.0.1", "port": 50202, "tasks": False, "environment": ENVIRONMENT}
         adapter.connected, adapter.last_heartbeat = False, now() - timedelta(minutes=1)
         db.commit()
         try:

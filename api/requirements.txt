@@ -25,11 +25,13 @@ protobuf==6.33.6
 ortools==9.15.6755
 # 模拟设备生成自签 TLS 证书（sila2[cryptography] 的可选依赖）
 cryptography==50.0.1
-# Modbus TCP 设备驱动（modbus_tcp_v1）与外部 Modbus 模拟设备共用；3.9 起从站上下文改名，版本固定
+# 下面三个 ILCS 自己不再用（协议驱动都在驱动宿主 devices/host）：外部模拟设备、环境连接器（devices/connectors，随这个
+# 镜像分发）与测试里在本进程起的驱动宿主要用，版本和 devices/host/requirements.txt 一致。
+# Modbus：模拟 PLC、环境连接器的 Modbus 采集；3.9 起从站上下文改名，版本固定
 pymodbus==3.8.6
-# OPC UA 设备驱动（opcua_v1）与外部 OPC UA 模拟设备共用
+# OPC UA：模拟 PLC 与 OPC UA 任务契约模拟设备
 asyncua==1.1.5
 # 样本与载具标签二维码（纯 Python，无依赖）
 segno==1.6.6
-# 串口 / TCP 命令驱动（line_command_v1）的串口通道
+# 串口：驱动宿主 line_command 插件的串口通道（测试里在本进程起驱动宿主）
 pyserial==3.5

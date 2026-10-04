@@ -1,4 +1,4 @@
-"""三份 profile 按 ILCS 导入、发布时的口径核对：摘要、模板检查、支持标志与验收缺省，再查命令列表本身守不守 SCPI 的规矩。
+"""三份 profile（驱动宿主的设备配置）：建得出 line_command 插件、支持标志与验收缺省，再查命令列表本身守不守 SCPI 的规矩。
 
     api/.venv/bin/pytest -q -p no:cacheprovider devices/gateway/scpi-cell-meter/tests
 """
@@ -16,22 +16,30 @@ OUTPUTS = {"keithley-2450": {"ocv_V"}, "keithley-2400": {"ocv_V"}, "hioki-bt3562
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_profile_would_import_and_release(name):
-    """导入时核对摘要（改过文件要重算），发布前的模板检查一项问题、一条提醒都没有，连接参数只放驱动登记的连接项。"""
-    from app.services.template_service import FORMAT, connection_problems, template_check, template_digest
+def test_profile_builds_the_driver_host_plugin(name, monkeypatch):
+    """profile 的映射 + 示例连接参数建得出驱动宿主的 line_command 插件（插件构造时就核对命令列表、正则、状态映射）；
+    连接参数只有 transport（设备编号的核对在 ILCS 工位那边：sila2_v1 的 expected_device_id）；支持标志与验收缺省照测量的性质。"""
+    from types import SimpleNamespace
 
+    from ilcs_host.plugins.line_command import LineCommandAdapter
+    from ilcs_host.settings import settings
+
+    monkeypatch.setattr(settings, "allowed_hosts", "*")  # 示例里的仪表主机名（非正式环境 * 放行）
     profile = load_profile(name)
-    assert profile["format"] == FORMAT and profile["state"] == "draft"
-    assert profile["driver"] == "line_command_v1" and profile["version"] == "scpi-cell-meter 0.1"
-    assert profile["digest"] == template_digest(profile), "profile 改过之后要重算摘要（见 README「自测」）"
-    assert template_check(profile) == {"ok": True, "problems": [], "warnings": []}
-    assert connection_problems(profile["driver"], profile["config"], profile["connection"]) == []
-    assert "transport" in profile["connection"]
+    assert profile["format"] == "ilcs-host-device-profile/1" and profile["plugin"] == "line_command"
+    assert profile["version"] == "scpi-cell-meter 0.2"
+    assert set(profile["connection"]) == {"transport"}
+    plugin = LineCommandAdapter(SimpleNamespace(
+        station_id=f"CHECK-{name}", config={**profile["config"], **profile["connection"]}, credential_ref="",
+        protocol=profile["protocol"], version=profile["version"], note="",
+        **{f"supports_{key}": value for key, value in profile["supports"].items()},
+    ))
+    assert plugin.tasks and plugin.capability_spec(CAPABILITY)["start"]
     assert profile["supports"] == SUPPORTS, "测量是即时动作：没有在途作业可保持、可终止"
     assert profile["acceptance"] == {"capability": CAPABILITY, "params": {}}
 
 
-def test_template_codes_are_distinct():
+def test_profile_codes_are_distinct():
     codes = [load_profile(name)["code"] for name in NAMES]
     assert len(set(codes)) == len(codes)
 

@@ -1,10 +1,11 @@
 # 设备模块：电芯开路电压 / 交流内阻检测仪表（SCPI 文本命令，映射模块）
 
 电芯装配之后、上柜循环之前的检查：开路电压（OCV）与 1 kHz 交流内阻（ACIR）。现场仪表的品牌还没定，这里先给最常见的
-几类台式仪表现成的**设备接入模板**（`ilcs-device-template/1`），都走 ILCS 内置的串口 / TCP 文本命令驱动 `line_command_v1`：
-接真仪表只填连接参数（地址、端口或串口），不写代码、不起网关、ILCS 不重启。
+几类台式仪表现成的**驱动宿主设备配置**（`ilcs-host-device-profile/1`），都走驱动宿主（[devices/host](../../host/README.md)）的
+串口 / TCP 文本命令插件 `line_command`，ILCS 工位用 `sila2_v1` 接驱动宿主：接真仪表只填连接参数（地址、端口或串口），
+不写代码、不起网关、ILCS 不重启。
 
-| 模板文件 | 仪表 | 接口 | 测什么 | 输出 |
+| 配置文件 | 仪表 | 接口 | 测什么 | 输出 |
 |---|---|---|---|---|
 | `profile-keithley-2450.json` | Keithley 2450 SourceMeter（SCPI 命令集） | LAN 原始套接字 TCP 5025，结束符 LF | 源 0 A、四线测电压 → 开路电压 | `ocv_V`（V） |
 | `profile-keithley-2400.json` | Keithley 2400 SourceMeter（2400 系列的老 SCPI；2450 设成 SCPI2400 命令集也能用） | RS-232（出厂 9600 8N1、结束符 CR），经串口服务器或本机串口 | 同上 | `ocv_V`（V） |
@@ -12,60 +13,42 @@
 
 没有做的：Hioki BT3554 系列（USB 是虚拟串口，命令手册在随机光盘上，公开资料里查不到）；同惠 TH2523 / TH2522（公开的
 TH2523/A 操作手册列了命令，但没有 `FETCH?` 的回复格式、`*IDN?` 与错误查询，写不出能核对的回复正则）；GPIB 接口
-（`line_command_v1` 只有 TCP 与串口通道）。这几种以后拿到命令手册，照下面的写法再加一份模板即可。
+（`line_command` 插件只有 TCP 与串口通道）。这几种以后拿到命令手册，照下面的写法再加一份配置即可。
 
-## 经驱动宿主接入（ILCS 只走 SiLA 2）
+## 怎么接：驱动宿主的设备文件 + ILCS 的 sila2_v1 工位
 
-ILCS 里的 `line_command_v1` 正在移出中控（见 [驱动宿主](../../host/README.md)）：同一份映射放进驱动宿主的设备文件
-（插件 `line_command`），ILCS 工位用 `sila2_v1` 连驱动宿主。本机的三台模拟仪表已经这样接（`devices/host/sites/local/devices/`
-的 OCV-K2450、OCV-K2400、ACIR-BT3562，`scripts/load-driver-host-devices.py register --acceptance`）。
-
-驱动宿主的设备文件：模板的 `config` 原样搬过去，加上连接 `transport`；`supports` 照抄模板：
+驱动宿主现场目录里一台仪表一个设备文件（`sites/<现场>/devices/<设备>.json`）：profile 的 `config` 原样放进去、加上
+连接 `transport`（profile 的 `connection` 是示例），`supports` 照抄 profile，`port` 是这台设备的 SiLA 端口：
 
 ```json
 {"plugin": "line_command", "port": 50211, "config_version": "r1",
  "supports": {"hold": false, "abort": false, "query": true, "dedup": true},
- "config": {"transport": {"kind": "tcp", "host": "10.20.1.51", "port": 5025}, "...": "模板 config 的其余各项"}}
+ "config": {"transport": {"kind": "tcp", "host": "10.20.1.51", "port": 5025}, "...": "profile config 的其余各项"}}
 ```
 
 ILCS 工位的设备连接（`sila2_v1`）：`{"host": "driver-host", "port": 50211, "ca_file": …, "expected_device_id": "<仪器序列号>"}`，
-接真仪表时不要 `simulator_control`。主机白名单在驱动宿主的 `host.json`（`allowed_hosts`），不再是 ILCS 的
-`ILCS_ADAPTER_ALLOWED_HOSTS`。下面的命令说明、仪表设置、能力 / 指标 / 设备方法的建法都不变。
+接入验收的缺省照 profile 的 `acceptance` 写进连接配置（`{"capability": "cap.cell_check", "params": {}}`）。接真仪表时不要
+`simulator_control`。仪表主机要在驱动宿主 `host.json` 的 `allowed_hosts` 里。本机的三台模拟仪表就是这样接的
+（`devices/host/sites/local/devices/` 的 OCV-K2450、OCV-K2400、ACIR-BT3562，`scripts/load-driver-host-devices.py register --acceptance`）。
 
 ## 文件
 
 | 文件 | 内容 |
 |---|---|
-| `profile-*.json` | 三份 ILCS 设备接入模板（草稿），在「工位与接入 → 接入模板」导入 |
+| `profile-*.json` | 三份驱动宿主设备配置（映射 + 示例连接 + 支持标志 + 验收缺省），照上面放进驱动宿主的设备文件 |
 | `simulator/scpi.py` | 假仪表的公共部分：命令头按手册写法匹配（长短写法都认）、一行多条命令、错误怎么记、待测电芯、故障与测量计数 |
-| `simulator/keithley.py` | 假 Keithley 2450 / 2400：本模板用到的源、测量、输出、错误队列、读数缓冲区命令 |
+| `simulator/keithley.py` | 假 Keithley 2450 / 2400：本配置用到的源、测量、输出、错误队列、读数缓冲区命令 |
 | `simulator/hioki.py` | 假 Hioki BT3562 系列：ΩV 测量、按量程定宽的读数格式、标准事件寄存器 / ESR0 / 状态字节 |
 | `simulator/server.py` | 假仪表的 TCP 口（CR、LF、CR+LF 都认）与统一控制口；可以直接运行 |
-| `deploy/Dockerfile`、`deploy/compose.yml` | 在 ILCS 那台机器上起三台模拟仪表（k2450-sim、k2400-sim、bt3562-sim，各带统一控制口），接进 ILCS 的后端网络；`scripts/load-device-simulators.py register` 登记对应工位 |
-| `tests/` | 模板检查（摘要、ILCS 模板检查、命令列表的规矩、读数正则对手册格式）、驱动直接测（完成、重投、回复丢失、忙、联锁、溢出……）、ILCS 接入验收清单三台各一遍、假仪表自己的行为 |
+| `deploy/Dockerfile`、`deploy/compose.yml` | 在 ILCS 那台机器上起三台模拟仪表（k2450-sim、k2400-sim、bt3562-sim，各带统一控制口），接进 ILCS 的后端网络；驱动宿主按 `devices/host/sites/local` 接它们，`scripts/load-device-simulators.py register` 登记对应工位 |
+| `tests/` | 配置检查（建得出插件、命令列表的规矩、读数正则对手册格式）、插件直接测（完成、重投、回复丢失、忙、联锁、溢出……）、经驱动宿主跑 ILCS 接入验收清单三台各一遍、假仪表自己的行为 |
 
 ```bash
 api/.venv/bin/pytest -q -p no:cacheprovider devices/gateway/scpi-cell-meter/tests     # 自测（不连库）
 api/.venv/bin/python devices/gateway/scpi-cell-meter/simulator/server.py --model keithley-2450 --port 5025
 ```
 
-改了 `profile-*.json` 要重算摘要（导入时摘要对不上会被拒），测试会查：
-
-```bash
-api/.venv/bin/python - <<'EOF'
-import json, re, sys
-from pathlib import Path
-sys.path.insert(0, "api")
-from app.services.template_service import template_digest
-for path in sorted(Path("devices/gateway/scpi-cell-meter").glob("profile-*.json")):
-    text = path.read_text(encoding="utf-8")
-    digest = template_digest(json.loads(text))
-    path.write_text(re.sub(r'"digest": "sha256:[0-9a-f]+"', f'"digest": "{digest}"', text), encoding="utf-8")
-    print(path.name, digest)
-EOF
-```
-
-## 一次测量怎么走（三份模板共同的规矩）
+## 一次测量怎么走（三份配置共同的规矩）
 
 - **读数就是结果，当场完成。** 能力 `cap.cell_check` 的启动命令依次是：清状态 → 配置测量 → 查错 →（Keithley：开输出、
   再查错、确认输出真开了）→ `:READ?`。`:READ?` 是唯一的动作命令（`motion: true`），它的回复按 `result.pattern` 取数
@@ -76,7 +59,7 @@ EOF
   仪表忙，都在这里变成**明确失败、仪表没测**。开头先 `*CLS`，旧错误、Hioki 开机的 PON 位不会被当成这次的错。
 - **溢出与测量异常是明确失败。** `:READ?` 回 9.9E+37（Keithley 超量程）或 Hioki 的 ±OF / 测量异常值（指数 E+5 以上）时，
   动作命令的 `reject` 正则命中，驱动判明确失败：这一笔没有有效读数，可以按恢复规则重测（夹好电芯再来）。
-- **状态与复位。** `line_command_v1` 必须有状态查询；这些仪表没有「运行中」，状态查询回答的是「仪表里有没有一笔还没
+- **状态与复位。** `line_command` 插件必须有状态查询；这些仪表没有「运行中」，状态查询回答的是「仪表里有没有一笔还没
   清掉的读数」：Keithley 查读数缓冲区里有几个读数（2450 `:TRAC:ACT? "defbuffer1"`、2400 `:TRAC:POIN:ACT?`），
   0 是空闲、非 0 是测完了；Hioki 查状态字节 `*STB?` 的 bit0（启动时 `:ESE0 1` 把测量结束位 EOM 汇总到这一位），
   奇数是测完了。每次开测前驱动先读状态，「测完了」就发复位命令（`acknowledge`：清缓冲区 / `*CLS`）再测——
@@ -119,20 +102,20 @@ EOF
 | `:READ? "defbuffer1"` | 动作命令：测一次、存进 defbuffer1、回读数 |
 | `:OUTP OFF` | 测完断开 |
 
-就绪查询 `*LANG?` 必须回 `SCPI`：2450 出厂是 SCPI 命令集，被人改成 TSP / SCPI2400 后这份模板的命令全报错，健康检查
+就绪查询 `*LANG?` 必须回 `SCPI`：2450 出厂是 SCPI 命令集，被人改成 TSP / SCPI2400 后这份配置的命令全报错，健康检查
 报「不接受指令」，ILCS 不投递动作指令（在前面板 MENU → System → Settings → Command Set 改回 SCPI，仪表重启）。
-设成 SCPI2400 的 2450 可以改用 2400 的模板（通道 TCP 5025、结束符 LF）。
+设成 SCPI2400 的 2450 可以改用 2400 的配置（通道 TCP 5025、结束符 LF）。
 
 ### Keithley 2400（`profile-keithley-2400.json`）
 
-和 2450 一样源 0 A、四线测电压，命令换成 2400 的写法：`:OUTP:SMOD HIMP`、`:SOUR:CLE:AUTO OFF`（不用自动关断，输出由模板
+和 2450 一样源 0 A、四线测电压，命令换成 2400 的写法：`:OUTP:SMOD HIMP`、`:SOUR:CLE:AUTO OFF`（不用自动关断，输出由配置
 自己开关）、`:SOUR:CURR:MODE FIX`、`:SOUR:CURR:LEV 0`、`:SENS:FUNC:CONC OFF` + `:SENS:FUNC "VOLT"`（只测电压）、
 `:SENS:VOLT:PROT 10`（电压限值，即 compliance）、`:SENS:VOLT:RANG 20`、`:SYST:RSEN ON`、`:FORM:ELEM VOLT`（读数串只有电压）、
 `:TRIG:COUN 1`、`:ARM:COUN 1`。2400 输出关着（又没开自动关断）时 `:READ?` 报 +803、不测，所以先开输出。
 
 「测完了」看数据缓冲区：每次开测前 `:TRAC:FEED:CONT NEV` → `:TRAC:CLE` → `:TRAC:FEED SENS` → `:TRAC:POIN 1` →
 `:TRAC:FEED:CONT NEXT`，`:READ?` 的读数随之存进去（存满 1 个就停）。存储进行中改 `:TRACe:FEED` 会报 +800（Illegal with storage active），所以先停再改、
-最后再开。RS-232 没有流控（出厂 NONE），模板在每条命令之间隔 20 ms（`inter_command_delay_ms`），不让仪表的输入缓冲溢出。
+最后再开。RS-232 没有流控（出厂 NONE），配置在每条命令之间隔 20 ms（`inter_command_delay_ms`），不让仪表的输入缓冲溢出。
 
 ### Hioki BT3562 系列（`profile-hioki-bt3562.json`）
 
@@ -157,21 +140,22 @@ mΩ 档测电压时仪表的输入阻抗约 90 kΩ（说明书规格），对锂
    - 2450：前面板设好 LAN 地址；命令集 SCPI（见上）。原始套接字端口 5025（手册：23 Telnet、1024 VXI-11、5025 原始套接字、
      5030 断开死连接）。同一时刻只能有一个连接控制仪表：别让别的软件（KickStart 之类）同时连着。
    - 2400：MENU → COMMUNICATION → RS-232：9600、8 位、无校验、结束符 CR、流控 NONE（出厂就是这些）。用直通线
-     （不是交叉线）接串口服务器或电脑。改了波特率、结束符，模板与连接参数跟着改（`write_terminator` / `read_terminator`）。
+     （不是交叉线）接串口服务器或电脑。改了波特率、结束符，配置与连接参数跟着改（`write_terminator` / `read_terminator`）。
    - Hioki BT356xA：仪器上选 LAN 接口，用浏览器打开仪器地址设 IP（出厂 192.168.1.1 / 255.255.0.0，命令端口 23）。
      BT3562 / BT3563：仪器上选 RS-232C 与波特率（9600 / 19200 / 38400），8N1，CR+LF，用交叉线。
-2. **连接参数**（工位「设备连接」里套用模板时填，模板里是示例）：
+2. **连接参数**（驱动宿主设备文件的 `config` 里填，profile 的 `connection` 是示例）：
    - TCP：`{"transport": {"kind": "tcp", "host": "10.20.1.51", "port": 5025}}`（Hioki 端口 23）；
    - 串口服务器：`{"transport": {"kind": "serial", "port": "rfc2217://moxa-01.lab.internal:4001", "baudrate": 9600}}`，
      串口服务器在 TCP 服务器（原始）模式时写 `socket://主机:端口`；本机串口 `/dev/ttyUSB0`、`/dev/serial/by-id/…`、`COM3`；
    - Hioki RS-232C：同上，另加 `"baudrate": 9600`；
-   - `expected_device_id`：Keithley 填 `*IDN?` 第三段的序列号（防接错仪表）；Hioki 不填。
-   - 主机要在 `ILCS_ADAPTER_ALLOWED_HOSTS` 白名单里（设备网段写成网段即可）。
-3. **导入、发布、套用**：「工位与接入 → 接入模板」导入 profile 成草稿，核对后由另一个人签名发布；工位「设备连接」选模板、
-   填连接参数、签名保存；保存后自动跑只读级接入验收。第一次接真仪表还要动作级验收（签名 + 现场批准人）：
-   **夹具上先放一颗参考电芯**（或标准电阻 + 稳定电压源的假电池），验收会真的测一次。
+   - 主机要在驱动宿主 `host.json` 的 `allowed_hosts` 里（设备网段写成网段即可）。
+3. **放进驱动宿主、ILCS 接工位**：设备文件放进驱动宿主的现场目录、重启驱动宿主（`--check` 先核一遍配置）；ILCS 工位
+   「设备连接」选 `sila2_v1`，填驱动宿主的地址、这台设备的 SiLA 端口、证书、令牌，`expected_device_id` 填 Keithley `*IDN?`
+   第三段的序列号（防接错仪表；Hioki 不填），签名保存；保存后自动跑只读级接入验收，驱动宿主报的驱动配置随验收批准。
+   第一次接真仪表还要动作级验收（签名 + 现场批准人）：**夹具上先放一颗参考电芯**（或标准电阻 + 稳定电压源的假电池），
+   验收会真的测一次。
 4. **可选：夹具盖联锁。** 现场把夹具盖开关接到 Keithley 后面板联锁、仪表上 Interlock 设成 On 时，盖子开着打不开输出，
-   模板在开输出之后的查错里就判明确失败。想在启动前（健康检查）就看到联锁，给模板加一段（两台的 `TRIPped?` 都是 1 = 联锁接通）：
+   配置在开输出之后的查错里就判明确失败。想在启动前（健康检查）就看到联锁，给配置加一段（两台的 `TRIPped?` 都是 1 = 联锁接通）：
 
    ```json
    "interlock": {"send": ":OUTP:INT:TRIP?", "pattern": "^(?P<value>[01])$", "ok": ["1"]}
@@ -193,20 +177,20 @@ mΩ 档测电压时仪表的输入阻抗约 90 kΩ（说明书规格），对锂
   ```
 
 - **指标**：例如 `cell_ocv`「电芯开路电压」单位 V、`cell_acir`「电芯交流内阻（1 kHz）」单位 mΩ。ILCS 不换算单位：
-  设备方法输出项的单位要与指标的标准单位一致，所以模板直接报 V 与 mΩ。
+  设备方法输出项的单位要与指标的标准单位一致，所以配置直接报 V 与 mΩ。
 - **设备方法**（适用型号写工位资产的型号）：Keithley 的「开路电压」程序 `OCV`，输出项
   `{"key": "ocv_V", "label": "开路电压", "unit": "V", "lo": 2.5, "hi": 4.4, "required": true}`；Hioki 的「交流内阻 + 开路电压」
   程序 `ACIR-OCV`，再加 `{"key": "ir_mohm", "label": "交流内阻", "unit": "mΩ", "lo": 0, "hi": 100, "required": true}`。
   上下限按电芯规格写：**越界照常入库、打标、报警**，空夹具、没压好的读数靠它挡住。输出项关联指标（`metric_id`）之后，
-  读数按样本写成「设备回报」检测结果，进数据审核。程序名只是目录登记，模板的命令里没有用到 `{program}`。
+  读数按样本写成「设备回报」检测结果，进数据审核。程序名只是目录登记，配置的命令里没有用到 `{program}`。
 - **工位**：1 个通道，能力极限 `{"cap.cell_check": {}}`；资产型号写仪表自报的型号（2450、2400、BT3562A……），
   否则「读取设备方法目录」时报型号不一致。一台仪表一个工位。
-- **流程**：**一条检测指令测一颗电芯。** 检测步骤所在的批次只放一颗电芯（或按电芯拆批）：映射驱动回的是批次级读数，
+- **流程**：**一条检测指令测一颗电芯。** 检测步骤所在的批次只放一颗电芯（或按电芯拆批）：映射插件回的是批次级读数，
   一个批次有几颗电芯时 ILCS 会把同一个读数记到每颗上（并打「批次级读数」标记）——不要这样用。
 
-## 映射驱动做不到的、要知道的
+## 映射插件做不到的、要知道的
 
-- **一次一颗。** `line_command_v1` 不接逐孔位参数、也不按孔位回报（`delivered.wells`）。多工位夹具 + 外接扫描开关
+- **一次一颗。** 检测步骤没有逐孔参数（矩阵条件才有），`line_command` 插件一条指令只测一颗、回一个读数。多工位夹具 + 外接扫描开关
   （多路切换器）要写一个网关模块（`ilcs_gateway`），在网关里逐个通道切换、测量、按孔位回报。
 - **实测值不能换算单位。** 驱动的实测值没有系数；Hioki 的 mΩ 靠固定 mΩ 档 + 正则取尾数，Keithley 直接是 V。
 - **Keithley 没有接触检查。** 夹具空着、探针没压上时 0 A 源下的电压读数不可信（可能飘到电压限值附近或接近 0 V），
@@ -223,11 +207,11 @@ mΩ 档测电压时仪表的输入阻抗约 90 kΩ（说明书规格），对锂
   约 1–2 s。串口服务器那一口只接这台仪表、只有 ILCS 连它时可以改 `keep_open: true`（但接入验收会同时开几个驱动实例，
   串口服务器要允许多个连接）。
 - **继电器寿命。** HIMP 关断状态下每测一次输出继电器吸合、断开各一次；两台 Keithley 的手册都提醒频繁开关不要用 HIMP。
-  节拍很快的产线可以权衡改成测量期间一直开着输出（源 0 A），改模板前与现场一起评估。
+  节拍很快的产线可以权衡改成测量期间一直开着输出（源 0 A），改配置前与现场一起评估。
 
 ## 模拟仪表
 
-`simulator/server.py` 起一台假仪表，走真实的文本命令协议，ILCS 照常用 `line_command_v1` 连：
+`simulator/server.py` 起一台假仪表，走真实的文本命令协议，驱动宿主照常用 `line_command` 插件连（ILCS 经 sila2_v1 接驱动宿主）：
 
 ```bash
 api/.venv/bin/python devices/gateway/scpi-cell-meter/simulator/server.py --model keithley-2450 --port 5025
@@ -269,7 +253,7 @@ SIM_CONTROL_PORT=9900 api/.venv/bin/python devices/gateway/scpi-cell-meter/simul
 | 同惠 TH2523/A Operation Manual Ver1.2：<https://nippon-sokki.vn/assets/tenant/uploads/media-uploader/sokki/pdf_full/tonghuith2523-may-do-dien-tro-thap-ac-tonghui-th2523-3ko-69168_2.pdf> | 确认命令有、回复格式没写（所以没做） | 常州同惠版权；只读 |
 | PyMeasure（`pymeasure/instruments/keithley/keithley2450.py`、`keithley2400.py`）：<https://github.com/pymeasure/pymeasure> | 命令拼写与参数（`:OUTP:CURR:SMOD`、`:SOUR:CURR:VLIM`、`:SOUR:CLE:AUTO`、`:SYST:RSEN`、关断状态的四种取值） | MIT |
 | QCoDeS（`src/qcodes/instrument_drivers/Keithley/Keithley_2450.py`、`Keithley_2400.py`）：<https://github.com/microsoft/Qcodes> | `:TRACe:ACTual?` / `:TRACe:CLEar` / `:FETCh?` 带缓冲区名的写法、`*LANG?` 判命令集、2450 测量要先开输出、2400 输出关着读电压会报错 | MIT |
-| SweepMe! instrument-drivers（`src/SMU-Keithley_2450`）：<https://github.com/SweepMe/instrument-drivers> | 对照看过（它也先查 `*LANG?`），模板没有用它的写法 | MIT |
+| SweepMe! instrument-drivers（`src/SMU-Keithley_2450`）：<https://github.com/SweepMe/instrument-drivers> | 对照看过（它也先查 `*LANG?`），配置没有用它的写法 | MIT |
 
 只读了上面这些资料、没有拷代码；labdrivers 没有查。
 
@@ -282,7 +266,7 @@ SIM_CONTROL_PORT=9900 api/.venv/bin/python devices/gateway/scpi-cell-meter/simul
   `:TRAC:POIN:ACT?` 与正数错误码（`+802` 还是 `802`）的回复写法（正则两种都认）；9600 波特、20 ms 命令间隔下不丢命令；
   `:OUTP?` 回 1 / 0。
 - [ ] **Hioki**：`*STB?` 在 `:ESE0 1` 之后测完一笔是奇数、`*CLS` 后变偶数（MAV 位 16 带不带都认）；非 A 型号（BT3562 / BT3563）
-  认模板里的每一条命令（`*ESR?` 是 0）；实机读数的空格补位与正则；LAN 口是否只允许一个连接。
+  认配置里的每一条命令（`*ESR?` 是 0）；实机读数的空格补位与正则；LAN 口是否只允许一个连接。
 - [ ] 三台：请求超时 5 s 够不够（中速 + 平均次数、NPLC 调大时要加大）；动作级验收用的参考电芯读数与仪表面板一致。
 - [ ] 电芯规格定下来后填设备方法输出项的上下限；量程（Hioki 30 mΩ / 3 mΩ 档、Keithley 2 V 档）按规格收窄。
 - [ ] 模块还没登记进 `devices/gateway/README.md` 的模块表（不在本模块目录里，另行补）。

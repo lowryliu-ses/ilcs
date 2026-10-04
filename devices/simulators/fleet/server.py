@@ -1,4 +1,4 @@
-"""ILCS AGV 车队模拟设备：按 MiR 机器人 REST API（v2.0.0）的常用子集模拟几台 AGV，系统侧用 `rest_map_v1` 接入。
+"""ILCS AGV 车队模拟设备：按 MiR 机器人 REST API（v2.0.0）的常用子集模拟几台 AGV，系统侧经驱动宿主的 `rest_map` 插件接入。
 
 每台 AGV 一个前缀 `/robots/<名称>/api/v2.0.0`（真实现场每台 MiR 各有自己的地址，这里用前缀区分）：
 

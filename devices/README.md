@@ -1,18 +1,18 @@
 # 设备侧
 
-ILCS 进程之外、设备那一侧的东西都在这里。ILCS 自己的驱动（主动去连设备的一端）不在这里，在
-`api/app/adapters/`：框架层（驱动契约、回执解读、作业台账、注册表、驱动目录、接入验收）+ `drivers/`（每种协议一个驱动）。
+ILCS 进程之外、设备那一侧的东西都在这里。ILCS 自己只经两个契约接设备（`api/app/adapters/drivers/` 的 `sila2_v1`、
+`http_json_v1`，外加内置模拟）；连 PLC、仪表、车队的协议驱动都在这里的驱动宿主 `host/` 里。
 
 | 目录 | 是什么 | 谁用 |
 |---|---|---|
-| [`contracts/`](contracts/) | 设备侧任务契约：设备要实现成什么样 ILCS 才接得上。`sila2/`（SiLA 2 特性；[README](contracts/sila2/README.md) 是只经 SiLA 接设备的契约草案）、`opcua/`（节点与方法）、`modbus/`（任务寄存器表） | 驱动与模拟设备读同一份定义；交给设备厂家 |
-| [`simulators/`](simulators/README.md) | 外部模拟设备：独立进程、走真实协议，每种驱动都有；`pilot-devices.json` 是试点工位接到它们的连接配置 | `docker compose --profile pilot`、`scripts/configure-pilot-adapters.py`、测试 |
+| [`contracts/`](contracts/) | 设备侧任务契约：设备要实现成什么样 ILCS 才接得上。`sila2/`（SiLA 2 特性；[README](contracts/sila2/README.md) 是只经 SiLA 接设备的契约）、`opcua/`（节点与方法）、`modbus/`（任务寄存器表） | 驱动宿主的插件、模拟设备读同一份定义；交给设备厂家 |
+| [`simulators/`](simulators/README.md) | 外部模拟设备：独立进程、走真实协议，驱动宿主的每类插件都有；`pilot-devices.json` 是试点工位接到 SiLA / 网关模拟设备的连接配置 | `docker compose --profile pilot`、`scripts/configure-pilot-adapters.py`、测试 |
 | [`gateway/`](gateway/README.md) | 设备网关：网关 SDK `ilcs_gateway`（厂家只给 SDK / DLL、私有协议的设备，用它包成 `http_json_v1` 网关，只写启动、读状态、停止）+ 设备模块（一台（一类）设备一个交付目录：驱动、假 SDK、`profile.json`、测试、部署文件；样板 `sample-cycler`） | 设备开发者；`scripts/new-device-module.py` 从样板生成新模块；HTTPS 网关模拟设备（`simulators/http_gateway`）也基于这个 SDK |
-| [`host/`](host/README.md) | 驱动宿主（驱动项目的第一块）：一个进程托管多台设备，每台一个 SiLA 2 服务；协议插件是从 ILCS 抽出的映射驱动（Modbus / OPC UA / REST），配置写法不变 | ILCS 用 `sila2_v1` 连它；`sites/<现场>` 是各现场的设备配置 |
+| [`host/`](host/README.md) | 驱动宿主：一个进程托管多台设备，每台一个 SiLA 2 服务；协议插件（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令，[插件配置](host/插件配置.md)）从 ILCS 抽出，配置写法不变 | ILCS 用 `sila2_v1` 连它；`sites/<现场>` 是各现场的设备配置 |
 | [`connectors/`](connectors/result_files/README.md) | 设备侧连接器：`result_files/` 盯住检测软件的导出目录，把结果文件回传 ILCS（只取数，不启动设备）；[`environment/`](connectors/environment/README.md) 按周期读手套箱水氧等传感器、上报环境读数 | `docker compose --profile results` / `--profile environment` |
 
 证书、令牌这类运行时文件不放这里，放仓库根目录的 `secrets/`（不进仓库）：compose 挂进容器的是
-`secrets/<sila|opcua|gateway|fleet|simctl>/`，本机直接跑模拟设备时缺省写到 `secrets/local/<类别>/`。
+`secrets/<sila|gateway|simctl|host>/`（`host/` 是驱动宿主的证书与令牌），本机直接跑模拟设备时缺省写到 `secrets/local/<类别>/`。
 
 `simulators`、`connectors` 两个 Python 包以本目录为根（`from simulators.common.device import …`），和 `api/` 是
 `app` 包的根一样；`gateway/` 是 `ilcs_gateway` 包的根。

@@ -107,7 +107,7 @@
 | 第三批 | 多载具并行、未绑定角色不顶替 | EXT `test_steps_on_different_plates_run_in_parallel`、`test_step_cannot_borrow_the_main_plate_for_an_unbound_role` | 通过 |
 | 第三批 | 分支 / 回环滚动排程、承诺与预测窗口 | EXT `test_branch_downstream_is_forecast_until_decided_then_rolled` | 通过 |
 | 第三批 | 执行器多实例 | `tests/api/test_concurrent_executor.py::test_only_one_executor_process_dispatches_at_a_time` | 通过。执行器本来就以会话级 advisory lock 单活，API 不投递指令 |
-| 第三批 | 与真实设备联合验收 | 手工 | **未执行**：需要真实设备到位；协议模拟器上的联调用例（`test_multi_protocol_pilot.py`、`test_sila2_pilot.py`）通过 |
+| 第三批 | 与真实设备联合验收 | 手工 | **未执行**：需要真实设备到位；协议模拟器上的联调用例（devices/host/tests 的插件测试、`test_device_acceptance.py` 经驱动宿主跑的完整验收清单、`test_sila2_pilot.py`）通过 |
 
 ## 待业务决策（原文 DEC 段）仍未关闭的项
 

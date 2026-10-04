@@ -18,7 +18,7 @@ ILCS 自己的驱动（主动去连设备的一端）不在这里，在 `api/app
 
 ```
 devices/gateway/<厂家-型号>/
-  driver/        真实接口：调厂家 SDK 或协议，只写启动、读状态、停止（能用映射驱动的设备没有这一层）
+  driver/        真实接口：调厂家 SDK 或协议，只写启动、读状态、停止（能用驱动宿主映射插件的设备没有这一层）
   simulator/     模拟接口：和厂家 SDK 同一组方法的「假 SDK」，带故障注入（丢回执、忙、联锁、失联）
   gateway.py     入口：--simulate 用模拟接口，否则连真实的厂家 SDK
   profile.json   ILCS 侧登记：设备接入模板文件（ilcs-device-template/1），在「工位与接入 → 接入模板」导入
@@ -39,7 +39,7 @@ devices/gateway/<厂家-型号>/
 | [raman-seabreeze](raman-seabreeze/) | 拉曼光谱仪（Ocean Insight） | python-seabreeze（USB），谱图回报成曲线 |
 | [thermostat](thermostat/) | 恒温循环器 / 冷水机（Huber / Julabo / LAUDA，配置里选）+ 可选的 IKA 板做制冷搅拌 | Huber PB 命令、Julabo、LAUDA 命令集，串口或网口；板子走 NAMUR |
 | [potentiostat](potentiostat/) | 电化学工作站（第一个后端 PalmSens EmStat4 / EmStat Pico / Nexus）：电导池 EIS 电导率、LSV 电化学窗口、CV、OCP、CA | MethodSCRIPT（USB 虚拟串口或网口），曲线 + 派生指标；别的品牌按 `driver/backend.py` 加后端 |
-| [scpi-cell-meter](scpi-cell-meter/) | 电芯开路电压 / 交流内阻：Keithley 2450、2400 SourceMeter（OCV），Hioki BT3561A–63A / BT3562 / BT3563（1 kHz ACIR + OCV） | 映射模块：三份 `profile-*.json` 走内置 `line_command_v1`（SCPI，LAN 或 RS-232），没有网关代码 |
+| [scpi-cell-meter](scpi-cell-meter/) | 电芯开路电压 / 交流内阻：Keithley 2450、2400 SourceMeter（OCV），Hioki BT3561A–63A / BT3562 / BT3563（1 kHz ACIR + OCV） | 映射模块：三份 `profile-*.json` 是驱动宿主 `line_command` 插件的设备配置（SCPI，LAN 或 RS-232），没有网关代码 |
 
 Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices/connectors/result_files`，`format: "neware"`）。
 
@@ -53,7 +53,7 @@ Neware 的 .nda / .ndax 充放电数据由结果文件接收器解析（`devices
 
 | 设备给的接口 | 模块里有什么 | ILCS 侧驱动 |
 |---|---|---|
-| 串口 / TCP 文本命令、Modbus 点表、OPC UA 节点、REST | 只有 `profile.json`（映射配置）+ 模拟设备 + 测试，不写代码 | 现有映射驱动（`line_command_v1` 等） |
+| 串口 / TCP 文本命令、Modbus 点表、OPC UA 节点、REST | 只有 profile（驱动宿主的设备配置）+ 模拟设备 + 测试，不写代码 | `sila2_v1` 接驱动宿主，映射由驱动宿主的插件（`line_command` 等）执行 |
 | 厂家 SDK / DLL、私有协议、逻辑复杂 | `driver/` + `simulator/` + `gateway.py`，基于本目录的 `ilcs_gateway` | `http_json_v1`（本模块起的网关） |
 
 第二种的网关是一个独立服务：挂了只影响这一台（ILCS 判它失联、进待命列表），其他工位照常；升级只重启这个服务，ILCS 不动。

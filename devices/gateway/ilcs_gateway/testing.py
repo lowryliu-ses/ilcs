@@ -23,19 +23,19 @@ def _ilcs_api() -> Path:
 
 
 @contextmanager
-def _ilcs_settings(credential_root: Path, state_root: Path):
+def _ilcs_settings(credential_root: Path):
     api = str(_ilcs_api())
     if api not in sys.path:
         sys.path.insert(0, api)
     from app.core.config import settings
 
-    saved = settings.adapter_credential_root, settings.adapter_state_root, settings.adapter_allowed_hosts
-    settings.adapter_credential_root, settings.adapter_state_root = str(credential_root), str(state_root)
-    settings.adapter_allowed_hosts = ",".join([saved[2], "127.0.0.1", "localhost"])
+    saved = settings.adapter_credential_root, settings.adapter_allowed_hosts
+    settings.adapter_credential_root = str(credential_root)
+    settings.adapter_allowed_hosts = ",".join([saved[1], "127.0.0.1", "localhost"])
     try:
         yield
     finally:
-        settings.adapter_credential_root, settings.adapter_state_root, settings.adapter_allowed_hosts = saved
+        settings.adapter_credential_root, settings.adapter_allowed_hosts = saved
 
 
 def acceptance(base_url: str, *, token_file: str | Path, ca_file: str | Path | None = None, capability: str,
@@ -43,11 +43,10 @@ def acceptance(base_url: str, *, token_file: str | Path, ca_file: str | Path | N
                timeout: float = 15.0, state_root: str | Path | None = None, supports: dict[str, bool] | None = None):
     """返回 ILCS 的验收报告（`app.adapters.acceptance.Report`）。`token_file`、`ca_file` 要在同一个目录里。
 
-    `supports` 与 profile.json 的同名字段一致（如 `{"hold": False}`）：声明不支持的项目验收记为跳过，缺省全支持。"""
+    `supports` 与 profile.json 的同名字段一致（如 `{"hold": False}`）：声明不支持的项目验收记为跳过，缺省全支持。
+    `state_root` 只为兼容老模块保留：ILCS 的 `http_json_v1` 不记作业台账，用不到它。"""
     token_file = Path(token_file)
-    credential_root = token_file.parent
-    state = Path(state_root) if state_root else credential_root / "ilcs-ledger"
-    with _ilcs_settings(credential_root, state):
+    with _ilcs_settings(token_file.parent):
         from app.adapters.acceptance import AcceptanceRecord, SimulatorControlInjector, run_acceptance
         from app.adapters.base import CommandRequest
         from app.adapters.drivers.http_json import HttpJsonAdapter

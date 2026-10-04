@@ -220,7 +220,7 @@ function TemplateDialog({
   useEffect(() => {
     if (form || (templateId && !row)) return;
     setForm({
-      code: row?.code ?? '', name: row?.name ?? '', driver: row?.driver ?? 'line_command_v1', model: row?.model ?? '',
+      code: row?.code ?? '', name: row?.name ?? '', driver: row?.driver ?? 'http_json_v1', model: row?.model ?? '',
       vendor: row?.vendor ?? '', protocol: row?.protocol ?? '', version: row?.version ?? '', note: row?.note ?? '',
     });
     setConfig(row?.config ?? {});

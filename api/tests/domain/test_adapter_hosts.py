@@ -101,16 +101,15 @@ def test_drivers_accept_new_devices_inside_the_allowed_network(monkeypatch):
     """新设备落在已放行的网段里：驱动直接接受，不用改白名单、不用重启。"""
     from app.adapters.base import AdapterError
     from app.adapters.http_client import HttpTransport
-    from app.adapters.drivers.line_command import LineTransport
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "10.20.1.0/24,.lab.internal")
     HttpTransport({"base_url": "https://10.20.1.45:8443/api/v1"}, "", driver="http_json_v1")
-    LineTransport({"transport": {"kind": "tcp", "host": "oven-07.lab.internal", "port": 4001}})
+    HttpTransport({"base_url": "https://gw-07.lab.internal/api/v1"}, "", driver="http_json_v1")
     with pytest.raises(AdapterError, match="白名单"):
         HttpTransport({"base_url": "https://10.20.2.45:8443/api/v1"}, "", driver="http_json_v1")
     with pytest.raises(AdapterError, match="白名单"):
-        LineTransport({"transport": {"kind": "tcp", "host": "oven-07.other.internal", "port": 4001}})
+        HttpTransport({"base_url": "https://gw-07.other.internal/api/v1"}, "", driver="http_json_v1")
 
 
 def test_http_paths_cannot_leave_the_base_url_host(monkeypatch):
@@ -120,7 +119,7 @@ def test_http_paths_cannot_leave_the_base_url_host(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "10.20.1.0/24")
-    transport = HttpTransport({"base_url": "https://10.20.1.45:8443/api/v1"}, "", driver="rest_map_v1")
+    transport = HttpTransport({"base_url": "https://10.20.1.45:8443/api/v1"}, "", driver="http_json_v1")
     assert transport.url("/jobs/{id}", {"id": "a/b"}) == "https://10.20.1.45:8443/api/v1/jobs/a%2Fb"
     assert transport.url("//jobs") == "https://10.20.1.45:8443/api/v1/jobs"
     for path in ("https://evil.example/steal", "http://10.20.1.45:8443/api/v1/x", "https://10.20.1.45:9443/x",

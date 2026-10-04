@@ -1,4 +1,4 @@
-"""设备侧 HTTP 通道：`http_json_v1`（ILCS 网关契约）与 `rest_map_v1`（设备自有 REST 接口）共用。
+"""设备侧 HTTP 通道：`rest_map` 插件（设备自有 REST 接口）用；从 ILCS 的同名模块抽出。
 
 - 主机必须在驱动宿主的 `allowed_hosts` 白名单；正式环境只允许 HTTPS 且必须校验证书；
 - 不读 `HTTP(S)_PROXY`（代理会把设备流量绕到白名单之外），不跟随重定向（30x 可以把带凭据的请求

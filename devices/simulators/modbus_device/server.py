@@ -1,7 +1,7 @@
 """ILCS Modbus TCP 模拟设备。
 
 在系统外部独立运行，按 `devices/contracts/modbus/TaskRegisters.json` 暴露任务寄存器，外加仅模拟器才有的故障
-注入寄存器与状态诊断区。系统侧用 `modbus_tcp_v1` 驱动接入，和接一台 PLC 走同一条路。
+注入寄存器与状态诊断区。系统侧经驱动宿主的 `modbus_task` 插件接入，和接一台 PLC 走同一条路。
 
     python devices/simulators/modbus_device/server.py --device-id SIM-VAC-01 --port 5020
 

@@ -162,9 +162,11 @@ def prepare(admin: Actor, operator: Actor) -> None:
     arm_driver = "内置模拟适配器"
     if "ARM-01" not in stations:
         adapter = {"protocol": "UR 仪表盘服务（TCP 命令）", "adapter_version": "5.12"}
-        if PILOT_DEVICES:
+        preset = None
+        if PILOT_DEVICES:  # 预设里登记了 ARM-01 接哪台设备才接；没有（串口命令驱动已移出 ILCS）就用内置模拟
             with open(PILOT_DEVICES, encoding="utf-8") as handle:
-                preset = json.load(handle)["stations"]["ARM-01"]
+                preset = json.load(handle)["stations"].get("ARM-01")
+        if preset:
             adapter = {
                 "protocol": preset["protocol"], "adapter_version": "5.12", "adapter_kind": "real",
                 "adapter_driver": preset["driver"], "adapter_config": preset["config"],

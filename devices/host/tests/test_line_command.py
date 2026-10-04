@@ -113,3 +113,49 @@ def test_text_command_device_runs_through_the_host(tmp_path):
             assert _refused(lambda: _submit(c, "CMD-I", {"temp": 120, "vacuum": 1})) == "Interlocked"
             runner.device.set_fault("none")
             assert sum(runner.device.executions.values()) == 3
+
+
+@contextmanager
+def wrong_mode_instrument():
+    """一台被切到别的命令集的仪表：身份、就绪查询照答（就绪回 TSP），状态查询不回话。"""
+    import socketserver
+    import threading
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            for raw in self.rfile:
+                text = raw.decode().strip()
+                reply = {"*IDN?": "KEITHLEY INSTRUMENTS,MODEL 2450,04512345,1.7.12b", "*LANG?": "TSP"}.get(text)
+                if reply is not None:
+                    self.wfile.write((reply + "\n").encode())
+
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_device_that_refuses_commands_is_not_reported_unreachable(tmp_path):
+    """就绪查询说不接指令时，状态查询答不上：报「不接指令、状态说不清」，不报连不上（否则 ILCS 当失联处理，原因说错）。"""
+    with wrong_mode_instrument() as port:
+        device = {"plugin": "line_command", "port": free_port(), "simulator": False,
+                  "supports": {"hold": False, "abort": False, "query": True, "dedup": True},
+                  "config": {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": port}, "request_timeout_sec": 0.5,
+                             "connect_timeout_sec": 0.5, "write_terminator": "\n", "read_terminator": "\n",
+                             "identity": {"send": "*IDN?", "pattern": "^(?P<vendor>[^,]*),MODEL (?P<model>[^,]*),(?P<serial>[^,]*),"},
+                             "ready": {"send": "*LANG?", "pattern": "^(?P<value>\\w+)$", "ok": ["SCPI"]},
+                             "status": {"send": ":TRAC:ACT? \"defbuffer1\"", "pattern": "^(?P<state>\\d+)$",
+                                        "states": {"0": "idle"}},
+                             "capabilities": {"cap.cell_check": {"start": [{"send": ":READ?", "motion": True}]}}}}
+        with running_host(write_site(tmp_path, {"K2450": device})):
+            c = client(device["port"])
+            status = c.DeviceInfo.Status.get(metadata=token(c))
+            assert (status.AcceptsCommands, status.State) == (False, "unknown")
+

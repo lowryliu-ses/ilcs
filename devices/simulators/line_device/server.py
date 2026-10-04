@@ -1,6 +1,6 @@
-"""ILCS 文本命令模拟设备：串口 / TCP 一问一答的仪器，系统侧用 `line_command_v1` 驱动接入。
+"""ILCS 文本命令模拟设备：串口 / TCP 一问一答的仪器，系统侧经驱动宿主的 `line_command` 插件接入。
 
-两种方言（`--dialect`），都不认识 ILCS 指令号——那正是 `line_command_v1` 要解决的问题：
+两种方言（`--dialect`），都不认识 ILCS 指令号——那正是 `line_command` 插件要解决的问题：
 
 - `oven`：真空干燥箱温控仪表（示例命令手册，经串口服务器转 TCP）
 

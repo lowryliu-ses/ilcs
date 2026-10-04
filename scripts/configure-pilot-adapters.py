@@ -47,7 +47,7 @@ from app.services.acceptance_service import after_config_change  # noqa: E402
 FIELDS = ("kind", "driver", "protocol", "version", "config", "credential_ref", "supports_hold",
           "supports_abort", "supports_query", "supports_dedup", "note")
 SECRETS = "/run/secrets/ilcs"
-PROTOCOLS = {"sila2_v1": "SiLA 2", "modbus_tcp_v1": "Modbus TCP", "opcua_v1": "OPC UA", "http_json_v1": "HTTPS JSON"}
+PROTOCOLS = {"sila2_v1": "SiLA 2", "http_json_v1": "HTTPS JSON"}
 COMMON = {"request_timeout_sec": 10, "probe_interval_sec": 10}
 
 
@@ -56,25 +56,12 @@ def _connection(driver: str, host: str, port: int, device_id: str, station: Stat
     if driver == "sila2_v1":
         return {"host": host, "port": port, "ca_file": f"{SECRETS}/sila/{device_id}.crt",
                 "expected_device_id": device_id, **COMMON}, ""
-    if driver == "modbus_tcp_v1":
-        capabilities = sorted(station.limits or {})
-        params = sorted({name for cap in capabilities for name in (station.limits[cap] or {})})
-        if len(params) > 16:
-            raise SystemExit(f"{station.id} 有 {len(params)} 个参数，超过 Modbus 任务寄存器的 16 个槽位")
-        return {"host": host, "port": port, "unit_id": 1, "expected_device_id": device_id, **COMMON,
-                "capabilities": {cap: index for index, cap in enumerate(capabilities, start=1)},
-                "params": {name: index for index, name in enumerate(params, start=1)}}, ""
-    if driver == "opcua_v1":
-        return {"endpoint": f"opc.tcp://{host}:{port}/ilcs/", "security_policy": "Basic256Sha256",
-                "security_mode": "SignAndEncrypt", "server_certificate": f"{SECRETS}/opcua/{device_id}.crt",
-                "application_uri": "urn:ilcs:client", "expected_device_id": device_id, **COMMON}, \
-            f"file://{SECRETS}/opcua/ilcs-client.json"
     if driver == "http_json_v1":
         # 网关模拟设备不推心跳：改成由执行器读 /health 探测
         return {"base_url": f"https://{host}:{port}/api/v1", "ca_file": f"{SECRETS}/gateway/{device_id}.crt",
                 "expected_device_id": device_id, "heartbeat_mode": "probe", **COMMON}, \
             f"file://{SECRETS}/gateway/{device_id}.token"
-    raise SystemExit(f"不支持的试点驱动 {driver}；可选 {', '.join(PROTOCOLS)}")
+    raise SystemExit(f"不支持的试点驱动 {driver}；可选 {', '.join(PROTOCOLS)}（协议驱动在驱动宿主里，工位用 sila2_v1 接）")
 
 
 def _lock(db, station_ids) -> None:
@@ -112,15 +99,13 @@ def _audit(db, station: Station, action: str, before: dict, after: dict) -> None
 
 
 def hosts_of(config) -> set[str]:
-    """配置里引用的全部设备主机：host、endpoint / base_url 的主机名、网络串口地址。"""
+    """配置里引用的全部设备主机：host、endpoint / base_url / url 的主机名。"""
     hosts: set[str] = set()
     if isinstance(config, dict):
         for key, value in config.items():
             if key == "host" and isinstance(value, str):
                 hosts.add(value.lower())
             elif key in {"endpoint", "base_url", "url"} and isinstance(value, str):
-                hosts.add((urlparse(value).hostname or "").lower())
-            elif key == "port" and isinstance(value, str) and "://" in value:
                 hosts.add((urlparse(value).hostname or "").lower())
             else:
                 hosts |= hosts_of(value)

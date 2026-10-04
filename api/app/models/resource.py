@@ -135,7 +135,7 @@ class Adapter(Base):
     __tablename__ = "adapters"
     station_id: Mapped[str] = mapped_column(ForeignKey("stations.id"), primary_key=True)
     protocol: Mapped[str] = mapped_column(String)
-    # driver 是代码注册键（如 simulation / modbus_tcp）；protocol 是给人看的协议名称。
+    # driver 是代码注册键（simulation / sila2_v1 / http_json_v1）；protocol 是给人看的协议名称。
     driver: Mapped[str] = mapped_column(String, default="simulation")
     version: Mapped[str] = mapped_column(String, default="")
     config: Mapped[dict] = mapped_column(JSON, default=dict)

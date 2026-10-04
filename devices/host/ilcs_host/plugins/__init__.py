@@ -3,7 +3,7 @@
 - 映射插件（`modbus_map`、`opcua_map`、`rest_map`、`line_command`）：设备不认识 ILCS 指令号，插件记作业台账；
 - 任务契约插件（`modbus_task`、`opcua_task`）：设备按 ILCS 任务契约编程，指令号、去重、查询都在设备侧。
 
-和 ILCS 那份的差别只有两处：配置项读驱动宿主的 `settings`；明确失败带 SiLA 错误码（`AdapterError.code`）。
+从 ILCS 抽出时只改了两处：配置项读驱动宿主的 `settings`；明确失败带 SiLA 错误码（`AdapterError.code`）。ILCS 里的原件已经删掉。
 """
 from .line_command import LineCommandAdapter
 from .modbus_map import ModbusMapAdapter

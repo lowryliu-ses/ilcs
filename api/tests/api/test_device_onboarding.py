@@ -8,7 +8,13 @@ import copy
 
 import pytest
 
-from sim_harness import OVEN_MAP
+# HTTPS 网关（http_json_v1）的接口映射：模板里放它，连接（base_url）由工位填
+GATEWAY = {
+    "paths": {"health": "/health", "submit": "/commands", "query": "/commands/{command_id}",
+              "hold": "/commands/{command_id}/hold", "abort": "/commands/{command_id}/abort"},
+    "idempotency_header": "Idempotency-Key", "request_timeout_sec": 1, "connect_timeout_sec": 1,
+}
+LOCAL = {"base_url": "https://127.0.0.1:8443/api/v1"}
 
 
 def _station(admin, station_id: str, **extra) -> None:
@@ -102,29 +108,27 @@ def test_connecting_a_real_device_uses_the_same_checks(admin, qa, reset_runtime)
 
     _station(admin, "ST-ONB-2")
     try:
-        invalid = _connect(admin, "ST-ONB-2", kind="real", driver="line_command_v1", protocol="串口 / TCP 命令",
-                           config={"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001}, "capabilities": {}})
-        assert invalid.status_code == 422 and invalid.json()["detail"]["code"] == "adapter_config_invalid"
-        secret = _connect(admin, "ST-ONB-2", kind="real", driver="line_command_v1", protocol="串口 / TCP 命令",
-                          config={**copy.deepcopy(OVEN_MAP), "transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001},
-                                  "password": "plain"})
+        invalid = _connect(admin, "ST-ONB-2", kind="real", driver="http_json_v1", protocol="HTTPS JSON",
+                           config=copy.deepcopy(GATEWAY))
+        assert invalid.status_code == 422 and invalid.json()["detail"]["code"] == "adapter_config_invalid", "缺网关地址"
+        secret = _connect(admin, "ST-ONB-2", kind="real", driver="http_json_v1", protocol="HTTPS JSON",
+                          config={**copy.deepcopy(GATEWAY), **LOCAL, "password": "plain"})
         assert secret.status_code == 422, secret.text
-        orphan = _connect(admin, "ST-ONB-2", template_connection={"transport": {"kind": "tcp", "host": "127.0.0.1"}})
+        orphan = _connect(admin, "ST-ONB-2", template_connection=dict(LOCAL))
         assert orphan.status_code == 422 and orphan.json()["detail"]["code"] == "template_required"
         assert admin.get("/api/stations/ST-ONB-2/adapter").status_code == 404, "被拒的登记不留半份适配器"
 
         draft = admin.post("/api/device-templates", {
-            "code": "TPL-ONBOARD-OVEN", "name": "真空干燥箱（接入测试）", "driver": "line_command_v1",
-            "protocol": "串口 / TCP 命令", "model": "VAC-OVEN-80",
-            "config": {**copy.deepcopy(OVEN_MAP), "request_timeout_sec": 1, "connect_timeout_sec": 1},
-            "connection": {"transport": {"kind": "tcp", "host": "oven-01.lab.internal", "port": 4001}},
+            "code": "TPL-ONBOARD-OVEN", "name": "真空干燥箱网关（接入测试）", "driver": "http_json_v1",
+            "protocol": "HTTPS JSON", "model": "VAC-OVEN-80",
+            "config": copy.deepcopy(GATEWAY),
+            "connection": {"base_url": "https://oven-01.lab.internal/api/v1"},
             "supports": {"hold": True, "abort": True, "query": True, "dedup": True},
             "acceptance": {"capability": "cap.vacuum_dry", "params": {"temp": 120, "vacuum": 1}},
         })
         assert draft.status_code == 201, draft.text
         assert draft.json()["check"]["ok"], draft.json()["check"]
-        unreleased = _connect(admin, "ST-ONB-2", template_id=draft.json()["id"],
-                              template_connection={"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001}})
+        unreleased = _connect(admin, "ST-ONB-2", template_id=draft.json()["id"], template_connection=dict(LOCAL))
         assert unreleased.status_code == 409 and unreleased.json()["detail"]["code"] == "template_not_released"
         released = qa.post(f"/api/device-templates/{draft.json()['id']}/release", {
             "row_version": draft.json()["row_version"],
@@ -132,18 +136,17 @@ def test_connecting_a_real_device_uses_the_same_checks(admin, qa, reset_runtime)
         })
         assert released.status_code == 200, released.text
 
-        created = _connect(admin, "ST-ONB-2", template_id=draft.json()["id"],
-                           template_connection={"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001}},
+        created = _connect(admin, "ST-ONB-2", template_id=draft.json()["id"], template_connection=dict(LOCAL),
                            credential_ref="vault://ilcs/devices/ST-ONB-2")
         assert created.status_code == 201, created.text
         adapter = created.json()
-        assert adapter["kind"] == "real" and adapter["driver"] == "line_command_v1"
+        assert adapter["kind"] == "real" and adapter["driver"] == "http_json_v1"
         assert adapter["template"]["code"] == "TPL-ONBOARD-OVEN" and adapter["template"]["revision"] == 1
         # 第一次接真实设备：欠动作级验收，执行器先自动跑一次只读级
         assert adapter["acceptance"]["required"] == "physical"
         detail = admin.get("/api/stations/ST-ONB-2/adapter").json()
-        assert detail["config"]["transport"]["host"] == "127.0.0.1" and "status" in detail["config"]
-        assert detail["template_connection"] == {"transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001}}
+        assert detail["config"]["base_url"] == LOCAL["base_url"] and "paths" in detail["config"]
+        assert detail["template_connection"] == LOCAL
         with SessionLocal() as db:
             queued = db.query(AcceptanceRun).filter(
                 AcceptanceRun.station_id == "ST-ONB-2", AcceptanceRun.state == "queued",
@@ -318,8 +321,8 @@ def test_a_used_station_cannot_be_deleted(admin, planned):
 
     # 真实设备一接入就排了一次只读级验收：验收记录是上线证据，工位只能停用
     _station(admin, "ST-ONB-9")
-    created = _connect(admin, "ST-ONB-9", kind="real", driver="line_command_v1", protocol="串口 / TCP 命令",
-                       config={**copy.deepcopy(OVEN_MAP), "transport": {"kind": "tcp", "host": "127.0.0.1", "port": 4001}})
+    created = _connect(admin, "ST-ONB-9", kind="real", driver="http_json_v1", protocol="HTTPS JSON",
+                       config={**copy.deepcopy(GATEWAY), **LOCAL})
     assert created.status_code == 201, created.text
     _retire(admin, "ST-ONB-9")
     refused = admin.delete("/api/stations/ST-ONB-9")

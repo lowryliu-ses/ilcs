@@ -1,10 +1,11 @@
-"""对着假仪表直接驱动 ILCS 的 `line_command_v1`：一次测量当场完成并带实测值；重投回放；回复丢了怎么找回；
-仪表忙、联锁、命令集不对、溢出 / 测量异常各怎么判。都不连 ILCS 数据库。"""
+"""对着假仪表直接驱动驱动宿主的 `line_command` 插件（从 ILCS 的 `line_command_v1` 搬过去，回执来源仍记
+`real:line_command_v1`）：一次测量当场完成并带实测值；重投回放；回复丢了怎么找回；仪表忙、联锁、命令集不对、
+溢出 / 测量异常各怎么判。都不连 ILCS 数据库。"""
 from __future__ import annotations
 
 import pytest
 
-from scpi_harness import acceptance, adapter, bench, record, request
+from scpi_harness import through_host, acceptance, adapter, bench, record, request
 
 NAMES = ["keithley-2450", "keithley-2400", "hioki-bt3562"]
 EXPECTED = {
@@ -77,7 +78,7 @@ def test_hioki_is_configured_for_host_triggered_rv_measurements():
 def test_lost_reply_is_unknown_then_recovered_from_the_instrument(name):
     """READ? 测了、回复没到：提交判结果未知（不是明确失败、不重发）；之后按仪表里的新读数（缓冲区 / 状态字节）判做完，
     实测值另外取回，质量标 uncertain。重启后的新实例同样查得回，重投不再测。"""
-    from app.adapters import AdapterError, AdapterUnreachable
+    from ilcs_host.plugins.base import AdapterError, AdapterUnreachable
 
     with bench(name) as rig:
         rec = record(rig)
@@ -99,7 +100,7 @@ def test_lost_reply_is_unknown_then_recovered_from_the_instrument(name):
 def test_trigger_that_never_measured_stays_unknown(name):
     """上一颗电芯的读数还在仪表里；这次 READ? 没回、仪表也没测：开测前已经复位清掉旧读数，所以不会拿旧读数当这一次的，
     结论是结果未知、转人工，不猜「测完了」也不猜「没测」。"""
-    from app.adapters import AdapterUnreachable
+    from ilcs_host.plugins.base import AdapterUnreachable
 
     with bench(name) as rig:
         rec = record(rig, request_timeout_sec=0.5)
@@ -116,7 +117,7 @@ def test_trigger_that_never_measured_stays_unknown(name):
 def test_overflow_or_measurement_fault_is_an_explicit_failure(name):
     """溢出（Keithley 9.9E37）/ 测量异常（Hioki +1E+10）的读数：明确失败（这一笔没有有效读数，可以按恢复规则重测），
     重投照样明确失败、不再测；之后照常测下一笔。"""
-    from app.adapters import AdapterError
+    from ilcs_host.plugins.base import AdapterError
 
     with bench(name) as rig:
         driver = adapter(record(rig))
@@ -137,7 +138,7 @@ def test_overflow_or_measurement_fault_is_an_explicit_failure(name):
 
 def test_hioki_open_probes_are_an_explicit_failure():
     """探针没压上电芯：Hioki 回测量异常值（300 mΩ 档 +1000.00E+7），明确失败。"""
-    from app.adapters import AdapterError
+    from ilcs_host.plugins.base import AdapterError
 
     with bench("hioki-bt3562") as rig:
         rig.meter.cell.connected = False
@@ -150,7 +151,7 @@ def test_hioki_open_probes_are_an_explicit_failure():
 ])
 def test_busy_instrument_refuses_before_measuring(name, reason):
     """仪表在忙别的、不收改设置的命令：开测前的查错（SYST:ERR? / *ESR?）把它挡住，明确失败，仪表没测。"""
-    from app.adapters import AdapterError
+    from ilcs_host.plugins.base import AdapterError
 
     with bench(name) as rig:
         rig.meter.set_fault("busy")
@@ -164,7 +165,7 @@ def test_busy_instrument_refuses_before_measuring(name, reason):
 ])
 def test_interlock_keeps_the_output_off_and_nothing_is_measured(name, reason):
     """夹具盖开关接在仪表联锁上（Interlock 设成 On）、盖子开着：打开输出被拒，开输出之后的查错把它挡住，仪表没测。"""
-    from app.adapters import AdapterError
+    from ilcs_host.plugins.base import AdapterError
 
     with bench(name) as rig:
         rig.meter.set_fault("interlock")
@@ -177,7 +178,7 @@ def test_interlock_keeps_the_output_off_and_nothing_is_measured(name, reason):
 def test_optional_interlock_query_from_the_readme(name):
     """README 给的可选写法：现场把夹具盖开关接到了仪表联锁上，就加这段 interlock 查询——盖子开着时健康检查报联锁，
     启动前就拒绝（不必等到开输出）。"""
-    from app.adapters import AdapterError
+    from ilcs_host.plugins.base import AdapterError
 
     snippet = {"interlock": {"send": ":OUTP:INT:TRIP?", "pattern": "^(?P<value>[01])$", "ok": ["1"]}}
     with bench(name) as rig:
@@ -191,13 +192,13 @@ def test_optional_interlock_query_from_the_readme(name):
 
 
 @pytest.mark.parametrize("language", ["TSP", "SCPI2400"])
-def test_keithley_2450_in_another_command_set_takes_no_commands(language):
+def test_keithley_2450_in_another_command_set_takes_no_commands(language, runtime_settings):
     """2450 不在 SCPI 命令集（*LANG? 回 TSP / SCPI2400）：健康检查报「不接受指令」，ILCS 不投递动作指令；
-    动作级验收不通过、一项动作都不跑。"""
+    动作级验收（经驱动宿主）不通过、一项动作都不跑。"""
     with bench("keithley-2450", control=False, language=language) as rig:
-        rec = record(rig)
-        assert adapter(rec).healthcheck()["accepts_commands"] is False
-        report = acceptance("keithley-2450", rec, faults=False)
+        assert adapter(record(rig)).healthcheck()["accepts_commands"] is False
+        with through_host(rig, runtime_settings) as rec:
+            report = acceptance("keithley-2450", rec, faults=False)
         states = {check.key: check.state for check in report.checks}
         assert states["health"] == "fail" and states["complete"] == "skip" and not report.ok
         assert rig.meter.motions == 0

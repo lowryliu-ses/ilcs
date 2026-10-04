@@ -110,7 +110,7 @@ def test_probed_devices_get_three_probe_cycles_and_a_probe_ends_the_wait(reset_r
 
     def probed(seconds_ago: float, interval: float | None = None):
         config = {} if interval is None else {"probe_interval_sec": interval}
-        return SimpleNamespace(kind="real", driver="modbus_map_v1", config=config, connected=False,
+        return SimpleNamespace(kind="real", driver="sila2_v1", config=config, connected=False,
                                awaiting_handshake_since=now() - timedelta(seconds=seconds_ago))
 
     assert handshake_grace(probed(0)) == 60, "缺省 10 s 探测一次：至少给 1 min"
@@ -126,7 +126,7 @@ def test_probed_devices_get_three_probe_cycles_and_a_probe_ends_the_wait(reset_r
     with SessionLocal() as db:
         adapter = db.get(Adapter, STATION)
         saved = (adapter.kind, adapter.driver, adapter.config)
-        adapter.kind, adapter.driver, adapter.config = "real", "modbus_map_v1", {"host": "127.0.0.1", "port": 502}
+        adapter.kind, adapter.driver, adapter.config = "real", "sila2_v1", {"host": "127.0.0.1", "port": 50201}
         adapter.connected, adapter.awaiting_handshake_since = False, now()
         db.commit()
         try:
@@ -169,7 +169,7 @@ def test_a_failed_probe_is_logged_once_and_explained_in_the_alarm(reset_runtime,
     with SessionLocal() as db:
         adapter = db.get(Adapter, STATION)
         saved = (adapter.kind, adapter.driver, adapter.config)
-        adapter.kind, adapter.driver, adapter.config = "real", "modbus_map_v1", {"host": "127.0.0.1", "port": 502}
+        adapter.kind, adapter.driver, adapter.config = "real", "sila2_v1", {"host": "127.0.0.1", "port": 50201}
         adapter.last_heartbeat = now() - timedelta(minutes=1)  # 到了探测周期
         db.commit()
         try:
@@ -205,7 +205,7 @@ def test_a_probed_device_that_drops_alarms_after_two_probe_cycles(reset_runtime)
     with SessionLocal() as db:
         adapter = db.get(Adapter, STATION)
         saved = (adapter.kind, adapter.driver, adapter.config)
-        adapter.kind, adapter.driver, adapter.config = "real", "modbus_map_v1", {"host": "127.0.0.1", "port": 502}
+        adapter.kind, adapter.driver, adapter.config = "real", "sila2_v1", {"host": "127.0.0.1", "port": 50201}
         adapter.connected, adapter.awaiting_handshake_since = False, None
         adapter.last_heartbeat = now() - timedelta(seconds=5)
         db.commit()

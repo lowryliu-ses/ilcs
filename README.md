@@ -171,14 +171,14 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 | 设备回执里报了实际消耗 | 按指令号去重直接入库存消耗；超预留或对不上预留不入账并报警；偏差超 5% 入账并报警待复核 |
 | 设备遥测上报 | 同一 `event_id` 只入库一次；设备时钟超前 5 分钟整批拒收；保留 1 年 |
 | 维护工单 | 建单即登记维护占用；开工资产转维护状态；完工写记录签名，不合格资产保持维护状态 |
-| 工位接到 SiLA 2（`sila2_v1`）/ Modbus TCP（`modbus_tcp_v1`）/ OPC UA（`opcua_v1`）设备 | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
-| 设备不认识 ILCS 指令号（PLC 点表、串口命令、车队 REST） | 驱动作业台账先落盘再动设备：重投同一指令号回放原作业；执行器重启后按原指令号回答；设备在运行就明确拒绝新作业 |
+| 工位接到 SiLA 2 设备服务（`sila2_v1`：驱动宿主上的 PLC、仪表、任务契约设备，或厂商的 SiLA 服务器） | 执行器主动探测在线；联锁 / 参数非法 / 忙为明确失败，断连 / 超时 / 回执丢失为结果未知，不重发 |
+| 设备不认识 ILCS 指令号（PLC 点表、串口命令、车队 REST，经驱动宿主接） | 驱动宿主插件的作业台账先落盘再动设备：重投同一指令号回放原作业；驱动宿主重启后按原指令号回答；设备在运行就明确拒绝新作业 |
 | 启动命令发出后没拿到确认 | 结果未知不重发；之后见到设备在运行（或按 PLC 回显 / 请求里的指令号找回）才按运行处理，质量标 uncertain |
 | 启动命令回了确认，设备却一直没进入运行也没有完成信号 | 超过启动时限转结果未知，不猜「做完了」 |
-| 映射驱动收到没有写入点 / 命令模板的参数，或孔位矩阵 | 明确拒绝，不静默丢弃设定值 |
+| 驱动宿主的映射插件收到没有写入点 / 命令模板的参数 | 明确拒绝，不静默丢弃设定值；逐孔参数按孔位依次执行，有一孔拼不出就整条拒绝 |
 | 检测软件只导出结果文件 | 结果文件接收器按内容摘要去重回传，原始文件关联到结果；被拒的文件移到 rejected/ 并写明原因 |
-| Modbus 指令带孔位矩阵、未映射的参数或能力 | 驱动直接拒绝，不写触发寄存器 |
-| Modbus 写了触发等不到应答 / 执行器重启 | 结果未知不重写触发；新实例从设备当前的触发与应答序号里较大的一个接着编号 |
+| Modbus 任务寄存器设备（驱动宿主 `modbus_task`）收到孔位矩阵、未映射的参数或能力 | 插件直接拒绝，不写触发寄存器 |
+| Modbus 任务寄存器写了触发等不到应答 / 驱动宿主重启 | 结果未知不重写触发；新实例从设备当前的触发与应答序号里较大的一个接着编号 |
 | OPC UA 未钉住服务器证书、客户端证书不受信任、正式环境用 None 安全策略 | 配置或握手阶段拒绝 |
 | 正式环境接入自报为模拟器的设备（任一协议） | 健康检查拒绝 |
 | 质检关卡测量值超限 | 按方法配置返工（超过次数转 QA）/ 报废 / 保持待 QA 签名判定；取不到数值一律不放行 |
@@ -206,7 +206,7 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
-未验证项：**现场真实设备试点（AC-37）**。系统已内置八个真实驱动——设备实现 ILCS 契约的 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务）、`sila2_v1`、`opcua_v1`、`modbus_tcp_v1`，按设备自有接口映射的 `opcua_map_v1`、`modbus_map_v1`、`line_command_v1`（串口 / TCP 命令）、`rest_map_v1`（车队等 REST 接口）——另有结果文件接收器；覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过。选哪种驱动见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器。
+未验证项：**现场真实设备试点（AC-37）**。ILCS 只经两个契约接设备——`sila2_v1`（SiLA 2 设备服务）与 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务），另有结果文件接收器；协议驱动都在 ILCS 进程之外的驱动宿主（devices/host）里：按设备自有接口映射的 `opcua_map`、`modbus_map`、`line_command`（串口 / TCP 命令）、`rest_map`（车队等 REST 接口），设备按 ILCS 契约编程的 `modbus_task`、`opcua_task`。覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过（插件测试在 devices/host/tests，ILCS 经驱动宿主的验收清单在 api/tests）。选哪种接法见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器；库里还有工位用已移出的驱动时，升级在迁移这一步就停下（0052）。
 
 ## 目录
 
@@ -214,16 +214,17 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 api/         FastAPI 服务：core / models / domain / repositories / services / adapters / api
 api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射 → 0004 适配器配置 → 0005 样本关联 → 0006 服务身份并发版本 → 0007 账号生命周期 → 0008 推进事件重试计数 → 0009 运行加固 → 0010 按时开工 / 遥测 / 维护工单 → 0011 并行通道 / 设计空间 / 闭环提案 → 0012 角色权限 → 0013 队列索引 → 0014 执行器明细 → 0015 载具与位置 → 0016 流程控制 → 0017 任务树 → 0018 异常引擎 → 0019 重排建议 → 0020 出向事件
 api/openapi.json  OpenAPI 快照（scripts/export-openapi.py 生成，测试核对不漂移）
-api/app/adapters/ 设备驱动：框架层（契约、回执解读、作业台账、注册表、驱动目录、接入验收）+ drivers/（每种协议一个驱动）
+api/app/adapters/ 设备接入：框架层（契约、回执解读、注册表、驱动目录、接入验收）+ drivers/（sila2_v1、http_json_v1 与内置模拟）
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
 devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.md
+  host/        驱动宿主：协议插件（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令），每台设备一个 SiLA 2 服务，见 devices/host/README.md
   contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
-  simulators/  外部模拟设备（每种驱动都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
+  simulators/  外部模拟设备（每类插件都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
   gateway/     设备网关：网关 SDK ilcs_gateway（厂家 SDK / 私有协议包成 http_json_v1 网关）+ 设备模块（样板 sample-cycler）
   connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
-secrets/     运行时证书与令牌（不进仓库）：compose 挂进容器的 sila/ opcua/ gateway/ fleet/ simctl/，本机直接跑模拟器用 local/
+secrets/     运行时证书与令牌（不进仓库）：compose 挂进容器的 sila/ gateway/ simctl/ host/（驱动宿主），本机直接跑模拟器用 local/
 docs/        现行文档（设备适配器配置模板、操作案例、验收记录、SOP 模板、上线清单）；archive/ 是历史需求、评审与证据，见 docs/README.md
 ```
 
@@ -326,27 +327,23 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 > `docker compose up -d`，**不要带 `--profile pilot`**——带了只会拉起一批没有工位可接的模拟设备。下面的试点说明只适用于
 > 用 `scripts/reset-demo-cases.sh` 重新播种了老演示产线的环境。
 
-真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：除 ST-01-B、ST-05 用内置模拟外，示例工位各接一台，走各自的真实协议，
-只在后端网络可见、不占宿主端口。工位与驱动的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
+真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：ST-01-A、ST-06（SiLA 2）与 ST-07（HTTPS 网关）各接一台，
+只在后端网络可见、不占宿主端口；其余示例工位用内置模拟。PLC 点表、Modbus / OPC UA 任务契约、车队 REST、串口命令这几类协议的
+驱动已移出 ILCS：要接这类模拟设备，把它挂到驱动宿主上（[devices/host](devices/host/README.md)），工位用 `sila2_v1` 接驱动宿主。
+工位与模拟设备的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
 
 | 工位 | 模拟设备 | 驱动 |
 |---|---|---|
 | ST-01-A | `sila-sim-slurry-a` | `sila2_v1` |
-| ST-02 | `plc-sim-mixer` | `modbus_map_v1`（Modbus 点表） |
-| ST-03 | `plc-sim-coater` | `opcua_map_v1`（OPC UA 节点映射） |
-| ST-04 | `opcua-sim-calender` | `opcua_v1`（OPC UA TaskExecution） |
 | ST-06 | `sila-sim-lh` | `sila2_v1` |
 | ST-07 | `gateway-sim-cycler` | `http_json_v1`（厂家 SDK 接口服务） |
-| AGV-01 / AGV-02 | `fleet-sim` | `rest_map_v1`（MiR 风格车队 REST） |
-| ARM-01（演示导入时登记） | `line-sim-arm` | `line_command_v1`（UR 仪表盘服务） |
-| ST-01-B、ST-05 | —（内置模拟适配器） | `simulation` |
+| ST-01-B、ST-02、ST-03、ST-04、ST-05、AGV-01 / AGV-02、ARM-01 | —（内置模拟适配器） | `simulation` |
 
 ```bash
 # 证书 / 凭据目录，模拟设备首次启动写入（属主是容器里的 10001）
-sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,opcua,gateway,fleet,simctl}
+sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,gateway,simctl}
 # deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
-#   sila-sim-slurry-a,sila-sim-lh,plc-sim-mixer,plc-sim-coater,
-#   opcua-sim-calender,gateway-sim-cycler,fleet-sim,line-sim-arm
+#   sila-sim-slurry-a,sila-sim-lh,gateway-sim-cycler
 cd /opt/ilcs/deploy && docker compose --profile pilot up -d
 docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 devices/simulators/pilot-devices.json 全部切换
 ```
@@ -357,7 +354,9 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 
 ### 设备接入：模板与设备模块
 
-同一类设备有好几台时，把映射配置存成**设备接入模板**（「工位与接入 → 接入模板」，发布要另一个人签名），工位套用模板、只填自己的连接参数。
+PLC 点表、串口命令、REST 这类设备的映射写在驱动宿主的设备文件里（[devices/host/插件配置.md](devices/host/插件配置.md)），ILCS 工位用
+`sila2_v1` 接驱动宿主。同一类设备有好几台时，ILCS 这边的连接配置可以存成**设备接入模板**（「工位与接入 → 接入模板」，发布要另一个人
+签名），工位套用模板、只填自己的连接参数。
 厂家只给 SDK / DLL 的设备按 [devices/gateway/README.md](devices/gateway/README.md) 写一个设备模块（基于 `devices/gateway/ilcs_gateway` 的独立网关，
 自带模拟接口与测试，交付 `profile.json`），ILCS 侧用 `http_json_v1` 接入，不改代码、不重启。
 `python scripts/new-device-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。

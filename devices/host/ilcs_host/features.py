@@ -154,10 +154,13 @@ class DeviceInfoImpl(FeatureImplementationBase):
 
     def get_Status(self, *, metadata):
         identity = self.runtime.identity()
+        accepts = bool(identity.get("accepts_commands", True))
+        # 设备自己说了不接指令（不在远程模式、命令集不对）：不再查状态——这时状态查询多半答不上，等它超时还会拖过
+        # ILCS 的截止时间，把「不接指令」报成「连不上」。照实报不接指令、状态说不清
+        state = self.runtime.device_state() if accepts else "unknown"
         return {
-            "State": self.runtime.device_state(), "ActiveCommandId": self.runtime.active_command(),
-            "Interlock": bool(identity.get("interlock")), "AcceptsCommands": bool(identity.get("accepts_commands", True)),
-            "ObservedAt": _now(),
+            "State": state, "ActiveCommandId": self.runtime.active_command(),
+            "Interlock": bool(identity.get("interlock")), "AcceptsCommands": accepts, "ObservedAt": _now(),
         }
 
     def get_Driver(self, *, metadata):

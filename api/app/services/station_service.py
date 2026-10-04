@@ -140,10 +140,10 @@ class StationService:
             "note": adapter.note,
             # 适配器契约：真实设备不支持的能力在界面上禁用并说明原因，不假装通用支持
             "kind": adapter.kind,
-            # 参与自动流程（接指令）？映射驱动只配了点表的是「只读写点位」：能读点、手动写，不接指令
+            # 参与自动流程（接指令）？SiLA 设备服务配了 tasks: false 的是「只读写点位」：能读点、手动写，不接指令
             "tasks": adapter.kind != "real" or has_tasks(adapter.driver, adapter.config),
-            # SiLA 设备服务的点表在设备那一侧（PointAccess），读的时候才知道有没有
-            "points": adapter.kind == "real" and (bool((adapter.config or {}).get("points")) or adapter.driver == "sila2_v1"),
+            # 点表在设备服务那一侧（PointAccess），读的时候才知道有没有
+            "points": adapter.kind == "real" and adapter.driver == "sila2_v1",
             "capabilities": {
                 "hold": adapter.supports_hold,
                 "abort": adapter.supports_abort,
@@ -616,7 +616,7 @@ class StationService:
             raise ValidationFailed("真实设备必须填写已登记的驱动键", code="adapter_driver_required")
         protocol = (changes.get("protocol") or "").strip()
         if not protocol:
-            raise ValidationFailed("请填写协议名称（给人看的，如 Modbus TCP、串口命令）", code="adapter_protocol_required")
+            raise ValidationFailed("请填写协议名称（给人看的，如 SiLA 2（驱动宿主）、HTTPS JSON）", code="adapter_protocol_required")
         if kind == "real":
             check = validate_config(driver, changes.get("config") or {}, changes.get("credential_ref", ""), protocol=protocol)
             if check.problems:

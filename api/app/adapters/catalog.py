@@ -1,6 +1,7 @@
 """驱动目录：每个内置驱动自己声明「配置长什么样」，界面按它出表单，保存时按它校验。
 
-以前每个驱动的配置模板写死在前端，加一个驱动要改页面；现在驱动在这里登记：
+ILCS 只登记两个契约驱动（`sila2_v1`、`http_json_v1`）：协议驱动（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令）
+都在驱动宿主（devices/host）里，它们的映射写在驱动宿主的设备文件里，不在这里。每个驱动在这里登记：
 
 - `fields`：顶层配置项（名称、类型、是否必填、说明），其中 `connection=True` 的是每台设备自己的连接参数
   （地址、端口、证书、设备编号）——设备模板里不写死它们，套用模板时由工位填；
@@ -26,7 +27,6 @@ TYPES = {
 }
 TYPE_LABELS = {"string": "文本", "integer": "整数", "number": "数值", "boolean": "是 / 否", "object": "对象", "array": "列表",
                "scalar": "值", "any": "任意 JSON"}
-STATES = ("idle", "running", "held", "done", "failed")
 
 
 @dataclass(frozen=True)
@@ -144,11 +144,6 @@ COMMON = (
     _list("commands", "设备接受的指令类型", _value("指令类型", "string")),
     ConfigField("vendor", "厂商（按登记）", "string"),
     ConfigField("firmware", "固件（按登记）", "string"),
-    _table("material_map", "实测值折算物料", _record("", "折算", (
-        ConfigField("material", "物料", "string", required=True),
-        ConfigField("unit", "单位", "string"),
-        ConfigField("factor", "折算系数", "number", hint="实测值 × 系数 = 物料用量，缺省 1"),
-    )), "实测参数", hint="{实测参数: {material, unit, factor}}", key_ref="params"),
     _record("simulator_control", "模拟设备控制口", (
         ConfigField("url", "控制口地址", "string", required=True),
         ConfigField("base_url", "控制口地址（同 url）", "string"),
@@ -172,138 +167,6 @@ COMMON = (
     ), hint="把点位读数记成环境读数，开跑检查与下发前按它核对步骤的环境要求：{zone, points: {指标: 点名}, interval_sec}。"
             "只对执行器探测的设备生效"),
 )
-IDLE_AFTER_START = ("done", "unknown")
-JOBS = (
-    ConfigField("start_timeout_sec", "启动确认超时（秒）", "number", hint="发了启动却一直没见到运行，超过它判结果未知"),
-    ConfigField("idle_after_start", "启动后回到空闲的含义", "string", options=IDLE_AFTER_START,
-                hint="done：设备没有「运行中」可查、回到空闲就是做完"),
-)
-# 驱动作业台账类驱动每项能力都能带的几项
-CAPABILITY_EXTRAS = (
-    _table("defaults", "参数缺省值", _value("值"), "参数", key_ref="params",
-           hint="指令里没带时用它；也可以放模板占位用的常量（如 REST 的 {mission}）"),
-    ConfigField("program", "缺省设备端程序", "string", hint="步骤没引用设备方法时用它"),
-    _list("accept", "另外接受的参数", _value("参数", "string"), hint="映射里没用到、但允许指令带的参数"),
-    ConfigField("idle_after_start", "启动后回到空闲的含义", "string", options=IDLE_AFTER_START, hint="只对这项能力，覆盖全局设置"),
-)
-
-
-def _params(limits: dict) -> tuple[list[str], Callable[[str], list[str]]]:
-    capabilities = sorted(limits or {})
-
-    def params_of(capability: str) -> list[str]:
-        return sorted((limits or {}).get(capability) or {})
-
-    return capabilities, params_of
-
-
-PLC_STATES = {"0": "idle", "1": "running", "2": "held", "3": "done", "4": "failed"}
-PULSE = {"value": True, "pulse_ms": 300}
-
-
-def _plc(kind: str, limits: dict) -> dict:
-    """PLC 点表模板：每个参数一个设定值点、一个实测点，外加状态 / 故障 / 启停 / 就绪 / 联锁 / 心跳；地址是占位。"""
-    capabilities, params_of = _params(limits)
-    params = sorted({name for capability in capabilities for name in params_of(capability)})
-    register = [10]
-    coils = ["CmdStart", "CmdHold", "CmdResume", "CmdAbort", "CmdAck"]
-
-    def point(name: str, kind_: str, table: str = "holding"):
-        if kind == "opcua":
-            return f'ns=3;s="DB_ILCS"."{name}"'
-        if table == "coil":
-            return {"table": "coil", "address": coils.index(name), "type": "bool"}
-        address = register[0]
-        register[0] += 2 if kind_ == "float32" else 1
-        return {"table": table, "address": address, "type": kind_}
-
-    points: dict[str, Any] = {
-        "state": point("State", "uint16"), "error": point("ErrorCode", "uint16"), "heartbeat": point("Heartbeat", "uint16"),
-        "remote": point("RemoteMode", "uint16"), "safety": point("SafetyOk", "uint16"),
-        **{f"cmd_{name[3:].lower()}": point(name, "bool", "coil") for name in coils},
-    }
-    for name in params:
-        points[f"sp_{name}"] = point(f"SP_{name}", "float32")
-        points[f"pv_{name}"] = point(f"PV_{name}", "float32")
-    return {
-        "points": points,
-        "ready": {"point": "remote", "ok": [True, 1]}, "interlock": {"point": "safety", "ok": [True, 1]},
-        "heartbeat": {"point": "heartbeat", "stale_sec": 30},
-        "capabilities": {capability: {
-            "write": {name: f"sp_{name}" for name in params_of(capability)},
-            "actuals": {name: f"pv_{name}" for name in params_of(capability)},
-            "start": {"point": "cmd_start", **PULSE},
-        } for capability in capabilities},
-        "status": {"point": "state", "states": PLC_STATES}, "error": {"point": "error", "codes": {}},
-        "hold": {"point": "cmd_hold", **PULSE}, "resume": {"point": "cmd_resume", **PULSE},
-        "abort": {"point": "cmd_abort", **PULSE}, "acknowledge": {"point": "cmd_ack", **PULSE},
-    }
-
-
-def _line(limits: dict) -> dict:
-    """串口 / TCP 命令模板：命令与回复格式是占位，必须按设备的命令手册改。"""
-    capabilities, params_of = _params(limits)
-    return {
-        "transport": {"kind": "serial", "port": "rfc2217://serial-server.lab.internal:4001", "baudrate": 9600, "parity": "N"},
-        "write_terminator": "\r\n", "read_terminator": "\r\n", "request_timeout_sec": 3, "probe_interval_sec": 10,
-        "identity": {"send": "*IDN?", "pattern": "^(?P<vendor>[^,]*),(?P<model>[^,]*),(?P<device_id>[^,]*),(?P<firmware>.*)$"},
-        "error_pattern": "^ERR",
-        "capabilities": {capability: {"start": [
-            *({"send": f"SET {name.upper()} {{{name}}}", "expect": "^OK$"} for name in params_of(capability)),
-            {"send": "RUN", "expect": "^OK$"},
-        ]} for capability in capabilities},
-        "status": {"send": "STAT?", "pattern": "^(?P<state>[A-Z]+)(,(?P<detail>.*))?$",
-                   "states": {"IDLE": "idle", "RUN": "running", "HOLD": "held", "DONE": "done", "ALARM": "failed"}},
-        "actuals": [],
-        "hold": [{"send": "HOLD", "expect": "^OK$"}], "resume": [{"send": "CONT", "expect": "^OK$"}],
-        "abort": [{"send": "STOP", "expect": "^OK$"}], "acknowledge": [{"send": "ACK", "expect": "^OK$"}],
-    }
-
-
-def _modbus_tcp(limits: dict) -> dict:
-    capabilities, params_of = _params(limits)
-    params = sorted({name for capability in capabilities for name in params_of(capability)})
-    return {
-        "host": "plc.lab.internal", "port": 502, "unit_id": 1, "base_address": 0, "request_timeout_sec": 10,
-        "probe_interval_sec": 10,
-        "capabilities": {capability: index for index, capability in enumerate(capabilities, start=1)},
-        "params": {name: index for index, name in enumerate(params[:16], start=1)},
-    }
-
-
-def _rest(limits: dict) -> dict:
-    capabilities, params_of = _params(limits)
-    return {
-        "base_url": "https://fleet.lab.internal/api/v2.0.0", "verify_tls": True, "request_timeout_sec": 10,
-        "probe_interval_sec": 10,
-        "identity": {"method": "GET", "path": "/status",
-                     "fields": {"device_id": "robot_name", "model": "model", "firmware": "software_version"},
-                     "interlock": {"field": "state_text", "values": ["EmergencyStop", "Error"]}},
-        "capabilities": {capability: {
-            "method": "POST", "path": "/mission_queue", "handle": "id",
-            "body": {"mission_id": "{mission}", "message": "ILCS {command_id}",
-                     "parameters": [{"id": "From", "value": "{from_position}"}, {"id": "To", "value": "{to_position}"}]}
-            if capability == "cap.transfer" else
-            {"mission_id": "{mission}", "message": "ILCS {command_id}", **{name: f"{{{name}}}" for name in params_of(capability)}},
-            "defaults": {"mission": "<任务模板编号>"},
-        } for capability in capabilities},
-        "positions": {},
-        "status": {"method": "GET", "path": "/mission_queue/{handle}", "field": "state",
-                   "states": {"Pending": "accepted", "Executing": "running", "Paused": "held", "Done": "done",
-                              "Aborted": "failed"}},
-        "lookup": {"method": "GET", "path": "/mission_queue", "detail_path": "/mission_queue/{id}", "id_field": "id",
-                   "match_field": "message", "match": "ILCS {command_id}"},
-        "abort": {"method": "DELETE", "path": "/mission_queue/{handle}"},
-    }
-
-
-OPCUA_SECURITY = (
-    ConfigField("security_policy", "安全策略", "string", hint="Basic256Sha256；None 只限非正式环境",
-                options=("Basic256Sha256", "None")),
-    ConfigField("security_mode", "安全模式", "string", hint="SignAndEncrypt / Sign", options=("SignAndEncrypt", "Sign")),
-    ConfigField("server_certificate", "服务器证书", "string", connection=True, hint="位于凭据目录内"),
-    ConfigField("application_uri", "客户端应用 URI", "string"),
-)
 TLS = (
     ConfigField("ca_file", "CA 证书", "string", connection=True, hint="私有 CA，必须位于凭据目录内；不填用系统信任链"),
     ConfigField("verify_tls", "校验证书", "boolean", hint="正式环境不允许关闭"),
@@ -311,241 +174,6 @@ TLS = (
     _table("headers", "固定请求头", _value("值", "string"), "请求头", hint="凭据不写这里，放 credential_ref"),
 )
 
-
-# ---------- PLC 点表（opcua_map_v1 / modbus_map_v1）----------
-
-def _signal(name: str, label: str, *extra: ConfigField) -> ConfigField:
-    return _record(name, label, (
-        _point("point", "信号点", required=True),
-        ConfigField("value", "写入值", "scalar", hint="缺省 true"),
-        ConfigField("pulse_ms", "脉冲宽度（毫秒）", "number", hint="写入后隔多久写回复位值；不填就不复位"),
-        ConfigField("reset", "复位值", "scalar", hint="缺省 false（数值点为 0）"),
-        *extra,
-    ))
-
-
-def _gate(name: str, label: str) -> ConfigField:
-    return _record(name, label, (
-        _point("point", "判断点", required=True),
-        _list("ok", "放行的值", _value("值"), hint="读到其中之一才算满足，缺省 [true]"),
-    ))
-
-
-# 点位读写：点上的说明字段，和协议无关。可写的点由人手动写（签名、留痕、执行器执行）
-POINT_META = (
-    ConfigField("label", "显示名", "string"),
-    ConfigField("unit", "单位", "string"),
-    ConfigField("writable", "可手动写", "boolean",
-                hint="缺省不可写；任务用的控制信号（启动、状态、复位、指令号）不能声明可写"),
-    ConfigField("min", "手动写下限", "number"),
-    ConfigField("max", "手动写上限", "number"),
-)
-OPCUA_POINT = _record("", "节点", (
-    ConfigField("node", "节点 ID", "string", required=True,
-                hint='ns=3;s="DB_ILCS"."State"，或带命名空间 URI 的 nsu=urn:…;s=…（服务器重启后序号会变，URI 不变）'),
-    ConfigField("scale", "比例", "number", hint="读数 × 比例 = 工程值，写入时反算"),
-    *POINT_META,
-), shorthand="node")
-MODBUS_POINT = _record("", "寄存器", (
-    ConfigField("table", "表", "string", options=("holding", "input", "coil", "discrete"),
-                hint="只有 holding 与 coil 可写；缺省 holding"),
-    ConfigField("address", "地址", "integer", required=True, hint="协议里的 0 基地址（手册上写 40001 的填 0）"),
-    ConfigField("type", "类型", "string", options=("uint16", "int16", "uint32", "int32", "float32", "bool", "ascii"),
-                hint="缺省 uint16"),
-    ConfigField("scale", "比例", "number", hint="读数 × 比例 = 工程值，写入时反算"),
-    ConfigField("word_order", "字序", "string", options=("big", "little"), hint="32 位数值缺省高字在前"),
-    ConfigField("bit", "位", "integer", hint="从保持寄存器取某一位（只读）"),
-    ConfigField("length", "字符数", "integer", hint="ascii 必填，≤240"),
-    *POINT_META,
-))
-
-
-def _point_map(kind: str) -> tuple[ConfigField, ...]:
-    start: list[ConfigField] = [
-        _point("point", "启动点", hint="写下启动信号的点" + ("；也可以改用启动方法" if kind == "opcua" else "")),
-        ConfigField("value", "写入值", "scalar", hint="缺省 true"),
-        ConfigField("pulse_ms", "脉冲宽度（毫秒）", "number", hint="写入后隔多久写回复位值"),
-        ConfigField("reset", "复位值", "scalar"),
-        ConfigField("write_only", "只写设定值", "boolean",
-                    hint="设定类动作（温控器设定值、阀门开度）：写完设定点就生效、没有启动信号；要配 idle_after_start: done"),
-    ]
-    if kind == "opcua":
-        start.append(_record("method", "启动方法", (
-            ConfigField("object", "对象节点", "string", required=True),
-            ConfigField("method", "方法节点", "string", required=True),
-            _list("args", "方法参数", _value("参数"), hint="可用 {program}、{参数} 占位"),
-        ), hint="设备用方法调用启动时填，与启动点二选一"))
-    capability = _record("", "能力", (
-        _table("constants", "常量", _value("值"), "点名", key_ref="points", hint="每次启动前先写的固定值"),
-        _record("recipe", "程序号", (
-            _point("point", "程序号点", required=True),
-            _table("map", "程序 → 程序号", _value("程序号"), "设备端程序", hint="不在表里的程序直接拒绝"),
-            ConfigField("default", "缺省程序", "string", hint="步骤没引用设备方法时用它"),
-        ), hint="把设备方法的设备端程序换成 PLC 的程序号"),
-        _table("write", "设定值", _record("", "写入", (
-            _point("point", "设定值点", required=True),
-            _table("map", "选项 → 设备代码", _value("代码"), "选项", key_ref="options",
-                   hint="选项型参数（溶剂、模式）下发时换成设备代码，没登记的选项拒绝"),
-        ), shorthand="point"), "参数", key_ref="params", scope="param", hint="参数 → 设定值点"),
-        _record("start", "启动", tuple(start), required=True),
-        _table("actuals", "实测点", _point("", "实测点"), "参数", key_ref="params", hint="做完读回的实测值"),
-        *CAPABILITY_EXTRAS,
-    ))
-    return (
-        _table("points", "点表", OPCUA_POINT if kind == "opcua" else MODBUS_POINT, "点名", required=True,
-               hint=("点名 → 节点 ID" if kind == "opcua" else "点名 → 寄存器定义")
-               + "；只登记点表就能按点读值，标了可写的点还能手动写"),
-        _table("identity", "身份点", _point("", "点"), "身份字段", hint="{device_id, model, vendor, firmware} → 点名",
-               key_options=("device_id", "serial", "model", "vendor", "firmware")),
-        _gate("ready", "就绪条件"), _gate("interlock", "联锁条件"),
-        _record("heartbeat", "心跳点", (
-            _point("point", "心跳计数点", required=True),
-            ConfigField("stale_sec", "多久不变判失联（秒）", "number", hint="缺省 30"),
-        ), shorthand="point"),
-        _record("job_id", "指令号写入 / 回显", (
-            _point("write", "写指令号的点"),
-            _point("echo", "回显指令号的点", hint="PLC 回显时，启动未确认的作业可以按它找回"),
-        )),
-        _table("capabilities", "能力映射", capability, "能力", key_ref="capabilities", scope="capability",
-               hint="每项能力的常量、程序号、设定值、启动、实测；只读写点位（不参与自动流程）的设备不配"),
-        _record("status", "状态点与状态映射", (
-            _point("point", "状态点", required=True),
-            _table("states", "状态映射", _value("状态", "string", options=STATES), "状态值", required=True),
-        ), hint="配了能力映射就必须配：自动流程要确认作业做没做完"),
-        _record("error", "故障点与故障码", (
-            _point("point", "故障点", required=True),
-            _table("codes", "故障码说明", _value("说明", "string"), "故障码"),
-        )),
-        _record("start_refused", "拒绝启动的故障码", (
-            _list("codes", "故障码", _value("故障码")),
-            ConfigField("after_sec", "启动后多久才认（秒）", "number", hint="缺省 1：给 PLC 一个扫描周期"),
-        ), hint='{"codes": ["90", "91"], "after_sec": 1}：写下启动沿后 PLC 停在空闲并报这些码 = 明确拒绝、没有动作'),
-        _signal("hold", "保持"), _signal("resume", "恢复"), _signal("abort", "终止"),
-        _signal("acknowledge", "复位", ConfigField("settle_ms", "复位后等（毫秒）", "number", hint="缺省 200")),
-    )
-
-
-# ---------- 串口 / TCP 文本命令（line_command_v1）----------
-
-def _query(name: str, label: str, group: str = "", *extra: ConfigField, hint: str = "", **kwargs) -> ConfigField:
-    return _record(name, label, (
-        ConfigField("send", "查询命令", "string", required=True),
-        ConfigField("pattern", "回复格式（正则）", "string", required=True,
-                    hint=f"要带命名组 (?P<{group}>…)" if group else "每个命名组 (?P<名>…) 就是一个字段"),
-        *extra,
-    ), hint=hint, **kwargs)
-
-
-LINE_STEP = _record("", "命令", (
-    ConfigField("send", "发送", "string", required=True, hint="可用 {参数}、{参数:.1f}、{command_id}、{program} 占位"),
-    ConfigField("expect", "期望回复（正则）", "string"),
-    ConfigField("reject", "拒绝回复（正则）", "string"),
-    ConfigField("reply", "等回复", "boolean", hint="缺省等；设备不回复的命令关掉"),
-    ConfigField("wait_ms", "发完等（毫秒）", "number"),
-    ConfigField("motion", "动作命令", "boolean", hint="这一条才让设备动作；缺省是最后一条"),
-))
-LINE_OK = _list("ok", "放行的值", _value("值", "string"), hint="命名组 value 读到其中之一才算满足")
-LINE = (
-    _record("transport", "通道", (
-        ConfigField("kind", "类型", "string", required=True, options=("tcp", "serial")),
-        ConfigField("host", "主机", "string", hint="TCP 通道填"),
-        ConfigField("port", "端口", "scalar", required=True,
-                    hint="TCP 填端口号；串口填 /dev/ttyUSB0、COM3、rfc2217://主机:端口 或 socket://主机:端口"),
-        ConfigField("baudrate", "波特率", "integer", hint="串口，缺省 9600"),
-        ConfigField("bytesize", "数据位", "integer", hint="缺省 8"),
-        ConfigField("parity", "校验", "string", options=("N", "E", "O", "M", "S"), hint="缺省 N"),
-        ConfigField("stopbits", "停止位", "number", hint="缺省 1"),
-        ConfigField("xonxoff", "软件流控", "boolean"),
-        ConfigField("rtscts", "硬件流控", "boolean"),
-    ), required=True, connection=True, hint='{"kind": "tcp", "host", "port"} 或 {"kind": "serial", "port": "rfc2217://…"}'),
-    ConfigField("encoding", "编码", "string", hint="缺省 ascii"), ConfigField("write_terminator", "发送结束符", "string"),
-    ConfigField("read_terminator", "接收结束符", "string"), ConfigField("greeting", "欢迎语（正则）", "string"),
-    ConfigField("keep_open", "保持连接", "boolean"), ConfigField("inter_command_delay_ms", "命令间隔（毫秒）", "number"),
-    _list("identity", "身份命令", _query("", "身份查询", hint="命名组 device_id / serial / model / vendor / firmware"),
-          single=True, hint="一条或几条查询，各自的命名组合在一起就是设备身份"),
-    _query("ready", "就绪命令", "value", LINE_OK),
-    _query("interlock", "联锁命令", "value", LINE_OK),
-    ConfigField("error_pattern", "错误回复（正则）", "string"),
-    _table("error_codes", "故障码说明", _value("说明", "string"), "故障码"),
-    _table("points", "点表", _record("", "点", (
-        ConfigField("send", "查询命令", "string", required=True),
-        ConfigField("pattern", "回复格式（正则）", "string", required=True, hint="要带命名组 (?P<value>…)"),
-        *POINT_META,
-        _list("write", "写命令", LINE_STEP, single=True, hint="可写的点必填；{value} 是要写的值，如 SP {value:.1f}"),
-    )), "点名", hint="只读写点位：每个点一条查询命令；只配点表的设备不参与自动流程"),
-    _table("capabilities", "能力命令", _record("", "能力", (
-        _list("start", "启动命令", LINE_STEP, required=True, hint="依次发送；动作命令之前的命令被拒，设备没有动作"),
-        _record("result", "即时结果", (
-            ConfigField("pattern", "结果格式（正则）", "string", required=True, hint="命名组就是结果字段"),
-        ), hint="读码器这类即时动作：动作命令的回复就是结果，作业当场完成"),
-        *CAPABILITY_EXTRAS,
-    )), "能力", key_ref="capabilities", scope="capability",
-           hint="每项能力的启动命令列表；只读写点位的设备不配"),
-    _query("status", "状态命令与映射", "state",
-           _table("states", "状态映射", _value("状态", "string", options=STATES), "设备状态值", required=True),
-           hint="可选命名组 detail：故障时按故障码说明翻译；配了能力命令就必须配"),
-    _list("actuals", "实测值命令", _query("", "实测查询"), single=True, hint="做完读回实测值：每个命名组是一个实测参数"),
-    _list("hold", "保持命令", LINE_STEP), _list("resume", "恢复命令", LINE_STEP),
-    _list("abort", "终止命令", LINE_STEP), _list("acknowledge", "复位命令", LINE_STEP),
-)
-
-
-# ---------- 设备自有 REST 接口（rest_map_v1）----------
-
-def _request(name: str, label: str, *extra: ConfigField, path_hint: str = "", hint: str = "", **kwargs) -> ConfigField:
-    return _record(name, label, (
-        ConfigField("method", "方法", "string", options=("GET", "POST", "PUT", "PATCH", "DELETE"), hint="缺省 GET"),
-        ConfigField("path", "路径", "string", required=True, hint=path_hint or "base_url 下以 / 开头的相对路径，可用 {占位}"),
-        ConfigField("body", "请求体", "any", hint="JSON；字符串里可用 {参数}、{command_id} 占位"),
-        *extra,
-    ), hint=hint, **kwargs)
-
-
-def _match(name: str, label: str, values_label: str) -> ConfigField:
-    return _record(name, label, (
-        ConfigField("field", "响应字段", "string", required=True, hint="字段路径，如 state_text 或 a.b.0.c"),
-        _list("values", values_label, _value("值")),
-    ))
-
-
-REST_STATES = ("idle", "accepted", "running", "held", "done", "failed")
-REST = (
-    _request("identity", "身份请求",
-             _table("fields", "身份字段", _value("响应字段", "string"), "身份字段",
-                    key_options=("device_id", "serial", "model", "vendor", "firmware")),
-             _match("interlock", "急停 / 故障判断", "取这些值时算联锁"), _match("ready", "就绪判断", "取这些值时算就绪"),
-             hint="判断在线用；只读写点位的设备不配时读第一个点"),
-    _request("busy", "忙判断", ConfigField("field", "响应字段", "string", required=True),
-             _list("values", "取这些值时算忙", _value("值")), hint="不配就不判忙（调度系统自己排队）"),
-    _table("capabilities", "能力请求模板", _request("", "能力",
-           ConfigField("handle", "任务号字段", "string", hint="响应里设备任务号在哪个字段；不填用指令号"),
-           _table("actuals", "实测字段", _value("响应字段或 {point: 点名}", "any"), "参数", key_ref="params",
-                  hint="做完读回：字符串按状态请求的响应字段读；{\"point\": 点名} 按点表读这个点（状态响应里没有实测值时）"),
-           *CAPABILITY_EXTRAS), "能力", key_ref="capabilities", scope="capability",
-           hint="只读写点位（不参与自动流程）的设备不配"),
-    _table("points", "点表", _request("", "点",
-           ConfigField("field", "响应字段", "string", hint="值在响应的哪个字段，如 value 或 a.b.0.c；不填就是整个响应"),
-           *POINT_META,
-           _request("write", "写请求", hint="可写的点必填；body 里用 {value}，整串占位时保持数 / 布尔类型",
-                    path_hint="base_url 下以 / 开头的相对路径"),
-           path_hint="读这个点的请求路径"), "点名", hint="只读写点位：每个点一个读请求，可写的点再配写请求"),
-    _table("positions", "位置映射", _value("设备站点编号", "string"), "ILCS 位置编号",
-           hint="配置后 {from_position} / {to_position} 按它查表，查不到明确拒绝"),
-    _request("status", "状态请求", ConfigField("field", "状态字段", "string", required=True),
-             _table("states", "状态映射", _value("状态", "string", options=REST_STATES), "状态值", required=True),
-             ConfigField("error_field", "故障说明字段", "string"),
-             path_hint="可用 {handle}（设备任务号）、{command_id}", hint="配了能力请求就必须配"),
-    _request("lookup", "按指令号找回",
-             ConfigField("detail_path", "详情路径", "string", hint="列表项里没有匹配字段时逐个取详情，可用 {id}"),
-             ConfigField("id_field", "任务号字段", "string", hint="缺省 id"),
-             ConfigField("match_field", "匹配字段", "string", hint="缺省 message"),
-             ConfigField("match", "匹配内容", "string", hint="缺省 {command_id}；要与请求里带的指令号写法一致"),
-             ConfigField("recent", "只看最近几条", "integer", hint="缺省 20"),
-             hint="启动请求没拿到应答时，按请求里带的指令号在设备侧找回"),
-    _request("hold", "保持", path_hint="可用 {handle}、{command_id}"),
-    _request("resume", "恢复", path_hint="可用 {handle}、{command_id}"),
-    _request("abort", "终止", path_hint="可用 {handle}、{command_id}"),
-)
 
 DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
     DriverInfo(
@@ -580,61 +208,6 @@ DRIVERS: dict[str, DriverInfo] = {item.key: item for item in (
                         "request_timeout_sec": 10, "probe_interval_sec": 10},
         credential="file:///run/secrets/ilcs/sila/<驱动宿主>.token",
     ),
-    DriverInfo(
-        "opcua_v1", "OPC UA TaskExecution", "OPC UA", "OPC UA 服务器实现 ILCS TaskExecution 节点与方法", "设备侧",
-        (ConfigField("endpoint", "端点", "string", required=True, connection=True, hint="opc.tcp://主机:端口/…"),
-         *OPCUA_SECURITY, ConfigField("device_timezone", "设备时区", "string"), *_timeouts(), *COMMON),
-        lambda limits: {"endpoint": "opc.tcp://opcua-device.lab.internal:4840/ilcs/", "security_policy": "Basic256Sha256",
-                        "security_mode": "SignAndEncrypt", "server_certificate": "/run/secrets/ilcs/opcua/<设备>.crt",
-                        "application_uri": "urn:ilcs:client", "request_timeout_sec": 10, "probe_interval_sec": 10},
-        credential="file:///run/secrets/ilcs/opcua/ilcs-client.json",
-    ),
-    DriverInfo(
-        "modbus_tcp_v1", "Modbus 任务寄存器", "Modbus TCP", "PLC 按 ILCS 任务寄存器表编程", "设备侧",
-        (ConfigField("host", "主机", "string", required=True, connection=True),
-         ConfigField("port", "端口", "integer", connection=True), ConfigField("unit_id", "从站号", "integer", connection=True),
-         ConfigField("base_address", "寄存器基地址", "integer"),
-         _table("capabilities", "能力码", _value("能力码", "integer"), "能力", key_ref="capabilities", required=True,
-                hint="{能力: 能力码}，与 PLC 程序核对"),
-         _table("params", "参数槽位", _value("槽位", "integer"), "参数", key_ref="params", required=True,
-                hint="{参数: 槽位 1–16}"),
-         ConfigField("poll_interval_ms", "握手轮询（毫秒）", "number"), ConfigField("heartbeat_stale_sec", "心跳超时（秒）", "number"),
-         *_timeouts(), *COMMON),
-        _modbus_tcp,
-    ),
-    DriverInfo(
-        "opcua_map_v1", "OPC UA 节点映射", "OPC UA 节点映射", "设备自有 OPC UA 节点（PLC、视觉系统）", "驱动作业台账",
-        (ConfigField("endpoint", "端点", "string", required=True, connection=True), *OPCUA_SECURITY, *_point_map("opcua"),
-         _table("rejections", "明确拒绝的状态码", _value("含义", "string"), "OPC UA 状态码",
-                key_options=("BadInvalidState", "BadInvalidArgument", "BadOutOfRange", "BadResourceUnavailable",
-                             "BadNotSupported", "BadUserAccessDenied"),
-                hint="启动方法返回这些状态码 = 设备明确没执行；在内置的几项之外补充"),
-         *JOBS, *_timeouts(), *COMMON),
-        lambda limits: {"endpoint": "opc.tcp://plc.lab.internal:4840/", "security_policy": "Basic256Sha256",
-                        "security_mode": "SignAndEncrypt", "server_certificate": "/run/secrets/ilcs/opcua/<设备>.crt",
-                        "application_uri": "urn:ilcs:client", "request_timeout_sec": 10, "probe_interval_sec": 10,
-                        **_plc("opcua", limits)},
-        credential="file:///run/secrets/ilcs/opcua/ilcs-client.json",
-    ),
-    DriverInfo(
-        "modbus_map_v1", "Modbus 点表", "Modbus TCP 点表", "设备自有 Modbus 寄存器表（PLC、温控仪表）", "驱动作业台账",
-        (ConfigField("host", "主机", "string", required=True, connection=True),
-         ConfigField("port", "端口", "integer", connection=True), ConfigField("unit_id", "从站号", "integer", connection=True),
-         *_point_map("modbus"), *JOBS, *_timeouts(3), *COMMON),
-        lambda limits: {"host": "plc.lab.internal", "port": 502, "unit_id": 1, "request_timeout_sec": 3,
-                        "probe_interval_sec": 10, **_plc("modbus", limits)},
-    ),
-    DriverInfo(
-        "line_command_v1", "串口 / TCP 命令", "串口 / TCP 命令", "一问一答的文本命令（RS232 / RS485 / TCP、机械臂仪表盘服务）",
-        "驱动作业台账", (*LINE, *JOBS, *_timeouts(5), *COMMON), _line,
-    ),
-    DriverInfo(
-        "rest_map_v1", "REST 接口映射", "REST 接口映射", "设备或调度系统自有 REST 接口（AGV 车队等）", "驱动作业台账 + 设备任务号",
-        (ConfigField("base_url", "接口地址", "string", required=True, connection=True), *TLS, *REST,
-         *JOBS, *_timeouts(), *COMMON),
-        _rest,
-        credential="file:///run/secrets/ilcs/<工位>.json",
-    ),
 )}
 
 
@@ -665,12 +238,6 @@ def check_fields(driver: str, config: dict, *, template: bool = False) -> Config
     for item in info.fields:
         if item.required and item.name not in config and not (template and item.connection):
             check.problems.append(f"缺少「{item.label}」（{item.name}）")
-    if driver in MAPPING_DRIVERS:
-        # 两层：只读写点位可以只配点表；参与自动流程（配了能力映射）就必须能确认作业做没做完
-        if config.get("capabilities") and not config.get("status"):
-            check.problems.append("配了能力映射（参与自动流程）就要配「状态」（status）：没有状态就无法判断作业做没做完")
-        if not config.get("capabilities") and not config.get("points"):
-            check.problems.append("至少要配点表（points，读写点位）或能力映射（capabilities，参与自动流程）")
     for name, value in config.items():
         item = known.get(name)
         if item is None:
@@ -719,18 +286,12 @@ def nested_warnings(spec: ConfigField, value, path: str) -> list[str]:
     return warnings
 
 
-# 映射驱动：设备自己的点表 / 命令 / 接口，ILCS 映射出两层——点位读写（只配点表）与任务执行（再配能力映射与状态）
-MAPPING_DRIVERS = {"modbus_map_v1", "opcua_map_v1", "rest_map_v1", "line_command_v1"}
-
-
 def has_tasks(driver: str, config: dict | None) -> bool:
-    """这份配置让设备参与自动流程（接指令）吗？映射驱动看有没有能力映射；SiLA 设备服务看 tasks（缺省参与）；
-    其余按 ILCS 契约接的驱动一律参与。"""
+    """这份配置让设备参与自动流程（接指令）吗？SiLA 设备服务看 tasks（缺省参与；只读写点位的设备填 false）；
+    HTTPS 网关一律参与。"""
     if driver == "sila2_v1":
         return (config or {}).get("tasks", True) is not False
-    if driver not in MAPPING_DRIVERS:
-        return True
-    return bool((config or {}).get("capabilities"))
+    return True
 
 
 def validate_config(driver: str, config: dict, credential_ref: str = "", *, protocol: str = "",
@@ -772,7 +333,7 @@ def validate_config(driver: str, config: dict, credential_ref: str = "", *, prot
     elif found:
         check.problems.append(found)
     if not found and not has_tasks(driver, config):
-        check.warnings.append("只配了点表、没有能力映射：可以读值、手动写标了可写的点，但不参与自动流程"
+        check.warnings.append("tasks: false（只读写点位）：可以读值、手动写标了可写的点，但不参与自动流程"
                               "（排到这台设备的指令会被拒绝；接入验收只要求只读级）")
     return check
 

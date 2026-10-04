@@ -49,7 +49,7 @@ def test_driver_and_target_changes_wait_for_acting_commands(admin, operator, res
     _, command_id, station_id = _acting_command(operator)
     original = admin.get(f"/api/stations/{station_id}/adapter").json()
     try:
-        swapped = _patch(admin, station_id, kind="real", driver="line_command_v1")
+        swapped = _patch(admin, station_id, kind="real", driver="http_json_v1")
         assert swapped.status_code == 409, swapped.text
         detail = swapped.json()["detail"]
         assert detail["code"] == "adapter_busy"
