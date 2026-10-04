@@ -11,8 +11,6 @@ dist/
 
 # 秘密与部署机配置：只有 .env.example 进仓库
 secrets/
-# 设备模块网关本机联调时的作业台账
-devices/gateway/**/state/
 deploy/.env
 .env
 

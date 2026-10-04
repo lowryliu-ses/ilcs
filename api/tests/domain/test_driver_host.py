@@ -1,22 +1,18 @@
-"""ILCS 的 `sila2_v1` × 驱动宿主（devices/host）× 外部 PLC 模拟设备：ILCS 只经 SiLA 2 读写设备、下发作业。
+"""ILCS 的 `sila2_v1` × 驱动宿主（设备仓库的 host/）× 外部 PLC 模拟设备：ILCS 只经 SiLA 2 读写设备、下发作业。
 
 驱动宿主用的插件配置就是 ILCS 映射驱动的那份配置（`plc_config` 原样放进去）：迁过去不用改写配置。
+驱动宿主自己的测试在设备仓库里（`./run-tests.sh`），这里只测 ILCS 经它接设备。
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-import subprocess
-import sys
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from sim_harness import HOST_TOKEN as TOKEN, driver_host, host_plc_device as _plc_device, plc_sim, request
+from sim_harness import HOST_TOKEN as TOKEN, driver_host, host_plc_device as _plc_device, needs_devices, plc_sim, request
 
-ROOT = Path(__file__).resolve().parents[3]
-HOST = ROOT / "devices" / "host"
+pytestmark = needs_devices
 
 
 @pytest.fixture(autouse=True)
@@ -50,14 +46,6 @@ def _wait(adapter, command_id: str, seconds: float = 6):
             return result
         time.sleep(0.1)
     raise AssertionError(f"{command_id} 没有在时限内结束")
-
-
-def test_driver_host_passes_its_own_tests():
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(HOST / "tests")], cwd=ROOT,
-        capture_output=True, text=True, timeout=300, env=dict(os.environ),
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_ilcs_drives_a_plc_only_through_the_driver_host(credentials):

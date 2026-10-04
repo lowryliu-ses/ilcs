@@ -1,6 +1,6 @@
 """SiLA 2 设备驱动（`sila2_v1`）。
 
-契约见 `devices/contracts/sila2/README.md`。设备服务（驱动宿主、厂商网关或模拟设备）实现其中一部分特性，驱动按
+契约见 `ilcs-devices/contracts/sila2/README.md`。设备服务（驱动宿主、厂商网关或模拟设备）实现其中一部分特性，驱动按
 `SiLAService` 报的已实现特性取能力，不再连上就要求 TaskExecution：
 - `DeviceInfo`：身份、状态、驱动与配置摘要；没有它的老服务器（只有 TaskExecution 1.0）读 `TaskExecution.DeviceIdentity`；
 - `PointAccess`：点位读写，与映射驱动的点位层同一套接口（点位服务、手动写都不用区分驱动）；

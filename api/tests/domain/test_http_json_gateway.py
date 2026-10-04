@@ -1,7 +1,7 @@
-"""`http_json_v1` 驱动 × HTTPS 网关模拟设备（devices/simulators/http_gateway）：真实走 TLS 与令牌，不打桩。
+"""`http_json_v1` 驱动 × HTTPS 网关模拟设备（ilcs-devices/simulators/http_gateway）：真实走 TLS 与令牌，不打桩。
 
 Modbus 任务寄存器、OPC UA TaskExecution 两个任务契约驱动已经移出 ILCS（驱动宿主的 modbus_task / opcua_task 插件，
-测试在 devices/host/tests/test_plugin_task_contract.py）。
+测试在 ilcs-devices/host/tests/test_plugin_task_contract.py）。
 """
 import time
 

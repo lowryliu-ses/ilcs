@@ -1,5 +1,0 @@
-# 网关跑在工作站 USB 插着的那台电脑上要装的。ILCS 仓库的 api/ 不依赖这些；模拟网关（--simulate）不需要 pyserial。
-# pyserial（BSD-3）：USB 虚拟串口 / 本机串口 / rfc2217:// 串口服务器。MethodSCRIPT 协议是 driver/ 里自己写的，不用 PalmSens 的库
-pyserial==3.5
-# 自签证书（现场签发证书时可以不装）
-cryptography==50.0.1

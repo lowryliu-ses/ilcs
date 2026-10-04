@@ -1,16 +1,11 @@
 """环境读数连接器：模拟手套箱（Modbus TCP）→ 连接器 → `POST /api/runtime/environment` → 步骤的水氧要求按最新读数核对。
 走真实 API（TestClient）与真实 Modbus 收发；服务身份按区域授权。"""
 import socket
-import sys
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
-DEVICES = ROOT / "devices"
-if str(DEVICES) not in sys.path:
-    sys.path.insert(0, str(DEVICES))
+from sim_harness import require_devices  # 连接器在设备仓库（connectors/environment）；导入时把它放进 sys.path
 
 
 class ServiceHttp:
@@ -33,6 +28,7 @@ def _free_port() -> int:
 
 @pytest.fixture()
 def glovebox():
+    require_devices()
     from connectors.environment.glovebox_sim import Glovebox
 
     box = Glovebox(port=_free_port()).start()
@@ -122,6 +118,7 @@ def test_an_unauthorized_zone_does_not_block_the_authorized_one(glovebox, zone_i
 
 
 def test_register_decoding_and_config_checks():
+    require_devices()
     from connectors.environment.poller import Poller, decode_registers
     from connectors.environment.glovebox_sim import float_registers
 

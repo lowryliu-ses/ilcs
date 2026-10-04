@@ -2,20 +2,38 @@
 
 模拟设备走真实网络协议（SiLA 2 / HTTPS / Modbus TCP / OPC UA / TCP 文本命令），驱动不打桩。ILCS 只经 sila2_v1、http_json_v1
 接设备：PLC、仪表、车队这类模拟设备挂到本进程起的驱动宿主上（`driver_host`），插件配置就是 `plc_config` / `line_config` /
-`fleet_config` 这几份——和现场同一条路。插件本身的测试在 devices/host/tests。
+`fleet_config` 这几份——和现场同一条路。插件本身的测试在设备仓库（ilcs-devices）的 host/tests。
+
+模拟设备、驱动宿主、网关 SDK 都在设备仓库里：环境变量 ILCS_DEVICES 指向它的检出，缺省是 ILCS 仓库旁边的
+../ilcs-devices。找不到时，起模拟设备 / 驱动宿主的辅助函数让当前测试跳过（`pytest -rs` 看原因），不报错。
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
 import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
-DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
+# 设备仓库的检出：simulators、connectors 包以它为根，ilcs_host 以它的 host/ 为根，ilcs_gateway 以它的 gateway/ 为根
+DEVICES = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices").resolve()
+DEVICES_FOUND = (DEVICES / "host" / "ilcs_host").is_dir() and (DEVICES / "simulators").is_dir()
+NO_DEVICES = f"找不到设备仓库 ilcs-devices（{DEVICES}；设环境变量 ILCS_DEVICES 指向它的检出）：跳过要用设备侧代码的测试"
 if str(DEVICES) not in sys.path:
     sys.path.insert(0, str(DEVICES))
+# 整个测试文件都要设备仓库时：pytestmark = needs_devices
+needs_devices = pytest.mark.skipif(not DEVICES_FOUND, reason=NO_DEVICES)
+
+
+def require_devices() -> Path:
+    """要用设备仓库里的代码（模拟设备、驱动宿主、网关 SDK、连接器）的地方先调它：找不到设备仓库就跳过当前测试。"""
+    if not DEVICES_FOUND:
+        pytest.skip(NO_DEVICES)
+    return DEVICES
 
 
 def free_port() -> int:
@@ -56,7 +74,8 @@ def request(command_id: str, type_: str = "dispatch", target: str = "", params=N
 
 @contextmanager
 def control_port(target, token: str = ""):
-    """模拟设备统一控制口（devices/simulators/common/control.py），接入验收的故障注入与动作计数走它。"""
+    """模拟设备统一控制口（ilcs-devices/simulators/common/control.py），接入验收的故障注入与动作计数走它。"""
+    require_devices()
     from simulators.common.control import ControlServer
 
     server = ControlServer(target, "127.0.0.1", 0, token).start()
@@ -67,6 +86,7 @@ def control_port(target, token: str = ""):
 
 
 def _device(device_id: str, profile: str = "generic", task_seconds: float = 0.3, **kwargs):
+    require_devices()
     from simulators.common.device import SimulatedDevice
 
     return SimulatedDevice(device_id, profile, task_seconds=task_seconds, **kwargs)
@@ -74,6 +94,7 @@ def _device(device_id: str, profile: str = "generic", task_seconds: float = 0.3,
 
 @contextmanager
 def opcua_sim(cert_dir: Path | None = None, device_id: str = "SIM-UA-T", **device):
+    require_devices()
     from simulators.opcua_device.server import SimulatorRunner, parse
 
     port = free_port()
@@ -97,6 +118,7 @@ def opcua_config(port: int, cert_dir: Path | None = None, device_id: str = "SIM-
 
 @contextmanager
 def gateway_sim(cert_dir: Path, device_id: str = "SIM-GW-T", **device):
+    require_devices()
     from simulators.http_gateway.server import SimulatorRunner, parse
 
     port = free_port()
@@ -121,7 +143,7 @@ def gateway_config(port: int, cert_dir: Path, device_id: str = "SIM-GW-T", **ext
 
 # ---------- 没有 ILCS 任务契约的设备：串口 / TCP 命令 ----------
 
-# 真空干燥箱温控仪表（devices/simulators/line_device --dialect oven）的命令映射
+# 真空干燥箱温控仪表（ilcs-devices/simulators/line_device --dialect oven）的命令映射
 OVEN_MAP = {
     "identity": {"send": "*IDN?", "pattern": "^(?P<vendor>[^,]*),(?P<model>[^,]*),(?P<device_id>[^,]*),(?P<firmware>.*)$"},
     "ready": {"send": "REM?", "pattern": "^(?P<value>\\w+)$", "ok": ["REMOTE"]},
@@ -143,7 +165,7 @@ OVEN_MAP = {
     "acknowledge": [{"send": "ACK", "expect": "^OK$"}],
 }
 
-# UR 仪表盘服务（devices/simulators/line_device --dialect ur）
+# UR 仪表盘服务（ilcs-devices/simulators/line_device --dialect ur）
 UR_MAP = {
     "write_terminator": "\n", "read_terminator": "\n",
     "greeting": "^Connected: Universal Robots Dashboard Server",
@@ -169,6 +191,7 @@ UR_MAP = {
 
 @contextmanager
 def line_sim(dialect: str = "oven", device_id: str = "SIM-OVEN-T", **device):
+    require_devices()
     from simulators.line_device.server import SimulatorRunner, parse
 
     port = free_port()
@@ -187,7 +210,7 @@ def line_config(port: int, dialect: str = "oven", **extra) -> dict:
             "connect_timeout_sec": 1, "probe_interval_sec": 0.5, **mapping, **extra}
 
 
-# ---------- PLC 点表（devices/simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
+# ---------- PLC 点表（ilcs-devices/simulators/plc_device）：OPC UA 节点映射 / Modbus 点表映射 ----------
 
 PLC_STATES = {"0": "idle", "1": "running", "2": "held", "3": "done", "4": "failed"}
 PLC_ERRORS = {"17": "过程报警", "23": "执行中断", "31": "程序号不存在", "90": "安全回路未闭合", "91": "不在远程模式",
@@ -259,6 +282,7 @@ def plc_modbus_points(setpoints: tuple) -> dict:
 @contextmanager
 def plc_sim(protocol: str = "opcua", cert_dir: Path | None = None, device_id: str = "SIM-PLC-T",
             machine: str = "Coater", setpoints: tuple = ("thickness", "temp"), recipes: str = "", **device):
+    require_devices()
     from simulators.plc_device.server import SimulatorRunner, parse
 
     port = free_port()
@@ -290,7 +314,7 @@ def plc_config(protocol: str, port: int, cert_dir: Path | None = None, device_id
     return {**config, **extra}, ""
 
 
-# ---------- REST 接口映射（devices/simulators/fleet：MiR 风格的 AGV 车队接口） ----------
+# ---------- REST 接口映射（ilcs-devices/simulators/fleet：MiR 风格的 AGV 车队接口） ----------
 
 def fleet_mapping(positions: dict | None = None) -> dict:
     return {
@@ -318,6 +342,7 @@ def fleet_mapping(positions: dict | None = None) -> dict:
 
 @contextmanager
 def fleet_sim(cert_dir: Path, robots: str = "AGV-01,AGV-02", task_seconds: float = 0.4):
+    require_devices()
     from simulators.fleet.server import SimulatorRunner, parse
 
     port = free_port()
@@ -350,13 +375,13 @@ def transfer(command_id: str, source: str = "HOTEL-01/S01", target: str = "ST-05
     )
 
 
-# ---------- 驱动宿主（devices/host）：ILCS 只经 SiLA 2 接设备 ----------
+# ---------- 驱动宿主（设备仓库的 host/）：ILCS 只经 SiLA 2 接设备 ----------
 
 HOST_TOKEN = "k" * 40
-if str(ROOT / "devices" / "host") not in sys.path:
-    # ilcs_host 包以 devices/host 为根。放在最后：devices/host/tests 和 api/tests 都是没有 __init__.py 的 tests 目录，
+if str(DEVICES / "host") not in sys.path:
+    # ilcs_host 包以设备仓库的 host/ 为根。放在最后：host/tests 和 api/tests 都是没有 __init__.py 的 tests 目录，
     # 放在前面会让 `from tests.conftest import …` 找到驱动宿主的 conftest
-    sys.path.append(str(ROOT / "devices" / "host"))
+    sys.path.append(str(DEVICES / "host"))
 
 
 def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKEN, **host) -> Path:
@@ -378,6 +403,7 @@ def write_host_site(root: Path, devices: dict[str, dict], token: str = HOST_TOKE
 @contextmanager
 def run_host(root: Path):
     """按现场目录在本进程里起驱动宿主，每台设备一个 SiLA 服务；退出时停掉（台账留在状态目录里）。"""
+    require_devices()
     from ilcs_host.plugins import PLUGINS
     from ilcs_host.server import prepare, start, stop
     from ilcs_host.site import load_site

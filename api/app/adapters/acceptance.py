@@ -215,7 +215,7 @@ def default_template(station_id: str, limits: dict[str, Any], capability: str = 
 # ---------- 故障注入器 ----------
 
 class SimulatorControlInjector:
-    """模拟设备统一控制口（`devices/simulators/common/control.py`）的客户端：故障注入与动作计数。
+    """模拟设备统一控制口（`ilcs-devices/simulators/common/control.py`）的客户端：故障注入与动作计数。
 
     `spec` 取自适配器配置里的 `simulator_control`：`{"url": "http://line-sim-arm:9900", "token_ref": "file://…",
     "unit": "AGV-01"}`（`unit` 给一个进程模拟多台设备的车队用）。主机同样要在设备白名单里；只对自报为模拟器的设备、

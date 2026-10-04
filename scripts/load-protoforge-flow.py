@@ -2,7 +2,7 @@
 """ProtoForge 联调线全流程：三台 ProtoForge 模拟设备经驱动宿主接入（只走 SiLA 2），按 SOP → 能力 / 设备方法 → 流程 →
 多温度矩阵方案 → 实验任务 → 排程 → 批次执行 → 数据复核 → 报告跑一遍。
 
-    python3 scripts/load-driver-host-devices.py register            # 先把三台设备经驱动宿主接进来（见 devices/host/README.md）
+    python3 scripts/load-driver-host-devices.py register            # 先把三台设备经驱动宿主接进来（见 ilcs-devices/host/README.md）
     python3 scripts/load-protoforge-flow.py register [--base http://127.0.0.1:8090]
     python3 scripts/load-protoforge-flow.py run [--temps 40,60,80] [--repeats 1]
 

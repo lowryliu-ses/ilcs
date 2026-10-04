@@ -1,13 +1,10 @@
 """结果文件接收器：检测软件导出的文件 → 关联检测任务与样本 → 原始文件上传 + 结果回传。走真实 API（TestClient）。"""
-import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
-DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
-if str(DEVICES) not in sys.path:
-    sys.path.insert(0, str(DEVICES))
+from sim_harness import needs_devices  # 接收器在设备仓库（connectors/result_files）；导入时把它放进 sys.path
+
+pytestmark = needs_devices
 
 CAPACITY = "METRIC-discharge_capacity-v1"
 DENSITY = "METRIC-areal_density-v1"

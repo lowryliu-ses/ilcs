@@ -1,6 +1,6 @@
 """选项型参数（溶剂种类、测试协议、气氛）：规格、工位极限、方法规则、流程校验、方案因子与设计点。
 
-驱动按设备代码下发选项（点表映射的 write.<参数>.map）在驱动宿主测：devices/host/tests/test_plugin_transports.py。"""
+驱动按设备代码下发选项（点表映射的 write.<参数>.map）在驱动宿主测：ilcs-devices/host/tests/test_plugin_transports.py。"""
 import pytest
 
 from app.domain import matrix

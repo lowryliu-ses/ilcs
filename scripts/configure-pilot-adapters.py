@@ -5,10 +5,16 @@
 每个工位写一条系统来源的审计（含前后配置），不绕过留痕。切换后适配器先标为离线，
 在线与否由执行器探测决定——不沿用切换前的「在线」结论。
 
-按预设切换（每个示例工位接哪种驱动、连哪台模拟设备，见 devices/simulators/pilot-devices.json）：
+按预设切换（每个示例工位接哪种驱动、连哪台模拟设备，见设备仓库的 simulators/pilot-devices.json）：
 
     python scripts/configure-pilot-adapters.py apply --preset                 # 预设里的全部工位
     python scripts/configure-pilot-adapters.py apply --preset --only ST-05 --only AGV-01
+
+缺省读设备仓库里的预设（环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices）。在 api 容器里跑时容器里没有
+设备仓库，用 `--preset -` 从标准输入喂进去（在 ILCS 的 deploy/ 里）：
+
+    docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply --preset - \
+        < ../../ilcs-devices/simulators/pilot-devices.json
 
 按单个工位切换（旧写法，`工位=[驱动@]主机:端口:设备ID`，不写驱动时是 sila2_v1）：
 
@@ -28,12 +34,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
+PRESET = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices") / "simulators" / "pilot-devices.json"
 
 from app.adapters.registry import reset_cache  # noqa: E402
 from app.core.clock import now  # noqa: E402
@@ -115,6 +123,16 @@ def hosts_of(config) -> set[str]:
     return hosts - {""}
 
 
+def _read_preset(source: str) -> dict[str, dict]:
+    """预设里的工位；`-` 从标准输入读（api 容器里没有设备仓库，从宿主机喂进来）。"""
+    if source == "-":
+        return json.loads(sys.stdin.read())["stations"]
+    path = Path(source)
+    if not path.is_file():
+        raise SystemExit(f"预设文件 {path} 不存在：设 ILCS_DEVICES 指向设备仓库，或用 --preset - 从标准输入喂进来")
+    return json.loads(path.read_text(encoding="utf-8"))["stations"]
+
+
 def _targets(args) -> dict[str, dict]:
     targets: dict[str, dict] = {}
     for spec in args.station or []:
@@ -123,7 +141,7 @@ def _targets(args) -> dict[str, dict]:
         host, port, device_id = rest.split(":")
         targets[station_id] = {"driver": driver or "sila2_v1", "host": host, "port": int(port), "device_id": device_id}
     if args.preset:
-        presets = json.loads(Path(args.preset).read_text(encoding="utf-8"))["stations"]
+        presets = _read_preset(args.preset)
         wanted = set(args.only or presets)
         unknown = sorted(wanted - set(presets))
         if unknown:
@@ -285,8 +303,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("action", choices=["apply", "revert", "simulate"])
     parser.add_argument("--station", action="append", help="apply：工位=[驱动@]主机:端口:设备ID；revert、simulate：工位")
-    parser.add_argument("--preset", nargs="?", const=str(ROOT / "devices" / "simulators" / "pilot-devices.json"),
-                        help="按预设文件切换（缺省 devices/simulators/pilot-devices.json）")
+    parser.add_argument("--preset", nargs="?", const=str(PRESET),
+                        help="按预设文件切换（缺省设备仓库的 simulators/pilot-devices.json；- 从标准输入读）")
     parser.add_argument("--only", action="append", help="只切换预设里的这些工位")
     parser.add_argument("--skip-missing", action="store_true", help="预设里的工位库里还没有就跳过（如演示用的 ARM-01）")
     parser.add_argument("--channels", action="append", help="工位=并行通道数")

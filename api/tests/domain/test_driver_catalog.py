@@ -3,14 +3,13 @@
 ILCS 只登记 sila2_v1 与 http_json_v1；协议驱动（PLC 点表、串口命令、REST……）的映射在驱动宿主的设备文件里，不在这里。
 """
 import json
-from pathlib import Path
 
 import pytest
 
 from app.adapters.catalog import DRIVERS, check_fields
+from sim_harness import require_devices
 
 LIMITS = {"cap.heat": {"temp": [20, 200], "time": [1, 600]}, "cap.transfer": {}}
-PRESETS = Path(__file__).resolve().parents[3] / "devices" / "simulators" / "pilot-devices.json"
 
 
 def test_only_the_two_contract_drivers_are_registered():
@@ -25,8 +24,10 @@ def test_driver_templates_match_their_own_field_specs(driver):
 
 
 def test_pilot_presets_pass_the_field_specs():
-    """示例工位的预设是真在用的配置：按字段说明不该有问题，也不该有「拼错的键」提醒。"""
-    stations = json.loads(PRESETS.read_text(encoding="utf-8"))["stations"]
+    """示例工位的预设（设备仓库的 simulators/pilot-devices.json）是真在用的配置：按字段说明不该有问题，
+    也不该有「拼错的键」提醒。"""
+    presets = require_devices() / "simulators" / "pilot-devices.json"
+    stations = json.loads(presets.read_text(encoding="utf-8"))["stations"]
     checked = 0
     for station, preset in stations.items():
         assert preset.get("driver") in DRIVERS, f"{station} 用的驱动 {preset.get('driver')} 不在 ILCS 里"
