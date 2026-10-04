@@ -203,25 +203,28 @@ def test_driver_config_change_on_the_host_reopens_the_acceptance_gate(admin, res
                 assert runs[0]["ok"] and runs[0]["driver_info"]["config_digest"] == changed_digest
                 assert accepted["approved_driver"]["config_digest"] == changed_digest, "验收通过时批准新的那份"
                 assert accepted["acceptance"]["required"] == "" and accepted["driver_changed"] is False
+                with SessionLocal() as db:
+                    alarm = db.query(Alarm).filter(Alarm.condition_key == f"station:{STATION}:driver_changed").one()
+                    assert alarm.origin == "system" and "停派工" in alarm.message
+                    # 闸门放开的同时复位条件，不等下一轮探测：放行之后马上开跑，开跑检查不该还被这条报警挡住
+                    assert alarm.condition_active is False and alarm.state == "active", "条件复位；确认与关闭留给人"
+                    alarm_id = alarm.id
                 written = admin.post(f"/api/stations/{STATION}/adapter/points/sp_temp/write", {
                     "value": 42.5, "reason": "批准之后写", "signature_id": admin.sign("手动写入设备点位", target=STATION)})
                 assert written.status_code == 201, written.text
                 assert _pass()["written"] == 1
                 actions = [row["action"] for row in admin.get(f"/api/audit?target={STATION}&limit=30").json()]
                 assert "批准驱动配置变更" in actions, actions
-                with SessionLocal() as db:
-                    alarm = db.query(Alarm).filter(Alarm.condition_key == f"station:{STATION}:driver_changed").one()
-                    assert alarm.origin == "system" and "停派工" in alarm.message
-                    alarm_id = alarm.id
-                _force_probe()
-                _pass()  # 再探测一次：摘要与已批准的一致，报警条件复位（确认与关闭留给人）
-                with SessionLocal() as db:
-                    assert db.get(Alarm, alarm_id).condition_active is False
 
-                # 同一份配置不重复处理：再探测几次，版本不再加
+                # 同一份配置不重复处理：再探测几次，版本不再加、报警不再挂
+                _force_probe()
+                _pass()
                 _force_probe()
                 _pass()
                 assert admin.get(f"/api/stations/{STATION}/adapter").json()["config_version"] == version + 1
+                with SessionLocal() as db:
+                    rows = db.query(Alarm).filter(Alarm.condition_key == f"station:{STATION}:driver_changed").all()
+                    assert [(row.id, row.condition_active) for row in rows] == [(alarm_id, False)]
 
 
 def test_driver_change_under_a_running_command_sends_it_to_manual_review(operator, reset_runtime, executor):
