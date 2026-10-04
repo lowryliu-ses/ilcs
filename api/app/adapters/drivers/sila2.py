@@ -53,9 +53,62 @@ WRITE_REFUSALS = {
     "DeviceUnreachable", "RequestConflict", "InvalidAccessToken",
 }
 SILA_TYPE = '<DataType xmlns="http://www.sila-standard.org"><Basic>{}</Basic></DataType>'
-# sila2 0.14.0 建客户端时现场编译 protobuf，生成的模块先放进 sys.modules 再删掉，不是线程安全的：执行器并发探测时
-# 两个线程同时建客户端会偶发 KeyError（如 'SiLAService_pb2'），被当成连不上、报一条失联。建客户端一律串行
-_CLIENT_LOCK = threading.Lock()
+# sila2 0.14.0 建客户端时现场编译 protobuf（framework.utils.run_protoc：改 sys.path、导入生成的模块、再从 sys.modules
+# 删掉），不是线程安全的：执行器并发探测时两个线程同时编译会偶发 KeyError（如 'SiLAService_pb2'），被当成连不上、报一条失联。
+# 只把编译串行起来：建客户端时的网络往来（TLS、读特性清单、取特性定义）不在锁里，一台接了连接却不应答的设备服务
+# 不会让别的工位的首次连接排在它后面
+_PROTOC_LOCK = threading.Lock()
+
+
+def _serialize_protoc() -> None:
+    """给 sila2 的 run_protoc 套上 `_PROTOC_LOCK`（只套一次）。特性模块按模块全局名调它，换掉模块属性就生效。"""
+    from sila2.framework import utils
+
+    with _PROTOC_LOCK:
+        compile_ = utils.run_protoc
+        if getattr(compile_, "ilcs_serialized", False):
+            return
+
+        def serialized(proto_file):
+            with _PROTOC_LOCK:
+                return compile_(proto_file)
+
+        serialized.ilcs_serialized = True
+        utils.run_protoc = serialized
+
+
+class _Handshake:
+    """一次建客户端（TLS、读特性清单、编译特性）：在后台线程里做，调用方最多等到截止时间。
+
+    sila2 的客户端构造不接受超时：接了连接却不应答的设备服务会让它挂到 gRPC 自己放弃（约 20 s），用 CA 证书时取服务器
+    证书那一步甚至没有超时。等不到就按连不上处理；后台那次接着做完，下一次连接直接取它的结论、不另起一个——
+    一台这样的设备服务最多挂着一个握手线程。
+    """
+
+    def __init__(self, build, station_id: str):
+        self._done = threading.Event()
+        self._client = None
+        self._error: BaseException | None = None
+        threading.Thread(target=self._run, args=(build,), name=f"sila2-handshake-{station_id}", daemon=True).start()
+
+    def _run(self, build) -> None:
+        try:
+            self._client = build()
+        except BaseException as exc:  # noqa: BLE001  结论留给等它的人
+            self._error = exc
+        finally:
+            self._done.set()
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def result(self, timeout: float):
+        if not self._done.wait(timeout):
+            raise TimeoutError
+        if self._error is not None:
+            raise self._error
+        return self._client
 
 
 class _Deadline:
@@ -123,6 +176,8 @@ class Sila2Adapter:
         self._client = None
         self._features: frozenset[str] = frozenset()
         self._metadata = None
+        self._handshake: _Handshake | None = None
+        self._handshake_lock = threading.Lock()
         self.contract = AdapterContract(
             kind="real", protocol=record.protocol or "SiLA 2", version=record.version or "1.0",
             supports_hold=bool(record.supports_hold), supports_abort=bool(record.supports_abort),
@@ -176,32 +231,69 @@ class Sila2Adapter:
 
     # ---------- 连接 ----------
 
-    def _connect(self):
-        if self._client is not None:
-            return self._client
-        # SilaClient 构造时会同步拉取特性清单；先用短超时探测端口，别让黑洞地址挂住执行器
-        try:
-            socket.create_connection((self.host, self.port), timeout=self.connect_timeout).close()
-        except OSError as exc:
-            raise AdapterUnreachable(f"SiLA 设备不可达：{exc.__class__.__name__}") from exc
+    @property
+    def handshake_budget(self) -> float:
+        """端口探测通了之后，建客户端（TLS、读特性清单、取特性定义）最多等多久：一个连接超时加一个请求超时。"""
+        return self.connect_timeout + self.request_timeout
+
+    def _build_client(self):
         from sila2.client import SilaClient
 
+        _serialize_protoc()
         try:
-            with _CLIENT_LOCK:
-                if self.insecure:
-                    client = SilaClient(self.host, self.port, insecure=True)
-                else:
-                    client = SilaClient(self.host, self.port, root_certs=self._root_certs())
+            if self.insecure:
+                return SilaClient(self.host, self.port, insecure=True)
+            return SilaClient(self.host, self.port, root_certs=self._root_certs())
         except AdapterError:
             raise
         except Exception as exc:
             raise AdapterUnreachable(f"SiLA 连接失败：{exc.__class__.__name__}: {exc}") from exc
+
+    def _connect(self):
+        with self._handshake_lock:
+            if self._client is not None:
+                return self._client
+            pending = self._handshake
+            if pending is None:
+                # 先用短超时探测端口：黑洞地址在这里就判连不上，不起握手线程
+                try:
+                    socket.create_connection((self.host, self.port), timeout=self.connect_timeout).close()
+                except OSError as exc:
+                    raise AdapterUnreachable(f"SiLA 设备不可达：{exc.__class__.__name__}") from exc
+                pending = self._handshake = _Handshake(self._build_client, self.station_id)
+        try:
+            client = pending.result(self.handshake_budget)
+        except TimeoutError as exc:
+            raise AdapterUnreachable(
+                f"SiLA 握手 {self.handshake_budget:g} s 内没有完成：设备服务接了连接却不应答"
+            ) from exc
+        finally:
+            with self._handshake_lock:
+                if pending.done and self._handshake is pending:
+                    self._handshake = None  # 出了结论就重新握手；还没出结论的留着，下一次接着等它
         features = frozenset(name for name in (TASKS, INFO, POINTS, AUTH) if hasattr(client, name))
         if not features & {TASKS, INFO}:
+            client.close()
             raise AdapterError("设备服务没有实现 ILCS 的 DeviceInfo 或 TaskExecution 特性，不能按 ILCS 契约接入")
         metadata = [client.AuthorizationService.AccessToken(self._token())] if AUTH in features else None
-        self._client, self._features, self._metadata = client, features, metadata
+        with self._handshake_lock:
+            self._client, self._features, self._metadata = client, features, metadata
         return client
+
+    def _drop_client(self) -> None:
+        """连接断了或调用无结论：下一次重新握手。旧连接不在这里关（别的线程可能还在用它），没人引用了由 gRPC 回收时关掉。"""
+        with self._handshake_lock:
+            self._client = None
+
+    def close(self) -> None:
+        """配置变了换新实例、接入验收前释放缓存实例（registry）：关掉持有的连接。"""
+        with self._handshake_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001  关不掉不影响新实例
+                pass
 
     def _has(self, feature: str) -> bool:
         self._connect()
@@ -237,12 +329,12 @@ class Sila2Adapter:
         except FrameworkError as exc:  # 元数据不对、调用不被接受：SiLA 框架在执行之前就拒绝了
             raise AdapterError(f"设备服务拒绝了这次调用（{exc.__class__.__name__}）：{exc}") from exc
         except SilaConnectionError as exc:
-            self._client = None
+            self._drop_client()
             raise AdapterUnreachable(f"SiLA 连接中断：{exc}") from exc
         except UndefinedExecutionError as exc:
             raise AdapterIndeterminate(f"设备内部错误：{exc}") from exc
         except Exception as exc:  # gRPC 超时、通道异常
-            self._client = None
+            self._drop_client()
             raise AdapterUnreachable(f"SiLA 调用无结论：{exc.__class__.__name__}") from exc
         return wrapped.to_native_type(response) if prop else wrapped.responses.to_native_type(response)
 

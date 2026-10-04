@@ -1,5 +1,6 @@
 """`sila2_v1` 驱动 × 外部 SiLA 2 模拟设备：真实走 gRPC，不打桩。"""
 import socket
+import threading
 import time
 from types import SimpleNamespace
 
@@ -223,3 +224,78 @@ def test_tls_with_generated_certificate_and_ca_file(tmp_path, monkeypatch):
             adapter(connect_timeout_sec=1).healthcheck()
     finally:
         runner.stop()
+
+
+@pytest.fixture()
+def blackhole():
+    """接了 TCP 连接却一个字节都不回的「设备服务」（卡死的网关、端口被别的程序占着）。"""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(16)
+    server.settimeout(0.2)
+    held, stop = [], threading.Event()
+
+    def accept():
+        while not stop.is_set():
+            try:
+                held.append(server.accept()[0])
+            except OSError:
+                continue
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    try:
+        yield server.getsockname()[1]
+    finally:
+        stop.set()
+        thread.join(2)
+        for connection in held:
+            connection.close()  # 挂着的握手随之失败、线程结束
+        server.close()
+
+
+def test_unresponsive_service_fails_by_deadline_without_blocking_other_stations(simulator, blackhole):
+    """接了连接却不应答：握手（读特性清单）按「连接超时 + 请求超时」判连不上，不再等 gRPC 自己放弃（约 20 s）；
+    全局锁只管编译，这次握手挂着时别的工位照常首次连接；同一台再连时接着等原来那次握手，不另起线程。"""
+    from app.adapters import AdapterUnreachable
+    from app.adapters.drivers.sila2 import Sila2Adapter
+
+    _, _, port = simulator
+    stuck = Sila2Adapter(SimpleNamespace(
+        station_id="ST-HOLE", protocol="SiLA 2", version="1.0", note="",
+        config={"host": "127.0.0.1", "port": blackhole, "insecure": True,
+                "connect_timeout_sec": 0.2, "request_timeout_sec": 0.3},
+        supports_hold=True, supports_abort=True, supports_query=True, supports_dedup=True,
+    ))
+    started = time.monotonic()
+    with pytest.raises(AdapterUnreachable, match="握手"):
+        stuck.healthcheck()
+    assert time.monotonic() - started < 2
+
+    started = time.monotonic()
+    assert _adapter(port).healthcheck()["device_id"] == "SIM-LH-T"
+    assert time.monotonic() - started < 5, "别的工位的首次连接不能排在卡住的握手后面"
+
+    with pytest.raises(AdapterUnreachable, match="握手"):
+        stuck.healthcheck()
+    assert len([t for t in threading.enumerate() if t.name == "sila2-handshake-ST-HOLE"]) == 1
+
+
+def test_parallel_first_connections_compile_safely(simulator):
+    """几个工位同时首次连接：sila2 现场编译特性的那一步串行（并发编译会偶发 KeyError、被误判成连不上），其余并行。"""
+    _, _, port = simulator
+    adapters = [_adapter(port) for _ in range(6)]
+    outcomes: list = [None] * len(adapters)
+
+    def connect(index):
+        try:
+            outcomes[index] = adapters[index].healthcheck()["device_id"]
+        except Exception as exc:  # noqa: BLE001
+            outcomes[index] = exc
+
+    threads = [threading.Thread(target=connect, args=(index,)) for index in range(len(adapters))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert outcomes == ["SIM-LH-T"] * len(adapters)
