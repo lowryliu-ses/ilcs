@@ -4,7 +4,7 @@ ILCS 只经两个契约接设备，外加内置模拟适配器：
 
 | 驱动 | 设备侧 | 指令号 / 去重 / 查询 |
 |---|---|---|
-| `sila2_v1` | SiLA 2 设备服务：驱动宿主（devices/host，托管 PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令等协议插件）或厂商的 SiLA 服务器 | 设备服务 |
+| `sila2_v1` | SiLA 2 设备服务：驱动宿主（ilcs-devices/host，托管 PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令等协议插件）或厂商的 SiLA 服务器 | 设备服务 |
 | `http_json_v1` | 实现 ILCS 网关契约的 HTTPS 服务（设备模块的网关、厂家 SDK 接口服务） | 设备侧 |
 
 协议驱动都在 ILCS 进程之外（驱动宿主、网关），ILCS 不再自己连 PLC、仪表。执行层始终按 Adapter.kind/driver 取实现。
@@ -23,7 +23,7 @@ REAL_IMPLEMENTATIONS: dict[str, type] = {
     HTTP_JSON_DRIVER: HttpJsonAdapter,
     SILA2_DRIVER: Sila2Adapter,
 }
-# 已经移出 ILCS 的进程内驱动：对应的设备经驱动宿主（devices/host 的同名插件）用 sila2_v1 接
+# 已经移出 ILCS 的进程内驱动：对应的设备经驱动宿主（ilcs-devices/host 的同名插件）用 sila2_v1 接
 RETIRED_DRIVERS = {
     "modbus_map_v1": "modbus_map", "opcua_map_v1": "opcua_map", "rest_map_v1": "rest_map",
     "line_command_v1": "line_command", "modbus_tcp_v1": "modbus_task", "opcua_v1": "opcua_task",

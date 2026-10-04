@@ -206,7 +206,7 @@ cd ilcs/api && ILCS_TEST_DATABASE_URL=postgresql+psycopg2://... .venv/bin/pytest
 
 验收用例 AC-01 至 AC-40 与自动化用例的对应关系、以及哪几项只有手工证据，见 [docs/acceptance-record.md](docs/acceptance-record.md)。
 
-未验证项：**现场真实设备试点（AC-37）**。ILCS 只经两个契约接设备——`sila2_v1`（SiLA 2 设备服务）与 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务），另有结果文件接收器；协议驱动都在 ILCS 进程之外的驱动宿主（devices/host）里：按设备自有接口映射的 `opcua_map`、`modbus_map`、`line_command`（串口 / TCP 命令）、`rest_map`（车队等 REST 接口），设备按 ILCS 契约编程的 `modbus_task`、`opcua_task`。覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过（插件测试在 devices/host/tests，ILCS 经驱动宿主的验收清单在 api/tests）。选哪种接法见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器；库里还有工位用已移出的驱动时，升级在迁移这一步就停下（0052）。
+未验证项：**现场真实设备试点（AC-37）**。ILCS 只经两个契约接设备——`sila2_v1`（SiLA 2 设备服务）与 `http_json_v1`（HTTPS 网关，含厂家 SDK 接口服务），另有结果文件接收器；协议驱动都在 ILCS 进程之外的驱动宿主（ilcs-devices/host）里：按设备自有接口映射的 `opcua_map`、`modbus_map`、`line_command`（串口 / TCP 命令）、`rest_map`（车队等 REST 接口），设备按 ILCS 契约编程的 `modbus_task`、`opcua_task`。覆盖设备身份核对、凭据外置、命令去重、异步状态查询、保持、终止、超时分类和真实遥测，与各协议外部模拟设备的联调测试已通过（插件测试在 ilcs-devices/host/tests，ILCS 经驱动宿主的验收清单在 api/tests）。选哪种接法见[设备适配器配置模板](docs/设备适配器配置模板.md)开头的对照表。具体仪器仍需依据 DEC-02 提供厂商协议或网关并完成断联、重复回执与物理副作用实测。未注册驱动会明确拒绝，不回落到模拟器；库里还有工位用已移出的驱动时，升级在迁移这一步就停下（0052）。
 
 ## 目录
 
@@ -216,17 +216,21 @@ api/alembic/ 版本化迁移：0001 基线 → 0002 结构 → 0003 历史映射
 api/openapi.json  OpenAPI 快照（scripts/export-openapi.py 生成，测试核对不漂移）
 api/app/adapters/ 设备接入：框架层（契约、回执解读、注册表、驱动目录、接入验收）+ drivers/（sila2_v1、http_json_v1 与内置模拟）
 executor/    设备执行器 + 工作流推进器；接真实设备实现 adapters/ 契约
-devices/     ILCS 进程之外、设备那一侧的东西，见 devices/README.md
-  host/        驱动宿主：协议插件（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令），每台设备一个 SiLA 2 服务，见 devices/host/README.md
-  contracts/   设备侧任务契约：sila2/（SiLA 2 特性）、modbus/（任务寄存器表）、opcua/（节点与方法）
-  simulators/  外部模拟设备（每类插件都有）与试点设备预设 pilot-devices.json，见 devices/simulators/README.md
-  gateway/     设备网关：网关 SDK ilcs_gateway（厂家 SDK / 私有协议包成 http_json_v1 网关）+ 设备模块（样板 sample-cycler）
-  connectors/  设备侧连接器：result_files/（检测软件导出文件 → 结果回传）
 web/         React 前端：shared 基础设施 + features 页面
 scripts/     migrate.py（迁移入口）/ smoke.py（端到端冒烟）/ reset-demo.sh（演示环境重置）/ reset-demo-cases.sh（重置为四个操作案例）
-secrets/     运行时证书与令牌（不进仓库）：compose 挂进容器的 sila/ gateway/ simctl/ host/（驱动宿主），本机直接跑模拟器用 local/
+secrets/     运行时证书与令牌（不进仓库）：ILCS 与设备仓库的 compose 都挂这里的 sila/ gateway/ simctl/ host/（驱动宿主）
 docs/        现行文档（设备适配器配置模板、操作案例、验收记录、SOP 模板、上线清单）；archive/ 是历史需求、评审与证据，见 docs/README.md
 ```
+
+设备那一侧（驱动宿主、网关 SDK 与设备模块、外部模拟设备、连接器、SiLA 等契约）在**独立的设备仓库 `ilcs-devices`** 里
+（2026-10-04 从本仓库的 `devices/` 拆出去；GitHub 私有仓库 `lowryliu-ses/ilcs-devices`），和本仓库并排放：
+
+```bash
+git clone https://github.com/lowryliu-ses/ilcs-devices.git ../ilcs-devices   # 在本仓库根目录执行
+```
+
+本仓库的测试与脚本按环境变量 `ILCS_DEVICES` 找它，缺省就是旁边的 `../ilcs-devices`；找不到时，要用设备侧代码的测试跳过
+（`pytest -rs` 看原因）。ILCS 运行时不依赖它：只经 `sila2_v1` / `http_json_v1` 两个契约接设备。
 
 ## 部署（10.10.106.51:8090）
 
@@ -253,6 +257,12 @@ cd ilcs && rsync -av --delete \
   --exclude 'web/src' --exclude 'web/tsconfig.tsbuildinfo' --exclude 'api/tests' \
   --exclude 'data' --exclude 'secrets' --exclude 'deploy/.env' --exclude '.git' --exclude 'output' \
   ./  10.10.106.51:/opt/ilcs/
+
+# 设备仓库同步到 ILCS 旁边（/opt/ilcs-devices）：驱动宿主、设备模块的模拟网关、试点模拟设备与连接器在那边起
+cd ../ilcs-devices && rsync -av --delete \
+  --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.DS_Store' --exclude '.git' \
+  --exclude 'secrets' --exclude 'state' \
+  ./  10.10.106.51:/opt/ilcs-devices/
 
 # 首次部署：从样例生成配置，把密钥改掉
 ssh 10.10.106.51 'test -f /opt/ilcs/deploy/.env || cp /opt/ilcs/deploy/.env.example /opt/ilcs/deploy/.env'
@@ -324,13 +334,13 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 
 > **现状（2026-09-30）**：本机 8090 与 10.10.106.51 都已重置为只有电解液配液线（见 [docs/电解液配液线.md](docs/电解液配液线.md)），
 > 种子里的老演示产线（ST-01~07、AGV、机械臂）与四个参考案例都已删除，外部模拟设备容器已停。这两套环境日常启动用
-> `docker compose up -d`，**不要带 `--profile pilot`**——带了只会拉起一批没有工位可接的模拟设备。下面的试点说明只适用于
+> `docker compose up -d`，**不要起设备仓库的 `pilot` profile**——起了只会拉起一批没有工位可接的模拟设备。下面的试点说明只适用于
 > 用 `scripts/reset-demo-cases.sh` 重新播种了老演示产线的环境。
 
-真机到位前，可随 `ilcs` 项目按 `pilot` profile 启动外部模拟设备：ST-01-A、ST-06（SiLA 2）与 ST-07（HTTPS 网关）各接一台，
-只在后端网络可见、不占宿主端口；其余示例工位用内置模拟。PLC 点表、Modbus / OPC UA 任务契约、车队 REST、串口命令这几类协议的
-驱动已移出 ILCS：要接这类模拟设备，把它挂到驱动宿主上（[devices/host](devices/host/README.md)），工位用 `sila2_v1` 接驱动宿主。
-工位与模拟设备的对照、每台的故障注入见 [devices/simulators/README.md](devices/simulators/README.md)：
+真机到位前，可用设备仓库的 `deploy/compose.yml` 按 `pilot` profile 启动外部模拟设备（接本项目的后端网络）：ST-01-A、ST-06（SiLA 2）
+与 ST-07（HTTPS 网关）各接一台，只在后端网络可见、不占宿主端口；其余示例工位用内置模拟。PLC 点表、Modbus / OPC UA 任务契约、车队 REST、串口命令这几类协议的
+驱动已移出 ILCS：要接这类模拟设备，把它挂到驱动宿主上（`ilcs-devices/host/README.md`），工位用 `sila2_v1` 接驱动宿主。
+工位与模拟设备的对照、每台的故障注入见 `ilcs-devices/simulators/README.md`：
 
 | 工位 | 模拟设备 | 驱动 |
 |---|---|---|
@@ -344,8 +354,10 @@ Compose 项目名固定为 `ilcs`。不要加 `--remove-orphans`，以免碰到�
 sudo install -d -m 0700 -o 10001 -g 10001 /opt/ilcs/secrets/{sila,gateway,simctl}
 # deploy/.env：ILCS_ADAPTER_ALLOWED_HOSTS 追加
 #   sila-sim-slurry-a,sila-sim-lh,gateway-sim-cycler
-cd /opt/ilcs/deploy && docker compose --profile pilot up -d
-docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset     # 按 devices/simulators/pilot-devices.json 全部切换
+docker compose -f /opt/ilcs-devices/deploy/compose.yml --profile pilot up -d --build
+# 按设备仓库的 simulators/pilot-devices.json 全部切换（api 容器里没有设备仓库，预设从标准输入喂进去）
+cd /opt/ilcs/deploy && docker compose exec -T api python ../scripts/configure-pilot-adapters.py apply --preset - \
+    < /opt/ilcs-devices/simulators/pilot-devices.json
 ```
 
 切换写审计、可 `revert`；在线状态由执行器探测，切换后执行器自动跑一次只读级接入验收，通过了工位才接指令。
@@ -354,15 +366,18 @@ docker compose exec api python ../scripts/configure-pilot-adapters.py apply --pr
 
 ### 设备接入：模板与设备模块
 
-PLC 点表、串口命令、REST 这类设备的映射写在驱动宿主的设备文件里（[devices/host/插件配置.md](devices/host/插件配置.md)），ILCS 工位用
+PLC 点表、串口命令、REST 这类设备的映射写在驱动宿主的设备文件里（`ilcs-devices/host/插件配置.md`），ILCS 工位用
 `sila2_v1` 接驱动宿主。同一类设备有好几台时，ILCS 这边的连接配置可以存成**设备接入模板**（「工位与接入 → 接入模板」，发布要另一个人
 签名），工位套用模板、只填自己的连接参数。
-厂家只给 SDK / DLL 的设备按 [devices/gateway/README.md](devices/gateway/README.md) 写一个设备模块（基于 `devices/gateway/ilcs_gateway` 的独立网关，
+厂家只给 SDK / DLL 的设备按 `ilcs-devices/gateway/README.md` 写一个设备模块（基于 `ilcs-devices/gateway/ilcs_gateway` 的独立网关，
 自带模拟接口与测试，交付 `profile.json`），ILCS 侧用 `http_json_v1` 接入，不改代码、不重启。
-`python scripts/new-device-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。
+在设备仓库里 `python gateway/new-module.py <名称> …` 从样板生成新模块。配置规则与接入验收见 [docs/设备适配器配置模板.md](docs/设备适配器配置模板.md)。
 以前版本的 `sila-sim-cycler`、`modbus-sim-mixer`、`gateway-sim-coater` 已不在 compose 里：升级后
 `docker compose stop sila-sim-cycler modbus-sim-mixer gateway-sim-coater && docker compose rm -f …` 清掉（不要用 `--remove-orphans`）。
-检测软件只能导出结果文件时另起结果文件接收器（`--profile results`，见 [devices/connectors/result_files/README.md](devices/connectors/result_files/README.md)）。
+拆出设备仓库之后，`pilot` / `results` / `environment` 三组服务也不在本仓库的 compose 里了：以前起过的按容器名停掉删掉
+（`docker rm -f ilcs-sila-sim-slurry-a ilcs-sila-sim-lh ilcs-gateway-sim-cycler ilcs-result-files ilcs-environment`），
+再从设备仓库的 `deploy/compose.yml` 起（服务名、容器名、主机名不变，工位配置不用改）。
+检测软件只能导出结果文件时另起结果文件接收器（设备仓库 `deploy/compose.yml` 的 `--profile results`，见 `ilcs-devices/connectors/result_files/README.md`）。
 
 部署窗口里也可以用 `scripts/configure-pilot-adapters.py apply|revert` 批量切换并留审计。
 

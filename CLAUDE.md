@@ -9,7 +9,7 @@
 ## 目录
 
 - `api/`：服务端（`app/adapters/` 是设备驱动：框架层 + `drivers/`）；`executor/`：执行器；`web/`：前端；`scripts/`：运维脚本。
-- `devices/`：ILCS 进程之外、设备那一侧的东西（契约、外部模拟设备、网关 SDK、设备模块、连接器），见 `devices/README.md`。
+- 设备那一侧（驱动宿主、契约、外部模拟设备、网关 SDK、设备模块、连接器）在独立仓库 `ilcs-devices`（GitHub 私有仓库 lowryliu-ses/ilcs-devices），和本仓库并排放（本机 `../ilcs-devices`）；测试与脚本按环境变量 `ILCS_DEVICES` 找它，见它的 `README.md`。
 - `data/`、`secrets/`：运行状态（上传文件、执行器作业台账、备份；设备证书与令牌），不进仓库，部署同步时排除，不要删。
 
 ## 批量改文件

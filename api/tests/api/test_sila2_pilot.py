@@ -1,16 +1,13 @@
 """系统级试点：工位接到外部 SiLA 2 模拟设备，批次从下发到完成全程走真实驱动。"""
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
 from test_failure_paths import running_batch  # noqa: F401  （复用 fixture）
 
-ROOT = Path(__file__).resolve().parents[3]
-DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
-if str(DEVICES) not in sys.path:
-    sys.path.insert(0, str(DEVICES))
+from sim_harness import needs_devices  # SiLA 2 模拟设备在设备仓库（simulators/sila_device）；导入时把它放进 sys.path
+
+pytestmark = needs_devices
 
 STATIONS = ("ST-05", "ST-06", "ST-07")
 

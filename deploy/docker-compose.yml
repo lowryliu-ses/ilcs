@@ -6,23 +6,6 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "5"
 
-# 试点模拟设备的公共设置：只在后端网络可见、不占宿主端口，根文件系统只读，不保留 Linux capabilities
-x-pilot-sim: &pilot-sim
-  image: ilcs-api:latest
-  profiles: ["pilot"]
-  restart: unless-stopped
-  logging: *default-logging
-  read_only: true
-  tmpfs:
-    - /tmp:size=16m,mode=1777
-  security_opt:
-    - no-new-privileges:true
-  cap_drop:
-    - ALL
-  working_dir: /opt/ilcs
-  networks:
-    - backend
-
 # PostgreSQL + 三个应用容器 + 一个一次性迁移任务。迁移不在应用启动里做：
 # 多副本发布时那样会让两个版本各改一半结构。
 services:
@@ -130,132 +113,11 @@ services:
     networks:
       - backend
 
-  # ---------- 试点：外部模拟设备（可选，--profile pilot 才启动） ----------
-  # 示例工位各接一台（ST-01-B、ST-05 除外），与真设备一样走网络接入；系统侧的驱动与连接配置见 devices/simulators/pilot-devices.json，
-  # 用 `docker compose exec api python ../scripts/configure-pilot-adapters.py apply --preset` 一次切换。
-  # 首次启动把证书 / 令牌写到 ../secrets/<sila|opcua|gateway|fleet>/，适配器配置里引用的就是这些文件。
-  # 每台还开一个统一控制口（9900，只在后端网络可见；令牌首次启动写到 ../secrets/simctl/）：
-  # 接入验收的故障项目与动作计数走它，适配器配置里的 simulator_control 指向它。
-  # 模拟设备自报是模拟器（身份里带 ILCS-SIMULATOR）：正式环境（ILCS_ENVIRONMENT=production）拒绝接入。
-  #
-  #   工位       模拟设备               协议 / 驱动
-  #   ST-01-A    sila-sim-slurry-a      SiLA 2 / sila2_v1
-  #   ST-06      sila-sim-lh            SiLA 2 / sila2_v1
-  #   ST-07      gateway-sim-cycler     HTTPS JSON（厂家 SDK 接口服务）/ http_json_v1
-  #   其余示例工位（ST-01-B、ST-02、ST-03、ST-04、ST-05、AGV-01/02、ARM-01）用系统内置的模拟适配器。
-  #   PLC 点表、Modbus / OPC UA 任务契约、REST 车队、串口命令这几类协议的驱动已移出 ILCS：要接这类模拟设备，
-  #   在驱动宿主（devices/host）的现场配置里登记，工位用 sila2_v1 接驱动宿主（见 devices/host/README.md）。
-  sila-sim-slurry-a:
-    <<: *pilot-sim
-    container_name: ilcs-sila-sim-slurry-a
-    environment:
-      SIM_DEVICE_ID: SIM-SLR-A
-      SIM_MODEL: EXP-SLURRY-24
-      SIM_PROFILE: generic
-      SIM_PORT: "50054"
-      SIM_HOST_NAME: sila-sim-slurry-a
-      SIM_CERT_DIR: /run/secrets/ilcs/sila
-      SIM_TASK_SECONDS: "20"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-SLR-A.token
-    volumes:
-      - ../secrets/sila:/run/secrets/ilcs/sila
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/sila_device/server.py"]
-
-  sila-sim-lh:
-    <<: *pilot-sim
-    container_name: ilcs-sila-sim-lh
-    environment:
-      SIM_DEVICE_ID: SIM-LH-01
-      SIM_PROFILE: liquid_handler
-      SIM_PORT: "50052"
-      SIM_HOST_NAME: sila-sim-lh
-      SIM_CERT_DIR: /run/secrets/ilcs/sila
-      SIM_TASK_SECONDS: "20"
-      SIM_MATERIAL_MAP: '{"electrolyte": {"material": "电解液 LP57", "unit": "mL", "factor": 0.001}}'
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-LH-01.token
-    volumes:
-      - ../secrets/sila:/run/secrets/ilcs/sila
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/sila_device/server.py"]
-
-  gateway-sim-cycler:
-    <<: *pilot-sim
-    container_name: ilcs-gateway-sim-cycler
-    environment:
-      SIM_DEVICE_ID: SIM-CYC-01
-      SIM_MODEL: CYCLER-32
-      SIM_PROFILE: cycler
-      SIM_CHANNELS: "8"
-      SIM_PORT: "8443"
-      SIM_HOST_NAME: gateway-sim-cycler
-      SIM_CERT_DIR: /run/secrets/ilcs/gateway
-      SIM_TASK_SECONDS: "60"
-      SIM_CONTROL_PORT: "9900"
-      SIM_CONTROL_TOKEN_FILE: /run/secrets/ilcs/simctl/SIM-CYC-01.token
-    volumes:
-      - ../secrets/gateway:/run/secrets/ilcs/gateway
-      - ../secrets/simctl:/run/secrets/ilcs/simctl
-    command: ["python", "devices/simulators/http_gateway/server.py"]
-
-  # 结果文件接收器（可选，--profile results）：检测软件导出目录 → 关联检测任务 → 结果回传。
-  # 先在「系统治理」创建服务身份并授权检测任务，口令写到 ../secrets/result-files/secret，
-  # 规则写到 ../secrets/result-files/result-files.json（示例见 devices/connectors/result_files/README.md）。
-  result-files:
-    image: ilcs-api:latest
-    container_name: ilcs-result-files
-    profiles: ["results"]
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      RESULT_FILES_CONFIG: /run/secrets/ilcs/result-files/result-files.json
-    volumes:
-      - ../secrets/result-files:/run/secrets/ilcs/result-files:ro
-      - ../data/instrument-exports:/data/instrument-exports
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
-    command: ["python", "devices/connectors/result_files/receiver.py"]
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - backend
-
-  # 环境读数连接器（可选，--profile environment）：手套箱水氧、温湿度、露点 → ILCS 环境读数，步骤的环境要求按它核对。
-  # 先在「系统治理」签发服务身份并授权环境区域，密钥写到 ../secrets/environment/secret，
-  # 读数点写到 ../secrets/environment/environment.json（示例见 devices/connectors/environment/README.md）。
-  environment:
-    image: ilcs-api:latest
-    container_name: ilcs-environment
-    profiles: ["environment"]
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      ENVIRONMENT_CONFIG: /run/secrets/ilcs/environment/environment.json
-    volumes:
-      - ../secrets/environment:/run/secrets/ilcs/environment:ro
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    working_dir: /opt/ilcs
-    command: ["python", "devices/connectors/environment/poller.py"]
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - backend
+  # ---------- 设备侧的可选服务：在设备仓库（ilcs-devices）里 ----------
+  # 试点模拟设备（pilot）、结果文件接收器（results）、环境读数连接器（environment）原来在这里用 ilcs-api 镜像跑，
+  # 拆仓库后搬到设备仓库的 deploy/compose.yml（镜像 ilcs-devices，服务名、容器名、主机名不变，接这里的 backend 网络）：
+  #   docker compose -f ../../ilcs-devices/deploy/compose.yml --profile pilot up -d --build
+  # 驱动宿主（ilcs-devices/host/deploy）与各设备模块的模拟网关（ilcs-devices/gateway/<模块>/deploy）同样在设备仓库里起。
 
   web:
     image: nginx:alpine

@@ -1,16 +1,13 @@
 """`sila2_v1` 驱动 × 外部 SiLA 2 模拟设备：真实走 gRPC，不打桩。"""
 import socket
-import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
-DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
-if str(DEVICES) not in sys.path:
-    sys.path.insert(0, str(DEVICES))
+from sim_harness import needs_devices  # SiLA 2 模拟设备在设备仓库（simulators/sila_device）；导入时把它放进 sys.path
+
+pytestmark = needs_devices
 
 
 def _free_port() -> int:

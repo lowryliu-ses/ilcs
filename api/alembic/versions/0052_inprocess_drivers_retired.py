@@ -3,7 +3,7 @@
 Revision ID: 0052_inprocess_drivers_retired
 Revises: 0051_awaiting_handshake
 
-modbus_map_v1、opcua_map_v1、rest_map_v1、line_command_v1、modbus_tcp_v1、opcua_v1 已经移到驱动宿主（devices/host 的
+modbus_map_v1、opcua_map_v1、rest_map_v1、line_command_v1、modbus_tcp_v1、opcua_v1 已经移到驱动宿主（ilcs-devices/host 的
 同名插件），ILCS 只经 sila2_v1、http_json_v1 接设备。还有真实工位用这几个驱动时升级到这一版，执行器建不出驱动、
 这些设备一律失联——所以在迁移这一步就停下，先把它们迁走再升级：
 - 在驱动宿主里登记这些设备（映射原样放进设备文件），工位改 sila2_v1 接驱动宿主（本机的做法见

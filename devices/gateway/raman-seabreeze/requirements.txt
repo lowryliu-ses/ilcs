@@ -1,6 +1,0 @@
-# 网关跑在光谱仪 USB 插着的那台电脑上要装的。ILCS 仓库的 api/ 不依赖这些；模拟网关（--simulate）也不需要 seabreeze。
-# python-seabreeze（MIT）：Ocean Insight 光谱仪的开源驱动，带 cseabreeze（缺省）与 pyseabreeze（pyusb）两个后端，
-# 会一并装上 numpy。driver/seabreeze_spec.py 只用它的高层接口（Spectrometer），版本固定，升级前在真机上核对一遍
-seabreeze[pyseabreeze]==2.11.0
-# 自签证书（现场签发证书时可以不装）
-cryptography==50.0.1

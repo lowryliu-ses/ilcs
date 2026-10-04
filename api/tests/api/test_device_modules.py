@@ -1,76 +1,38 @@
-"""设备模块进 ILCS 的整条路：模块自测 → 导入 profile.json → 另一个人发布 → 工位套用 → 执行器跑接入验收。
+"""设备模块进 ILCS 的整条路：导入 profile.json → 另一个人发布 → 工位套用 → 执行器跑接入验收。
 
-模块的网关（devices/gateway/ilcs_gateway + 样板的驱动与假厂家 SDK）在本进程里起，走真实的 HTTPS 与令牌；ILCS 侧不打桩。
+模块（样板 sample-cycler）在设备仓库里：网关（ilcs_gateway + 样板的驱动与假厂家 SDK）在本进程里起，走真实的 HTTPS 与令牌；
+ILCS 侧不打桩。模块自己的测试、模块脚手架与网关 SDK 的测试都在设备仓库里（`./run-tests.sh`）。
 """
 import json
-import os
-from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
-MODULE = ROOT / "devices" / "gateway" / "sample-cycler"
+from sim_harness import DEVICES, needs_devices
+
+pytestmark = needs_devices
+MODULE = DEVICES / "gateway" / "sample-cycler"
 LIMITS = {"cap.test": {"rate": [0.01, 10], "vmax": [2.0, 5.0]}}
 
 
-def _pytest(target: Path, **env) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(target)], cwd=ROOT,
-        capture_output=True, text=True, timeout=300, env={**os.environ, **env},
-    )
-
-
-def test_sample_module_passes_its_own_tests():
-    result = _pytest(MODULE / "tests")
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_scaffolded_module_is_green_out_of_the_box(tmp_path):
-    created = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "new-device-module.py"), "acme-vd80", "--title", "ACME 真空干燥箱",
-         "--model", "VD-80", "--vendor", "ACME", "--capability", "cap.vacuum_dry", "--param", "temp=60:180",
-         "--param", "vacuum=0.1:5", "--program", "VD-120=120℃干燥", "--output", str(tmp_path)],
-        cwd=ROOT, capture_output=True, text=True, timeout=120,
-    )
-    assert created.returncode == 0, created.stdout + created.stderr
-    module = tmp_path / "acme-vd80"
-    profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
-    assert profile["code"] == "TPL-ACME-VD80" and profile["acceptance"]["capability"] == "cap.vacuum_dry"
-    # 生成在别处的模块：网关 SDK 不在它的上一级目录，用 PYTHONPATH 指过去；ILCS_REPO 让它找到 ILCS 跑一致性测试
-    result = _pytest(module / "tests", ILCS_REPO=str(ROOT), PYTHONPATH=str(ROOT / "devices" / "gateway"))
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("name", ["neware-bts", "balance-dosing", "ika-stirrer", "raman-seabreeze", "thermostat",
-                                  "potentiostat", "scpi-cell-meter"])
-def test_device_module_passes_its_own_tests_and_its_profile_imports(name):
-    """仓库里的设备模块：自测（各自一个进程——模块的 driver / simulator 包同名）全过，profile.json 能导入成接入模板。
-    映射模块（没有网关代码，如 scpi-cell-meter）一种仪表一份 profile-*.json，是驱动宿主的设备配置、不导入成 ILCS 模板
-    （建不建得出驱动宿主插件由模块自测核对）。"""
+def test_device_module_profiles_import_as_templates():
+    """设备仓库里网关模块的 profile.json 都能按 ILCS 的规则导入成接入模板：摘要对得上、核对通过。ILCS 改了模板规则时，
+    这里先发现交付物导不进来。映射模块（如 scpi-cell-meter）的 profile-*.json 是驱动宿主的设备配置，不是模板。"""
     from app.services.template_service import FORMAT, template_check, template_digest
 
-    module = ROOT / "devices" / "gateway" / name
-    result = _pytest(module / "tests")
-    assert result.returncode == 0, result.stdout + result.stderr
-    profiles = sorted(module.glob("profile*.json"))
-    assert profiles, f"{name} 没有 profile.json"
+    profiles = sorted((DEVICES / "gateway").glob("*/profile.json"))
+    assert len(profiles) >= 7, profiles
     for path in profiles:
         profile = json.loads(path.read_text(encoding="utf-8"))
-        assert profile["supports"]["hold"] is False, "这几台设备都不做保持：契约如实声明"
-        if profile["format"] == "ilcs-host-device-profile/1":
-            continue
-        assert profile["format"] == FORMAT, path.name
-        assert profile["digest"] == template_digest(profile), f"{path.name} 改过之后要重算摘要"
-        assert template_check(profile)["ok"], (path.name, template_check(profile))
+        assert profile["format"] == FORMAT, path.parent.name
+        assert profile["digest"] == template_digest(profile), f"{path.parent.name} 的 profile.json 改过之后要重算摘要"
+        assert template_check(profile)["ok"], (path.parent.name, template_check(profile))
 
 
 @pytest.fixture()
 def module_gateway(tmp_path, monkeypatch):
     from app.core.config import settings
 
-    for path in (MODULE, ROOT / "devices" / "gateway"):
+    for path in (MODULE, DEVICES / "gateway"):
         monkeypatch.syspath_prepend(str(path))
     from ilcs_gateway import serve
     from driver.device import Instrument
@@ -164,88 +126,3 @@ def test_module_profile_goes_live_through_template_and_acceptance(admin, qa, mod
     states = {check["key"]: check["state"] for check in run["checks"]}
     assert run["state"] == "done" and run["ok"], run["report_md"]
     assert all(state == "pass" for state in states.values()), states
-
-
-@pytest.fixture()
-def sdk(monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "devices" / "gateway"))
-    import ilcs_gateway
-
-    return ilcs_gateway
-
-
-class _NeverAnswers:
-    """启动命令发出去就没了下文（厂家 SDK 超时）、设备侧也找不到作业：不知道它开没开始。"""
-
-    def __init__(self, sdk):
-        self.sdk = sdk
-        self.aborted: list[str] = []
-
-    def identity(self):
-        return {"device_id": "SIM-NA", "model": "NA", "simulator": True}
-
-    def start(self, job):
-        raise TimeoutError("厂家 SDK 超时")
-
-    def status(self, job):
-        return self.sdk.Status("running")
-
-    def abort(self, job):
-        self.aborted.append(job.handle)
-
-    def lookup(self, job):
-        return None
-
-    def hold(self, job):
-        raise self.sdk.Rejected("unsupported", "不支持")
-
-    def resume(self, job):
-        raise self.sdk.Rejected("unsupported", "不支持")
-
-    def fault_target(self):
-        return None
-
-
-def test_gateway_sdk_security_defaults(sdk, tmp_path):
-    """HTTPS 必须带令牌；明文只给本机联调、缺省只听 127.0.0.1；令牌、私钥、台账创建时就是属主只读。"""
-    import stat
-
-    from ilcs_gateway.server import serve
-
-    device = _NeverAnswers(sdk)
-    secrets = tmp_path / "secrets"
-    with pytest.raises(SystemExit, match="访问令牌"):
-        serve(device, device_id="SIM-NA", state_dir=tmp_path / "state", port=0,
-              cert=secrets / "SIM-NA.crt", key=secrets / "SIM-NA.key")
-    with pytest.raises(SystemExit, match="只能监听本机地址"):
-        serve(device, device_id="SIM-NA", state_dir=tmp_path / "state", port=0, insecure=True, address="0.0.0.0")
-    plain = serve(device, device_id="SIM-NA", state_dir=tmp_path / "state", port=0, insecure=True)
-    try:
-        assert plain.address == "127.0.0.1"
-    finally:
-        plain.stop()
-    server = serve(device, device_id="SIM-NA", state_dir=tmp_path / "state", port=0, address="127.0.0.1",
-                   token_file=secrets / "SIM-NA.token", cert=secrets / "SIM-NA.crt", key=secrets / "SIM-NA.key")
-    try:
-        server.gateway.submit({"command_id": "CMD-1", "capability": "cap.test", "params": {}})
-        for path in (secrets / "SIM-NA.token", secrets / "SIM-NA.key", tmp_path / "state" / "SIM-NA.json"):
-            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
-        assert not list(secrets.glob(".*.tmp")), "不留临时文件"
-    finally:
-        server.stop()
-
-
-def test_gateway_sdk_does_not_claim_to_have_stopped_a_job_it_cannot_find(sdk, tmp_path):
-    """启动没拿到应答、设备侧也还没找到的作业：终止回结果未知，原作业不记成已停——不知道它开没开始，也就没法确认停住了。"""
-    from ilcs_gateway.gateway import Gateway
-    from ilcs_gateway.ledger import Ledger
-
-    device = _NeverAnswers(sdk)
-    gateway = Gateway(device, Ledger(tmp_path / "ledger.json"))
-    started = gateway.submit({"command_id": "CMD-1", "capability": "cap.test", "params": {}})
-    assert started["state"] == "unknown"
-    stopped = gateway.control("abort", "CMD-ABORT", {"target_command_id": "CMD-1"})
-    assert stopped["state"] == "unknown" and "现场核查" in stopped["error"]
-    assert not device.aborted, "拿不到作业号：不去乱停"
-    assert gateway.query("CMD-1")["state"] == "unknown", "原作业照样是结果未知，不记成已停"
-    assert gateway.ledger.find("CMD-ABORT") is None, "不落控制记录：同一终止指令号再来会重新找一次"

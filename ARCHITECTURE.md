@@ -35,7 +35,7 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 | 服务 | `services/` | 用例编排，一个方法 = 一个事务 | 写 SQL 细节、拼 HTTP |
 | 仓储 | `repositories/` | 聚合读写、作用域过滤、时间线查询 | 业务规则 |
 | 领域 | `domain/` | 纯函数与纯数据：能力匹配、方法校验、节点类型、依赖图、排程、多批次顺序搜索与可选 CP-SAT 模型、载具转运计划、开跑检查、恢复策略、条件矩阵、库存三量、资质判定、正式统计 | 碰数据库、碰时钟、碰框架 |
-| 适配 | `adapters/` | 设备侧契约、模拟实现；只经两个契约接设备：`sila2_v1`（SiLA 2 设备服务：驱动宿主 `devices/host` 上的协议插件，或厂商的 SiLA 服务器）与 `http_json_v1`（HTTPS 网关）；驱动目录与保存前的配置检查 `catalog.py`；接入验收清单 `acceptance.py`。协议驱动（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令）都在驱动宿主里 | 业务状态迁移 |
+| 适配 | `adapters/` | 设备侧契约、模拟实现；只经两个契约接设备：`sila2_v1`（SiLA 2 设备服务：驱动宿主 `ilcs-devices/host` 上的协议插件，或厂商的 SiLA 服务器）与 `http_json_v1`（HTTPS 网关）；驱动目录与保存前的配置检查 `catalog.py`；接入验收清单 `acceptance.py`。协议驱动（PLC 点表、Modbus / OPC UA 任务契约、REST、串口命令）都在驱动宿主里 | 业务状态迁移 |
 | 模型 | `models/` | SQLAlchemy 表定义 | 行为 |
 | 基础 | `core/` | 配置、会话、`Quantity` 类型、版本校验、访问上下文、时钟、随机数、口令与 JWT、领域异常、设备主机白名单（`hosts.py`） | 领域概念 |
 
@@ -117,19 +117,19 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 
 **方法审批的职责分离**。方法记录作者与提交人的稳定用户 ID；批准人不能是二者之一，管理员也不例外。审批 / 发布签名按严格模式核对：票据必须针对该方法及其当前 `row_version`，未写对象的票据不再当作通配。用过的步骤 ID 记在 `used_step_ids`，删掉的也不复用；修订号与修订版本号在整条修订链上取已有最大值 + 1（R-203 → R-203-r1 → R-203-r2，修订的修订不再叠后缀）；修订版发布即退役来源版本。
 
-**SiLA 2 设备**（`adapters/drivers/sila2.py` + `devices/contracts/sila2/TaskExecution.sila.xml`）。`sila2_v1` 驱动按 ILCS 指令号提交、查询、保持、终止任务，回执与 `http_json_v1` 共用 `adapters/contract.py` 的解读规则。SiLA 定义错误（联锁、参数非法、忙、不支持）是明确失败；连接失败、超时是结果未知；未定义执行错误与不合规回执是「有响应但无法确认」，同样按结果未知处理。SiLA 设备不推心跳：执行器按 `probe_interval_sec` 读设备身份判在线并同步联锁；设备自报 `simulator: true` 时正式环境拒绝接入。`devices/simulators/sila_device/` 是系统外部的 SiLA 2 模拟设备，带故障注入，用于真机到位前的联调验收。
+**SiLA 2 设备**（`adapters/drivers/sila2.py` + `ilcs-devices/contracts/sila2/TaskExecution.sila.xml`）。`sila2_v1` 驱动按 ILCS 指令号提交、查询、保持、终止任务，回执与 `http_json_v1` 共用 `adapters/contract.py` 的解读规则。SiLA 定义错误（联锁、参数非法、忙、不支持）是明确失败；连接失败、超时是结果未知；未定义执行错误与不合规回执是「有响应但无法确认」，同样按结果未知处理。SiLA 设备不推心跳：执行器按 `probe_interval_sec` 读设备身份判在线并同步联锁；设备自报 `simulator: true` 时正式环境拒绝接入。`ilcs-devices/simulators/sila_device/` 是系统外部的 SiLA 2 模拟设备，带故障注入，用于真机到位前的联调验收。
 
 **设备接入：改配置即生效，改代码不进 ILCS 进程**。接一台设备分三种情况，风险不同，做法也不同：
 
 - *改配置*（地址、证书、超时；点表、命令、状态码这类映射改在驱动宿主的设备文件里）：「工位与接入 → 设备连接」签名保存，`config_version` 加 1；执行器每轮从库里读适配器，驱动实例按 `config_version` 缓存（`adapters/registry.adapter_for`），下一轮就换成新配置，不用重启。设备主机白名单 `ILCS_ADAPTER_ALLOWED_HOSTS` 可以写网段（`10.20.1.0/24`）与域名后缀（`.lab.internal`，`core/hosts.py`），设备网段里新接的设备不用改 `.env`；主机名不做 DNS 解析去比网段（解析结果会变）；正式环境不许 `*`、IPv4 网段不宽于 /16。
 - *一类设备怎么接*：存成**设备接入模板**（`services/template_service.py`）——驱动 + 配置 + 连接参数示例 + 支持标志 + 验收缺省，按修订号管理；起草人不能发布本人起草的模板，发布要签名，发布后内容由触发器冻结；工位 = 模板的某一版 + 自己的连接参数（`adapters.template_id / template_connection`，`config` 仍是合并后的完整配置，驱动照旧只读它）。新修订发布时旧版退役，但不自动推给工位：模板页列出还在用旧修订的工位，逐台切换、重新验收。模板的导出文件（`ilcs-device-template/1`，带内容摘要）就是设备模块交付的 `profile.json`，导入一律成草稿，摘要对不上（导出后被改过）拒绝。
-- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——新协议写成驱动宿主（`devices/host`）的插件，经 `sila2_v1` 接；厂家 SDK 的设备写设备模块（`devices/gateway/<模块>/`），基于 `devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
+- *新协议、厂家 SDK*：写代码，但不进 ILCS 进程——新协议写成驱动宿主（`ilcs-devices/host`）的插件，经 `sila2_v1` 接；厂家 SDK 的设备写设备模块（`ilcs-devices/gateway/<模块>/`），基于 `ilcs-devices/gateway/ilcs_gateway` 起一个独立网关，实现 `http_json_v1` 契约；ILCS 不改代码、不重启，网关挂了只是这一台失联。**不支持**从页面上传驱动代码、在执行器里热加载：执行器是单活进程、握着全站在途指令，插件里一个 C 扩展崩溃就是全站执行门关闭；Python 热重载不替换已建的实例、C 扩展根本不能重载；上传代码绕开代码评审，审计也答不出「这条指令是哪一版驱动执行的」；厂家 SDK 自带的 grpc / protobuf 版本多半与我们钉死的冲突。
 
 驱动在 `adapters/catalog.py` 声明自己的配置项，连同嵌套结构（`fields` 固定键、`entries` 任意键的表、`items` 列表、`options` 可选值、`ref` / `key_ref` 引用点名 / 能力 / 参数、`shorthand` 简写、`single` 单项列表）；界面按它出通用表单（`features/stations/ConfigForm.tsx`，设备连接与接入模板共用，表单编辑不了的写法就地按 JSON 改，完整 JSON 随时可切），`GET /drivers` 另给每项能力的起步写法 `capability_examples`（按能力字典的参数生成）。保存前按它查缺项与类型、再构造一次驱动实例（不连设备）——驱动自己的校验（正则、点表、白名单）就在构造时，配错了当场拒绝（`adapter_config_invalid`），不用等到测试连接；未登记的键（顶层与嵌套结构里的）只提醒。只有驱动、配置、凭据真的变了才检查：适配器坏了的时候，停用它、改说明不被挡。
 
 设备上还有可能在动作的指令（在途、已保持、结果未知且可能已送达，`CommandRepository.acting_on_station`）时，只放行说明、停用、超时与探测周期（`domain/adapter_rules.busy_blocked_changes`）：换了驱动或连接目标，新实例就查不回原指令——设备服务按指令号记作业，换成另一台设备服务就查不到它，批次判故障转人工；改了状态映射，同一条作业就可能按另一套状态码判结论。试点切换脚本守同一条规矩。
 
-**接入验收与闸门**（`adapters/acceptance.py` + `services/acceptance_service.py`）。验收清单三级：只读（身份与方法目录、健康检查、契约声明、查询不存在的指令号）、动作（正常完成、同一指令号重复提交、重建驱动后按指令号查回、保持、终止）、故障（回执丢失、设备忙、联锁、失联）。界面申请只登记一条排队记录，**由执行器执行**：执行器是唯一驱动设备的进程，同一工位的设备 I/O 在它那里串行，验收不会和投递、轮询抢同一个串口；界面上的测试连接、读目录、重连在验收执行中被拒。动作级要签名并写明现场批准人（DEC-02），等工位上没有可能在动作的指令才开始，排队期间新的动作指令留在队列里（免得一直等不到空档）；故障项目只在非正式环境、设备自报为模拟器、登记了模拟设备统一控制口（`devices/simulators/common/control.py`，适配器配置里的 `simulator_control`）时跑。「重复提交只动作一次」要读得到设备侧动作次数才判通过：设备认 ILCS 指令号时按指令号数，不认的（串口命令、PLC 点表、天平、车队）数设备的总动作次数。验收记录出了结论就由触发器冻结、永不删除，报告带驱动、固件、配置版本、配置摘要与模板版本。
+**接入验收与闸门**（`adapters/acceptance.py` + `services/acceptance_service.py`）。验收清单三级：只读（身份与方法目录、健康检查、契约声明、查询不存在的指令号）、动作（正常完成、同一指令号重复提交、重建驱动后按指令号查回、保持、终止）、故障（回执丢失、设备忙、联锁、失联）。界面申请只登记一条排队记录，**由执行器执行**：执行器是唯一驱动设备的进程，同一工位的设备 I/O 在它那里串行，验收不会和投递、轮询抢同一个串口；界面上的测试连接、读目录、重连在验收执行中被拒。动作级要签名并写明现场批准人（DEC-02），等工位上没有可能在动作的指令才开始，排队期间新的动作指令留在队列里（免得一直等不到空档）；故障项目只在非正式环境、设备自报为模拟器、登记了模拟设备统一控制口（`ilcs-devices/simulators/common/control.py`，适配器配置里的 `simulator_control`）时跑。「重复提交只动作一次」要读得到设备侧动作次数才判通过：设备认 ILCS 指令号时按指令号数，不认的（串口命令、PLC 点表、天平、车队）数设备的总动作次数。验收记录出了结论就由触发器冻结、永不删除，报告带驱动、固件、配置版本、配置摘要与模板版本。
 
 配置变更后工位欠一份验收（`adapters.acceptance_required`，`domain/adapter_rules.acceptance_requirement`）：第一次接成真实设备或换了驱动欠动作级，其他改动欠只读级，还没补上的动作级不因为又改了一次而降级；模拟适配器不设闸门。欠着就进执行门的 `blocked_stations`（并单列在 `acceptance_pending`），排程绕开、下发与续跑 423；已在队列里的动作指令在验收排队时等、没有排队的验收（上次不通过、欠动作级）时不投递并挂起批次。改完配置执行器自动排一次只读级，通过了（级别够）就放行——自报为模拟器的设备只读级就够：模拟设备不会造成物理后果、正式环境也不许接入；设备恢复在线时，上一次因为连不上没通过的自动验收再排一次。执行器启动时把上一个执行器没做完的验收判为出错（要现场核对设备上以 `ACC-` 开头的验收指令）；串行模式下长时间的动作级验收边做边续写执行器存活记录。迁移前在用的配置不追溯。
 
@@ -361,8 +361,8 @@ cd ilcs && api/.venv/bin/python scripts/smoke.py   # 端到端闭环（需 api �
 |---|---|---|
 | 数据库指令队列 + LISTEN/NOTIFY 唤醒 | NATS JetStream（多执行器分片、跨站点） | `repositories/execution.py`、`core/events.py` 与执行器循环 |
 | JWT + 本地口令 | Keycloak OIDC | `core/security.py`、`api/deps.py`；服务身份不变 |
-| 模拟适配器 | 厂商专用工位适配器 | 能用映射插件描述的设备只写驱动宿主的设备文件（设备模块交付 profile）；厂家 SDK / 私有协议的设备按 `devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码；新协议写成驱动宿主的插件。ILCS 进程里不再放协议驱动。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
-| 映射驱动在 ILCS 进程内，网关模块走 `http_json_v1` | 驱动移出 ILCS，放进独立的驱动项目，每台设备一个 SiLA 服务，ILCS 只经 SiLA 接设备 | 已完成（2026-10-04）：驱动宿主 `devices/host` 托管全部协议插件（四个映射插件 + 两个任务契约插件），ILCS 只留 `sila2_v1` 与 `http_json_v1`；契约见 `devices/contracts/sila2/README.md`，驱动配置摘要闸门在 `ExecutorLoop._track_driver` 与接入验收收尾；库里还有工位用已移出的驱动时迁移 0052 拒绝升级。下一步 devices/ 独立成项目 |
+| 模拟适配器 | 厂商专用工位适配器 | 能用映射插件描述的设备只写驱动宿主的设备文件（设备模块交付 profile）；厂家 SDK / 私有协议的设备按 `ilcs-devices/gateway/` 的设备模块结构写一个基于 `ilcs_gateway` 的网关，经 `http_json_v1` 接入，ILCS 不改代码；新协议写成驱动宿主的插件。ILCS 进程里不再放协议驱动。**待 DEC-02 定下首台设备协议、能力与超时语义**；未注册驱动在保存配置、健康检查、重连和执行时明确拒绝 |
+| 映射驱动在 ILCS 进程内，网关模块走 `http_json_v1` | 驱动移出 ILCS，放进独立的驱动项目，每台设备一个 SiLA 服务，ILCS 只经 SiLA 接设备 | 已完成（2026-10-04）：驱动宿主 `ilcs-devices/host` 托管全部协议插件（四个映射插件 + 两个任务契约插件），ILCS 只留 `sila2_v1` 与 `http_json_v1`；契约见 `ilcs-devices/contracts/sila2/README.md`，驱动配置摘要闸门在 `ExecutorLoop._track_driver` 与接入验收收尾；库里还有工位用已移出的驱动时迁移 0052 拒绝升级。设备侧（原 `devices/`）已拆成独立仓库 `ilcs-devices`（2026-10-04）：两边各自测试、各自出镜像，ILCS 的集成测试按 `ILCS_DEVICES` 找它 |
 | 模拟遥测序列与模拟原始曲线 | TimescaleDB 连续聚合 / 对象存储 | `ExecutionService.record_telemetry`、`ResultService.raw_curve_rows`；读接口不变 |
 | 本地文件存储 | 对象存储 | `services/file_service.py` 一处；接口返回的是文件 ID，不是路径 |
 | 自绘 SVG 图表 | uPlot | `web/src/shared/chart.tsx` |

@@ -1,4 +1,4 @@
-"""试点设备预设（devices/simulators/pilot-devices.json）：每个示例工位的驱动与连接配置。
+"""试点设备预设（设备仓库的 simulators/pilot-devices.json）：每个示例工位的驱动与连接配置。
 
 - 每条预设都能构造出驱动（主机、证书、凭据位置都校验）；ILCS 只经 sila2_v1、http_json_v1 接设备，预设里没有别的驱动；
 - 一个绑定托盘的批次按预设走真实驱动：ST-06 注液走 SiLA 2，ST-07 充放电走 HTTPS 网关（厂家 SDK 接口服务）；
@@ -6,19 +6,18 @@
 """
 import importlib.util
 import json
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from sim_harness import DEVICES, DEVICES_FOUND, needs_devices
 from tests.api.test_labware_transfer import _batch_with_labware, _dispatch, clean_labware  # noqa: F401
 
+pytestmark = needs_devices
 ROOT = Path(__file__).resolve().parents[3]
-DEVICES = ROOT / "devices"  # simulators、connectors 包所在的目录
-if str(DEVICES) not in sys.path:
-    sys.path.insert(0, str(DEVICES))
-PRESETS = json.loads((ROOT / "devices" / "simulators" / "pilot-devices.json").read_text(encoding="utf-8"))["stations"]
+PRESET_FILE = DEVICES / "simulators" / "pilot-devices.json"
+PRESETS = json.loads(PRESET_FILE.read_text(encoding="utf-8"))["stations"] if DEVICES_FOUND else {}
 SECRETS = "/run/secrets/ilcs"
 
 
@@ -27,6 +26,18 @@ def _pilot_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_preset_is_read_from_the_devices_repo_or_stdin(monkeypatch, tmp_path):
+    """api 容器里没有设备仓库：`--preset -` 从标准输入读；给的文件不存在时说清楚怎么办，不抛 FileNotFoundError。"""
+    import io
+
+    script = _pilot_script()
+    assert Path(script.PRESET).resolve() == PRESET_FILE.resolve(), "缺省读设备仓库里的预设，和测试找的是同一个设备仓库"
+    monkeypatch.setattr("sys.stdin", io.StringIO(PRESET_FILE.read_text(encoding="utf-8")))
+    assert script._read_preset("-") == PRESETS
+    with pytest.raises(SystemExit, match="ILCS_DEVICES"):
+        script._read_preset(str(tmp_path / "missing.json"))
 
 
 def localize(value, endpoints: dict, secrets: Path):
@@ -181,7 +192,7 @@ def test_preset_switch_is_audited_and_reverts(tmp_path, monkeypatch, reset_runti
     for preset in PRESETS.values():
         hosts |= script.hosts_of(preset["config"])
     monkeypatch.setattr(settings, "adapter_allowed_hosts", "127.0.0.1")
-    blocked = Namespace(station=None, preset=str(ROOT / "devices" / "simulators" / "pilot-devices.json"), only=None,
+    blocked = Namespace(station=None, preset=str(PRESET_FILE), only=None,
                         skip_missing=True, channels=None, backup_dir=str(tmp_path))
     assert script.apply(blocked) == 2, "白名单缺主机：一个工位都不改"
 
@@ -219,7 +230,7 @@ def test_simulate_switches_stations_back_to_the_builtin_adapter(tmp_path, monkey
     fields = ("kind", "driver", "protocol", "version", "config", "credential_ref", "note", "acceptance_required")
     with SessionLocal() as db:
         seeded = {field: getattr(db.get(Adapter, "ST-06"), field) for field in fields}
-    real = Namespace(station=None, preset=str(ROOT / "devices" / "simulators" / "pilot-devices.json"), only=["ST-06"],
+    real = Namespace(station=None, preset=str(PRESET_FILE), only=["ST-06"],
                      skip_missing=True, channels=None, backup_dir=str(tmp_path))
     assert script.apply(real) == 0
     with SessionLocal() as db:

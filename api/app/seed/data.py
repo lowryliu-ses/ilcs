@@ -118,7 +118,7 @@ STATIONS = [
 ]
 
 # 协议名写的是这台设备现场用的接口；种子里都是内置模拟适配器。接外部模拟设备或真机时按
-# devices/simulators/pilot-devices.json 的预设切到对应驱动（scripts/configure-pilot-adapters.py apply --preset）。
+# ilcs-devices/simulators/pilot-devices.json 的预设切到对应驱动（scripts/configure-pilot-adapters.py apply --preset）。
 # ST-01-B、ST-05 没有预设，一直用内置模拟。
 ADAPTERS = [
     ("ST-01-A", "SiLA 2", "1.1", ""), ("ST-01-B", "内置模拟", "1.0", ""),

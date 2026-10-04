@@ -155,7 +155,7 @@ def main() -> int:
             raise SystemExit("故障项目只对自报为模拟器的设备开放；真实设备请在网络路径上注入（中间代理丢应答）")
         injector, note = injector_for(record, capability)
         if injector is None:
-            print(f"提示：{note}，故障项目在报告里标为跳过；可在模拟器容器里用 devices/simulators/*/fault.py 手工注入",
+            print(f"提示：{note}，故障项目在报告里标为跳过；可在模拟器容器里用 ilcs-devices/simulators/*/fault.py 手工注入",
                   file=sys.stderr)
 
     report = run_acceptance(

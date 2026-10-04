@@ -3,18 +3,18 @@
 电化学工作站、电芯开路电压 / 内阻仪（Keithley 2450、Keithley 2400、Hioki BT3562）。
 
 只走 HTTP，和界面调同一组接口；签名用演示账号口令逐次签署。设备侧是各设备模块的模拟容器
-（`devices/gateway/<模块>/deploy/compose.yml`，接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
+（`ilcs-devices/gateway/<模块>/deploy/compose.yml`，接 ILCS 的后端网络）：网关模块（balance-sim、ika-stirrer-sim、raman-sim、
 thermostat-sim、potentiostat-sim）ILCS 经 `http_json_v1` 走 HTTPS + 令牌接，网关自报为模拟器；电芯检测仪表是映射模块
-（k2450-sim、k2400-sim、bt3562-sim），映射在驱动宿主里（devices/host 的 line_command 插件，本机现场 devices/host/sites/local），
+（k2450-sim、k2400-sim、bt3562-sim），映射在驱动宿主里（ilcs-devices/host 的 line_command 插件，本机现场 ilcs-devices/host/sites/local），
 ILCS 用 `sila2_v1` 接驱动宿主（scripts/load-driver-host-devices.py 的那三台），另登记模拟设备的统一控制口。
 和接真机是同一条路（驱动宿主要先起来）：
 
-    docker compose -f devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 每个模块各起一组
-    docker compose -f devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
-    docker compose -f devices/gateway/raman-seabreeze/deploy/compose.yml up -d --build
-    docker compose -f devices/gateway/thermostat/deploy/compose.yml up -d --build
-    docker compose -f devices/gateway/potentiostat/deploy/compose.yml up -d --build
-    docker compose -f devices/gateway/scpi-cell-meter/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/gateway/balance-dosing/deploy/compose.yml up -d --build     # 每个模块各起一组
+    docker compose -f ../ilcs-devices/gateway/ika-stirrer/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/gateway/raman-seabreeze/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/gateway/thermostat/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/gateway/potentiostat/deploy/compose.yml up -d --build
+    docker compose -f ../ilcs-devices/gateway/scpi-cell-meter/deploy/compose.yml up -d --build
     python3 scripts/load-device-simulators.py register [--base http://127.0.0.1:8090] [--acceptance] [--only balance,chiller,…]
 
 每台：能力（`cap.weigh`、`cap.thermostat`、`cap.echem`、`cap.cell_check` 没有就登记；`cap.ely.*` 用电解液线已有的）→
@@ -38,6 +38,8 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+# 设备仓库（模块的 profile.json 在它的 gateway/ 下）：环境变量 ILCS_DEVICES，缺省是 ILCS 旁边的 ../ilcs-devices
+DEVICES_REPO = Path(os.environ.get("ILCS_DEVICES") or ROOT.parent / "ilcs-devices")
 _spec = importlib.util.spec_from_file_location("load_neware_cycler", HERE / "load-neware-cycler.py")
 common = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(common)  # 复用它的 HTTP 传输、演示账号与签名、等待与输出
@@ -177,7 +179,7 @@ def ensure_station(engineer: Actor, device: dict[str, Any]) -> None:
         "asset_no": device["asset"], "name": device["name"], "model": device["model"], "vendor": device["vendor"],
         "capacity": device["channels"], "calibration_applicable": False,
         "calibration_exempt_reason": "模拟阶段占位：接的是模拟网关，接真机前按实物登记序列号与校准",
-        "note": f"模拟阶段占位资产：devices/gateway/{device['module']} 的模拟网关",
+        "note": f"模拟阶段占位资产：ilcs-devices/gateway/{device['module']} 的模拟网关",
     })["id"]
     engineer.post("/stations", {
         "id": device["station"], "name": device["name"], "island": ISLAND["id"], "channels": device["channels"],
@@ -189,7 +191,7 @@ def ensure_station(engineer: Actor, device: dict[str, Any]) -> None:
 
 
 def ensure_template(engineer: Actor, qa: Actor, device: dict[str, Any]) -> dict:
-    path = ROOT / "devices" / "gateway" / device["module"] / device.get("profile", "profile.json")
+    path = DEVICES_REPO / "gateway" / device["module"] / device.get("profile", "profile.json")
     profile = json.loads(path.read_text(encoding="utf-8"))
     rows = [row for row in _items(engineer.get("/device-templates"))
             if row.get("code") == profile["code"] and int(row.get("revision") or 0) == int(profile["revision"])]
