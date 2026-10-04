@@ -12,9 +12,9 @@ ILCS 用 `sila2_v1` 连它，不再自己连 PLC、仪表。契约见 [contracts
 
 ## 协议插件
 
-`ilcs_host/plugins/` 是从 ILCS 的 `api/app/adapters/drivers` 抽出来的映射驱动，**配置写法与 ILCS 里的一模一样**：
-ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line_command_v1` 配置（连同连接参数）原样放进
-设备文件的 `config` 就能用。
+`ilcs_host/plugins/` 是从 ILCS 的 `api/app/adapters/drivers` 抽出来的设备驱动，**配置写法与 ILCS 里的一模一样**：
+ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line_command_v1` / `modbus_tcp_v1` / `opcua_v1`
+配置（连同连接参数）原样放进设备文件的 `config` 就能用。
 
 | 插件 | 设备 |
 |---|---|
@@ -22,6 +22,12 @@ ILCS 工位上现成的 `modbus_map_v1` / `opcua_map_v1` / `rest_map_v1` / `line
 | `opcua_map` | 已有 OPC UA 服务器、节点是厂家自己的 PLC / 视觉系统 |
 | `rest_map` | 设备或调度系统自有的 REST 接口 |
 | `line_command` | 厂家给了命令手册的文本协议仪器：RS232 / RS485（经串口服务器或本机串口）、TCP 端口上一问一答（SCPI 仪表、温控仪表、机械臂仪表盘服务） |
+| `modbus_task` | PLC 按 ILCS 任务寄存器契约编程（`devices/contracts/modbus/TaskRegisters.json`，原 `modbus_tcp_v1`） |
+| `opcua_task` | OPC UA 服务器实现 ILCS TaskExecution 节点与方法（`devices/contracts/opcua/TaskExecution.json`，原 `opcua_v1`） |
+
+前四个是**映射插件**：设备不认识 ILCS 指令号，插件记作业台账（先落盘再动设备、重启后按台账查回）。后两个是**任务契约插件**：
+设备按 ILCS 契约编程，指令号、去重、按指令号查询都在设备侧，宿主不记台账、没有点表；提交时连不上一律回结果未知
+（分不清触发写没写下），之后按指令号问设备；设备状态报 unknown（契约里没有「运行中」）。
 
 ILCS 矩阵条件的逐孔参数（`ParametersJson` 里的 `wells`）由插件按孔位**依次执行**、回执按孔位回报，写法见
 [设备适配器配置模板](../../docs/设备适配器配置模板.md)「逐孔依次执行」。
@@ -112,8 +118,11 @@ docker compose -f devices/host/deploy/compose.yml up -d
 api/.venv/bin/python -m pytest devices/host/tests
 ```
 
-在本进程里拉起外部模拟设备（PLC 真实走 Modbus TCP / OPC UA，文本命令仪器走 TCP），起宿主，用 SiLA 客户端带令牌调用：
-三组特性、错误码、令牌、设备忙、动作前连不上、重启后按台账查回不重发、在途作业时不许换配置、只读写点位的设备、逐孔依次执行。ILCS 的
+- `test_host.py`、`test_line_command.py`、`test_task_contract_host.py`：在本进程里拉起外部模拟设备（PLC 真实走 Modbus TCP /
+  OPC UA，文本命令仪器走 TCP，任务契约设备走各自的寄存器 / 节点），起宿主，用 SiLA 客户端带令牌调用：三组特性、错误码、令牌、
+  设备忙、动作前连不上、重启后按台账查回不重发、在途作业时不许换配置、只读写点位的设备、逐孔依次执行。
+- `test_plugin_*.py`：插件本身对着外部模拟设备测（不经 SiLA）——从 ILCS 的驱动测试搬来，插件离开 ILCS 时测试跟着走；
+  辅助函数在 `plugin_harness.py`。ILCS 的
 `api/tests/domain/test_driver_host.py` 会跑这一套，并从 ILCS 的 `sila2_v1` 经驱动宿主驱动 PLC；
 `api/tests/api/test_driver_host_points.py` 走 API 验证点位面板、签名手动写与驱动配置闸门。
 

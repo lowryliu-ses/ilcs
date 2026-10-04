@@ -194,6 +194,19 @@ def token(sila_client, value: str = TOKEN) -> list:
     return [sila_client.AuthorizationService.AccessToken(value)]
 
 
+@pytest.fixture(autouse=True)
+def host_settings(tmp_path, monkeypatch):
+    """插件读的驱动宿主配置：每个测试都从开发环境、本机白名单、临时的凭据与台账目录开始，测完还原（起宿主时
+    `prepare()` 会按现场配置改写它们）。"""
+    from ilcs_host.settings import settings
+
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "allowed_hosts", "127.0.0.1,localhost")
+    monkeypatch.setattr(settings, "credential_root", str(tmp_path))
+    monkeypatch.setattr(settings, "state_dir", str(tmp_path / "adapter-state"))
+    return settings
+
+
 @pytest.fixture()
 def plc():
     with plc_sim() as running:

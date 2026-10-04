@@ -337,7 +337,7 @@ class TaskExecutionImpl(FeatureImplementationBase):
         entry, adapter = self.runtime.entry, self.adapter
         return {
             "Capabilities": [
-                {"Capability": capability, "ParametersSchema": json.dumps(self._schema(spec), ensure_ascii=False),
+                {"Capability": capability, "ParametersSchema": json.dumps(self._schema(capability, spec), ensure_ascii=False),
                  "Programs": self._programs(capability, spec)}
                 for capability, spec in (entry.config.get("capabilities") or {}).items()
             ],
@@ -346,8 +346,12 @@ class TaskExecutionImpl(FeatureImplementationBase):
             "Handoff": getattr(adapter, "handoff", "") or "sync",
         }
 
-    def _schema(self, spec: dict) -> dict:
-        """能力参数的 JSON Schema：写入点有单位、范围就带上，选项型参数列出可选值。"""
+    def _schema(self, capability: str, spec) -> dict:
+        """能力参数的 JSON Schema：写入点有单位、范围就带上，选项型参数列出可选值。插件自己给的（按任务契约接的设备，
+        能力只映射到能力码）就用插件的。"""
+        custom = getattr(self.adapter, "parameters_schema", None)
+        if custom is not None:
+            return custom(capability)
         accepted = self.adapter.accepted_params(spec) or set()
         writes = spec.get("write") or {}
         points = self.adapter.point_specs()
@@ -368,8 +372,8 @@ class TaskExecutionImpl(FeatureImplementationBase):
         required = sorted(name for name in writes if name not in defaults)
         return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
-    def _programs(self, capability: str, spec: dict) -> list[dict]:
-        recipe = spec.get("recipe") or {}
+    def _programs(self, capability: str, spec) -> list[dict]:
+        recipe = (spec.get("recipe") if isinstance(spec, dict) else None) or {}
         if isinstance(recipe.get("map"), dict):
             return [{"Program": str(program), "Name": str(program)} for program in recipe["map"]]
         rows = []

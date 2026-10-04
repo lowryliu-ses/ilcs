@@ -300,6 +300,27 @@ class Sila2Adapter:
             },
         }
 
+    @property
+    def handoff(self) -> str:
+        """设备服务报的交接方式（TaskSupport.Handoff）：async 是提交只是交接（PLC 点表写下启动沿），设备忙、联锁的拒绝
+        要之后查询才看得到——接入验收的故障项目按它判。读不到（没有 TaskExecution、连不上）按同步。"""
+        try:
+            if self._has(TASKS) and hasattr(getattr(self._client, TASKS), "TaskSupport"):
+                return str(self._read(TASKS, "TaskSupport").Handoff or "sync")
+        except Exception:  # noqa: BLE001  读不到不影响别的检查，按同步
+            pass
+        return "sync"
+
+    @property
+    def offline_after_sec(self) -> float:
+        """设备服务判失联的时延（Driver.OfflineAfterSeconds，例如 PLC 心跳多久不变）：接入验收的离线项目断开得比它久。"""
+        try:
+            if self._has(INFO):
+                return float(self._read(INFO, "Driver").OfflineAfterSeconds or 0)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0.0
+
     def identity(self) -> dict:
         """设备自报的身份与方法目录（读取设备自报信息、接入验收用）。方法目录取自 TaskSupport 的设备端程序。"""
         identity = self._status_identity()
