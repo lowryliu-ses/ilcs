@@ -18,7 +18,8 @@
 OPC UA、HTTP 两台在 ProtoForge 里没有启动信号，写完设定值就生效，所以按**设定类动作**接：点表映射的启动写
 `{"write_only": true}` 并配 `idle_after_start: "done"`；REST 映射的能力请求本身就是写设定值的请求，实测值写成
 `{"point": "temperature"}` 按点表读回。写法见驱动宿主插件配置（`ilcs-devices/host/插件配置.md`）「逐孔依次执行」。
-驱动宿主的现场配置在 `ilcs-devices/host/sites/local/devices/`。
+驱动宿主的现场配置在 `ilcs-devices/host/sites/local/devices/`（本机在用的是 `data/driver-host/site`），也可以在驱动宿主的设备管理台
+（`http://127.0.0.1:50200`）上看状态、改映射、起停各台设备的服务；改了映射照样要在「设备连接」签名批准、重新验收。
 
 前提：驱动宿主在跑、三台设备已经接入并验收（`scripts/load-driver-host-devices.py register`，见 `ilcs-devices/host/README.md`），
 ProtoForge 里导入并启动了 `ilcs-devices/simulators/protoforge/ilcs-plc-scenario.json`（从站 2 的握手 PLC），执行器在跑。
