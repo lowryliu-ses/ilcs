@@ -1,5 +1,5 @@
 from . import (
-    admin, alarms, analysis, assets, auth, batches, comments, environment, exceptions, files, formulations, governance,
+    admin, alarms, analysis, assets, auth, batches, comments, environment, exceptions, files, governance,
     integrations, labware, maintenance,
     materials, methods,
     metrics,
@@ -16,7 +16,6 @@ ROUTERS = [
     assets.router,
     maintenance.router,
     recipes.router,
-    formulations.router,
     methods.router,
     comments.router,
     environment.router,

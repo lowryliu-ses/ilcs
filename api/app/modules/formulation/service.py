@@ -19,29 +19,30 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..core.clock import now
-from ..core.context import AccessContext
-from ..core.errors import NotFound, StateConflict, ValidationFailed
-from ..core.spreadsheet import SpreadsheetError, check_limits, read_sheet
-from ..domain import formulation as rules
-from ..domain.recipe_rules import validate_steps
-from ..domain.steps import normalize
-from ..models import FormulationTemplate, PhysicalSample, User
-from ..repositories.formulations import FormulationTemplateRepository
-from ..repositories.materials import MaterialRepository
-from ..repositories.methods import DeviceMethodRepository
-from ..repositories.metrics import MetricRepository
-from ..repositories.recipes import RecipeRepository
-from ..repositories.resources import CapabilityRepository, StationRepository
-from ..repositories.samples import PhysicalSampleRepository
-from .audit_service import AuditService
+from ...core.clock import now
+from ...core.context import AccessContext
+from ...core.errors import NotFound, StateConflict, ValidationFailed
+from .spreadsheet import SpreadsheetError, check_limits, read_sheet
+from ...domain.recipe_rules import validate_steps
+from ...domain.steps import normalize
+from ...models import PhysicalSample, User
+from ...repositories.materials import MaterialRepository
+from ...repositories.methods import DeviceMethodRepository
+from ...repositories.metrics import MetricRepository
+from ...repositories.recipes import RecipeRepository
+from ...repositories.resources import CapabilityRepository, StationRepository
+from ...repositories.samples import PhysicalSampleRepository
+from ...services.audit_service import AuditService
+from ...services.sample_service import UNUSABLE_SAMPLE
+from . import rules
+from .models import FormulationTemplate
+from .repository import FormulationTemplateRepository
 
 CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$")
 STATE_LABEL = {"active": "在用", "retired": "已退役"}
 EDITABLE = ("name", "description", "config")
 # 沿用已有流程时的优先顺序：已经审过的优先，省掉重新评审
 REUSE_RANK = {"released": 0, "approved": 1, "review": 2, "draft": 3}
-UNUSABLE_SAMPLE = {"disposed": "已处置", "exhausted": "已用尽"}
 
 
 def _steps_key(steps: list[dict]) -> str:
@@ -105,7 +106,7 @@ class FormulationService:
 
     def param_specs(self, config: Any) -> dict[str, dict[str, Any]]:
         """实验参数与逐瓶参数作用的那个能力参数的规格（类型、选项、单位）：界面据此给选项型参数画下拉。"""
-        from ..domain.params import spec_of
+        from ...domain.params import spec_of
 
         if not isinstance(config, dict):
             return {}
@@ -271,7 +272,7 @@ class FormulationService:
         """生成的步骤按当前工位与方法校验一遍：导入只建草稿，这些问题在提交评审前要解决，所以只提醒。"""
         if not steps:
             return []
-        from .flow_expansion import resolved_steps
+        from ...services.flow_expansion import resolved_steps
 
         resolved, method_problems = resolved_steps(self.db, self.ctx, steps)
         rows = validate_steps(resolved, self.stations.specs(), capabilities, {}, method_problems)
@@ -310,7 +311,7 @@ class FormulationService:
                                          result["warnings"])
         recipe, reused = self._recipe_for(result, user, filename, template)
 
-        from .plan_service import PlanService
+        from ...services.plan_service import PlanService
 
         plan = PlanService(self.db, self.ctx).create({
             "name": str(payload.get("plan_name") or "").strip() or plan_spec["name"],
@@ -345,7 +346,7 @@ class FormulationService:
         existing: dict[str, PhysicalSample | None] = {}
         problems: list[str] = []
         notes: list[str] = []
-        from .batch_service import BatchService
+        from ...services.batch_service import BatchService
 
         batches = BatchService(self.db, self.ctx)
         for serial in serials:
@@ -353,7 +354,7 @@ class FormulationService:
             existing[serial] = sample
             if sample is not None:
                 # 与建批次同一条口径：没终止的批次、或已向设备发过指令的终止批次里有它，就是配过液了
-                used_by = batches.bottle_used_by(serial)
+                used_by = batches.sample_used_by(serial)
                 if used_by:
                     problems.append(f"序列号 {serial} 已在批次 {used_by} 里配过液，不能再作为空瓶导入")
                 elif sample.lifecycle_state in UNUSABLE_SAMPLE:
@@ -403,8 +404,8 @@ class FormulationService:
         没有生效版本、标题在这一版里找不到、设备能力超出 SOP 的适用范围，都是问题：这样的流程发布不了或建不了批次，
         不如导入时就说清楚。没指定 SOP 时只去掉 `sop_step`。
         """
-        from ..domain.sop_steps import scope_outside
-        from ..repositories.sops import SopRepository, SopVersionRepository
+        from ...domain.sop_steps import scope_outside
+        from ...repositories.sops import SopRepository, SopVersionRepository
 
         steps = result.get("steps") or []
         titles = {index: step.pop("sop_step") for index, step in enumerate(steps) if "sop_step" in step}
@@ -446,7 +447,7 @@ class FormulationService:
         if candidates:
             candidates.sort(key=lambda recipe: (REUSE_RANK[recipe.state], -self._number(recipe.id)))
             return candidates[0], True
-        from .recipe_service import RecipeService
+        from ...services.recipe_service import RecipeService
 
         recipe = RecipeService(self.db, self.ctx).create_from_steps(
             spec["name"], int(spec["plate"]), steps, user, bom=[], risk=spec["risk"], design=spec["design"],

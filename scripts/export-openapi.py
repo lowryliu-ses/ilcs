@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
+
+from app.modules import AVAILABLE  # noqa: E402
+
+# 契约覆盖全部可选模块，不随本机 ILCS_MODULES 变
+os.environ["ILCS_MODULES"] = ",".join(AVAILABLE)
 
 from app.main import app  # noqa: E402
 

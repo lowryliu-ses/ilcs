@@ -166,7 +166,7 @@ def validate_steps(
                 issues.append("返工目标必须是本关卡的上游步骤（依赖链上的前驱）")
         if kind == BRANCH:
             issues.extend(branch_issues(step, steps, index))
-        # 前馈来源、按瓶限定引用的投料步骤都要看上下游步骤，同样只能在整条流程上校验
+        # 前馈来源、按样本限定引用的投料步骤都要看上下游步骤，同样只能在整条流程上校验
         issues.extend(binding_issues(step, steps, index, capabilities))
         issues.extend(applies_to_issues(step, steps, index))
         issues.extend(holds_station_issues(steps, index))
@@ -343,7 +343,7 @@ def manual_materials_outside_bom(steps: list[dict[str, Any]], bom: list[dict] | 
 
 def _bom_check(material_steps: list[dict[str, Any]], bom: list[dict]) -> tuple[bool, str]:
     """BOM 项。合法空 BOM 有两种：没有消耗物料的步骤；或每个消耗步骤都是设备步骤、写明了投哪种料——
-    这时每批的量随样本变（配方表逐瓶给出），由实验方案的因子给出，建批次时按本批样本预留。
+    这时每批的量随样本变（配方表逐样本给出），由实验方案的因子给出，建批次时按本批样本预留。
     人工步骤投的料不管 BOM 空不空，都必须列在 BOM 里（见 manual_materials_outside_bom）。
     """
     manual = manual_materials_outside_bom(material_steps, bom)

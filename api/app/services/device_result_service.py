@@ -3,7 +3,7 @@
 设备方法的输出项关联了指标（`metric_id`）时，设备这一步回报的值按样本写成该指标的检测结果：进「数据审核」
 待复核，复核通过后进结果分析、报告，也才进闭环的训练数据——与仪器结果回传是同一条链，不用人从批次记录里抄数。
 
-- 按瓶记：取 `delivered.wells[孔位][键]`，孔位 → 样本与逐孔参数同一口径（`BatchService._step_targets`）。
+- 按样本记：取 `delivered.wells[孔位][键]`，孔位 → 样本与逐孔参数同一口径（`BatchService._step_targets`）。
   设备只给了顶层值（批次级读数）时照 `dataquality.output_flags` 的口径当作每个孔位的值，并打上「批次级读数」标记。
 - 每个样本一张「设备回报」检测任务，要求指标 = 这个批次快照里所有输出项关联的指标（建任务时冻结）。
 - 按「指令 + 孔位」去重（回传事件表的同一唯一键）：回执重放不重复写；同一步重做（返工、续跑）的新读数取代上一版，
@@ -94,7 +94,7 @@ class DeviceResultService:
             task = self._task_for(batch, sample, required)
             event_id = f"{command.id}:{well}"
             if self.events.find(source, task.id, event_id) is not None:
-                continue  # 回执重放：这一瓶这一步已经记过
+                continue  # 回执重放：这个样本这一步已经记过
             prepared: list[dict] = []
             for rule in rules:
                 key = str(rule.get("key") or "")

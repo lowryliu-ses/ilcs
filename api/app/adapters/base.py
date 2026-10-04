@@ -82,7 +82,7 @@ class CommandRequest:
     material: dict = field(default_factory=dict)
     # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required, metric_id}）；同样只是内部挂钩
     outputs: tuple = ()
-    # 这一步处理的孔位（设备认的孔位键 → 在用样本，与逐孔参数同一口径）。没有逐孔参数的检测步骤也要逐瓶回报读数，
+    # 这一步处理的孔位（设备认的孔位键 → 在用样本，与逐孔参数同一口径）。没有逐孔参数的检测步骤也要逐样本回报读数，
     # 驱动据此知道这条指令覆盖哪几个孔位；内置模拟按它逐孔给示意值。同样只是内部挂钩，不上线协议
     wells: tuple = ()
 

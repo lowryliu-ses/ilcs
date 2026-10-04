@@ -207,10 +207,10 @@ class PlanService:
         ]
 
     def _physical_samples_check(self, plan: Plan, conditions: int) -> dict:
-        """矩阵方案指定物理样本（如贴好序列号标签的瓶子）：按「条件 × 重复」逐个对应，建批次时照此分配。
+        """矩阵方案指定物理样本（如贴好序列号标签的样品瓶）：按「条件 × 重复」逐个对应，建批次时照此分配。
 
         不指定时每个运行分配登记新样本（原来的行为）。指定了就必须一一对得上：少一个、多一个都说明
-        表格与方案不是同一份，放过去就会把配方投进别的瓶子。
+        表格与方案不是同一份，放过去就会把配方投进别的样本。
         """
         listed = [str(sid) for sid in plan.sample_ids or []]
         label = "指定的物理样本与条件 × 重复一一对应"
@@ -227,8 +227,8 @@ class PlanService:
         missing = [sid for sid in dict.fromkeys(listed) if self.samples.get(sid) is None]
         if missing:
             problems.append(f"未登记：{'、'.join(missing[:8])}{' 等' if len(missing) > 8 else ''}")
-        # 导入时就拒收已处置、已用尽的瓶子；导入之后才处置或分样用尽的，锁定与提交时同样挡住（建批次还会再判一次）
-        from .formulation_service import UNUSABLE_SAMPLE
+        # 导入时就拒收已处置、已用尽的样本；导入之后才处置或分样用尽的，锁定与提交时同样挡住（建批次还会再判一次）
+        from .sample_service import UNUSABLE_SAMPLE
 
         unusable = [
             f"{sid}（{UNUSABLE_SAMPLE[sample.lifecycle_state]}）" for sid in dict.fromkeys(listed)

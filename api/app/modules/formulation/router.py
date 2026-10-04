@@ -1,13 +1,13 @@
 """配液模板与实验表格导入：模板决定怎么把一张配方表生成流程草稿与方案草稿；导入后仍走流程评审与方案审批。"""
 from fastapi import APIRouter, File, UploadFile
 
-from ...core.spreadsheet import MAX_BYTES
-from ...schemas import (
+from .spreadsheet import MAX_BYTES
+from ...schemas import Versioned
+from .schemas import (
     FormulationCheckIn, FormulationImportIn, FormulationPreviewIn, FormulationTemplateIn, FormulationTemplatePatchIn,
-    Versioned,
 )
-from ...services.formulation_service import FormulationService
-from ..deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
+from .service import FormulationService
+from ...api.deps import Ctx, CurrentUser, DbSession, IdempotencyGuard, require
 
 router = APIRouter(prefix="/formulation-templates", tags=["recipe"])
 

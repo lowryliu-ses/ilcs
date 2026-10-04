@@ -37,9 +37,9 @@ import re
 from decimal import Context, Decimal, InvalidOperation
 from typing import Any
 
-from .matrix import ordered_levels
-from .params import canonical_unit, decimal_of, spec_of, value_issues
-from .steps import DEVICE, kind_of
+from ...domain.matrix import ordered_levels
+from ...domain.params import canonical_unit, decimal_of, spec_of, value_issues
+from ...domain.steps import DEVICE, kind_of
 
 DEFAULT_SERIAL_HEADERS = ("序列号", "编号", "瓶号", "样品编号", "serial", "id")
 MAX_REPEATS = 12
@@ -523,7 +523,7 @@ def _volume_issues(
     估出的体积偏小，核对偏保守）。分装瓶数、每瓶分装量可以是实验参数（整批一个值），也可以是逐瓶参数列。
     有列既不是质量也不是体积、或是质量却查不到密度，估算不了，只提醒。
     """
-    from .params import convert, convertible
+    from ...domain.params import convert, convertible
 
     check = config.get("volume_check")
     if not isinstance(check, dict) or not rows or not reagents:

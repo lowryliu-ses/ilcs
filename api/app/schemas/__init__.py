@@ -460,7 +460,7 @@ class PlanCreateIn(BaseModel):
     design_points: list[list[Any]] = []
     sample_count: int = Field(default=0, ge=0, le=96)
     sample_ids: list[str] = []
-    # 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成）
+    # 指定的样本：fresh 只用一次 / continue 接着用上一步的产物（多步合成）
     sample_policy: Literal["fresh", "continue"] = "fresh"
     required_metrics: list[str] = []
     resource_requirements: list[dict[str, Any]] = []
@@ -1505,12 +1505,6 @@ class LocationActiveIn(BaseModel):
     active: bool
 
 
-# ---------- 配液模板与实验表格导入 ----------
-
-# 表格单元格：xlsx 里的数字是 float，文字与 csv 单元格是 str，空格子是 None
-TableCell = str | float | None
-
-
 class ReportTemplateIn(BaseModel):
     """新建组织报告模板草稿。sections 不给而给了 copy_from（内置模板键或组织模板 id）时以它的章节为起点。"""
 
@@ -1529,50 +1523,3 @@ class ReportTemplatePatchIn(Versioned):
     name: str | None = Field(default=None, max_length=200)
     description: str | None = None
     sections: list[dict[str, Any]] | None = None
-
-
-class FormulationTemplateIn(BaseModel):
-    """配液模板：固定步骤 + 加料阶段 + 物料类别 → 加法 + 搅拌规则 + 实验参数，config 结构见 domain/formulation.py。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    code: str
-    name: str
-    description: str = ""
-    config: dict[str, Any]
-
-
-class FormulationTemplatePatchIn(Versioned):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = None
-    description: str | None = None
-    config: dict[str, Any] | None = None
-
-
-class FormulationPreviewIn(BaseModel):
-    """按已解析的表格（parse 返回的原样表格，或界面改了实验参数后重提）生成预览，不写库。
-    实验参数是数，选项型的实验参数是选项文字。"""
-
-    filename: str = Field(default="", max_length=200)
-    table: list[list[TableCell]]
-    params: dict[str, float | str] = {}
-
-
-class FormulationCheckIn(BaseModel):
-    """模板编辑器：按还没保存的配置核对问题；带了表格就顺便按它试算一次（不写库、不登记瓶子）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    config: dict[str, Any]
-    name: str = Field(default="", max_length=200)
-    description: str = ""
-    filename: str = Field(default="", max_length=200)
-    table: list[list[TableCell]] | None = None
-    params: dict[str, float | str] = {}
-
-
-class FormulationImportIn(FormulationPreviewIn):
-    """导入：服务端重新生成（不信任前端预览），一个事务里登记样本、建流程草稿（或沿用）与方案草稿。"""
-
-    plan_name: str = Field(default="", max_length=200)

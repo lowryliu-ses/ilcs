@@ -11,6 +11,9 @@ from sqlalchemy import engine_from_config, pool
 from app.core.config import settings
 from app.core.db import Base
 from app import models  # noqa: F401  确保所有表都注册到 metadata
+from app.modules import load_models
+
+load_models()  # 可选模块的表同样由迁移管，不随启用开关变
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

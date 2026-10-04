@@ -1,6 +1,6 @@
 """方案与批次这一侧的守卫（配液线接入评审的修正）：
 
-- 一瓶一配方：指定瓶子已在别的未终止批次里，不能再建批次；已处置/已用尽的瓶子锁定检查与建批次都挡。
+- 样本只用一次（fresh，配液线的一瓶一配方）：指定瓶子已在别的未终止批次里，不能再建批次；已处置/已用尽的瓶子锁定检查与建批次都挡。
 - 人工步骤投的料不在 BOM 里：提交评审、批准都拒绝（与检查清单同一句话）。
 - 方案检查按子流程展开后的步骤：子流程里「用量由方案给出」的料锁不上。
 - 物料预览与预留同一口径：批号单位不一致不算可用。
@@ -56,7 +56,7 @@ def test_one_bottle_one_formulation(researcher, qa, operator):
     again = operator.post("/api/batches", {"plan_id": plan_id})
     assert again.status_code == 409, again.text
     assert again.json()["detail"]["code"] == "sample_in_use"
-    assert f"瓶子 {bottles[0]} 已分配给批次 {first_id}" in again.json()["detail"]["message"]
+    assert f"样本 {bottles[0]} 已分配给批次 {first_id}" in again.json()["detail"]["message"]
     reserved = operator.get(f"/api/batches/{first_id}").json()["reservations"]
     assert [row["qty"] for row in reserved] == ["5.750000"], "被拒的第二个批次没有留下第二份预留"
 
@@ -93,7 +93,7 @@ def test_aborted_batch_that_already_sent_commands_keeps_its_bottles(researcher, 
     db.commit()
 
     service = BatchService(db, system_context(batch.org_id))
-    assert service.bottle_used_by(bottles[0]) == first_id
+    assert service.sample_used_by(bottles[0]) == first_id
     again = operator.post("/api/batches", {"plan_id": plan_id})
     assert again.status_code == 409, again.text
     assert again.json()["detail"]["code"] == "sample_in_use"

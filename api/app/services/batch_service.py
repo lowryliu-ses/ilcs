@@ -417,7 +417,7 @@ class BatchService:
                     "assist_station_ids": list(c.assist_station_ids or []),
                     # 前馈参数的求值记录：每个样本的来源、原始值、系数与下发的计算值
                     "bindings": list(c.bindings or []),
-                    # 按瓶拆开下发时依次执行的设备指令：第几条、哪几瓶、状态与出错原因（回执在检查点里汇总）
+                    # 逐样本拆开下发时依次执行的设备指令：第几条、哪几个样本、状态与出错原因（回执在检查点里汇总）
                     "runs": [{"id": run.get("id"), "wells": run.get("wells") or [], "state": run.get("state"),
                               "error": run.get("error") or "", "carried_from": run.get("carried_from") or ""}
                              for run in c.runs or []],
@@ -787,7 +787,7 @@ class BatchService:
         认哪个因子与方案锁定检查同一条规则（domain.plan_dosing）：作用在这一步的用量参数上、写了物料单位、per > 0。
         流程 BOM 已列的物料照旧按 BOM（每批的量）预留，不在这里重复算——两边都算就预留了两份。
         其余带物料的因子（没有作用参数、作用在别的步骤或参数上）只是计划页的估算，不据此预留。
-        配方表导入的流程 BOM 为空，逐瓶的量全在因子上，这里就是它们的预留来源。
+        配方表导入的流程 BOM 为空，逐样本的量全在因子上，这里就是它们的预留来源。
         按十进制算到 6 位小数（与库存流水同一精度），和为 0 的不列：0 用量没有可预留的东西。
         """
         from ..domain.inventory import q
@@ -1005,9 +1005,9 @@ class BatchService:
                 batch.recipe_snapshot.get("plate", 0), plan.layout, plan.seed,
                 plan.design_points or None, repeat_offset=offset, groups=portion.get("groups") or None,
             )
-            # 方案指定了物理样本（如贴好二维码的瓶子）：第 i 个对应「条件序号 × 重复数 + (重复号 − 1)」。
+            # 方案指定了物理样本（如贴好二维码的样品瓶）：第 i 个对应「条件序号 × 重复数 + (重复号 − 1)」。
             # 重复号是全局的（拆分子任务已含偏移），所以子任务不必各带清单；随机布局只换孔位不换这层对应。
-            # 超出方案重复数的重复号（整体重复的第二份、补测）没有对应的瓶子，照旧登记新的
+            # 超出方案重复数的重复号（整体重复的第二份、补测）没有对应的样本，照旧登记新的
             listed = list(plan.sample_ids or [])
             repeats = max(1, int(plan.repeats or 1))
 
@@ -1026,7 +1026,7 @@ class BatchService:
                 for a in assignments
             ]
             if listed:
-                self._require_fresh_bottles(batch, [row["physical_id"] for row in rows if row["physical_id"]],
+                self._require_fresh_samples(batch, [row["physical_id"] for row in rows if row["physical_id"]],
                                             continuing=(getattr(plan, "sample_policy", "") or "fresh") == "continue")
         else:
             listed = list((task.sample_ids if task is not None else None) or plan.sample_ids or [])
@@ -1085,17 +1085,17 @@ class BatchService:
             sample_service.occupy_slot(container_id, row["well"], physical_id, assignment.id)
         return rows
 
-    def _require_fresh_bottles(self, batch: Batch, physical_ids: list[str], continuing: bool = False) -> None:
-        """矩阵方案指定的瓶子：一瓶一配方。
+    def _require_fresh_samples(self, batch: Batch, physical_ids: list[str], continuing: bool = False) -> None:
+        """矩阵方案指定的物理样本，缺省只用一次（`sample_policy: fresh`）。
 
-        瓶子已在别的批次里（未终止的——已完成的瓶子装过配方，同样不能再配一次），再建一个批次就是往同一瓶里
-        二次投料、物料也预留两份；已处置、已用尽的瓶子不能再用。先于预留判，不必预留了再回滚。
+        样本已在别的批次里（未终止的——已完成的样本已经被处理过，同样不能再来一遍），再建一个批次就是对同一个样本
+        重复处理（如往同一瓶里二次投料）、物料也预留两份；已处置、已用尽的样本不能再用。先于预留判，不必预留了再回滚。
         单条件方案按清单重复测已有样本是正当的，不走这里。
 
         方案声明「接着用上一步的产物」（`sample_policy: continue`，多步合成）时，上一批已经跑完（完成或终止）的
         样本可以再进新批次；还在别的批次里没跑完的、已处置用尽的照样不行——一个样本同一时刻只在一处。
         """
-        from .formulation_service import UNUSABLE_SAMPLE
+        from .sample_service import UNUSABLE_SAMPLE
 
         if continuing:
             for physical_id in dict.fromkeys(physical_ids):
@@ -1124,10 +1124,11 @@ class BatchService:
                     f"方案引用的样本 {physical_id} {UNUSABLE_SAMPLE[physical.lifecycle_state]}，不能再用于执行",
                     {"blocked": [{"key": "sample", "label": physical_id}]}, code="sample_unusable",
                 )
-            other = self.bottle_used_by(physical_id, exclude=batch.id)
+            other = self.sample_used_by(physical_id, exclude=batch.id)
             if other:
                 raise StateConflict(
-                    f"瓶子 {physical_id} 已分配给批次 {other}，同一瓶不能再次配液：请导入新序列号的配方表",
+                    f"样本 {physical_id} 已分配给批次 {other}，方案要求样本只用一次：请换用新的样本；"
+                    "多步处理同一批样本时，把方案的样本用法改为「接着用上一步的产物」",
                     {"blocked": [{"key": "sample", "label": f"{physical_id} → {other}"}]},
                     code="sample_in_use",
                 )
@@ -1142,11 +1143,11 @@ class BatchService:
                 return other.id
         return ""
 
-    def bottle_used_by(self, physical_id: str, exclude: str = "") -> str:
-        """这个瓶子被哪个批次用过（返回批次号，没有返回空串）。配方表导入与建批次共用这一条口径。
+    def sample_used_by(self, physical_id: str, exclude: str = "") -> str:
+        """这个样本被哪个批次用过（返回批次号，没有返回空串）。建批次与配方表导入（配液模板模块）共用这一条口径。
 
-        没终止的批次（含已完成）算用过：装过配方的瓶子不能再配一次。已终止的批次只有真的向设备发出过指令
-        （投递状态是「可能已发出」或「已送达」）才算——瓶里可能已经投了料；从没下发就终止的批次不占瓶子。
+        没终止的批次（含已完成）算用过：处理过的样本不能再来一遍。已终止的批次只有真的向设备发出过指令
+        （投递状态是「可能已发出」或「已送达」）才算——样本可能已经被处理（投了料）；从没下发就终止的批次不占样本。
         """
         from ..models import Command
 
@@ -1541,7 +1542,7 @@ class BatchService:
         self.db.add(command)
         self.db.flush()
         if command_type in DISPATCHING and capability is None and applies_to(step) is not None and not wells:
-            # 推进器会先跳过一瓶都不用做的步骤；续跑 / 重试时覆盖的瓶子都已剔除才会走到这里。
+            # 推进器会先跳过一个样本都不用做的步骤；续跑 / 重试时覆盖的样本都已剔除才会走到这里。
             # 不带孔位下发等于整批都做，宁可挂起让人看
             self._refuse_unsent(batch, command, f"第 {step_index + 1} 步{self.uncovered(batch, step_index)}：指令不下发")
             return command
@@ -1585,7 +1586,7 @@ class BatchService:
         别的孔上，布局放不进板型时实体孔位也与布局孔位不同。子样本继承母样的水平，条件跟着样本走。
         板上还没有这批样本（分装之前的第二块板）就不带逐孔参数；没有任何在途占用的老批次沿用冻结的布局孔位。
         只投影在用样本：已拆分的母样、被剔除的样本仍占着孔位（实物还在），但不再是下游处理对象。
-        声明了 `applies_to` 的步骤按瓶限定处理对象，见 `_covered_params`。
+        声明了 `applies_to` 的步骤按样本限定处理对象，见 `_covered_params`。
         """
         from ..domain.matrix import step_condition
 
@@ -1678,9 +1679,9 @@ class BatchService:
         return allowed
 
     def _covered_params(self, batch: Batch, step: dict, step_id: str, rule: tuple, frozen: dict | None) -> dict:
-        """按瓶限定（`applies_to`）的步骤：只带在指定投料步骤真加了料的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
+        """按样本限定（`applies_to`）的步骤：只带在指定投料步骤真加了料的孔位，每孔写这一步的参数（有逐孔条件的叠上）。
 
-        没列出的瓶子这一步不做——配液线「加料后搅拌」按瓶执行，某瓶这种料是 0 就连搅拌一起跳过。一瓶都没有时
+        没列出的样本这一步不做——配液线「加料后搅拌」按样本执行，某个样本这种料是 0 就连搅拌一起跳过。一个样本都没有时
         返回空 dict：不能退回「不带孔位 = 整批都做」。用量与逐孔参数同一口径（布局孔位或实体占用）。
         """
         from ..domain.matrix import step_condition
@@ -1713,7 +1714,7 @@ class BatchService:
         return covered
 
     def uncovered(self, batch: Batch, step_index: int) -> str:
-        """按瓶限定（`applies_to`）的步骤此刻一瓶都不用做时给出原因（推进器据此直接跳过这一步）；否则空串。"""
+        """按样本限定（`applies_to`）的步骤此刻一个样本都不用做时给出原因（推进器据此直接跳过这一步）；否则空串。"""
         steps = self.steps_of(batch)
         step = steps[step_index] if step_index < len(steps) else {}
         rule = applies_to(step)
@@ -1722,7 +1723,7 @@ class BatchService:
         names = {step_id_of(row, position): row.get("name") or step_id_of(row, position)
                  for position, row in enumerate(steps)}
         dosed, later = rule
-        return f"只处理在「{names.get(dosed, dosed)}」加了料{'、之后还要再加料' if later else ''}的瓶子，本批没有这样的在用瓶子"
+        return f"只处理在「{names.get(dosed, dosed)}」加了料{'、之后还要再加料' if later else ''}的样本，本批没有这样的在用样本"
 
     def _step_targets(self, batch: Batch, step: dict) -> dict[str, Sample] | None:
         """这一步的处理对象：设备孔位 → 在用样本。与矩阵逐孔参数同一口径（见 `_step_projection`）。"""

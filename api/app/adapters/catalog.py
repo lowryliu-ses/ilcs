@@ -145,10 +145,10 @@ COMMON = (
         ConfigField("capability", "对应能力", "string", ref="capabilities"),
     ), shorthand="program"), hint="协议带不了目录时登记：[\"VD-120\"] 或 [{program, name, capability}]"),
     _list("commands", "设备接受的指令类型", _value("指令类型", "string")),
-    ConfigField("wells_per_command", "一条指令最多几瓶", "integer", minimum=1,
-                hint="设备一次只能处理一瓶（秤上一个位置、单测量位）时填 1：一步要做的瓶（孔位）超过它，ILCS 按瓶拆开、"
-                     "依次下发（设备指令号 <指令号>/<序号>，每条只带这几瓶的孔位与参数），每瓶做完就按实际量入账；"
-                     "不填就一条指令带全部瓶"),
+    ConfigField("wells_per_command", "一条指令最多几个样本", "integer", minimum=1,
+                hint="设备一次只能处理一个样本（秤上一个位置、单测量位）时填 1：一步要做的样本（孔位）超过它，ILCS 逐样本拆开、"
+                     "依次下发（设备指令号 <指令号>/<序号>，每条只带这几个样本的孔位与参数），每个样本做完就按实际量入账；"
+                     "不填就一条指令带全部样本"),
     ConfigField("vendor", "厂商（按登记）", "string"),
     ConfigField("firmware", "固件（按登记）", "string"),
     _record("simulator_control", "模拟设备控制口", (

@@ -285,7 +285,7 @@ export function RecipeDetailPage() {
   );
 }
 
-/** 工位资源、资质要求与按瓶执行的一行说明：这些字段只在编辑器里改，详情页照着列出来 */
+/** 工位资源、资质要求与按样本执行的一行说明：这些字段只在编辑器里改，详情页照着列出来 */
 function StepResourceNote({ step, steps }: { step?: RecipeStep; steps: RecipeStep[] }) {
   if (!step) return null;
   const parts: string[] = [];
@@ -298,7 +298,7 @@ function StepResourceNote({ step, steps }: { step?: RecipeStep; steps: RecipeSte
     const names = (ids: string[]) =>
       ids.map((id) => steps.find((row) => row.step_id === id)?.name ?? id).join('、');
     parts.push(
-      `按瓶执行：只处理在「${names([step.applies_to.dosed])}」加了料的样本` +
+      `按样本执行：只处理在「${names([step.applies_to.dosed])}」加了料的样本` +
         (step.applies_to.then_any?.length ? `，且之后还要加 ${names(step.applies_to.then_any)} 之一` : ''),
     );
   }

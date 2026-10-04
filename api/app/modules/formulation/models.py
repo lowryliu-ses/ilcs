@@ -4,15 +4,15 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstr
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
-from ..core.clock import now
-from .base import Base, uid
+from ...core.clock import now
+from ...models.base import Base, uid
 
 
 class FormulationTemplate(Base):
     """配液模板：一条配液线「怎么把一张配方表变成流程」。
 
     config 里是固定步骤（物料准备段、测试段）、加料阶段、物料类别 → 加法（能力、方法、用量参数）、
-    搅拌规则与每次实验可配的参数；结构见 domain/formulation.py。模板不走发布：它只决定怎么生成
+    搅拌规则与每次实验可配的参数；结构见 rules.py。模板不走发布：它只决定怎么生成
     流程草稿，生成的流程照旧走 评审 → 批准 → 发布，那才是受控点。改模板要乐观锁并留审计。
     """
 

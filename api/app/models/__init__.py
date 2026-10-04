@@ -2,7 +2,6 @@ from .base import Base, uid
 from .batch import Allocation, AnalysisTask, Batch, Result, Sample, ScheduleProposal
 from .execution import AdapterExecution, Checkpoint, Command, ExecutorHeartbeat, Telemetry
 from .file import FileObject
-from .formulation import FormulationTemplate
 from .governance import (
     AccessLog, Alarm, AuditEvent, Comment, ExceptionEvent, ExceptionRule, IdempotencyKey, PlanBatchLink,
 )
@@ -43,5 +42,5 @@ __all__ = [
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",
-    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DeviceTemplate", "FormulationTemplate", "DataRule", "Comment", "PlanTemplate", "EnvironmentReading", "PersonBooking", "PointWrite", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
+    "ExceptionEvent", "ExceptionRule", "DeviceMethod", "DeviceTemplate", "DataRule", "Comment", "PlanTemplate", "EnvironmentReading", "PersonBooking", "PointWrite", "ScheduleProposal", "WebhookDelivery", "WebhookSubscription",
 ]

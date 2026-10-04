@@ -106,7 +106,7 @@ def test_continue_policy_lets_a_next_step_reuse_finished_products(admin, researc
     strict = _bottle_plan(researcher, recipe_id, reagent, bottles, "fresh")
     _approve(researcher, qa, strict)
     refused = operator.post("/api/batches", {"plan_id": strict})
-    assert refused.status_code == 409 and "同一瓶不能再次配液" in refused.text, "缺省仍是一瓶一配方"
+    assert refused.status_code == 409 and "方案要求样本只用一次" in refused.text, "缺省仍是样本只用一次"
     reused = operator.post("/api/batches", {"plan_id": waiting})
     assert reused.status_code == 201, reused.text
     samples = operator.get(f"/api/batches/{reused.json()['id']}").json()["samples"]

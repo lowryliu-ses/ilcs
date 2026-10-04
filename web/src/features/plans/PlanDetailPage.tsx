@@ -242,8 +242,8 @@ export function PlanDetailPage() {
             重复 {data.repeats} 次 · 布局 {data.layout === 'randomized' ? `随机化（种子 ${data.seed}）` : '顺序'} ·
             对照 {data.control?.label ?? '未设'} ·{' '}
             {data.sample_ids.length
-              ? `指定物理样本 ${data.sample_ids.length} 个（哪瓶对哪个条件见条件矩阵）${
-                data.sample_policy === 'continue' ? '，接着用上一步的产物' : '，一瓶一配方'}`
+              ? `指定物理样本 ${data.sample_ids.length} 个（哪个样本对哪个条件见条件矩阵）${
+                data.sample_policy === 'continue' ? '，接着用上一步的产物' : '，样本只用一次'}`
               : '未指定物理样本：每个运行登记新样本'}
           </div>
         </Panel>
@@ -411,7 +411,7 @@ export function PlanDetailPage() {
                     .join(' ')}
                 </td>
                 {data.sample_ids.length ? (
-                  <td className="mono small">{bottlesOf(data.sample_ids, data.repeats, condition.group) || '—'}</td>
+                  <td className="mono small">{samplesOf(data.sample_ids, data.repeats, condition.group) || '—'}</td>
                 ) : null}
               </tr>
             ))}
@@ -496,15 +496,15 @@ export function PlanDetailPage() {
   );
 }
 
-/** 矩阵方案指定的物理样本里，某个条件组分到哪几瓶。与后端 batch_service._generate_samples 同一规则：
+/** 矩阵方案指定的物理样本里，某个条件组分到哪几个样本。与后端 batch_service._generate_samples 同一规则：
     第 i 个样本对应「条件序号 × 重复数 + (重复号 − 1)」，条件序号取组名里的数字（C01 → 1），不按行的位置，
     这样页面上看到的对应关系就是建批次时实际分配的那个。 */
-function bottlesOf(sampleIds: string[], repeats: number, group: string): string {
+function samplesOf(sampleIds: string[], repeats: number, group: string): string {
   const number = Number(group.slice(1));
   if (!/^\d+$/.test(group.slice(1)) || number < 1) return '';
   const per = Math.max(1, Math.trunc(repeats || 1));
-  const bottles = sampleIds.slice((number - 1) * per, number * per);
-  return per === 1 ? bottles.join('') : bottles.map((id, at) => `重复${at + 1} ${id}`).join(' · ');
+  const picked = sampleIds.slice((number - 1) * per, number * per);
+  return per === 1 ? picked.join('') : picked.map((id, at) => `重复${at + 1} ${id}`).join(' · ');
 }
 
 function ApprovalProgress({ levels }: { levels: ApprovalLevel[] }) {
@@ -1000,7 +1000,7 @@ function FactorEditor({
   const [repeats, setRepeats] = useState<number | ''>(plan.repeats);
   const [layout, setLayout] = useState(plan.layout);
   const [seed, setSeed] = useState<number | ''>(plan.seed);
-  /* 方案指定了物理样本时，瓶子按「条件顺序 × 重复号」对应；改了重复次数或因子水平，对应关系就变了，
+  /* 方案指定了物理样本时，样本按「条件顺序 × 重复号」对应；改了重复次数或因子水平，对应关系就变了，
      条数也可能对不上（锁定校验会拦）。给个清除的出口，免得只能重新导入配方表才能再锁定。 */
   const [clearSamples, setClearSamples] = useState(false);
   const [samplePolicy, setSamplePolicy] = useState<'fresh' | 'continue'>(plan.sample_policy ?? 'fresh');
@@ -1093,8 +1093,8 @@ function FactorEditor({
 
       {mappingChanged ? (
         <div className="note warn">
-          这个方案指定了 {plan.sample_ids.length} 个物理样本，按条件顺序 × 重复号逐瓶对应。改了重复次数或因子水平后，
-          哪瓶对哪个条件会变，数量对不上时锁定校验不通过。
+          这个方案指定了 {plan.sample_ids.length} 个物理样本，按条件顺序 × 重复号逐个对应。改了重复次数或因子水平后，
+          哪个样本对哪个条件会变，数量对不上时锁定校验不通过。
           <label className="check" style={{ marginTop: 6 }}>
             <input type="checkbox" checked={clearSamples} onChange={(event) => setClearSamples(event.target.checked)} />
             清除指定的物理样本（之后每个运行登记新样本）
@@ -1119,7 +1119,7 @@ function FactorEditor({
       {plan.sample_ids.length ? (
         <Field label="指定样本的用法" hint="多步合成：上一批的产物接着做下一步反应时选「接着用」；没跑完的、已处置用尽的样本照样不能进新批次">
           <select value={samplePolicy} onChange={(event) => setSamplePolicy(event.target.value as 'fresh' | 'continue')}>
-            <option value="fresh">一瓶一配方（用过的瓶子不能再进新批次）</option>
+            <option value="fresh">只用一次（用过的样本不能再进新批次）</option>
             <option value="continue">接着用上一步的产物（允许上一批已跑完的样本）</option>
           </select>
         </Field>

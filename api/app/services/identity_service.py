@@ -151,6 +151,8 @@ class IdentityService:
             "restricted_projects": bool(context.restricted_projects) if context else False,
             "project_ids": sorted(context.project_ids) if context else [],
             "must_change_password": bool(user.must_change_password),
+            # 启用的可选模块：界面据此决定出不出对应菜单
+            "modules": settings.module_list,
             # 测试环境开关：系统管理员可审批本人内容（界面据此提示）
             "admin_self_approval": bool(
                 settings.admin_self_approval and settings.environment != "production" and ADMIN in roles_of(user)
