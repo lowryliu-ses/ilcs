@@ -2702,7 +2702,7 @@
       },
       "FormulationTemplateIn": {
         "additionalProperties": false,
-        "description": "配液模板：固定步骤 + 加料阶段 + 物料类别 → 加法 + 搅拌规则 + 实验参数，config 结构见 domain/formulation.py。",
+        "description": "配液模板：固定步骤 + 加料阶段 + 物料类别 → 加法 + 搅拌规则 + 实验参数，config 结构见 rules.py。",
         "properties": {
           "code": {
             "title": "Code",

@@ -25,6 +25,8 @@ from ..repositories.samples import (
 from .audit_service import AuditService
 
 LIFECYCLE = ("registered", "received", "in_use", "stored", "exhausted", "disposed")
+# 样本不能再进批次、不能再分样的生命周期状态
+UNUSABLE_SAMPLE = {"disposed": "已处置", "exhausted": "已用尽"}
 LIFECYCLE_LABEL = {
     "registered": "已登记", "received": "已收样", "in_use": "使用中",
     "stored": "已入库", "exhausted": "已用尽", "disposed": "已处置",
@@ -367,7 +369,7 @@ class SampleService:
                 "母样本没有录入数量，无法核对分样是否超量；请先补录数量",
                 code="parent_quantity_missing",
             )
-        if parent.lifecycle_state in {"disposed", "exhausted"}:
+        if parent.lifecycle_state in UNUSABLE_SAMPLE:
             raise StateConflict(f"母样本状态为 {parent.lifecycle_state}，不能分样")
         children = payload.get("children") or []
         if not children:

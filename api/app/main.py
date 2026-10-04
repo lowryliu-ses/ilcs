@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .api.routers import ROUTERS
+from . import modules
 from .core.config import settings
 from .core.db import engine
 from .core.errors import DomainError
@@ -111,5 +112,6 @@ def health():
     }
 
 
-for router in ROUTERS:
+# 可选模块按 ILCS_MODULES 挂载，见 app/modules
+for router in [*ROUTERS, *modules.routers(settings.module_list)]:
     app.include_router(router, prefix="/api")

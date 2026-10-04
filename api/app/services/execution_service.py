@@ -50,28 +50,28 @@ LOG = logging.getLogger("ilcs.executor")
 
 
 
-# ---------- 按瓶拆开下发（设备接入配置 wells_per_command） ----------
-# 一次只能处理一瓶的设备（秤上一个位置、单测量位）：一步要做的瓶数超过上限时，ILCS 仍记一条指令，按瓶拆成依次执行的
-# 设备指令 `<指令号>/<序号>`（commands.runs），每条只带这几瓶的孔位与参数；每瓶做完就按它的实际量入账，全部做完再按瓶
-# 汇总写检查点与检测结果。哪一瓶失败或结论未知，整条指令按它的结论走；续跑 / 重试跳过已经做完的瓶。
+# ---------- 逐样本拆开下发（设备接入配置 wells_per_command） ----------
+# 一次只能处理一个样本的设备（秤上一个位置、单测量位）：一步要做的样本数超过上限时，ILCS 仍记一条指令，逐样本拆成依次执行的
+# 设备指令 `<指令号>/<序号>`（commands.runs），每条只带这几个样本的孔位与参数；每个样本做完就按它的实际量入账，全部做完再按样本
+# 汇总写检查点与检测结果。哪个样本失败或结论未知，整条指令按它的结论走；续跑 / 重试跳过已经做完的样本。
 RUN_ACTIVE = {"sent", "running"}
 QUALITY_ORDER = {"good": 0, "uncertain": 1, "bad": 2}
 
 
 def wells_per_command(record) -> int:
-    """适配器配置的「一条指令最多几瓶」：没配（或配得不对）就是 0，不拆。"""
+    """适配器配置的「一条指令最多几个样本」：没配（或配得不对）就是 0，不拆。"""
     value = (getattr(record, "config", None) or {}).get("wells_per_command")
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else 0
 
 
 def current_run(command: Command) -> dict | None:
-    """按瓶拆开的指令此刻在设备上的那一条（已交给适配器、还没出结论）。"""
+    """逐样本拆开的指令此刻在设备上的那一条（已交给适配器、还没出结论）。"""
     return next((run for run in command.runs or [] if run.get("state") in RUN_ACTIVE), None)
 
 
 @dataclass
 class RunCommand:
-    """按瓶拆开的一条设备指令，给消耗入账用：事件号、计划量都按这一条（这几瓶）算。"""
+    """逐样本拆开的一条设备指令，给消耗入账用：事件号、计划量都按这一条（这几个样本）算。"""
     id: str
     step_index: int
     capability: str
@@ -525,7 +525,7 @@ class ExecutionService:
             aimed = self.db.get(Command, target) if target else None
             running = current_run(aimed) if aimed is not None else None
             if running is not None:
-                # 按瓶拆开的动作：设备上在做的是这一瓶的那条指令，停它
+                # 逐样本拆开的动作：设备上在做的是这个样本的那条指令，停它
                 target = running["id"]
         request = CommandRequest(
             command_id=command.id, station_id=command.station_id, capability=command.capability,
@@ -659,13 +659,13 @@ class ExecutionService:
         if command.type == "abort":
             self._confirm_abort(batch, command, record)
 
-    # ---------- 按瓶拆开下发 ----------
+    # ---------- 逐样本拆开下发 ----------
 
     def _plan_runs(self, batch: Batch, command: Command, record, request: CommandRequest) -> bool:
-        """这条设备动作要不要按瓶拆开：要就把拆分计划记进 command.runs（已经记过的沿用），返回 True。
+        """这条设备动作要不要逐样本拆开：要就把拆分计划记进 command.runs（已经记过的沿用），返回 True。
 
-        瓶（孔位）取逐孔参数的孔位，没有逐孔参数的（检测步骤）取这一步覆盖的孔位。续跑 / 重试接续的那条指令
-        若也是拆开的，已经做完的瓶照搬过来（连同回执），不再下发——加过的料不能再加一遍。
+        样本（孔位）取逐孔参数的孔位，没有逐孔参数的（检测步骤）取这一步覆盖的孔位。续跑 / 重试接续的那条指令
+        若也是拆开的，已经做完的样本照搬过来（连同回执），不再下发——加过的料不能再加一遍。
         """
         if command.runs:
             return True
@@ -701,8 +701,8 @@ class ExecutionService:
 
     @staticmethod
     def _run_request(request: CommandRequest, command: Command, run: dict) -> CommandRequest:
-        """这一瓶（这几瓶）的设备指令：指令号 <指令号>/<序号>，参数里的 wells 只带这几瓶——没有逐孔参数的检测步骤
-        也带上孔位（参数为空），设备据此知道测的是哪一瓶。"""
+        """这个样本（这几个样本）的设备指令：指令号 <指令号>/<序号>，参数里的 wells 只带这几个样本——没有逐孔参数的检测步骤
+        也带上孔位（参数为空），设备据此知道测的是哪个样本。"""
         per_well = (command.params or {}).get("wells") if isinstance((command.params or {}).get("wells"), dict) else {}
         params = {key: value for key, value in (command.params or {}).items() if key != "wells"}
         params["wells"] = {well: dict(per_well.get(well) or {}) for well in run["wells"]}
@@ -710,8 +710,8 @@ class ExecutionService:
 
     def _drive_runs(self, batch: Batch, command: Command, ledger: AdapterExecution, record, adapter,
                     request: CommandRequest, result: CommandResult | None = None) -> None:
-        """推进按瓶拆开的指令：吸收当前这一瓶的回执；做完了就发下一瓶，直到有一瓶在设备上跑、出了结论不是完成、
-        或者全部做完。每发一瓶之前先把「已交给适配器」落库：崩在中间时重启按这一瓶的指令号去问设备。"""
+        """推进逐样本拆开的指令：吸收当前这个样本的回执；做完了就发下一个样本，直到有一个样本在设备上跑、出了结论不是完成、
+        或者全部做完。每发一个样本之前先把「已交给适配器」落库：崩在中间时重启按这个样本的指令号去问设备。"""
         runs = [dict(run) for run in command.runs or []]
         while True:
             if result is not None:
@@ -763,7 +763,7 @@ class ExecutionService:
 
     @staticmethod
     def _run_label(runs: list[dict], run: dict) -> str:
-        return f"按瓶下发第 {runs.index(run) + 1}/{len(runs)} 条（{'、'.join(run['wells'])}）"
+        return f"逐样本下发第 {runs.index(run) + 1}/{len(runs)} 条（{'、'.join(run['wells'])}）"
 
     @staticmethod
     def _done_note(runs: list[dict]) -> str:
@@ -771,7 +771,7 @@ class ExecutionService:
         return f"；已做完 {'、'.join(done)}（已按实际量入账）" if done else ""
 
     def _absorb_run(self, batch: Batch, command: Command, run: dict, result: CommandResult) -> None:
-        """一瓶做完：记下回执，按这一瓶的实际量入账（事件号、计划量都按这一条算）。"""
+        """一个样本做完：记下回执，按这个样本的实际量入账（事件号、计划量都按这一条算）。"""
         from .consumption_service import ConsumptionService
 
         wells = run.get("wells") or []
@@ -792,7 +792,7 @@ class ExecutionService:
         )
 
     def _runs_outcome(self, command: Command, runs: list[dict], run: dict, result: CommandResult) -> CommandResult:
-        """哪一瓶失败或结论未知：整条指令按它的结论走，说清是第几瓶、已经做完了哪几瓶。"""
+        """哪个样本失败或结论未知：整条指令按它的结论走，说清是第几个样本、已经做完了哪几个样本。"""
         label = self._run_label(runs, run)
         if result.state == "unknown":
             error = (f"{label}：设备已收到指令，但回报结论未知；动作可能仍在进行，保留占用，转人工核查，不自动重试"
@@ -803,7 +803,7 @@ class ExecutionService:
                              quality=result.quality, error=error + self._done_note(runs), origin=result.origin)
 
     def _runs_finished(self, command: Command, runs: list[dict]) -> CommandResult:
-        """全部做完：按瓶汇总成一份回执（孔位合并、消耗按物料合计只作展示——已经逐瓶入过账）。"""
+        """全部做完：按样本汇总成一份回执（孔位合并、消耗按物料合计只作展示——已经逐样本入过账）。"""
         wells: dict = {}
         materials: dict[tuple, dict] = {}
         names = set()
@@ -850,8 +850,8 @@ class ExecutionService:
         )
 
     def poll_runs(self, batch: Batch, command: Command, record, query_only: bool = False) -> None:
-        """轮询 / 对账按瓶拆开的指令：问当前这一瓶的指令号，按回执推进；当前没有在设备上的（上一瓶刚做完、
-        下一瓶还没发出去时停过）就接着发下一瓶。"""
+        """轮询 / 对账逐样本拆开的指令：问当前这个样本的指令号，按回执推进；当前没有在设备上的（上一个样本刚做完、
+        下一个样本还没发出去时停过）就接着发下一个样本。"""
         adapter = adapter_for(record, tuple(self.capabilities.specs()))
         ledger = self.executions.get(command.id)
         if ledger is None:
@@ -1056,7 +1056,7 @@ class ExecutionService:
         outputs = (step.get("method") or {}).get("outputs") or []
         if outputs:
             hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
-            # 要回报读数的步骤带上它覆盖的孔位：检测步骤一般没有逐孔参数，驱动也得知道逐瓶回报哪几瓶
+            # 要回报读数的步骤带上它覆盖的孔位：检测步骤一般没有逐孔参数，驱动也得知道逐样本回报哪几个样本
             from .batch_service import BatchService
 
             targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
@@ -1176,7 +1176,7 @@ class ExecutionService:
         from .consumption_service import ConsumptionService
 
         if command.runs:
-            # 按瓶拆开的指令：每瓶做完时已经按它的实际量入过账，汇总回执里的消耗只作展示，不再入账
+            # 逐样本拆开的指令：每个样本做完时已经按它的实际量入过账，汇总回执里的消耗只作展示，不再入账
             consumption = {key: sum(int((run.get("consumption") or {}).get(key) or 0) for run in command.runs)
                            for key in ("booked", "rejected", "deviations")}
         else:
@@ -1536,7 +1536,7 @@ class ExecutorLoop:
                 warn_after = expected * settings.command_overdue_factor + grace
                 hard_after = expected * settings.command_hard_limit_factor + grace
             elif command.type in DISPATCHING:
-                # 按瓶拆开的指令一瓶接一瓶做：预计时长与硬上限按条数放大
+                # 逐样本拆开的指令一个接一个做：预计时长与硬上限按条数放大
                 rounds = max(1, len(command.runs or []))
                 expected = float(step.get("dur") or 0) * rounds
                 grace = settings.command_timeout_grace_min
@@ -1622,7 +1622,7 @@ class ExecutorLoop:
             if batch is None:
                 continue
             if command.runs:
-                # 按瓶拆开的指令：问当前这一瓶，做完了接着发下一瓶
+                # 逐样本拆开的指令：问当前这个样本，做完了接着发下一个样本
                 service.poll_runs(batch, command, record)
                 self.db.commit()
                 if command.state == "done":
@@ -1839,7 +1839,7 @@ class ExecutorLoop:
                 mismatches += 1
                 continue
             if command.runs and batch is not None and service.executions.get(command.id) is not None:
-                # 按瓶拆开的指令：按当前这一瓶的指令号问设备，能确认就接着推进；问不到照旧转人工核查
+                # 逐样本拆开的指令：按当前这个样本的指令号问设备，能确认就接着推进；问不到照旧转人工核查
                 service.poll_runs(batch, command, record)
                 self.db.commit()
                 if command.state not in {"running", "accepted", "done"}:

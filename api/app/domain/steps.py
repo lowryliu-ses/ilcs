@@ -278,10 +278,10 @@ def material_issues(step: dict[str, Any]) -> list[str]:
 
 
 def applies_to(step: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
-    """设备步骤只处理在某个投料步骤真加了料的瓶子：`applies_to: {dosed, then_any}` → (投料步骤, then_any)。
+    """设备步骤只处理在某个投料步骤真加了料的样本：`applies_to: {dosed, then_any}` → (投料步骤, then_any)。
 
-    配液线「每加一种料后搅拌」按瓶执行：某瓶这种料是 0，这瓶跳过加料，也不做随后的搅拌；`then_any` 非空时
-    这瓶在其中至少还要再加一种才搅（阶段最后一种料加完不搅）。没声明返回 None：照旧处理这一步的全部瓶子。
+    例：配液线「每加一种料后搅拌」——某瓶这种料是 0，这瓶跳过加料，也不做随后的搅拌；`then_any` 非空时
+    这个样本在其中至少还要再加一种才处理（阶段最后一种料加完不搅）。没声明返回 None：照旧处理这一步的全部样本。
     """
     rule = (step or {}).get("applies_to")
     if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
@@ -296,7 +296,7 @@ def applies_to_issues(step: dict[str, Any], steps: list[dict[str, Any]], index: 
         return []
     rule = step["applies_to"]
     if kind_of(step) != DEVICE:
-        return ["只有设备步骤能按瓶限定处理对象（applies_to）"]
+        return ["只有设备步骤能按样本限定处理对象（applies_to）"]
     if not isinstance(rule, dict) or not isinstance(rule.get("dosed"), str) or not rule["dosed"].strip():
         return ['applies_to 要写成 {"dosed": 投料步骤标识, "then_any": [投料步骤标识…]}']
     later = rule.get("then_any", [])

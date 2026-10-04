@@ -430,7 +430,7 @@ function manualIssues(step: RecipeStep): string[] {
   return issues;
 }
 
-/* ---------- 工位资源、资质、按瓶执行（对应后端 steps.resource_issues / qualification_issues /
+/* ---------- 工位资源、资质、按样本执行（对应后端 steps.resource_issues / qualification_issues /
    holds_station_issues / applies_to_issues） ---------- */
 
 function resourceIssues(step: RecipeStep): string[] {
@@ -474,7 +474,7 @@ function holdsStationIssues(steps: RecipeStep[], index: number): string[] {
   return twins ? [`「${source.name || stepIdOf(source, parent[0])}」之后已经有一个等待步骤占着这台设备：样本只能在一处`] : [];
 }
 
-/** 能作按瓶执行依据的投料步骤：指定了投料物料与用量参数的设备步骤 */
+/** 能作按样本执行依据的投料步骤：指定了投料物料与用量参数的设备步骤 */
 export function isDosingStep(step: RecipeStep): boolean {
   return kindOf(step) === 'device' && Boolean(step.material?.trim()) && Boolean(step.material_param);
 }
@@ -482,7 +482,7 @@ export function isDosingStep(step: RecipeStep): boolean {
 function appliesToIssues(step: RecipeStep, steps: RecipeStep[], index: number): string[] {
   const rule = step.applies_to;
   if (!rule) return [];
-  if (kindOf(step) !== 'device') return ['只有设备步骤能按瓶限定处理对象（applies_to）'];
+  if (kindOf(step) !== 'device') return ['只有设备步骤能按样本限定处理对象（applies_to）'];
   const ids = steps.map(stepIdOf);
   const dosed = ids.indexOf(rule.dosed ?? '');
   const issues: string[] = [];

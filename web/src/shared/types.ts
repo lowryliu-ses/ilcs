@@ -19,6 +19,8 @@ export type User = {
   password_changed_at: string | null;
   /** 测试环境开关：系统管理员可审批本人内容 */
   admin_self_approval?: boolean;
+  /** 启用的可选模块（如 formulation 配液模板）；界面据此决定出不出对应菜单 */
+  modules?: string[];
 };
 
 /** 执行门：`open`/`reasons` 是全站（联锁、执行器）；`blocked_stations` 是单台设备的失联 / 心跳超时，只挡用到它的批次。 */
@@ -561,7 +563,7 @@ export type RecipeStep = {
   resource?: { station?: string; capability?: string; holds_station?: boolean };
   /** 人工步骤要求执行人具备的资质：SOP 编号、安全操作资质编号 */
   qualification?: { sop?: string; safety?: string };
-  /** 按瓶执行：只处理在 dosed 那一步真加了料的样本；写了 then_any 时之后还要再加其中一种 */
+  /** 按样本执行：只处理在 dosed 那一步真加了料的样本；写了 then_any 时之后还要再加其中一种 */
   applies_to?: { dosed?: string; then_any?: string[] };
   /** 质检关卡：读测量来源步骤回执里的 field，按 min/max 判定 */
   gate?: {
@@ -628,7 +630,7 @@ export type PlanSummary = {
   layout: string;
   seed: number;
   sample_ids: string[];
-  /** 指定的样本：fresh 一瓶一配方 / continue 接着用上一步的产物（多步合成） */
+  /** 指定的样本：fresh 只用一次 / continue 接着用上一步的产物（多步合成） */
   sample_policy?: 'fresh' | 'continue';
   required_metrics: string[];
   resource_requirements: Record<string, unknown>[];

@@ -7,8 +7,8 @@ import zipfile
 
 import pytest
 
-from app.core import spreadsheet
-from app.core.spreadsheet import MAX_COLUMNS, MAX_ROWS, MAX_SPAN, SpreadsheetError, column_index, read_sheet, read_table
+from app.modules.formulation import spreadsheet
+from app.modules.formulation.spreadsheet import MAX_COLUMNS, MAX_ROWS, MAX_SPAN, SpreadsheetError, column_index, read_sheet, read_table
 
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"

@@ -45,8 +45,8 @@ import type { Dashboard, Gate } from '../shared/types';
    点进去看到空页面比没有这一项更糟。
    分组与组内顺序按业务主线：方案 → 流程 → 接样建批 → 排程执行 → 数据审核 → 报告。
    菜单名与页面标题保持一致。 */
-/* perm 给数组时有其中任一权限即可 */
-type NavItem = { path: string; label: string; perm?: string | string[] };
+/* perm 给数组时有其中任一权限即可；module 是可选模块名，服务端没启用它就不出这一项（见 api/app/modules） */
+type NavItem = { path: string; label: string; perm?: string | string[]; module?: string };
 const NAV: [string, NavItem[]][] = [
   ['工作台', [
     { path: '/dashboard', label: '工作台' },
@@ -58,8 +58,8 @@ const NAV: [string, NavItem[]][] = [
     { path: '/methods', label: '设备方法' },
     { path: '/recipes', label: '实验流程' },
     { path: '/plans', label: '实验方案' },
-    { path: '/formulations', label: '配方导入', perm: 'recipe.edit' },
-    { path: '/formulation-templates', label: '配液模板', perm: 'recipe.edit' },
+    { path: '/formulations', label: '配方导入', perm: 'recipe.edit', module: 'formulation' },
+    { path: '/formulation-templates', label: '配液模板', perm: 'recipe.edit', module: 'formulation' },
   ]],
   ['执行与监控', [
     { path: '/samples', label: '样本管理' },
@@ -101,6 +101,7 @@ export function App() {
   if (!ready) return <div className="boot">加载中…</div>;
   if (!user) return <LoginPage />;
   if (user.must_change_password) return <ChangePasswordPage />;
+  const modules = new Set(user.modules ?? []);
 
   const counts = counters.data?.counts;
   const badges: Record<string, number | undefined> = {
@@ -129,7 +130,9 @@ export function App() {
         <nav>
           {NAV.map(([group, items]) => {
             const visible = items.filter(
-              (item) => !item.perm || [item.perm].flat().some((perm) => user.perms.includes(perm)),
+              (item) =>
+                (!item.module || modules.has(item.module)) &&
+                (!item.perm || [item.perm].flat().some((perm) => user.perms.includes(perm))),
             );
             if (!visible.length) return null;
             return (
@@ -196,9 +199,13 @@ export function App() {
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/plans" element={<PlansPage />} />
           <Route path="/plans/:planId" element={<PlanDetailPage />} />
-          <Route path="/formulations" element={<FormulationImportPage />} />
-          <Route path="/formulation-templates" element={<FormulationTemplatesPage />} />
-          <Route path="/formulation-templates/:templateId" element={<FormulationTemplateEditorPage />} />
+          {modules.has('formulation') ? (
+            <>
+              <Route path="/formulations" element={<FormulationImportPage />} />
+              <Route path="/formulation-templates" element={<FormulationTemplatesPage />} />
+              <Route path="/formulation-templates/:templateId" element={<FormulationTemplateEditorPage />} />
+            </>
+          ) : null}
           <Route path="/recipes" element={<RecipesPage />} />
           <Route path="/recipes/:recipeId" element={<RecipeDetailPage />} />
           <Route path="/recipes/:recipeId/edit" element={<RecipeEditorPage />} />

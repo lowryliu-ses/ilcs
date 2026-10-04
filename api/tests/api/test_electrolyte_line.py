@@ -261,7 +261,7 @@ def test_a_stir_no_bottle_needs_is_skipped_not_dispatched(client, reset_runtime,
     assert "LiDFP 加料后制冷搅拌" not in index, "阶段最后一种料加完不搅"
     skipped = steps[index["FEC 加料后制冷搅拌"]]["step_id"]
     runs = {row["step_id"]: row for row in detail["step_runs"] if row["state"] not in {"superseded", "cancelled"}}
-    assert runs[skipped]["state"] == "skipped" and "本批没有这样的在用瓶子" in runs[skipped]["reason"], runs[skipped]
+    assert runs[skipped]["state"] == "skipped" and "本批没有这样的在用样本" in runs[skipped]["reason"], runs[skipped]
     assert {row["state"] for step_id, row in runs.items() if step_id != skipped} == {"completed"}
     db.expire_all()
     commands = db.query(Command).filter(Command.batch_id == outcome["batch"]).all()

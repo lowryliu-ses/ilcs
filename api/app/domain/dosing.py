@@ -38,8 +38,8 @@ def param_unit(capability: dict | None, param: str) -> str:
 def commanded_quantity(params: dict[str, Any] | None, param: str) -> Decimal:
     """一条指令对这个参数下发的总量：有孔位时各孔 `wells[w][param]` 之和（某孔没写就用顶层值），否则取顶层值。
 
-    每孔 0 表示这一瓶跳过这种料（上位机的语义），照加 0。十进制求和，6 位小数。孔位只含下发时仍在用的样本，
-    所以中途判废的瓶子不会算进来。
+    每孔 0 表示这个样本跳过这种料（上位机的语义），照加 0。十进制求和，6 位小数。孔位只含下发时仍在用的样本，
+    所以中途判废的样本不会算进来。
     """
     top = decimal_of((params or {}).get(param)) or Decimal(0)
     wells = (params or {}).get("wells")
@@ -54,9 +54,9 @@ def commanded_quantity(params: dict[str, Any] | None, param: str) -> Decimal:
 
 
 def covers(rule: tuple[str, tuple[str, ...]], amount_of: Callable[[str], Decimal]) -> bool:
-    """一瓶在不在 `steps.applies_to` 的范围里：在 dosed 那一步加了料（> 0），then_any 非空时之后至少还加其中一种。
+    """一个样本在不在 `steps.applies_to` 的范围里：在 dosed 那一步加了料（> 0），then_any 非空时之后至少还加其中一种。
 
-    `amount_of(步骤标识)` 给这一瓶在那一步的用量（没有就是 0）。0 表示这一瓶跳过这种料，与下发的语义一致。
+    `amount_of(步骤标识)` 给这个样本在那一步的用量（没有就是 0）。0 表示这个样本跳过这种料，与下发的语义一致。
     """
     dosed, later = rule
     if amount_of(dosed) <= 0:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ..models import FormulationTemplate
-from .base import ScopedRepository
+from ...repositories.base import ScopedRepository
+from .models import FormulationTemplate
 
 
 class FormulationTemplateRepository(ScopedRepository[FormulationTemplate]):

@@ -1,6 +1,6 @@
 /* 物料主数据：一种料「叫什么、按什么单位记账、属于哪一类、其他单位怎么折算」。
 
-   类别决定配液模板怎么加这种料（溶剂、锂盐……），单位换算决定入库与设备回报怎么折成基础单位。
+   类别用来归类物料（溶剂、锂盐……）；启用配液模板时，模板按类别决定怎么加这种料，单位换算决定入库与设备回报怎么折成基础单位。
    已有批号的物料不能改名称与基础单位——批号、预留与设备回报的消耗按名称与单位对账，由服务端判，
    这里按 locked_fields 置灰。不用的物料停用、不删除：批号与流水都指回它。 */
 import { useMemo, useState } from 'react';
@@ -132,7 +132,7 @@ export function MaterialMasterPanel() {
         </table>
       ) : null}
       <div className="panel-body small muted">
-        类别决定配液模板怎么加这种料；单位换算写「1 单位折合多少基础单位」，入库与设备回报按它折成基础单位记账，没登记的跨量纲单位一律拒收。
+        类别用来归类物料（启用配液模板时按它决定怎么加这种料）；单位换算写「1 单位折合多少基础单位」，入库与设备回报按它折成基础单位记账，没登记的跨量纲单位一律拒收。
         已有批号的物料不能改名称与基础单位。
       </div>
 
@@ -154,7 +154,7 @@ export function MaterialMasterPanel() {
           onConfirm={() => retire.run(retiring).catch(() => undefined)}
         >
           <div className="note warn">
-            {retiring.name} 停用后不能再按它入库新批号，配液模板导入也不再认它；已有的 {retiring.lot_count}{' '}
+            {retiring.name} 停用后不能再按它入库新批号（配液模板导入也不再认它）；已有的 {retiring.lot_count}{' '}
             个批号照常可用、可消耗。停用不删除，随时可以恢复。
           </div>
         </ConfirmDialog>
@@ -277,7 +277,7 @@ function MaterialDialog({
         </Field>
       </div>
       <div className="grid cols-3">
-        <Field label="类别" hint="配液模板按类别决定怎么加这种料">
+        <Field label="类别" hint="用来归类；启用配液模板时按类别决定怎么加这种料">
           <input
             value={form.category}
             list="material-categories"

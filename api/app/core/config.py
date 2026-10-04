@@ -154,6 +154,14 @@ class Settings(BaseSettings):
     # 设备回报的实际消耗与计划量偏差超过这个百分比时报警并标记待复核（仍按实际量入账）
     consumption_deviation_pct: float = 5.0
 
+    # ---------- 可选模块 ----------
+    # 启用哪些（逗号分隔，见 app/modules）；空串 = 只跑通用编排
+    modules: str = "formulation"
+
+    @property
+    def module_list(self) -> list[str]:
+        return [item.strip() for item in self.modules.split(",") if item.strip()]
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

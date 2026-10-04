@@ -2,7 +2,7 @@
 import copy
 from decimal import Decimal
 
-from app.domain import formulation as rules
+from app.modules.formulation import rules
 from app.domain import steps as steps_rules
 from app.domain.dosing import covers
 
@@ -376,7 +376,7 @@ def test_huge_and_too_precise_numbers_become_issues_or_warnings_not_crashes():
 
 
 def test_row_numbers_follow_the_file_when_blank_rows_are_kept():
-    from app.core.spreadsheet import read_table
+    from app.modules.formulation.spreadsheet import read_table
 
     table = read_table("f.csv", "序列号,EC (g)\nB-1,1\n\n\n,2\nB-1,3\n".encode())
     result = generate(table)
@@ -525,7 +525,7 @@ def test_applies_to_must_point_at_dose_steps():
     assert issues({"dosed": dosed, "then_any": ["s07"]}) == [f"applies_to 的 then_any 引用的 s07 要排在 {dosed} 之后"]
     assert issues(dosed) == ['applies_to 要写成 {"dosed": 投料步骤标识, "then_any": [投料步骤标识…]}']
     manual = {**steps[0], "applies_to": {"dosed": "s07"}}
-    assert steps_rules.applies_to_issues(manual, steps, 0) == ["只有设备步骤能按瓶限定处理对象（applies_to）"]
+    assert steps_rules.applies_to_issues(manual, steps, 0) == ["只有设备步骤能按样本限定处理对象（applies_to）"]
 
 
 # ---------- 模板结构：按类别 / 阶段的加料后步骤、逐瓶参数列、阶段不串行、按类别排序、按登记的密度核分装量 ----------

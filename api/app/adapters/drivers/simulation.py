@@ -152,7 +152,7 @@ class SimulationAdapter:
         """方法输出规则里没回显的检测项补示意值：有孔位时逐孔一份、顶层写均值。绝不覆盖回显的参数键。
 
         孔位取回显的逐孔参数；这一步没有逐孔参数（如检测步骤）就按指令覆盖的孔位（`request.wells`）逐孔给——
-        每瓶各有读数，结果才能按瓶记到各自的样本上。"""
+        每个样本各有读数，结果才能记到各自的样本上。"""
         wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else None
         if wells:
             wells = {well: dict(values or {}) for well, values in wells.items()}

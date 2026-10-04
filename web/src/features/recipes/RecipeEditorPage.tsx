@@ -1867,8 +1867,8 @@ function ManualResourceFields({
   );
 }
 
-/* 按瓶执行：这一步只处理在某个投料步骤真加了料的样本（指令的孔位只列这些），本批一个都没有就跳过、归还时间窗。
-   写了「之后还要再加」时，这瓶在那之后还要再加其中一种料才处理——如「每加一种料后搅拌，最后一种加完不搅」。 */
+/* 按样本执行：这一步只处理在某个投料步骤真加了料的样本（指令的孔位只列这些），本批一个都没有就跳过、归还时间窗。
+   写了「之后还要再加」时，这个样本在那之后还要再加其中一种料才处理——如配液线「每加一种料后搅拌，最后一种加完不搅」。 */
 function AppliesToFields({
   step,
   steps,
@@ -1894,7 +1894,7 @@ function AppliesToFields({
     .filter(({ row, at }) => dosedAt >= 0 && at > dosedAt && isDosingStep(row));
   return (
     <>
-      <Field label="按瓶执行" hint="只处理在所选投料步骤真加了料的样本；某瓶这种料是 0，这瓶这一步不动">
+      <Field label="按样本执行" hint="只处理在所选投料步骤真加了料的样本；某个样本这种料是 0，它这一步不动">
         <select
           value={rule?.dosed ?? ''}
           disabled={readOnly}
