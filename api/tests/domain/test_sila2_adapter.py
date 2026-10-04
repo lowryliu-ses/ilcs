@@ -90,8 +90,8 @@ def test_identity_submit_query_and_dedup(simulator):
     assert adapter.query("CMD-NEVER-SEEN") is None
 
 
-def test_context_carries_station_and_material(simulator):
-    """TaskExecution 1.1：上下文和 http_json_v1 的请求体一样带工位，投料步骤再带物料。"""
+def test_context_carries_station_material_and_wells(simulator):
+    """TaskExecution 1.1：上下文和 http_json_v1 的请求体一样带工位，投料步骤再带物料，处理样本的动作再带孔位。"""
     from dataclasses import replace
 
     device, _, port = simulator
@@ -103,6 +103,11 @@ def test_context_carries_station_and_material(simulator):
     _wait_done(adapter, "CMD-CTX")
     adapter.submit(_request("CMD-PLAIN"))
     assert "material" not in device.tasks["CMD-PLAIN"].context, "不投料的步骤不带物料"
+    assert "wells" not in device.tasks["CMD-PLAIN"].context
+    _wait_done(adapter, "CMD-PLAIN")
+    # 没有逐孔参数的检测步骤、指令没拆开：上下文带处理的孔位，设备据此知道测的是哪一瓶
+    adapter.submit(replace(_request("CMD-B3", params={"repeats": 1}), wells=("B3",)))
+    assert device.tasks["CMD-B3"].context["wells"] == ["B3"]
 
 
 def test_simulator_reports_task_support(simulator):

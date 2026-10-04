@@ -107,6 +107,9 @@ class HttpJsonAdapter:
             # 这一步投哪种料（名称、单位、用量取哪个参数）：称量加料的网关据此核对装在设备上的料对不对，
             # 并按实际称量回报 delivered.materials。只是附加字段，params 照旧原样下发
             extra["material"] = dict(request.material)
+        if request.wells:
+            # 这条指令处理的孔位（样本）：没有逐孔参数的检测步骤也带，设备据此知道测的是哪几瓶、按孔位回报 delivered.wells
+            extra["wells"] = list(request.wells)
         return {**extra,
             "command_id": request.command_id,
             "station_id": request.station_id,

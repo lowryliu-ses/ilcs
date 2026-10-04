@@ -664,22 +664,16 @@ class ExecutionService:
     def _plan_runs(self, batch: Batch, command: Command, record, request: CommandRequest) -> bool:
         """这条设备动作要不要逐样本拆开：要就把拆分计划记进 command.runs（已经记过的沿用），返回 True。
 
-        样本（孔位）取逐孔参数的孔位，没有逐孔参数的（检测步骤）取这一步覆盖的孔位。续跑 / 重试接续的那条指令
-        若也是拆开的，已经做完的样本照搬过来（连同回执），不再下发——加过的料不能再加一遍。
+        样本（孔位）取指令处理的孔位（`request.wells`：逐孔参数的孔位，没有逐孔参数的取这一步的处理对象，见
+        `_step_hooks`）。续跑 / 重试接续的那条指令若也是拆开的，已经做完的样本照搬过来（连同回执），不再下发——
+        加过的料不能再加一遍。
         """
         if command.runs:
             return True
         limit = wells_per_command(record)
-        per_well = (command.params or {}).get("wells")
         if not limit:
             return False
-        wells = [str(well) for well in per_well] if isinstance(per_well, dict) and per_well else list(request.wells)
-        if not wells:
-            from .batch_service import BatchService
-
-            steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
-            step = steps[command.step_index] if command.step_index < len(steps) else {}
-            wells = sorted(BatchService(self.db, self.ctx)._step_targets(batch, step) or {})
+        wells = list(request.wells)
         if len(wells) <= limit:
             return False
         runs: list[dict] = []
@@ -1041,11 +1035,12 @@ class ExecutionService:
         return self.runs.latest(batch.id, self._step_id(batch, command.step_index))
 
     def _step_hooks(self, batch: Batch, command: Command) -> dict:
-        """执行设备动作的指令带给驱动的步骤信息：投哪种料（名称、用量参数及其单位）与方法输出规则。
+        """执行设备动作的指令带给驱动的步骤信息：处理哪几个样本（孔位）、投哪种料（名称、用量参数及其单位）与方法输出规则。
 
-        从批次快照按步骤序号取（与 complete_device_step 同一取法），不进 params——params 原样下发给设备，
-        真实驱动的线协议不因此改变。用量参数按 `dosing.dosing_param` 取（与消耗对账同一条规则）：没写时
-        该能力里单位等于物料单位的参数恰好一个才用，有歧义就不填，宁可不回报消耗，也不拿错参数去对账。
+        从批次快照按步骤序号取（与 complete_device_step 同一取法），不进 params——params 原样下发给设备。
+        孔位与物料是线协议的附加字段（`http_json_v1` 请求体、`sila2_v1` 的 ContextJson），设备据此知道这条指令处理的是
+        哪几个样本、投的是什么料；输出规则只给内置模拟用。用量参数按 `dosing.dosing_param` 取（与消耗对账同一条规则）：
+        没写时该能力里单位等于物料单位的参数恰好一个才用，有歧义就不填，宁可不回报消耗，也不拿错参数去对账。
         """
         if command.type not in DISPATCHING:
             return {}
@@ -1056,7 +1051,12 @@ class ExecutionService:
         outputs = (step.get("method") or {}).get("outputs") or []
         if outputs:
             hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
-            # 要回报读数的步骤带上它覆盖的孔位：检测步骤一般没有逐孔参数，驱动也得知道逐样本回报哪几个样本
+        # 这条指令处理的孔位：有逐孔参数就是它的孔位（与设备按孔位执行的口径一致），没有的（检测步骤、整批同一参数的步骤）
+        # 取这一步的处理对象。设备一次只处理一个样本、指令又没拆开时，只有靠它才知道测的是哪一瓶
+        per_well = (command.params or {}).get("wells")
+        if isinstance(per_well, dict) and per_well:
+            hooks["wells"] = tuple(str(well) for well in per_well)
+        else:
             from .batch_service import BatchService
 
             targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}

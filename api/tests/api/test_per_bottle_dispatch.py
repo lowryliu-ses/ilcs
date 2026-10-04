@@ -15,6 +15,7 @@ from app.core.context import system_context
 from app.core.db import SessionLocal
 from app.models import Adapter, Batch, Checkpoint, Command, InventoryEvent, Reservation
 from app.services.execution_service import ExecutionService
+from test_failure_paths import running_batch  # noqa: F401
 from test_graph_workflow import _dispatch, _run
 from test_step_materials import _lot, _plan_batch
 
@@ -216,3 +217,70 @@ def test_abort_stops_the_bottle_on_the_device_and_the_rest_are_never_sent(
     assert f"{command_id}/2" not in OneBottleDevice.submitted, "后面的瓶不再下发"
     detail = operator.get(f"/api/batches/{batch_id}").json()
     assert detail["state"] == "aborted", detail["state"]
+
+
+class RecordingDevice:
+    """一次能处理整批的设备（没配 wells_per_command，指令不拆开）：记下 ILCS 交给驱动的请求，回报做完。"""
+
+    requests: list = []
+
+    def __init__(self, record):
+        self.contract = AdapterContract(kind="real", protocol="test-recording", version="1", supports_hold=False,
+                                        supports_abort=True, supports_query=True, supports_dedup=True)
+
+    def healthcheck(self):
+        return {"reachable": True, "device_id": "RECORDING", "simulator": True}
+
+    def submit(self, request):
+        type(self).requests.append(request)
+        return CommandResult(command_id=request.command_id, state="accepted", device_ts=now(), origin="real:test-rec")
+
+    def query(self, command_id):
+        return CommandResult(command_id=command_id, state="done", device_ts=now(), origin="real:test-rec")
+
+    def hold(self, request):
+        raise AdapterError("不支持保持")
+
+    def abort(self, request):
+        return CommandResult(command_id=request.command_id, state="done", device_ts=now(), origin="real:test-rec")
+
+
+def test_an_unsplit_command_still_tells_the_device_which_samples_it_covers(
+    running_batch, reset_runtime, executor, monkeypatch,
+):
+    """没有逐孔参数的步骤（检测、整批同一参数）指令不拆开时，设备也得知道处理的是哪几个样本：请求带这一步的处理对象，
+    `http_json_v1` 的请求体与 `sila2_v1` 的 ContextJson 都带 wells；params 照旧原样下发，不塞孔位进去。"""
+    import json
+
+    from app.adapters.drivers.http_json import HttpJsonAdapter
+    from app.adapters.drivers.sila2 import Sila2Adapter
+    from app.services.sample_service import SampleService
+
+    RecordingDevice.requests = []
+    monkeypatch.setitem(REAL_IMPLEMENTATIONS, "test_recording", RecordingDevice)
+    with SessionLocal() as db:
+        command = db.query(Command).filter(Command.batch_id == running_batch, Command.type == "dispatch").one()
+        station_id = command.station_id
+        adapter = db.get(Adapter, station_id)
+        saved = {key: getattr(adapter, key) for key in ("kind", "driver", "protocol", "config")}
+        adapter.kind, adapter.driver, adapter.protocol, adapter.config = "real", "test_recording", "test-recording", {}
+        adapter.config_version += 1
+        expected = tuple(sorted(SampleService(db, system_context(command.org_id, "测试")).device_wells(running_batch).values()))
+        db.commit()
+    reset_cache()
+    try:
+        executor()
+        assert RecordingDevice.requests, "第一步的指令交给了设备"
+        request = RecordingDevice.requests[0]
+        assert len(expected) > 1 and request.wells == expected
+        assert "wells" not in request.params, "没有逐孔参数的步骤，params 原样下发"
+        assert HttpJsonAdapter._payload(request)["wells"] == list(expected)
+        assert json.loads(Sila2Adapter._context(request))["wells"] == list(expected)
+    finally:
+        with SessionLocal() as db:
+            adapter = db.get(Adapter, station_id)
+            for key, value in saved.items():
+                setattr(adapter, key, value)
+            adapter.current_command_id = ""
+            db.commit()
+        reset_cache()
