@@ -6,7 +6,7 @@ from test_failure_paths import running_batch  # noqa: F401  （复用 fixture）
 
 @pytest.fixture()
 def measured(monkeypatch):
-    """模拟设备回执里的测量值：按投递顺序依次取值，取完沿用最后一个。"""
+    """模拟设备回执里的测量值：按投递顺序依次取值，取完沿用最后一个。`_quality` 是回执自己报的质量。"""
     from app.adapters.drivers.simulation import SimulationAdapter
 
     values: dict[str, list] = {}
@@ -17,10 +17,11 @@ def measured(monkeypatch):
         queue = values.get(request.step_id)
         if not queue:
             return result
-        extra = queue.pop(0) if len(queue) > 1 else queue[0]
+        extra = dict(queue.pop(0) if len(queue) > 1 else queue[0])
+        quality = extra.pop("_quality", result.quality)
         from dataclasses import replace
 
-        patched = replace(result, delivered={**result.delivered, **extra})
+        patched = replace(result, delivered={**result.delivered, **extra}, quality=quality)
         self._ledger[request.command_id] = patched
         return patched
 
@@ -95,6 +96,64 @@ def test_gate_scrap_faults_batch_and_fails_samples(operator, running_batch, exec
     assert detail["state"] == "fault"
     assert "报废" in detail["failure_reason"]
     assert all(sample["state"] == "failed" for sample in detail["samples"])
+
+
+def test_a_reading_the_device_marked_unreliable_never_passes(operator, qa, running_batch, executor, measured):
+    """数值在范围里，但设备回执自己报质量 bad：不自动放行，转 QA 判定（与取不到数值同样处理）；QA 放行后流程继续。"""
+    measured["s04"] = [{"water_ppm": 12, "_quality": "bad"}]
+    _append(running_batch, _gate())
+    detail = _run(operator, running_batch, executor)
+    assert detail["state"] == "paused"
+    pending = _gate_run(detail)[-1]
+    assert pending["state"] == "ready" and "质量为 bad" in pending["reason"], pending["reason"]
+    decided = qa.post(f"/api/step-runs/{pending['id']}/gate-decision", {
+        "conclusion": "approved", "reason": "现场复测 KF 13 ppm，设备报警是探头自检，放行",
+        "signature_id": qa.sign("质检判定属实", target=pending["id"]),
+    })
+    assert decided.status_code == 200, decided.text
+    assert operator.get(f"/api/batches/{running_batch}").json()["state"] == "done"
+
+
+def test_sample_gate_holds_on_the_wells_whose_reading_the_device_flagged(operator, running_batch, executor, measured):
+    """按瓶拆开下发、其中一条回执质量 uncertain：只有那几个样本算读数不可信，整个关卡转人工（不剔除、不自动放行），
+    另一条里的样本照常判定。"""
+    from app.core.db import SessionLocal
+    from app.models import Adapter, Command, StepRun
+
+    detail = operator.get(f"/api/batches/{running_batch}").json()
+    wells = sorted(sample["well"] for sample in detail["samples"])
+    station = next(row["station_id"] for row in detail["allocations"]
+                   if row["step_index"] == 3 and row.get("kind", "work") == "work")
+    with SessionLocal() as db:
+        adapter = db.get(Adapter, station)
+        saved = dict(adapter.config or {})
+        adapter.config = {**saved, "wells_per_command": 4}
+        adapter.config_version += 1
+        db.commit()
+    try:
+        first, second = wells[:4], wells[4:]
+        measured["s04"] = [
+            {"wells": {well: {"loading": 18.0} for well in first}},
+            {"wells": {well: {"loading": 18.0} for well in second}, "_quality": "uncertain"},
+        ]
+        _append(running_batch, _gate(field="loading", min=17, max=19, scope="sample"))
+        detail = _run(operator, running_batch, executor)
+        assert detail["state"] == "paused", detail["failure_reason"]
+        with SessionLocal() as db:
+            command = db.query(Command).filter(Command.batch_id == running_batch, Command.step_index == 3,
+                                               Command.type == "dispatch").one()
+            assert [run["wells"] for run in command.runs] == [first, second], "s04 按 4 瓶一条拆开下发"
+            gate = db.query(StepRun).filter(StepRun.batch_id == running_batch, StepRun.kind == "gate").one()
+            assert gate.form_data["untrusted"] == {well: "uncertain" for well in second}
+            assert gate.form_data["failed"] == [] and gate.form_data["undecided"] == []
+            assert f"{len(second)} 个样本的 loading 读数设备标为不可信" in gate.reason
+        assert all(sample["state"] != "failed" for sample in detail["samples"]), "读数不可信不等于不合格，不剔除"
+    finally:
+        with SessionLocal() as db:
+            adapter = db.get(Adapter, station)
+            adapter.config = saved
+            adapter.config_version += 1
+            db.commit()
 
 
 def test_missing_measurement_never_passes(operator, running_batch, executor):

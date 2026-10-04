@@ -833,7 +833,8 @@ class ExecutionService:
                 telemetry.append(TelemetryPoint(point["metric"], point["value"], point.get("setpoint"),
                                                 point.get("well") or "",
                                                 datetime.fromisoformat(moment) if moment else None))
-        delivered = {"runs": [{"id": run["id"], "wells": run["wells"], "state": run["state"]} for run in runs]}
+        delivered = {"runs": [{"id": run["id"], "wells": run["wells"], "state": run["state"],
+                               "quality": run.get("quality") or "good"} for run in runs]}
         if wells:
             delivered["wells"] = wells
         if materials:
@@ -1192,7 +1193,7 @@ class ExecutionService:
         from .device_result_service import DeviceResultService
 
         results = DeviceResultService(self.db, self.ctx).record(
-            batch, command, step, result.delivered or {}, result.origin,
+            batch, command, step, result.delivered or {}, result.origin, quality=result.quality,
         )
         self.audit.record(
             None, "步骤检查点", batch.id,

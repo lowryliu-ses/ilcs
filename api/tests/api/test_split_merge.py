@@ -82,3 +82,36 @@ def test_counts_that_are_not_whole_numbers_hold_the_split(operator, reset_runtim
     _dispatch(operator, batch_id)
     held = _run(operator, batch_id, executor, rounds=30, until=("paused", "done", "fault"))
     assert held["state"] == "paused" and "拆分份数不是 1–96 的整数" in held["failure_reason"], held["failure_reason"]
+
+
+def test_counts_from_a_reading_the_device_marked_unreliable_hold_the_split(
+    operator, reset_runtime, db, executor, monkeypatch,
+):
+    """份数取上游设备每孔的读数：读数都是合法整数，但设备回执质量 bad——不拿它定份数，也不退回缺省份数，拆分保持。"""
+    from dataclasses import replace
+
+    from app.adapters.drivers.simulation import SimulationAdapter
+
+    def shape(steps):
+        shaped = _shape(steps)
+        shaped[2] = {**shaped[2], "split": {"count_from": {"source_step_id": steps[1]["step_id"], "field": "aliquots"},
+                                            "count": 2, "child_type": "分份"}}
+        return shaped
+
+    batch_id = _graph_batch(operator, db, shape)
+    weigh_id = operator.get(f"/api/batches/{batch_id}").json()["snapshot"]["steps"][1]["step_id"]
+    original = SimulationAdapter.submit
+
+    def submit(self, request):
+        result = original(self, request)
+        if request.step_id != weigh_id:
+            return result
+        patched = replace(result, quality="bad", delivered={**result.delivered, "wells": {
+            well: {"aliquots": 2} for well in request.wells}})
+        self._ledger[request.command_id] = patched
+        return patched
+
+    monkeypatch.setattr(SimulationAdapter, "submit", submit)
+    _dispatch(operator, batch_id)
+    held = _run(operator, batch_id, executor, rounds=30, until=("paused", "done", "fault"))
+    assert held["state"] == "paused" and "读数设备标为不可信" in held["failure_reason"], held["failure_reason"]

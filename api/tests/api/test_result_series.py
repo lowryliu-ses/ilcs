@@ -174,6 +174,46 @@ def test_device_reported_curves_are_written_per_well(admin, db, finished_batch):
     db.rollback()
 
 
+def test_values_the_device_marked_unreliable_are_written_as_suspect(admin, db, finished_batch):
+    """设备回执自己报质量不是 good：值照写成检测结果，但置可疑、打「设备质量」标记，复核的人下结论；
+    按样本拆开下发时只标那一条里的样本（`delivered.runs[].quality`）。"""
+    from app.core.context import system_context
+    from app.models import Batch, Command, ResultValue
+    from app.services.device_result_service import DeviceResultService
+
+    capacity = admin.post("/api/metrics", {"code": f"dq_cap_{uuid4().hex[:6]}", "name": "设备质量容量",
+                                           "value_type": "number", "unit": "Ah"})
+    assert capacity.status_code == 201, capacity.text
+    capacity = capacity.json()
+    batch = db.get(Batch, finished_batch["id"])
+    command = next(row for row in db.query(Command).filter(Command.batch_id == batch.id).all() if row.type == "dispatch")
+    snapshot = dict(batch.recipe_snapshot)
+    base = next(step for step in snapshot["steps"] if step.get("kind", "device") == "device")
+    step = {**base, "method": {**(base.get("method") or {}), "code": "CYC", "version": 1, "outputs": [
+        {"key": "capacity", "unit": "Ah", "metric_id": capacity["id"]},
+    ]}}
+    snapshot["steps"] = [*snapshot["steps"], step]
+    batch.recipe_snapshot = snapshot
+    db.flush()
+    service = DeviceResultService(db, system_context(batch.org_id))
+    first, second = sorted(service.analysis.assignments.for_batch(batch.id), key=lambda row: row.well)[:2]
+    delivered = {
+        "wells": {first.well: {"capacity": 0.0032}, second.well: {"capacity": 0.0031}},
+        "runs": [{"id": f"{command.id}/1", "wells": [first.well], "state": "done", "quality": "bad"},
+                 {"id": f"{command.id}/2", "wells": [second.well], "state": "done", "quality": "good"}],
+    }
+    outcome = service.record(batch, command, step, delivered, "real:http_json_v1", quality="bad")
+    assert outcome["problems"] == [] and outcome["samples"] == 2, outcome
+    db.flush()
+    rows = {row.assignment_id: row for row in
+            db.query(ResultValue).filter(ResultValue.metric_definition_id == capacity["id"]).all()}
+    assert rows[first.id].quality == "suspect" and rows[first.id].value_num == 0.0032
+    assert any(flag["code"] == "device_quality" and "bad" in flag["message"] for flag in rows[first.id].flags)
+    assert rows[second.id].quality == "unassessed"
+    assert not any(flag["code"] == "device_quality" for flag in rows[second.id].flags), "另一条回执是 good，不标"
+    db.rollback()
+
+
 def test_values_from_a_simulator_device_are_flagged_simulated(admin, db, finished_batch):
     """走真实协议的外部模拟设备（工位当前采用的接入验收由自报为模拟器的设备通过）：回报的值和内置模拟一样
     打「模拟」标记、仪器注明模拟设备、不进训练数据；验收不是模拟器通过的工位照常是实测值。"""
