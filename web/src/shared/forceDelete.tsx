@@ -1,8 +1,11 @@
 /* 测试环境的管理员级联强制删除（ILCS_ADMIN_FORCE_DELETE）。
 
    开关没开、或不是系统管理员时什么都不渲染。点开先看服务端预览：会连带删掉哪些对象、各删多少条；
-   写原因、签名后执行，删除动作本身留审计。正式环境开关打不开。 */
+   写原因、签名后执行，删除动作本身留审计。正式环境开关打不开。
+
+   按钮多半放在表格的操作列里：对话框挂到 body 上，不继承单元格的不换行样式；点击也不往上冒到可点的表格行。 */
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { api } from './api';
 import { useMutation, useQuery } from './query';
@@ -50,20 +53,32 @@ export function ForceDeleteButton({
   if (!user?.admin_force_delete) return null;
   return (
     <>
-      <button className={className} title="测试环境：连同依赖它的数据一起删除" onClick={() => setOpen(true)}>
+      <button
+        className={className}
+        title="测试环境：连同依赖它的数据一起删除"
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen(true);
+        }}
+      >
         强制删除
       </button>
-      {open ? (
-        <ForceDeleteDialog
-          kind={kind}
-          id={id}
-          onClose={() => setOpen(false)}
-          onDone={() => {
-            setOpen(false);
-            onDone?.();
-          }}
-        />
-      ) : null}
+      {open
+        ? createPortal(
+            <div onClick={(event) => event.stopPropagation()}>
+              <ForceDeleteDialog
+                kind={kind}
+                id={id}
+                onClose={() => setOpen(false)}
+                onDone={() => {
+                  setOpen(false);
+                  onDone?.();
+                }}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
 }
