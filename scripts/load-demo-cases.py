@@ -184,16 +184,17 @@ def prepare(admin: Actor, operator: Actor) -> None:
              timeout=60)
     ok("机械臂 ARM-01", f"能力 cap.robot_load，{arm_driver}")
 
-    # 操作员要有新能力的资质，否则任务分配按资质挡住
+    # 操作员要有新能力的资质，否则任务分配按资质挡住；管理员默认拥有全部能力资质（和种子一致）
     people = admin.get("/people?limit=200")
     people = people.get("items", people) if isinstance(people, dict) else people
-    person = next(row for row in people if row.get("code") == "P-003")
-    quals = admin.get(f"/people/{person['id']}/qualifications")
-    if not any(row["scope_ref"] == "cap.robot_load" and row.get("state") != "revoked" for row in quals):
-        admin.post(f"/people/{person['id']}/qualifications", {
-            "scope_kind": "capability", "scope_ref": "cap.robot_load", "label": "机械臂上下料",
-        })
-    ok("操作员资质", "cap.robot_load")
+    for code in ("P-003", "P-005"):
+        person = next(row for row in people if row.get("code") == code)
+        quals = admin.get(f"/people/{person['id']}/qualifications")
+        if not any(row["scope_ref"] == "cap.robot_load" and row.get("state") != "revoked" for row in quals):
+            admin.post(f"/people/{person['id']}/qualifications", {
+                "scope_kind": "capability", "scope_ref": "cap.robot_load", "label": "机械臂上下料",
+            })
+    ok("操作员与管理员资质", "cap.robot_load")
 
     metrics = {row["code"]: row for row in admin.get("/metrics")}
     for code, name, unit, rules in (

@@ -191,8 +191,12 @@ def seed(
             summary["people"] = summary.get("people", 0) + 1
         people[row["code"]] = person
 
+    admin_capabilities = [
+        (data.ADMIN_PERSON, "capability", capability.id, data.ADMIN_QUALIFICATION_DAYS)
+        for capability in db.query(Capability).filter(Capability.retired.is_(False)).order_by(Capability.id)
+    ] if not master_only else []
     for person_code, scope_kind, scope_ref, valid_days in (
-        data.QUALIFICATIONS if not master_only else []
+        (data.QUALIFICATIONS if not master_only else []) + admin_capabilities
     ):
         person = people.get(person_code)
         if not person:

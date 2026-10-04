@@ -312,7 +312,8 @@ PEOPLE = [
     dict(code="P-007", name="实验室经理", title="实验室运营", username="manager", contact="ext.107"),
 ]
 
-# 操作员拿全部设备能力资质；研究员只有称重与测试——分配到涂布步骤时会被资质挡住
+# 操作员拿全部设备能力资质；研究员只有称重与测试——分配到涂布步骤时会被资质挡住。
+# 管理员不在这张表里：播种时按库里登记的全部能力逐项发（见 ADMIN_PERSON）
 QUALIFICATIONS = [
     ("P-003", "capability", "cap.dose_solid", 365),
     ("P-003", "capability", "cap.dose_liquid", 365),
@@ -328,8 +329,11 @@ QUALIFICATIONS = [
     ("P-003", "safety", "危化品操作", 365),
     ("P-001", "capability", "cap.weigh", 365),
     ("P-001", "capability", "cap.test", 365),
-    ("P-005", "capability", "cap.mix", 365),
 ]
+
+# 管理员默认拥有全部能力资质：播种时库里有的每项未退役能力都发一份（产线脚本后登记的能力由脚本补发）
+ADMIN_PERSON = "P-005"
+ADMIN_QUALIFICATION_DAYS = 365
 
 # ---------- 资产与校准 ----------
 
