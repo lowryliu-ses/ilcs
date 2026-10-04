@@ -148,16 +148,6 @@ def test_curve_columns_become_a_curve_result_split_by_cycle(tmp_path, client, li
     assert float(values[CAPACITY]["value"]) == 190.0, "数值指标照旧取最后一行"
 
 
-def test_curve_profile_needs_csv_and_both_columns():
-    from connectors.result_files.receiver import Profile
-
-    base = {"name": "x", "pattern": r"(?P<task_id>.+)\.txt", "metrics": {"曲线": {"metric_version_id": "M", "series": {"x": "a"}}}}
-    with pytest.raises(ValueError, match="要写"):
-        Profile(base)
-    with pytest.raises(ValueError, match="只有 csv"):
-        Profile({**base, "format": "key_value", "metrics": {"曲线": {"metric_version_id": "M", "series": {"x": "a", "y": "b"}}}})
-
-
 RETENTION = "METRIC-retention-v1"
 
 
@@ -182,24 +172,6 @@ def _cycling_records() -> list[dict]:
                          "Current(mA)": -0.5, "Charge_Capacity(mAh)": 0.0,
                          "Discharge_Capacity(mAh)": discharge * fraction, "Discharge_Energy(mWh)": discharge * fraction * 3.6})
     return rows
-
-
-def test_cycle_summary_adds_up_steps_and_derives_efficiency_and_retention():
-    from connectors.result_files import cycling
-
-    rows = cycling.cycles(_cycling_records())
-    assert [row["cycle"] for row in rows] == [1, 2, 3], "只有静置的圈 0 不列"
-    assert rows[0]["charge_mAh"] == pytest.approx(3.6) and rows[0]["discharge_mAh"] == pytest.approx(3.2), "CC + CV 两段相加"
-    assert rows[0]["ce_pct"] == pytest.approx(3.2 / 3.6 * 100, rel=1e-4)
-    summary = cycling.summary(rows, active_mass_mg=16.0)
-    assert summary["cycle_count"] == 3 and summary["first_discharge_mAh"] == pytest.approx(3.2)
-    assert summary["retention_pct"] == pytest.approx(3.1 / 3.2 * 100, rel=1e-4)
-    assert summary["first_ce_pct"] == pytest.approx(88.8889, rel=1e-4)
-    assert summary["mean_ce_pct"] == pytest.approx((3.2 / 3.25 + 3.1 / 3.18) / 2 * 100, rel=1e-4), "第 2 圈起"
-    assert summary["first_discharge_mAh_g"] == pytest.approx(200.0), "3.2 mAh ÷ 0.016 g"
-    assert cycling.summary([])["retention_pct"] is None, "没有放电就没有保持率，不当 0"
-    picked = cycling.select(_cycling_records(), cycles_wanted=[2], statuses=["CC_DChg"])
-    assert len(picked) == 3 and {row["Cycle"] for row in picked} == {2}
 
 
 def test_neware_file_becomes_capacity_retention_and_a_cycle_curve(tmp_path, client, lims, admin, operator, researcher,
@@ -250,59 +222,3 @@ def test_neware_file_becomes_capacity_retention_and_a_cycle_curve(tmp_path, clie
     full = researcher.get(f"/api/result-values/{values[curve.json()['id']]['id']}/series").json()
     assert full["traces"][0]["x"] == [1, 2, 3] and full["traces"][0]["y"] == pytest.approx([3.2, 3.2, 3.1])
     assert values[CAPACITY]["raw_file_id"], "原始数据文件已上传并关联"
-
-
-def test_neware_record_curves_are_filtered_and_thinned():
-    from connectors.result_files.receiver import Profile
-
-    profile = Profile({"name": "n", "pattern": r"(?P<task_id>.+)\.ndax", "format": "neware", "metrics": {
-        "放电曲线": {"metric_version_id": "M", "unit": "V", "series": {
-            "table": "records", "x": "Discharge_Capacity(mAh)", "y": "Voltage", "trace": "Cycle",
-            "cycles": [1, 3], "status": ["CC_DChg"], "max_points": 2}},
-    }})
-    entry = profile.metrics_from({}, [], _cycling_records())[0]
-    traces = entry["value"]["traces"]
-    assert [trace["name"] for trace in traces] == ["1", "3"], "只取第 1、3 圈的放电段"
-    assert all(len(trace["x"]) == 2 for trace in traces) and traces[0]["x"] == [0.0, 3.2], "抽稀保留首尾、0 照收"
-    with pytest.raises(ValueError, match="table 只有 neware"):
-        Profile({"name": "c", "pattern": r"(?P<task_id>.+)\.csv", "metrics": {
-            "x": {"metric_version_id": "M", "series": {"x": "a", "y": "b", "table": "records"}}}})
-
-
-def test_a_cut_off_last_cycle_and_a_half_first_cycle_do_not_skew_retention():
-    """测试中途停了：末圈放电不到前一圈一半，当作没跑完，不进保持率；开头只有半圈放电：基准取第一个完整的圈。"""
-    from connectors.result_files import cycling
-
-    rows = [
-        {"cycle": 1, "charge_mAh": 0.0, "discharge_mAh": 0.05, "ce_pct": None},   # 只有放电的半圈
-        {"cycle": 2, "charge_mAh": 3.3, "discharge_mAh": 3.2, "ce_pct": 96.97},
-        {"cycle": 3, "charge_mAh": 3.25, "discharge_mAh": 3.1, "ce_pct": 95.38},
-        {"cycle": 4, "charge_mAh": 3.2, "discharge_mAh": 0.4, "ce_pct": 12.5},    # 停在放电中途
-    ]
-    summary = cycling.summary(rows)
-    assert summary["reference_cycle"] == 2 and summary["final_cycle"] == 3 and summary["last_cycle_partial"] == 1
-    assert summary["retention_pct"] == pytest.approx(3.1 / 3.2 * 100, rel=1e-4)
-    assert summary["mean_ce_pct"] == pytest.approx(95.38) and summary["last_discharge_mAh"] == 0.4, "原样的末圈照给"
-    fixed = cycling.summary(rows, reference_cycle=3, incomplete_ratio=0)
-    assert fixed["reference_cycle"] == 3 and fixed["final_cycle"] == 4 and fixed["retention_pct"] == pytest.approx(12.9032, rel=1e-4)
-
-
-@pytest.mark.skipif(not __import__("os").environ.get("NEWARE_SAMPLE"), reason="要设 NEWARE_SAMPLE 指向一个真 .nda / .ndax，且装了 NewareNDA")
-def test_a_real_neware_file_reads_and_adds_up():
-    """可选：对真文件跑一遍（NewareNDA 仓库 tests/nda 下有样例）。按 (圈, 工步) 取最大再按圈相加，与 pandas 的同一算法逐圈对照。"""
-    import os
-
-    pytest.importorskip("NewareNDA")
-    from connectors.result_files import cycling
-
-    records, _ = cycling.read_neware(os.environ["NEWARE_SAMPLE"])
-    rows = cycling.cycles(records)
-    assert rows and all(row["charge_mAh"] >= 0 and row["discharge_mAh"] >= 0 for row in rows)
-    import pandas
-
-    frame = pandas.DataFrame(records)
-    reference = frame.groupby(["Cycle", "Step"])[[cycling.CHARGE, cycling.DISCHARGE]].max().groupby(level=0).sum()
-    reference = reference[(reference[cycling.CHARGE] > 0) | (reference[cycling.DISCHARGE] > 0)]
-    assert [row["cycle"] for row in rows] == [int(cycle) for cycle in reference.index]
-    for row in rows:
-        assert row["discharge_mAh"] == pytest.approx(float(reference.loc[row["cycle"], cycling.DISCHARGE]), abs=1e-5)

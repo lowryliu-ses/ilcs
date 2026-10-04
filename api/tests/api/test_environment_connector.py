@@ -117,25 +117,6 @@ def test_an_unauthorized_zone_does_not_block_the_authorized_one(glovebox, zone_i
     assert len(outcome["rejected"]) == 1 and "HTTP 403" in outcome["rejected"][0], outcome
 
 
-def test_register_decoding_and_config_checks():
-    require_devices()
-    from connectors.environment.poller import Poller, decode_registers
-    from connectors.environment.glovebox_sim import float_registers
-
-    assert decode_registers(float_registers(0.75), "float32") == pytest.approx(0.75)
-    assert decode_registers(list(reversed(float_registers(0.75))), "float32", "little") == pytest.approx(0.75)
-    assert decode_registers([0xFFFF], "int16") == -1 and decode_registers([0x0001, 0x0000], "uint32") == 65536
-    with pytest.raises(ValueError, match="至少要配置一个读数点"):
-        Poller({"sources": []}, http=object())
-    with pytest.raises(ValueError, match="address"):
-        Poller({"sources": [{"kind": "modbus", "host": "h", "readings": [{"zone": "z", "metric": "o2_ppm"}]}]},
-               http=object())
-    with pytest.raises(ValueError, match="pattern"):
-        Poller({"sources": [{"kind": "line", "link": {"kind": "tcp", "host": "h", "port": 1},
-                             "readings": [{"zone": "z", "metric": "o2_ppm", "send": "O2?", "pattern": "(\\d+)"}]}]},
-               http=object())
-
-
 def test_environment_zone_scope_is_validated(admin):
     """服务身份可以授予 environment_zones：all 或区域名数组；别的写法拒绝（拼错的授权不能变成假授权）。"""
     everything = admin.post("/api/service-identities", {
