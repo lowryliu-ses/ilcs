@@ -1,0 +1,8 @@
+{
+  "_说明": "电解液线哪几个工位改走真实接入链路、接哪台设备网关（http_json_v1）。现在接的是设备仓库 ilcs-devices 的 deploy/compose.yml 里 electrolyte profile 起的模拟站；接真机时把 host、device_id 换成现场网关。load-electrolyte-line.py connect 套用接入模板（module 是设备仓库里的设备模块，模板没登记就从它的 profile.json 导入发布）并填连接参数，disconnect 切回内置模拟。没列出的工位照旧用内置模拟。",
+  "stations": {
+    "EL-D-BAL": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-bal-sim", "device_id": "SIM-EL-D-BAL"},
+    "EL-D-PWD": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-pwd-sim", "device_id": "SIM-EL-D-PWD"},
+    "EL-T-RAM": {"module": "raman-seabreeze", "template": "TPL-RAMAN-SEABREEZE", "host": "el-t-ram-sim", "device_id": "SIM-EL-T-RAM"}
+  }
+}

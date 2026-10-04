@@ -297,9 +297,9 @@ def test_material_only_usage_spreads_over_lots_and_is_all_or_nothing(
         assert db.get(Lot, early).qty == Decimal("3") and db.get(Lot, late).qty == Decimal("100")
         assert all(db.get(Reservation, row["id"]).consumed_qty == 0 for row in rows)
 
-    # 预留合计装不下：整项拒绝，按基础单位报合计余量（mg 回报先换成 g）
+    # 预留合计装不下（多出的远超偏差阈值）：整项拒绝，按基础单位报合计余量（mg 回报先换成 g）
     short = fake("short")
-    assert service.book(batch, short, {"materials": [{"material": solvent, "unit": "mg", "quantity": 6000}]}) == {
+    assert service.book(batch, short, {"materials": [{"material": solvent, "unit": "mg", "quantity": 7000}]}) == {
         "booked": 0, "rejected": 1, "deviations": 0,
     }
     alarm = db.query(Alarm).filter(Alarm.condition_key == f"command:{short.id}:material:1").one()
@@ -341,6 +341,51 @@ def test_material_only_usage_spreads_over_lots_and_is_all_or_nothing(
         if "fake-" not in a.condition_key
     ]
     assert not alarms, alarms
+
+
+def test_small_overdraw_tops_up_the_reservation_and_books_the_actual_amount(researcher, qa, operator, reset_runtime, db):
+    """称量加料多加了一点（在偏差阈值内）：先从同一批号追加预留、再按实际量入账，流水里看得到那笔追加；
+    批号没有余量可补就照旧整项拒绝，追加的预留和消耗一起撤销，什么都不留。"""
+    uid = uuid4().hex[:6]
+    solvent, salt = f"超量溶剂-{uid}", f"超量锂盐-{uid}"
+    lot = _lot(operator, qa, solvent, qty="100")
+    _lot(operator, qa, salt)
+    batch_id = _plan_batch(researcher, qa, operator, solvent, salt)
+    db.expire_all()
+    batch = db.get(Batch, batch_id)
+    service = ConsumptionService(db, system_context(batch.org_id, "测试"))
+    over = SimpleNamespace(id=f"fake-over-{uid}", step_index=0, capability="cap.dose_solid", params={})
+    assert service.book(batch, over, {"materials": [{"material": solvent, "unit": "g", "quantity": 5.8}]}) == {
+        "booked": 1, "rejected": 0, "deviations": 0,
+    }
+    db.commit()
+    db.expire_all()
+    assert db.get(Lot, lot).qty == Decimal("94.2"), "账上按天平称出来的 5.8 g 扣"
+    reservation = db.query(Reservation).filter(Reservation.batch_id == batch_id, Reservation.lot_id == lot).one()
+    assert (reservation.qty, reservation.consumed_qty) == (Decimal("5.8"), Decimal("5.8"))
+    topup = db.query(InventoryEvent).filter(InventoryEvent.event_id == f"{over.id}#1:topup").one()
+    assert (topup.source, topup.event_type) == ("system", "reserve") and "偏差阈值内" in topup.reason
+    assert not db.query(Alarm).filter(Alarm.condition_key == f"command:{over.id}:material:1").count()
+
+    # 批号已经全被占用：差的 0.05 g 补不上，整项拒绝，追加预留也不留下
+    tight, tight_salt = f"满占溶剂-{uid}", f"满占锂盐-{uid}"
+    tight_lot = _lot(operator, qa, tight, qty="5.75")
+    _lot(operator, qa, tight_salt)
+    tight_batch_id = _plan_batch(researcher, qa, operator, tight, tight_salt)
+    db.expire_all()
+    tight_batch = db.get(Batch, tight_batch_id)
+    blocked = SimpleNamespace(id=f"fake-tight-{uid}", step_index=0, capability="cap.dose_solid", params={})
+    assert service.book(tight_batch, blocked, {"materials": [{"material": tight, "unit": "g", "quantity": 5.8}]}) == {
+        "booked": 0, "rejected": 1, "deviations": 0,
+    }
+    db.commit()
+    db.expire_all()
+    alarm = db.query(Alarm).filter(Alarm.condition_key == f"command:{blocked.id}:material:1").one()
+    assert "消耗被拒" in alarm.message and "可用量" in alarm.message, alarm.message
+    assert not db.query(InventoryEvent).filter(InventoryEvent.event_id.like(f"{blocked.id}#%")).count()
+    assert db.get(Lot, tight_lot).qty == Decimal("5.75")
+    db.query(Alarm).filter(Alarm.condition_key.like(f"command:fake-%-{uid}:%")).delete(synchronize_session=False)
+    db.commit()
 
 
 def test_dosing_hook_reports_param_unit_and_consumption_converts_it(db):
