@@ -366,6 +366,8 @@ def _point_map(kind: str) -> tuple[ConfigField, ...]:
         ConfigField("value", "写入值", "scalar", hint="缺省 true"),
         ConfigField("pulse_ms", "脉冲宽度（毫秒）", "number", hint="写入后隔多久写回复位值"),
         ConfigField("reset", "复位值", "scalar"),
+        ConfigField("write_only", "只写设定值", "boolean",
+                    hint="设定类动作（温控器设定值、阀门开度）：写完设定点就生效、没有启动信号；要配 idle_after_start: done"),
     ]
     if kind == "opcua":
         start.append(_record("method", "启动方法", (
@@ -517,7 +519,8 @@ REST = (
              _list("values", "取这些值时算忙", _value("值")), hint="不配就不判忙（调度系统自己排队）"),
     _table("capabilities", "能力请求模板", _request("", "能力",
            ConfigField("handle", "任务号字段", "string", hint="响应里设备任务号在哪个字段；不填用指令号"),
-           _table("actuals", "实测字段", _value("响应字段", "string"), "参数", key_ref="params", hint="做完按状态请求的响应读"),
+           _table("actuals", "实测字段", _value("响应字段或 {point: 点名}", "any"), "参数", key_ref="params",
+                  hint="做完读回：字符串按状态请求的响应字段读；{\"point\": 点名} 按点表读这个点（状态响应里没有实测值时）"),
            *CAPABILITY_EXTRAS), "能力", key_ref="capabilities", scope="capability",
            hint="只读写点位（不参与自动流程）的设备不配"),
     _table("points", "点表", _request("", "点",

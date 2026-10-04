@@ -120,6 +120,52 @@ def test_device_service_end_to_end(tmp_path, plc):
         assert _refused(lambda: _submit(c, "CMD-X", capability="cap.other")) == "NotSupported"
 
 
+def test_wells_run_one_after_another_and_report_each_well(tmp_path, plc):
+    """逐孔参数（ILCS 矩阵条件）：按孔位顺序一个一个跑——写设定、启动、等完成、取实测、复位，再下一孔；回执按孔位回报。
+    每孔一个启动沿、一个运行号（<指令号>/<序号>）；固定参数是每孔的缺省值。"""
+    program, plc_port = plc
+    device = _plc_device(plc_port)
+    with running_host(write_site(tmp_path, {"PLC-1": device})):
+        c = client(device["port"])
+        params = {"thickness": 180, "wells": {"A2": {"temp": 120}, "A10": {"temp": 140}, "A1": {"temp": 110}}}
+        assert _submit(c, "CMD-W", params)["state"] == "accepted"
+        done = _wait(c, "CMD-W", seconds=15)
+        assert done["state"] == "done", done
+        wells = done["delivered"]["wells"]
+        assert set(wells) == {"A1", "A2", "A10"}
+        assert all(abs(wells[well]["temp"] - target) < 2.5 for well, target in (("A1", 110), ("A2", 120), ("A10", 140)))
+        assert all(abs(row["thickness"] - 180) < 2.5 for row in wells.values()), "固定参数是每孔的缺省值"
+        assert sum(program.device.executions.values()) == 3, "每孔一个启动沿"
+        assert program.memory["JobLatched"] == "CMD-W/3", "每孔写自己的运行号：最后锁存的是第 3 孔（A10）的"
+        assert _submit(c, "CMD-W", params)["state"] == "done", "重复投递回放原作业，不再动作"
+        assert sum(program.device.executions.values()) == 3
+
+        bad = {"thickness": 180, "wells": {"A1": {"temp": 110}, "A2": {"pressure": 3}}}
+        assert _refused(lambda: _submit(c, "CMD-BAD", bad)) == "InvalidParameters"
+        assert sum(program.device.executions.values()) == 3, "有一孔参数不对：整条拒绝，设备一次都没动"
+
+
+def test_restart_mid_sequence_continues_without_rerunning_started_wells(tmp_path):
+    """逐孔跑到一半驱动宿主重启：按台账接着查当前这一孔，做完再启动后面的孔；已经启动过的孔不重发。"""
+    with plc_sim(task_seconds=0.8) as (program, plc_port):
+        device = _plc_device(plc_port)
+        site_dir = write_site(tmp_path, {"PLC-1": device})
+        params = {"thickness": 180, "wells": {"A1": {"temp": 110}, "A2": {"temp": 120}, "A3": {"temp": 130}}}
+        with running_host(site_dir):
+            c = client(device["port"])
+            _submit(c, "CMD-R", params)
+            deadline = time.monotonic() + 10
+            while sum(program.device.executions.values()) < 2 and time.monotonic() < deadline:
+                _query(c, "CMD-R")
+                time.sleep(0.1)
+            assert sum(program.device.executions.values()) == 2, "停在第二孔运行中"
+        with running_host(site_dir):
+            c = client(device["port"])
+            done = _wait(c, "CMD-R", seconds=15)
+        assert done["state"] == "done" and set(done["delivered"]["wells"]) == {"A1", "A2", "A3"}, done
+        assert sum(program.device.executions.values()) == 3 and program.memory["JobLatched"] == "CMD-R/3", "重启后没有重发"
+
+
 def test_calls_without_a_valid_token_are_refused(tmp_path, plc):
     from sila2.framework.abc.sila_error import SilaError
 
