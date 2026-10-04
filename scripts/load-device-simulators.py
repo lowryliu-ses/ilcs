@@ -220,7 +220,10 @@ def connect(engineer: Actor, operator: Actor, template: dict, device: dict[str, 
     credential = f"file:///run/secrets/ilcs/gateway/{device_id}.token"
     where = connection["base_url"]
     adapter = engineer.get(f"/stations/{station}/adapter")
-    if (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
+    if _driver_host_script().via_driver_host(adapter):
+        ok("设备连接", f"{station} 经驱动宿主接 driver-host:{adapter['config'].get('port')}"
+           "（沿用；见 scripts/load-driver-host-devices.py）")
+    elif (adapter.get("template") or {}).get("id") != template["id"] or adapter.get("template_connection") != connection \
             or adapter.get("credential_ref") != credential:
         adapter = engineer.patch(f"/stations/{station}/adapter", {
             "template_id": template["id"], "template_connection": connection, "credential_ref": credential,
