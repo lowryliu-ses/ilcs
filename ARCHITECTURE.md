@@ -286,7 +286,8 @@ web (React/Vite)  ──HTTP/JSON──▶  api (FastAPI)  ──SQL──▶  D
 **上游系统提交**（服务身份，授权范围 `formulation_imports` 列出能向哪些模板提交）：`POST /runtime/formulation-templates/{编号}/imports`
 交表格行（与界面导入同一套校验与生成），按提交方的请求编号去重（`formulation_submissions`，同一编号同一内容回放、内容不同 409）；
 生成的流程与方案仍是草稿，起草人记成这个服务身份，评审、批准、建批次、签名下发照旧由人做；提交方按请求编号查进度
-（`GET …/imports/{请求编号}`：流程与方案审批状态、实验任务、批次、每瓶结果是否进正式统计、报告），只看得到自己提交的。模板在「实验设计 → 配液模板」里可视化编辑（`features/formulations/FormulationTemplatesPage.tsx`）：前后段固定步骤、阶段、类别的加法、各级加料后步骤、实验参数与逐瓶参数、分装量核对都有表单，步骤按能力登记的参数类型给控件（数值、选项、程序表），设备方法只列该能力已发布的；每改一处按当前主数据核一次（`POST /formulation-templates/check`，不保存），也可以上传一张配方表（`POST /formulation-templates/table` 只读成表格）按还没保存的配置试算——与导入同一套生成规则，不写库、不登记瓶子；可以从现有模板复制一份再改。
+（`GET …/imports/{请求编号}`：流程与方案审批状态、实验任务、批次、每瓶结果是否进正式统计、报告；曲线结果的完整数据点
+`GET …/imports/{请求编号}/results/{结果编号}/series`），只看得到自己提交的。模板在「实验设计 → 配液模板」里可视化编辑（`features/formulations/FormulationTemplatesPage.tsx`）：前后段固定步骤、阶段、类别的加法、各级加料后步骤、实验参数与逐瓶参数、分装量核对都有表单，步骤按能力登记的参数类型给控件（数值、选项、程序表），设备方法只列该能力已发布的；每改一处按当前主数据核一次（`POST /formulation-templates/check`，不保存），也可以上传一张配方表（`POST /formulation-templates/table` 只读成表格）按还没保存的配置试算——与导入同一套生成规则，不写库、不登记瓶子；可以从现有模板复制一份再改。
 
 **维护工单**（`services/maintenance_service.py`）。建单即登记维护占用（排程让路），开工资产转入维护状态（开跑检查拦截），完工写记录并签名；合格恢复原状态，不合格保持维护状态，取消恢复开工前状态。
 

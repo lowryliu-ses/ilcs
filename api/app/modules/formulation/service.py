@@ -394,17 +394,14 @@ class FormulationService:
         """提交方按请求编号查进度：流程与方案的审批状态、实验任务、批次进度、每瓶的检测结果。只看得到自己提交的。
 
         结果标明复核状态与是否进正式统计（`official`）：审核通过、质量有效、没被更正版本取代的才算；
-        模拟设备的示意值照实标出来（`simulated`），不冒充实测。曲线只给点数，完整的点按结果编号去取。"""
+        模拟设备的示意值照实标出来（`simulated`），不冒充实测。曲线只给点数，完整的点按结果编号取（`result_series`）。"""
         from ...domain.statistics import EXCLUSION_REASONS
         from ...models import Batch, ExperimentTask, Report, ResultValue
         from ...repositories.batches import AnalysisTaskRepository
         from ...repositories.recipes import PlanRepository
         from ...services.batch_service import BatchService
 
-        template = self._service_template(code)
-        row = self.submissions.find(self.ctx.subject_id, str(request_id or "").strip())
-        if row is None or row.template_id != template.id:
-            raise NotFound("没有这个请求编号的提交")
+        row = self._submission(code, request_id)
         plan = PlanRepository(self.db, self.ctx).get(row.plan_id)
         recipe = self.recipes.get(row.recipe_id)
         tasks = (self.db.query(ExperimentTask)
@@ -465,6 +462,29 @@ class FormulationService:
             "results": results,
             "reports": [{"id": report.id, "code": report.code, "title": report.title} for report in reports],
         }
+
+    def _submission(self, code: str, request_id: str) -> FormulationSubmission:
+        template = self._service_template(code)
+        row = self.submissions.find(self.ctx.subject_id, str(request_id or "").strip())
+        if row is None or row.template_id != template.id:
+            raise NotFound("没有这个请求编号的提交")
+        return row
+
+    def result_series(self, code: str, request_id: str, result_id: str) -> dict[str, Any]:
+        """提交方取一条曲线结果（拉曼谱、充放电曲线）的完整数据点：只限这次提交生成的批次里的结果。"""
+        from ...models import Batch, ResultValue
+        from ...repositories.batches import AnalysisTaskRepository
+        from ...services.analysis_service import AnalysisService
+
+        row = self._submission(code, request_id)
+        value = self.db.get(ResultValue, result_id)
+        batches = [batch.id for batch in self.db.query(Batch).filter(
+            Batch.org_id == self.ctx.org_id, Batch.plan_id == row.plan_id).all()]
+        repository = AnalysisTaskRepository(self.db, self.ctx)
+        tasks = {task.id for batch_id in batches for task in repository.for_batch(batch_id)}
+        if value is None or value.org_id != self.ctx.org_id or value.analysis_task_id not in tasks:
+            raise NotFound("这次提交里没有这条结果")
+        return AnalysisService(self.db, self.ctx).series_out(result_id)
 
     def _sample_check(self, serials: list[str]) -> tuple[list[str], list[str], dict[str, PhysicalSample | None]]:
         """瓶身序列号能不能当空瓶配液：(问题, 提醒, 已登记的样本)。只读，预览与导入共用。

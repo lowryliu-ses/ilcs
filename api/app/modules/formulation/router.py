@@ -102,3 +102,9 @@ def submission_progress(code: str, request_id: str, db: DbSession, ctx: ServiceC
     """按请求编号查进度：流程与方案的审批状态、实验任务、批次、每瓶的检测结果（标明是否进正式统计）。
     只看得到本服务身份自己提交的。"""
     return FormulationService(db, ctx).progress(code, request_id)
+
+
+@runtime_router.get("/{code}/imports/{request_id}/results/{result_id}/series")
+def submission_result_series(code: str, request_id: str, result_id: str, db: DbSession, ctx: ServiceCtx):
+    """取一条曲线结果（拉曼谱等）的完整数据点；只限这次提交生成的批次里的结果。"""
+    return FormulationService(db, ctx).result_series(code, request_id, result_id)
