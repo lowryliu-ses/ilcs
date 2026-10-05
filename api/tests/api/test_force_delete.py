@@ -174,3 +174,22 @@ def test_approved_plan_lists_why_it_cannot_be_deleted(researcher, qa):
     plan_id = _approved_plan(researcher, qa)
     blockers = researcher.get(f"/api/plans/{plan_id}").json()["delete_blockers"]
     assert any("已批准" in text for text in blockers), "列表上的删除按钮要和删除接口一致：已批准的不能删"
+
+
+def test_alarm_numbers_do_not_come_back_after_alarms_are_deleted(db):
+    """删掉的报警编号不再发：审计里的「触发报警」记着用过的编号。"""
+    from app.core.context import system_context
+    from app.models import Alarm
+    from app.services.alarm_service import AlarmService
+
+    service = AlarmService(db, system_context("ORG-001", "用例"))
+    first = service.raise_alarm(4, "station", "ST-02", "编号用例：先报一条")
+    db.commit()
+    number = int(first.id[2:])
+    db.query(Alarm).filter(Alarm.id == first.id).delete(synchronize_session=False)
+    db.commit()
+    second = service.raise_alarm(4, "station", "ST-02", "编号用例：删掉以后再报一条")
+    db.commit()
+    assert int(second.id[2:]) > number, (first.id, second.id)
+    db.query(Alarm).filter(Alarm.id == second.id).delete(synchronize_session=False)
+    db.commit()
