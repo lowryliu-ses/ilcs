@@ -55,7 +55,7 @@ MAX_LOOPS = 10
 APPLICABLE: dict[str, set[str]] = {
     DEVICE: {
         "cap", "params", "bindings", "dur", "hard", "resource", "timeout", "skippable",
-        "consumes_materials", "material", "material_param", "applies_to",
+        "consumes_materials", "material", "material_param", "materials", "applies_to",
     },
     MANUAL: {
         "dur", "form", "resource", "requires_signature", "qualification", "hard", "timeout", "skippable",
@@ -262,6 +262,30 @@ def step_material(step: dict[str, Any]) -> str:
     return material if isinstance(material, str) and material.strip() else ""
 
 
+def step_doses(step: dict[str, Any]) -> list[tuple[str, str]]:
+    """这一步投哪几种料、各自的用量参数：[(物料名, 用量参数)]，按加料顺序。没勾「消耗物料」为空。
+
+    投一种料写 `material` / `material_param`（用量参数可以不写，由 `dosing.dosing_param` 按物料单位推）；
+    一步投几种料写 `materials: [{material, param}]`——整线一个任务把一瓶的全部组分投完（上位机按顺序加），
+    每种料的用量参数都要写明：几种料的单位多半相同，按单位推不出哪个参数是哪种料。
+    """
+    if not consumes_materials(step):
+        return []
+    rows = (step or {}).get("materials")
+    if isinstance(rows, list) and rows:
+        return [
+            (row["material"], str(row.get("param") or "").strip()) for row in rows
+            if isinstance(row, dict) and isinstance(row.get("material"), str) and row["material"].strip()
+        ]
+    name = step_material(step)
+    return [(name, str((step or {}).get("material_param") or "").strip())] if name else []
+
+
+def step_materials(step: dict[str, Any]) -> list[str]:
+    """这一步投的全部物料名称（按加料顺序）：投一种料的就是 `step_material`，一步投几种料的是 `materials` 里的那些。"""
+    return [name for name, _ in step_doses(step)]
+
+
 def material_issues(step: dict[str, Any]) -> list[str]:
     """步骤级投料物料的字段完整性。用量参数属不属于能力要看能力定义，由 recipe_rules.device_issues 判。"""
     issues: list[str] = []
@@ -274,6 +298,44 @@ def material_issues(step: dict[str, Any]) -> list[str]:
             issues.append("声明了投料物料，但没有勾选「消耗物料」")
     if step.get("material_param") not in (None, "") and kind_of(step) != DEVICE:
         issues.append("只有设备步骤可以指定用量参数")
+    if "materials" in step:
+        issues.extend(_materials_issues(step))
+    return issues
+
+
+def _materials_issues(step: dict[str, Any]) -> list[str]:
+    """一步投几种料（`materials`）：只有设备步骤能这样写，每种料一项、写明用量参数，料与参数都不重复。
+    和 `material` / `material_param` 二选一——同时写就说不清这一步到底投什么。"""
+    rows = step.get("materials")
+    if kind_of(step) != DEVICE:
+        return ["只有设备步骤能一步投几种料（materials）"]
+    if not isinstance(rows, list) or not rows:
+        return ['materials 要写成 [{"material": 物料名, "param": 用量参数}…]，至少一种']
+    issues: list[str] = []
+    if "material" in step or step.get("material_param") not in (None, ""):
+        issues.append("一步投几种料用 materials，不能同时写 material / material_param")
+    names: set[str] = set()
+    params: set[str] = set()
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            issues.append(f"materials 第 {position} 项必须是对象")
+            continue
+        name, param = row.get("material"), row.get("param")
+        label = name if isinstance(name, str) and name.strip() else f"第 {position} 项"
+        if not isinstance(name, str) or not name.strip():
+            issues.append(f"materials 第 {position} 项的物料名称必须是非空文字")
+        elif name in names:
+            issues.append(f"物料 {name} 在 materials 里出现了两次")
+        else:
+            names.add(name)
+        if not isinstance(param, str) or not param.strip():
+            issues.append(f"materials 里 {label} 要写用量参数 param")
+        elif param in params:
+            issues.append(f"用量参数 {param} 被两种料共用")
+        else:
+            params.add(param)
+    if not consumes_materials(step):
+        issues.append("声明了投料物料，但没有勾选「消耗物料」")
     return issues
 
 

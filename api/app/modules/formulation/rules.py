@@ -27,6 +27,14 @@
 - 分装量核对优先用物料主数据里登记的密度（换算「1 mL = x g」），没有登记的才用 `volume_check.density`；
   按体积填的列直接算体积。
 
+整任务方式（`task: {step, slots}`）：上位机收整份实验任务、自己调度线内各模组（A-Lab 一类整线）时，流程不再逐种料
+生成加料与搅拌步骤，而是由一个固定设备步骤（`task.step`，在 prefix / suffix 里）一步投完一瓶的全部组分：
+- 阶段与类别照旧决定加料顺序（阶段先后、阶段内 `order`）与 `not_last` 检查，但只用来排顺序——阶段里不写 then、
+  stir，类别不写 step、param、stir：这些动作由上位机按它的工艺执行；
+- 这张表要加的料按加料顺序依次占用 `task.slots` 列出的能力参数（加料位 1、2……），步骤上写
+  `materials: [{material, param}]`、各参数写 0，每瓶的量照旧由方案因子按孔位给出；
+- 同样几种料、同样顺序的下一张表生成的步骤完全一样，沿用同一个已发布流程。
+
 生成结果确定性：同输入同输出（步骤标识按生成顺序 s01、s02…，每一步都写显式 after），服务层据此判断能否沿用已有流程。
 """
 from __future__ import annotations
@@ -219,6 +227,8 @@ def template_issues(
     stage_keys: list[str] = []
     if not isinstance(stages, list) or not stages:
         issues.append("至少要有一个加料阶段 stages")
+    # 整任务方式：阶段与类别只排加料顺序，加料、搅拌由上位机做
+    task_mode = "task" in config
 
     def check_fixed(label: str, steps: Any) -> None:
         if not isinstance(steps, list):
@@ -261,6 +271,16 @@ def template_issues(
             issues.append(f"阶段 key「{key}」重复")
         else:
             stage_keys.append(key)
+        if task_mode:
+            # 整任务方式：阶段只决定加料顺序
+            issues.extend(
+                f"整任务方式（task）下阶段「{stage.get('label') or key}」只写 key、label、order，{field} 不用写："
+                f"加料、搅拌、拧盖这些由上位机按它的工艺做"
+                for field in ("after", "then", "stir", "stir_after_last", "chain") if field in stage
+            )
+            if stage.get("order", "table") not in ORDERS:
+                issues.append(f"阶段「{key}」的加料顺序 order 只能是 {'、'.join(ORDERS)}")
+            continue
         after = stage.get("after", [])
         if not isinstance(after, list) or not all(isinstance(ref, str) for ref in after):
             issues.append(f"阶段「{key}」的 after 必须是固定步骤 key 列表")
@@ -296,6 +316,13 @@ def template_issues(
             continue
         if route.get("stage") not in stage_keys:
             issues.append(f"{label}的阶段 {route.get('stage') or '（未填）'} 不存在")
+        if task_mode:
+            issues.extend(_not_last_issue(route, label))
+            issues.extend(
+                f"整任务方式（task）下{label}只写阶段 stage 与 not_last，{field} 不用写：这类料怎么加由上位机定"
+                for field in ("step", "param", "stir", "stir_after") if field in route
+            )
+            continue
         if "stir_after" in route and not isinstance(route["stir_after"], bool):
             issues.append(f"{label}的 stir_after 只能是是或否")
         if "stir" in route:
@@ -303,9 +330,7 @@ def template_issues(
         stirs = route.get("stir_after", True) is not False or stage_last.get(route.get("stage"), True)
         if stirs and "stir" not in route and not stage_stir.get(route.get("stage")):
             needs_default = True
-        not_last = route.get("not_last")
-        if "not_last" in route and not (isinstance(not_last, bool) or (isinstance(not_last, str) and not_last.strip())):
-            issues.append(f"{label}的 not_last 只能是是或否，或写明原因的文字")
+        issues.extend(_not_last_issue(route, label))
         step = route.get("step")
         if not isinstance(step, dict) or kind_of(step) != DEVICE or step.get("kind") not in (None, "", DEVICE):
             issues.append(f"{label}的步骤模板必须是设备步骤")
@@ -321,7 +346,11 @@ def template_issues(
             issues.append(f"{label}的用量参数 {param} 没有登记单位，无法与表格单位对账")
 
     stir = config.get("stir")
-    if stir is not None or needs_default:
+    if task_mode:
+        if stir is not None:
+            issues.append("整任务方式（task）下不写搅拌步骤模板 stir：加料后的搅拌由上位机按任务参数做")
+        issues.extend(_task_issues(config.get("task"), fixed, capabilities))
+    elif stir is not None or needs_default:
         if not isinstance(stir, dict) or kind_of(stir) != DEVICE or stir.get("kind") not in (None, "", DEVICE):
             issues.append("搅拌步骤模板 stir 必须是设备步骤（有类别加完要搅拌、又没写自己的加料后步骤）")
         else:
@@ -421,6 +450,63 @@ def template_issues(
     return issues
 
 
+def _not_last_issue(route: dict, label: str) -> list[str]:
+    not_last = route.get("not_last")
+    if "not_last" in route and not (isinstance(not_last, bool) or (isinstance(not_last, str) and not_last.strip())):
+        return [f"{label}的 not_last 只能是是或否，或写明原因的文字"]
+    return []
+
+
+def _task_issues(task: Any, fixed: dict[str, dict], capabilities: dict[str, dict]) -> list[str]:
+    """整任务方式：`task.step` 是一个固定设备步骤，`task.slots` 是它的能力里用来放各种料用量的参数（加料位），
+    按顺序一种料占一个。加料位都要是登记了单位的数值参数、单位相同——表格里每列的单位都按它核对。"""
+    if not isinstance(task, dict):
+        return ['task 要写成 {"step": 固定步骤 key, "slots": [加料位参数…]}']
+    issues: list[str] = []
+    step = fixed.get(task.get("step")) if isinstance(task.get("step"), str) else None
+    if step is None or kind_of(step) != DEVICE:
+        return [f"task.step 指向的 {task.get('step') or '（未填）'} 不是 prefix / suffix 里的设备固定步骤"]
+    label = f"整任务步骤「{step.get('name') or task['step']}」"
+    if step.get("material") or step.get("material_param") or step.get("materials"):
+        issues.append(f"{label}不用写 material / materials：投哪几种料按表格生成")
+    slots = task.get("slots")
+    if not isinstance(slots, list) or not slots or not all(isinstance(slot, str) and slot.strip() for slot in slots):
+        return [*issues, "task.slots 要列出加料位参数（至少一个）"]
+    if len(set(slots)) != len(slots):
+        issues.append("task.slots 里有重复的参数")
+    capability = capabilities.get(step.get("cap")) if isinstance(step.get("cap"), str) else None
+    if capability is None:
+        return issues  # 能力没登记已经在固定步骤里报过
+    units: set[str] = set()
+    for slot in slots:
+        if slot not in (capability.get("params") or {}):
+            issues.append(f"加料位 {slot} 不是能力 {step.get('cap')} 的参数")
+            continue
+        rule = spec_of(capability, slot)
+        if rule["type"] in ("enum", "program"):
+            issues.append(f"加料位 {slot} 不是数值参数")
+        elif not rule["unit"]:
+            issues.append(f"加料位 {slot} 没有登记单位，无法与表格单位对账")
+        else:
+            units.add(rule["unit"])
+    if len(units) > 1:
+        issues.append(f"加料位的单位不一致（{'、'.join(sorted(units))}）：表格各列按同一个单位核对")
+    return issues
+
+
+def task_slots(config: dict, capabilities: dict[str, dict] | None) -> tuple[list[str], str]:
+    """整任务方式的加料位与它们的单位（取第一个加料位登记的单位；没给能力表时为空）。"""
+    task = config.get("task") if isinstance(config.get("task"), dict) else {}
+    slots = [slot for slot in task.get("slots") or [] if isinstance(slot, str) and slot.strip()]
+    fixed = {
+        step.get("key"): step for _, steps in fixed_sections(config) for step in (steps if isinstance(steps, list) else [])
+        if isinstance(step, dict) and step.get("key")
+    }
+    step = fixed.get(task.get("step")) or {}
+    unit = spec_of((capabilities or {}).get(step.get("cap")), slots[0])["unit"] if slots and capabilities else ""
+    return slots, unit
+
+
 def _experiment_rule(row: dict, fixed: dict[str, dict], capabilities: dict[str, dict] | None) -> dict | None:
     """实验参数作用的那个能力参数的规格；指向不明或没给能力表时为 None（按数值处理）。"""
     step = fixed.get(row.get("step")) if isinstance(row.get("step"), str) else None
@@ -484,13 +570,23 @@ def _catalog_entry(catalog: dict[str, dict], name: str) -> tuple[str, dict] | No
     return (matches[0], catalog[matches[0]]) if len(matches) == 1 else None
 
 
-def _not_last_issues(rows: list[dict], stages: list[dict], dosed: list[dict]) -> list[str]:
+def _stage_order(stage: dict, dosed: list[dict], routes: dict) -> list[dict]:
+    """一个阶段里要加的料，按实际加料顺序：表格列顺序（缺省），或 `order: routes` 按 routes 里类别的先后、
+    同类再按表格顺序（sorted 稳定，dosed 本来就是表格顺序）。生成步骤与 not_last 检查按同一个顺序。"""
+    items = [item for item in dosed if item["stage"] == stage.get("key")]
+    if stage.get("order") == "routes":
+        rank = {category: position for position, category in enumerate(routes)}
+        items = sorted(items, key=lambda item: rank.get(item["category"], len(rank)))
+    return items
+
+
+def _not_last_issues(rows: list[dict], stages: list[dict], dosed: list[dict], routes: dict) -> list[str]:
     """按瓶核对类别的 `not_last`：这类料不能是一瓶在本阶段加的最后一种（写了原因就带上原因）。"""
     issues: list[str] = []
     for row in rows:
         for stage in stages:
-            added = [item for item in dosed
-                     if item["stage"] == stage.get("key") and row["amounts"].get(item["name"], 0) > 0]
+            added = [item for item in _stage_order(stage, dosed, routes)
+                     if row["amounts"].get(item["name"], 0) > 0]
             rule = added[-1]["route"].get("not_last") if added else None
             if rule:
                 reason = f"：{rule.strip()}" if isinstance(rule, str) else ""
@@ -610,6 +706,9 @@ def generate(
     warnings: list[str] = []
     default_unit = canonical_unit(config.get("unit"))
     routes = config.get("routes") or {}
+    # 整任务方式：一个固定设备步骤一步投完一瓶的全部组分（见模块说明）
+    task = config.get("task") if isinstance(config.get("task"), dict) else None
+    slots, task_unit = task_slots(config, capabilities) if task is not None else ([], "")
     stages = [stage for stage in config.get("stages") or [] if isinstance(stage, dict)]
     stage_label = {stage.get("key"): stage.get("label") or stage.get("key") for stage in stages}
     result: dict[str, Any] = {
@@ -730,13 +829,23 @@ def generate(
         col.update(kind="reagent", stage=route.get("stage") or "")
         step = route.get("step") or {}
         expected = default_unit
-        if capabilities is not None:
-            expected = spec_of(capabilities.get(step.get("cap") or ""), route.get("param") or "")["unit"]
-        if col["unit"] != expected:
-            issues.append(
-                f"列 {col['header']} 的单位 {col['unit'] or '（未写）'} 与「{category}」加法的用量参数 "
-                f"{route.get('param')} 的单位 {expected or '（未登记）'} 不同"
-            )
+        if task is not None:
+            # 整任务方式：几种料都落在加料位上，按加料位登记的单位核对
+            if capabilities is not None:
+                expected = task_unit
+            if col["unit"] != expected:
+                issues.append(
+                    f"列 {col['header']} 的单位 {col['unit'] or '（未写）'} 与整任务步骤加料位的单位 "
+                    f"{expected or '（未登记）'} 不同"
+                )
+        else:
+            if capabilities is not None:
+                expected = spec_of(capabilities.get(step.get("cap") or ""), route.get("param") or "")["unit"]
+            if col["unit"] != expected:
+                issues.append(
+                    f"列 {col['header']} 的单位 {col['unit'] or '（未写）'} 与「{category}」加法的用量参数 "
+                    f"{route.get('param')} 的单位 {expected or '（未登记）'} 不同"
+                )
         base = canonical_unit(entry.get("base_unit"))
         if base and base != col["unit"]:
             warnings.append(f"{name} 的物料主数据基本单位是 {base}，表格按 {col['unit']}：预留要有以 {col['unit']} 登记的已放行批号")
@@ -858,7 +967,7 @@ def generate(
         issues.append("表格里没有任何需要加料的试剂")
     elif not reagents and serial_col is not None:
         issues.append("表格里没有识别到任何试剂列")
-    issues.extend(_not_last_issues(rows, stages, dosed))
+    issues.extend(_not_last_issues(rows, stages, dosed, routes))
     volume_issues, volume_warnings = _volume_issues(config, values, reagents, rows, catalog)
     issues.extend(volume_issues)
     warnings.extend(volume_warnings)
@@ -873,7 +982,8 @@ def generate(
     steps: list[dict[str, Any]] = []
     fixed_ids: dict[str, str] = {}
     previous: list[str | None] = [None]
-    doses: list[tuple[dict, str]] = []
+    # (试剂, 投它的步骤, 用量参数)：方案因子按它作用
+    doses: list[tuple[dict, str, str]] = []
 
     def emit(step: dict, after: list[str | None]) -> str:
         step = {key: value for key, value in step.items() if key not in ("key", "after")}
@@ -889,6 +999,11 @@ def generate(
             after = [previous[0]] if chain else []
         fixed_ids[step.get("key")] = emit(copy.deepcopy(step), [*after, *extra])
 
+    if task is not None:
+        _task_steps(config, task, slots, stages, dosed, routes, add_fixed, steps, fixed_ids, doses, issues)
+        result["steps"] = steps
+        return _plan_and_recipe(result, config, values, rows, doses, row_param_specs, fixed_ids, stage_label,
+                                stages, issues, template_name, filename, description)
     for step in config.get("prefix") or []:
         add_fixed(step)
     # 阶段接在哪：第一个阶段的第一步写了 stage.after 就只等它们——从 prefix 里分叉出来，
@@ -897,7 +1012,6 @@ def generate(
     # 阶段写了 chain: false 就只接它的 stage.after，不接上一个阶段的尾巴；没汇合的尾巴由后面的阶段或后段一起接上
     forking = True
     dangling: list[str] = []
-    route_order = {category: position for position, category in enumerate(routes)}
     for number, stage in enumerate(stages):
         pending = [fixed_ids[ref] for ref in stage.get("after") or [] if ref in fixed_ids]
         detached = stage.get("chain") is False and number > 0 and bool(pending)
@@ -907,10 +1021,7 @@ def generate(
         elif dangling:
             pending = [*pending, *dangling]
             dangling = []
-        stage_doses = [item for item in dosed if item["stage"] == stage.get("key")]
-        if stage.get("order") == "routes":
-            # 按 routes 里类别的先后加，同类再按表格顺序（sorted 稳定，dosed 本来就是表格顺序）
-            stage_doses = sorted(stage_doses, key=lambda item: route_order.get(item["category"], len(route_order)))
+        stage_doses = _stage_order(stage, dosed, routes)
         dose_ids: list[str] = []
         stirs: list[tuple[dict, int]] = []
         for position, item in enumerate(stage_doses):
@@ -925,7 +1036,7 @@ def generate(
             step["params"] = {**(step.get("params") or {}), param: 0}
             step_id = emit(step, [*([] if (forking or detached) and pending else [previous[0]]), *pending])
             pending, forking, detached = [], False, False
-            doses.append((item, step_id))
+            doses.append((item, step_id, param))
             dose_ids.append(step_id)
             last = position == len(stage_doses) - 1
             stir = stage.get("stir_after_last", True) if last else route.get("stir_after", True)
@@ -951,14 +1062,48 @@ def generate(
         # 后段第一步把还没汇合的阶段尾巴一起接上
         add_fixed(step, dangling if position == 0 and "after" not in step else [])
     result["steps"] = steps
+    return _plan_and_recipe(result, config, values, rows, doses, row_param_specs, fixed_ids, stage_label, stages,
+                            issues, template_name, filename, description)
 
+
+def _task_steps(
+    config: dict, task: dict, slots: list[str], stages: list[dict], dosed: list[dict], routes: dict,
+    add_fixed: Any, steps: list[dict], fixed_ids: dict[str, str], doses: list, issues: list[str],
+) -> None:
+    """整任务方式的步骤：只有固定步骤（prefix → suffix），其中 `task.step` 一步投完全部组分。
+    这张表要加的料按阶段先后、阶段内的加料顺序依次占用加料位；表格没用到的加料位不写进步骤。"""
+    for step in config.get("prefix") or []:
+        add_fixed(step)
+    for step in config.get("suffix") or []:
+        add_fixed(step)
+    ordered = [item for stage in stages for item in _stage_order(stage, dosed, routes)]
+    if len(ordered) > len(slots):
+        issues.append(f"这张表要加 {len(ordered)} 种料，整任务步骤只有 {len(slots)} 个加料位（task.slots）")
+    step_id = fixed_ids.get(task.get("step"))
+    target = next((row for row in steps if row["step_id"] == step_id), None)
+    if target is None:
+        return
+    pairs = list(zip(ordered, slots))
+    target["consumes_materials"] = True
+    target["materials"] = [{"material": item["name"], "param": slot} for item, slot in pairs]
+    # 每瓶的量不属于流程：由方案因子按孔位给出，流程上写 0
+    target["params"] = {**(target.get("params") or {}), **{slot: 0 for _, slot in pairs}}
+    doses.extend((item, step_id, slot) for item, slot in pairs)
+
+
+def _plan_and_recipe(
+    result: dict[str, Any], config: dict, values: dict, rows: list[dict], doses: list, row_param_specs: list[dict],
+    fixed_ids: dict[str, str], stage_label: dict, stages: list[dict], issues: list[str], template_name: str,
+    filename: str, description: str,
+) -> dict[str, Any]:
+    """方案（每种料一个因子、实验参数与逐瓶参数各一个）与流程草稿的名称、说明。逐种料生成与整任务方式共用。"""
     # 方案：每个加料步骤一个因子（水平 = 各瓶用量去重排序），实验参数各一个单水平因子
     factors: list[dict[str, Any]] = []
-    for item, step_id in doses:
+    for item, step_id, param in doses:
         levels = sorted({row["amounts"][item["name"]] for row in rows})
         factors.append({
             "name": item["name"], "unit": item["unit"], "levels": levels,
-            "target": {"step_id": step_id, "param": item["route"].get("param")},
+            "target": {"step_id": step_id, "param": param},
             "material": {"name": item["name"], "unit": item["unit"], "per": 1},
         })
     experiment = [row for row in config.get("experiment_params") or [] if row.get("key") in values]
@@ -978,7 +1123,8 @@ def generate(
         })
     groups: dict[tuple, list[str]] = {}
     for row in rows:
-        point = (tuple(row["amounts"][item["name"]] for item, _ in doses) + tuple(values[r["key"]] for r in experiment)
+        point = (tuple(row["amounts"][item["name"]] for item, _, _ in doses)
+                 + tuple(values[r["key"]] for r in experiment)
                  + tuple((row.get("params") or {})[entry["key"]] for entry in per_row))
         groups.setdefault(point, []).append(row["serial"])
     counts = [len(serials) for serials in groups.values()]
@@ -1003,12 +1149,14 @@ def generate(
     }
 
     # 流程草稿：名称带试剂顺序，设计说明写模板说明 + 各阶段的加料顺序
-    order = "、".join(item["name"] for item, _ in doses)
+    order = "、".join(item["name"] for item, _, _ in doses)
     if len(order) > NAME_LIMIT:
         order = order[:NAME_LIMIT - 1] + "…"
+    def stage_sequence(stage: dict) -> str:
+        return " → ".join(item["name"] for item, _, _ in doses if item["stage"] == stage.get("key"))
+
     sequence = "；".join(
-        f"{stage_label.get(stage.get('key'))}：{' → '.join(item['name'] for item, _ in doses if item['stage'] == stage.get('key'))}"
-        for stage in stages if any(item["stage"] == stage.get("key") for item, _ in doses)
+        f"{stage_label.get(stage.get('key'))}：{stage_sequence(stage)}" for stage in stages if stage_sequence(stage)
     )
     prefix = (config.get("design") or description or "").strip()
     result["recipe"] = {

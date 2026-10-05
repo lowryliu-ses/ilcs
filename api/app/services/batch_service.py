@@ -777,6 +777,19 @@ class BatchService:
         return dosed
 
     @staticmethod
+    def _zero_plan_steps(steps: list[dict], zero_plan: list) -> int:
+        """投的料全是「方案给出用量、本批合计为 0」的消耗步骤有几步：这些步骤不需要 BOM。一步投几种料的，
+        只有每种料都是 0 才算——其中一种有量，这一步照样要预留、要投料许可。"""
+        from ..domain.steps import normalize, step_materials
+
+        rows = normalize(steps or [])
+        zero: dict[int, set[str]] = {}
+        for row in zero_plan:
+            zero.setdefault(row.index, set()).add(row.material)
+        return sum(1 for index, names in zero.items()
+                   if index < len(rows) and set(step_materials(rows[index])) <= names)
+
+    @staticmethod
     def plan_materials(
         factors: list[dict], rows: list[dict], bom: list[dict], steps: list[dict],
         capabilities: dict[str, dict] | None = None,
@@ -1327,7 +1340,7 @@ class BatchService:
             resource_checks=resource_checks,
             reservations=reservations,
             bom_items=snapshot.get("bom") or [],
-            material_steps=len([s for s in steps if consumes_materials(s)]) - len(zero_plan),
+            material_steps=len([s for s in steps if consumes_materials(s)]) - self._zero_plan_steps(steps, zero_plan),
             zero_plan_materials=list(dict.fromkeys(row.material for row in zero_plan)),
             bom_satisfied=self.materials.bom_satisfied(batch.id, snapshot.get("bom") or []),
             expired_lots=self.materials.expired_reserved_lots(batch.id),

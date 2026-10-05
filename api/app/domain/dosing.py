@@ -14,12 +14,18 @@ from .params import canonical_unit, decimal_of, spec_of
 QUANTUM = Decimal("0.000001")
 
 
-def dosing_param(step: dict[str, Any] | None, capability: dict | None, unit: str) -> str:
+def dosing_param(step: dict[str, Any] | None, capability: dict | None, unit: str, material: str = "") -> str:
     """这一步的用量参数。步骤写了 `material_param` 就用它；没写就在能力参数里找登记单位等于物料单位的，
     恰好一个才用。推断不出（没有或有歧义）返回空串：宁可不回报、不对账，也不拿错参数去算。
 
+    一步投几种料（`materials`）时按 `material` 取那一项写明的参数，不按单位推——几种料同一单位，推出来的不知道是谁的。
+
     `capability` 是 `{"params": {...}, "param_specs": {...}}`（能力登记的原样）。
     """
+    rows = (step or {}).get("materials")
+    if isinstance(rows, list) and rows:
+        return next((str(row.get("param") or "").strip() for row in rows
+                     if isinstance(row, dict) and row.get("material") == material), "")
     explicit = str((step or {}).get("material_param") or "").strip()
     if explicit:
         return explicit

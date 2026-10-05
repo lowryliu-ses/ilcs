@@ -16,7 +16,7 @@ from typing import Any
 
 from .dosing import dosing_param
 from .params import decimal_of
-from .steps import DEVICE, kind_of, normalize, step_id_of, step_material
+from .steps import DEVICE, kind_of, normalize, step_doses, step_id_of
 
 
 @dataclass(frozen=True)
@@ -49,68 +49,74 @@ def plan_dosed_steps(
     factors = [f for f in factors or []]
     out: list[DosedStep] = []
     for index, step in enumerate(normalize(steps or [])):
-        material = step_material(step)
-        if not material or material in listed:
-            continue
-        step_id = step_id_of(step, index)
-        name = str(step.get("name") or step_id)
-        label = f"第 {index + 1} 步「{name}」"
-
-        def add(factor: int | None, problem: str) -> None:
-            out.append(DosedStep(index, step_id, name, material, factor, problem))
-
-        groups = step.get("groups") or []
-        if groups:
-            group = groups[-1] or {}
-            add(None, (
-                f"子流程「{group.get('name') or group.get('step_id') or ''}」里的「{name}」投 {material}，"
-                f"被引用流程的 BOM 没列用量；子流程内的步骤不能由方案因子给出用量，请在被引用流程的 BOM 里列出 {material}"
-            ))
-            continue
-        if kind_of(step) != DEVICE:
-            add(None, (
-                f"{label}是人工步骤，投的 {material} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，"
-                f"方案因子给不出，请修订流程把它加进 BOM"
-            ))
-            continue
-        capability = (capabilities or {}).get(str(step.get("cap") or "")) or {}
-        qualified: list[int] = []
-        reasons: list[str] = []
-        for position, factor in enumerate(factors):
-            if not isinstance(factor, dict):
-                continue
-            spec = factor.get("material") or {}
-            target = factor.get("target") or {}
-            if str(spec.get("name") or "") != material or str(target.get("step_id") or "") != step_id:
-                continue
-            title = f"因子「{factor.get('name') or '未命名因子'}」"
-            unit = str(spec.get("unit") or "").strip()
-            per = decimal_of(spec.get("per"))
-            param = dosing_param(step, capability, unit) if unit else ""
-            aimed = str(target.get("param") or "")
-            if not unit:
-                reasons.append(f"{title}没写物料单位，建批次无法按单位预留")
-            elif not param:
-                reasons.append(
-                    f"按物料单位 {unit} 推断不出「{name}」的用量参数（能力里没有或不止一个 {unit} 参数），"
-                    f"请在流程步骤里指定用量参数"
-                )
-            elif aimed != param:
-                reasons.append(f"{title}作用在 {aimed or '未选择的参数'}，这一步的用量取 {param}")
-            elif per is None or per <= Decimal(0):
-                reasons.append(f"{title}的每单位用量（per）没填或不大于 0，建批次算不出预留量")
-            else:
-                qualified.append(position)
-        if len(qualified) == 1:
-            add(qualified[0], "")
-        elif qualified:
-            names = "、".join(f"「{factors[p].get('name') or '未命名因子'}」" for p in qualified)
-            add(None, f"{label}投 {material}，有 {len(qualified)} 个因子都给出它的用量（{names}），只能有一个")
-        elif reasons:
-            add(None, f"{label}投 {material}：{'；'.join(reasons)}")
-        else:
-            add(None, f"{label}投 {material}，流程 BOM 没列用量，方案里也没有给出 {material} 用量的因子")
+        # 一步投几种料（整线一个任务投完一瓶的全部组分）时逐种料各认一个因子
+        for material, _ in step_doses(step):
+            if material not in listed:
+                out.append(_dosed(step, index, material, factors, capabilities))
     return out
+
+
+def _dosed(
+    step: dict[str, Any], index: int, material: str, factors: list[dict], capabilities: dict[str, dict] | None,
+) -> DosedStep:
+    """这一步的这种料由哪个因子给出用量；对不上时 `problem` 写明原因。"""
+    step_id = step_id_of(step, index)
+    name = str(step.get("name") or step_id)
+    label = f"第 {index + 1} 步「{name}」"
+
+    def found(factor: int | None, problem: str) -> DosedStep:
+        return DosedStep(index, step_id, name, material, factor, problem)
+
+    groups = step.get("groups") or []
+    if groups:
+        group = groups[-1] or {}
+        return found(None, (
+            f"子流程「{group.get('name') or group.get('step_id') or ''}」里的「{name}」投 {material}，"
+            f"被引用流程的 BOM 没列用量；子流程内的步骤不能由方案因子给出用量，请在被引用流程的 BOM 里列出 {material}"
+        ))
+    if kind_of(step) != DEVICE:
+        return found(None, (
+            f"{label}是人工步骤，投的 {material} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，"
+            f"方案因子给不出，请修订流程把它加进 BOM"
+        ))
+    capability = (capabilities or {}).get(str(step.get("cap") or "")) or {}
+    qualified: list[int] = []
+    reasons: list[str] = []
+    for position, factor in enumerate(factors):
+        if not isinstance(factor, dict):
+            continue
+        spec = factor.get("material") or {}
+        target = factor.get("target") or {}
+        if str(spec.get("name") or "") != material or str(target.get("step_id") or "") != step_id:
+            continue
+        title = f"因子「{factor.get('name') or '未命名因子'}」"
+        unit = str(spec.get("unit") or "").strip()
+        per = decimal_of(spec.get("per"))
+        param = dosing_param(step, capability, unit, material) if unit else ""
+        aimed = str(target.get("param") or "")
+        if not unit:
+            reasons.append(f"{title}没写物料单位，建批次无法按单位预留")
+        elif not param:
+            reasons.append(
+                f"按物料单位 {unit} 推断不出「{name}」的用量参数（能力里没有或不止一个 {unit} 参数），"
+                f"请在流程步骤里指定用量参数"
+            )
+        elif aimed != param:
+            # 一步投几种料时说清是哪种料的用量参数
+            whose = f" {material} " if isinstance(step.get("materials"), list) and step["materials"] else ""
+            reasons.append(f"{title}作用在 {aimed or '未选择的参数'}，这一步{whose}的用量取 {param}")
+        elif per is None or per <= Decimal(0):
+            reasons.append(f"{title}的每单位用量（per）没填或不大于 0，建批次算不出预留量")
+        else:
+            qualified.append(position)
+    if len(qualified) == 1:
+        return found(qualified[0], "")
+    if qualified:
+        names = "、".join(f"「{factors[p].get('name') or '未命名因子'}」" for p in qualified)
+        return found(None, f"{label}投 {material}，有 {len(qualified)} 个因子都给出它的用量（{names}），只能有一个")
+    if reasons:
+        return found(None, f"{label}投 {material}：{'；'.join(reasons)}")
+    return found(None, f"{label}投 {material}，流程 BOM 没列用量，方案里也没有给出 {material} 用量的因子")
 
 
 def dosing_factors(

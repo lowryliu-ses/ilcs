@@ -631,3 +631,117 @@ def test_volume_check_uses_registered_densities_and_volume_columns():
     mixed = generate([header, ["A-1", 13.2, 10]], config=config, params={"volume": 10},
                      catalog={**CATALOG, "EC": catalog["EC"]})
     assert "按物料主数据登记的密度估算，没登记的按 1.25 g/mL" in mixed["issues"][0]
+
+
+# ---------- 整任务方式：上位机收整份任务，一个步骤投完一瓶的全部组分 ----------
+
+SLOTS = [f"m{index:02d}" for index in range(1, 13)]
+
+
+def task_capabilities(prefix: str = "cap.t.") -> dict[str, dict]:
+    specs = capability_specs(prefix)
+    specs[f"{prefix}run"] = {
+        "name": "整线实验任务", "retired": False,
+        "params": {**{slot: f"加料位 {int(slot[1:])}" for slot in SLOTS}, "mix_time": "终混时间",
+                   "bottles": "分装瓶数", "volume": "每瓶分装量"},
+        "param_specs": {**{slot: {"type": "number", "unit": "g", "required": False} for slot in SLOTS},
+                        "mix_time": {"type": "number", "unit": "s"},
+                        "bottles": {"type": "integer", "unit": "瓶"}, "volume": {"type": "number", "unit": "mL"}},
+    }
+    return specs
+
+
+def task_config(prefix: str = "cap.t.") -> dict:
+    """整任务方式的参考模板：人工上料与扫码 → 上位机整任务（一步投完全部组分）。"""
+    base = template_config(prefix)
+    run = {"kind": "device", "key": "run", "name": "A-Lab 实验任务", "cap": f"{prefix}run",
+           "params": {"mix_time": 3600, "bottles": 2, "volume": 20}, "dur": 240, "after": ["scan"]}
+    return {
+        **{key: base[key] for key in ("plate", "risk", "design", "unit", "sample_type", "serial_headers",
+                                       "required_metrics")},
+        "prefix": [*base["prefix"][:3], run],
+        "stages": [{"key": "liquid", "label": "液体"}, {"key": "salt", "label": "锂盐与添加剂", "order": "routes"}],
+        "routes": {
+            "预热溶剂": {"stage": "liquid", "not_last": "EC 常温是固体"},
+            "溶剂": {"stage": "liquid"}, "添加剂": {"stage": "salt"}, "锂盐": {"stage": "salt"},
+        },
+        "task": {"step": "run", "slots": SLOTS},
+        "experiment_params": [
+            {"key": "bottles", "label": "分装瓶数", "step": "run", "param": "bottles", "unit": "瓶", "default": 2},
+            {"key": "volume", "label": "每瓶分装量", "step": "run", "param": "volume", "unit": "mL", "default": 20},
+        ],
+    }
+
+
+def generate_task(table, config=None, params=None):
+    return rules.generate(config or task_config(), CATALOG, table, params or {},
+                          capabilities=task_capabilities(), filename="formula.csv", template_name="A-Lab")
+
+
+def test_task_template_is_valid_and_rejects_step_mode_fields():
+    capabilities = task_capabilities()
+    assert rules.template_issues(task_config(), capabilities, {}, {METRIC}) == []
+
+    broken = task_config()
+    broken["stages"][0]["then"] = [{"kind": "device", "key": "x", "name": "拧盖", "cap": "cap.t.capper",
+                                    "params": {"torque": 10}}]
+    broken["routes"]["溶剂"]["step"] = {"kind": "device", "name": "{material} 加注", "cap": "cap.t.dose_liquid"}
+    broken["stir"] = {"kind": "device", "name": "搅拌", "cap": "cap.t.stir"}
+    issues = rules.template_issues(broken, capabilities, {}, {METRIC})
+    assert any("阶段「液体」只写 key、label、order，then 不用写" in issue for issue in issues), issues
+    assert any("加法「溶剂」只写阶段 stage 与 not_last，step 不用写" in issue for issue in issues), issues
+    assert any("不写搅拌步骤模板 stir" in issue for issue in issues), issues
+
+    def task_problem(task):
+        config = task_config()
+        config["task"] = task
+        return rules.template_issues(config, capabilities, {}, {METRIC})
+
+    assert task_problem({"step": "scan", "slots": SLOTS}) == [
+        "task.step 指向的 scan 不是 prefix / suffix 里的设备固定步骤"]
+    assert task_problem({"step": "run", "slots": []}) == ["task.slots 要列出加料位参数（至少一个）"]
+    assert "加料位 x9 不是能力 cap.t.run 的参数" in task_problem({"step": "run", "slots": ["m01", "x9"]})
+    assert "加料位的单位不一致（g、s）：表格各列按同一个单位核对" in task_problem(
+        {"step": "run", "slots": ["m01", "mix_time"]})
+
+
+def test_task_mode_puts_every_dosed_material_on_the_one_task_step_in_addition_order():
+    header = ["序列号", "EC (g)", "EMC(g)", "LiPF6(g)", "VC(g)", "FEC(g)"]
+    table = [header, ["ELY-T01", 12, 20, 6, 1, 0], ["ELY-T02", 12, 20, 6, 0, 0], ["ELY-T03", 10, 22, 6, 1, 0]]
+    result = generate_task(table)
+    assert result["issues"] == [], result["issues"]
+    steps = result["steps"]
+    assert [step["name"] for step in steps] == ["过渡舱载入空瓶", "手动分装物料", "手动扫码核对瓶身序列号", "A-Lab 实验任务"]
+    run = steps[-1]
+    # FEC 整列为 0 不投；锂盐与添加剂阶段按 routes 里类别的先后：添加剂（VC）在锂盐（LiPF6）前
+    assert run["materials"] == [
+        {"material": "EC", "param": "m01"}, {"material": "EMC", "param": "m02"},
+        {"material": "VC", "param": "m03"}, {"material": "LiPF6", "param": "m04"},
+    ]
+    assert run["consumes_materials"] is True and run["after"] == ["s03"]
+    assert run["params"] == {"mix_time": 3600, "bottles": 2, "volume": 20, "m01": 0, "m02": 0, "m03": 0, "m04": 0}
+    assert steps_rules.material_issues(run) == []
+    factors = {factor["name"]: factor for factor in result["plan"]["factors"]}
+    assert factors["VC"]["target"] == {"step_id": run["step_id"], "param": "m03"}
+    assert factors["VC"]["levels"] == [0, 1] and factors["VC"]["material"] == {"name": "VC", "unit": "g", "per": 1}
+    assert factors["分装瓶数"]["target"] == {"step_id": run["step_id"], "param": "bottles"}
+    assert result["plan"]["sample_ids"] == ["ELY-T01", "ELY-T02", "ELY-T03"]
+    assert "加料顺序 液体：EC → EMC；锂盐与添加剂：VC → LiPF6" in result["recipe"]["design"]
+
+    # 同样几种料、同样顺序、量不同的下一张表：步骤完全一样（沿用同一个已发布流程）
+    again = generate_task([header, ["ELY-T11", 11, 21, 5, 2, 0]])
+    assert again["steps"] == steps
+
+
+def test_task_mode_checks_units_slots_and_not_last_in_addition_order():
+    # 单位按加料位（g）核对
+    assert "列 EMC(mL) 的单位 mL 与整任务步骤加料位的单位 g 不同" in generate_task(
+        [["序列号", "EC (g)", "EMC(mL)"], ["ELY-U01", 10, 20]])["issues"]
+    # 加料位不够
+    config = task_config()
+    config["task"]["slots"] = ["m01", "m02"]
+    assert "这张表要加 3 种料，整任务步骤只有 2 个加料位（task.slots）" in generate_task(
+        [["序列号", "EC (g)", "EMC(g)", "VC(g)"], ["ELY-U02", 10, 20, 1]], config)["issues"]
+    # not_last 按实际加料顺序：这瓶液体阶段只有 EC
+    issues = generate_task([["序列号", "EC (g)", "EMC(g)", "LiPF6(g)"], ["ELY-U03", 10, 0, 5]])["issues"]
+    assert any("EC 之后在「液体」阶段没有再加别的料：EC 常温是固体" in issue for issue in issues), issues

@@ -646,7 +646,14 @@ function PreviewPanels({
                   {kindOf(step) === 'device' && step.cap ? <div className="tiny muted">{capName[step.cap] ?? step.cap}</div> : null}
                 </td>
                 <td className="small">
-                  {step.material ? (
+                  {step.materials?.length ? (
+                    // 整任务：一步按顺序投几种料
+                    step.materials.map((row, order) => (
+                      <span key={row.material} className="tag" title={`第 ${order + 1} 种 · 用量取 ${row.param}`}>
+                        {order + 1}. {row.material}
+                      </span>
+                    ))
+                  ) : step.material ? (
                     <>
                       <span className="tag">{step.material}</span>
                       {step.material_param ? <span className="tiny muted"> · {step.material_param}</span> : null}
@@ -663,6 +670,48 @@ function PreviewPanels({
           </tbody>
         </table>
       </Panel>
+    </>
+  );
+}
+
+/* 整任务方式的规则：前后段固定步骤，中间一个设备步骤按顺序投完一瓶的全部组分（上位机执行加料与搅拌） */
+function TaskRules({ config, fixedName }: { config: FormulationTemplateConfig; fixedName: Record<string, string> }) {
+  const stages = config.stages ?? [];
+  const routes = Object.entries(config.routes ?? {});
+  const names = (rows: { name: string }[] | undefined) => (rows ?? []).map((row) => row.name).join(' → ') || '无';
+  const task = config.task!;
+  return (
+    <>
+      <div>
+        <div className="small muted">整任务：上位机按顺序执行</div>
+        <ol className="small">
+          <li>加料前固定步骤：{names(config.prefix)}</li>
+          <li>
+            整任务步骤「{fixedName[task.step] ?? task.step}」一步投完一瓶的全部组分，加料顺序：
+            {stages
+              .map((stage) => {
+                const categories = routes.filter(([, route]) => route.stage === stage.key).map(([category]) => category);
+                return `${stage.label}（${stage.order === 'routes' ? '按类别先后' : '按表格列顺序'}：${categories.join('、') || '—'}）`;
+              })
+              .join(' → ')}
+            <div className="tiny muted">
+              表格里要加的料按这个顺序依次写进加料位 <span className="mono">{task.slots.join('、')}</span>；某瓶某种料是 0，上位机这瓶跳过它
+            </div>
+          </li>
+          <li>加料后固定步骤：{names(config.suffix)}</li>
+        </ol>
+      </div>
+      {routes.some(([, route]) => route.not_last) ? (
+        <ul className="tiny muted">
+          {routes
+            .filter(([, route]) => route.not_last)
+            .map(([category, route]) => (
+              <li key={category}>
+                {category}不能是一瓶在本阶段加的最后一种{typeof route.not_last === 'string' ? `：${route.not_last}` : ''}
+              </li>
+            ))}
+        </ul>
+      ) : null}
     </>
   );
 }
@@ -759,6 +808,10 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
         ) : null}
       </div>
 
+      {config.task ? (
+        <TaskRules config={config} fixedName={fixedName} />
+      ) : (
+      <>
       <div>
         <div className="small muted">阶段顺序</div>
         <ol className="small">
@@ -821,6 +874,8 @@ function TemplateRules({ template, loading }: { template: FormulationTemplate | 
         「紧跟搅拌」指不是本阶段最后一个加料时；最后一个按阶段规则。搅拌步骤：{config.stir?.name?.replace('{material}', '…') ?? '未配置'}。
         搅拌按瓶执行：某瓶这种料是 0，这瓶跳过加料和随后的搅拌，「最后一个」也按这瓶自己加的料算。
       </div>
+      </>
+      )}
 
       {config.experiment_params?.length ? (
         <div>

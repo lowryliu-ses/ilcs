@@ -6,6 +6,9 @@
 - 同结构的配方表（加哪几种料、什么顺序都一样，只是量不同）沿用已有流程：每瓶的量在方案因子上，
   流程不变就不必重新评审。沿用优先已发布 > 已批准 > 评审中 > 草稿。
 - 导入本身不提交、不批准：之后仍由人提交流程评审 → QA 批准发布 → 锁定并提交方案 → QA 批准方案 → 建批次。
+- 上游系统（AI 配方预测、实验设计平台）用服务身份提交（`submit`）：授权范围 `formulation_imports` 列出它能向哪些模板
+  提交，按它给的请求编号去重；生成的同样只是草稿，评审、批准、建批次、签名下发照旧由人做（提交方不是审批人）。
+  提交方按请求编号查进度（`progress`）：流程与方案的审批状态、实验任务、批次，已复核的结果标明是否进正式统计。
 - 一瓶一配方：表里的序列号是要配液的空瓶。已登记、还没进过任何批次的沿用（提醒一句）；
   已经在某个批次里有运行分配（配过液）的整张表拒绝——跑批次不改物理样本的状态，只能按运行分配判断。
   预览就把这些列出来，导入时再按同一规则核一次。
@@ -13,6 +16,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from typing import Any
@@ -21,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from ...core.clock import now
 from ...core.context import AccessContext
-from ...core.errors import NotFound, StateConflict, ValidationFailed
+from ...core.errors import NotFound, PermissionDenied, StateConflict, ValidationFailed
 from .spreadsheet import SpreadsheetError, check_limits, read_sheet
 from ...domain.recipe_rules import validate_steps
 from ...domain.steps import normalize
@@ -35,8 +39,8 @@ from ...repositories.samples import PhysicalSampleRepository
 from ...services.audit_service import AuditService
 from ...services.sample_service import UNUSABLE_SAMPLE
 from . import rules
-from .models import FormulationTemplate
-from .repository import FormulationTemplateRepository
+from .models import FormulationSubmission, FormulationTemplate
+from .repository import FormulationSubmissionRepository, FormulationTemplateRepository
 
 CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$")
 STATE_LABEL = {"active": "在用", "retired": "已退役"}
@@ -54,6 +58,7 @@ class FormulationService:
         self.db = db
         self.ctx = ctx
         self.templates = FormulationTemplateRepository(db, ctx)
+        self.submissions = FormulationSubmissionRepository(db, ctx)
         self.capabilities = CapabilityRepository(db)
         self.methods = DeviceMethodRepository(db, ctx)
         self.metrics = MetricRepository(db, ctx)
@@ -294,8 +299,13 @@ class FormulationService:
 
     # ---------- 导入 ----------
 
-    def import_table(self, template_id: str, payload: dict[str, Any], user: User) -> dict[str, Any]:
-        """一个事务：登记（或沿用）瓶子 → 沿用或新建流程草稿 → 新建方案草稿 → 审计。"""
+    def import_table(
+        self, template_id: str, payload: dict[str, Any], user: User | None,
+        submission: FormulationSubmission | None = None,
+    ) -> dict[str, Any]:
+        """一个事务：登记（或沿用）瓶子 → 沿用或新建流程草稿 → 新建方案草稿 → 审计。
+
+        `user` 为空是服务身份在提交（见 `submit`）：起草人记成这个服务身份；`submission` 随最后一次提交一起落库。"""
         template = self._active(template_id)
         filename = str(payload.get("filename") or "").strip() or "未命名表格"
         result = self._generate(template, filename, payload.get("table") or [], payload.get("params") or {},
@@ -321,19 +331,139 @@ class FormulationService:
             "sample_ids": plan_spec["sample_ids"], "required_metrics": plan_spec["required_metrics"],
         }, user)
         created = sum(1 for row in samples if row["created"])
+        via = f"（{self.ctx.subject_label or '外部系统'} 提交，请求 {submission.request_id}）" if submission else ""
         self.audit.record(
             user, "配方表导入", template.id, after=plan["id"], object_version=template.row_version,
-            detail=f"{filename}；模板 {template.code}；流程 {recipe.id}（{'沿用' if reused else '新建草稿'}）；"
+            detail=f"{filename}{via}；模板 {template.code}；流程 {recipe.id}（{'沿用' if reused else '新建草稿'}）；"
                    f"方案 {plan['id']}；{len(result['plan']['design_points'])} 个配方、{len(samples)} 瓶"
                    f"（新登记 {created}，沿用 {len(samples) - created}）",
         )
-        self.db.commit()
-        return {
+        out = {
             "template_id": template.id,
             "recipe": {"id": recipe.id, "name": recipe.name, "state": recipe.state, "reused": reused},
             "plan": {"id": plan["id"], "name": plan["name"], "state": plan["state"]},
             "samples": samples,
             "warnings": result["warnings"],
+        }
+        if submission is not None:
+            submission.plan_id, submission.recipe_id = plan["id"], recipe.id
+            submission.result = {"request_id": submission.request_id, "template": template.code, **out}
+            self.submissions.add(submission)
+        self.db.commit()
+        return out
+
+    # ---------- 外部系统提交（服务身份） ----------
+
+    def _service_template(self, code: str) -> FormulationTemplate:
+        """服务身份要在 `formulation_imports` 里被授权这个模板（all 或模板编号）。别的组织的、不存在的一律 404。"""
+        if not self.ctx.is_service:
+            raise PermissionDenied("这个入口只给服务身份用；人员在「配方导入」页面导入", code="service_only")
+        if not service_may_import(self.ctx.scopes, code):
+            raise PermissionDenied(f"该服务身份没有向配液模板 {code} 提交配方表的授权",
+                                   code="formulation_import_not_authorized")
+        template = self.templates.by_code(code)
+        if template is None:
+            raise NotFound("配液模板不存在")
+        return template
+
+    def submit(self, code: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """上游系统提交一张配方表：与界面导入同一套校验与生成，生成的是流程与方案草稿。按请求编号去重：
+        同一编号同一内容回放首次结果（`replayed: true`），内容不同 409；表格有问题 422 列出全部问题，什么都不建。"""
+        template = self._service_template(code)
+        request_id = str(payload.get("request_id") or "").strip()
+        body = {key: payload.get(key) for key in ("filename", "table", "params", "plan_name")}
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode()
+        ).hexdigest()
+        existing = self.submissions.find(self.ctx.subject_id, request_id)
+        if existing is not None:
+            if existing.digest != digest or existing.template_id != template.id:
+                raise StateConflict(f"请求编号 {request_id} 已经提交过，内容与这次不一致：换一个请求编号",
+                                    code="submission_conflict")
+            return {**existing.result, "replayed": True}
+        submission = FormulationSubmission(
+            org_id=self.ctx.org_id, service_id=self.ctx.subject_id, source=self.ctx.subject_label or "",
+            request_id=request_id, digest=digest, template_id=template.id, template_code=template.code,
+            filename=str(body.get("filename") or "").strip(), plan_id="", recipe_id="", created_at=now(),
+        )
+        self.import_table(template.id, {**body, "filename": body.get("filename") or f"外部提交 {request_id}"},
+                          None, submission=submission)
+        return {**submission.result, "replayed": False}
+
+    def progress(self, code: str, request_id: str) -> dict[str, Any]:
+        """提交方按请求编号查进度：流程与方案的审批状态、实验任务、批次进度、每瓶的检测结果。只看得到自己提交的。
+
+        结果标明复核状态与是否进正式统计（`official`）：审核通过、质量有效、没被更正版本取代的才算；
+        模拟设备的示意值照实标出来（`simulated`），不冒充实测。曲线只给点数，完整的点按结果编号去取。"""
+        from ...domain.statistics import EXCLUSION_REASONS
+        from ...models import Batch, ExperimentTask, Report, ResultValue
+        from ...repositories.batches import AnalysisTaskRepository
+        from ...repositories.recipes import PlanRepository
+        from ...services.batch_service import BatchService
+
+        template = self._service_template(code)
+        row = self.submissions.find(self.ctx.subject_id, str(request_id or "").strip())
+        if row is None or row.template_id != template.id:
+            raise NotFound("没有这个请求编号的提交")
+        plan = PlanRepository(self.db, self.ctx).get(row.plan_id)
+        recipe = self.recipes.get(row.recipe_id)
+        tasks = (self.db.query(ExperimentTask)
+                 .filter(ExperimentTask.org_id == self.ctx.org_id, ExperimentTask.plan_id == row.plan_id)
+                 .order_by(ExperimentTask.id).all())
+        batches = (self.db.query(Batch).filter(Batch.org_id == self.ctx.org_id, Batch.plan_id == row.plan_id)
+                   .order_by(Batch.created_at).all())
+        batch_service = BatchService(self.db, self.ctx)
+        batch_rows = []
+        for batch in batches:
+            summary = batch_service.summary_out(batch)
+            batch_rows.append({key: summary.get(key) for key in (
+                "id", "state", "state_label", "task_id", "step_count", "current_step", "sample_count",
+                "sample_done", "starts_at", "ends_at", "failure_reason",
+            )})
+        tasks_of = AnalysisTaskRepository(self.db, self.ctx)
+        analysis = [task for batch in batches for task in tasks_of.for_batch(batch.id)]
+        values = (self.db.query(ResultValue)
+                  .filter(ResultValue.org_id == self.ctx.org_id,
+                          ResultValue.analysis_task_id.in_([task.id for task in analysis]),
+                          ResultValue.superseded_by_id == "")
+                  .order_by(ResultValue.physical_sample_id, ResultValue.created_at).all()
+                  if analysis else [])
+        definitions = self.metrics.many(sorted({value.metric_definition_id for value in values}))
+        results = []
+        for value in values:
+            definition = definitions.get(value.metric_definition_id)
+            reason = _official_reason(value)
+            flags = {flag.get("code") for flag in value.flags or [] if isinstance(flag, dict)}
+            series = value.value_series or None
+            results.append({
+                "result_id": value.id, "sample_id": value.physical_sample_id,
+                "metric": definition.code if definition else value.metric_definition_id,
+                "metric_name": definition.name if definition else "",
+                "value": value.value_num if value.value_num is not None else (value.value_text or None),
+                "series_points": sum(len(trace.get("x") or []) for trace in (series or {}).get("traces") or [])
+                if series else None,
+                "unit": value.unit, "review_state": value.review_state, "quality": value.quality,
+                "official": reason is None, "excluded": EXCLUSION_REASONS.get(reason, "") if reason else "",
+                "simulated": "simulated" in flags, "station_id": value.station_id,
+            })
+        batch_ids = [batch.id for batch in batches]
+        reports = self.db.query(Report).filter(
+            Report.org_id == self.ctx.org_id,
+            (Report.plan_id == row.plan_id) | Report.batch_id.in_(batch_ids or [""]),
+        ).all()
+        return {
+            "request_id": row.request_id, "template": row.template_code,
+            "submitted_at": row.created_at.isoformat(timespec="seconds"),
+            "recipe": {"id": recipe.id, "name": recipe.name, "state": recipe.state, "version": recipe.version}
+            if recipe else {"id": row.recipe_id},
+            "plan": {"id": plan.id, "name": plan.name, "state": plan.state, "approval_state": plan.approval_state,
+                     "version": plan.version} if plan else {"id": row.plan_id},
+            "samples": [item["id"] for item in (row.result or {}).get("samples") or []],
+            "tasks": [{"id": task.id, "state": task.state, "batch_id": task.batch_id, "parent_id": task.parent_id}
+                      for task in tasks],
+            "batches": batch_rows,
+            "results": results,
+            "reports": [{"id": report.id, "code": report.code, "title": report.title} for report in reports],
         }
 
     def _sample_check(self, serials: list[str]) -> tuple[list[str], list[str], dict[str, PhysicalSample | None]]:
@@ -371,8 +501,14 @@ class FormulationService:
                 problems.append(f"序列号 {serial} 已是样本 {holder.id} 的条码")
         return problems, notes, existing
 
+    def _actor_name(self, user: User | None) -> str:
+        return user.display_name if user is not None else (self.ctx.subject_label or "外部系统")
+
+    def _actor_id(self, user: User | None) -> str:
+        return user.id if user is not None else f"service:{self.ctx.subject_id}"
+
     def _register_samples(self, serials: list[str], template: FormulationTemplate, filename: str,
-                          config: dict, user: User, warnings: list[str]) -> list[dict[str, Any]]:
+                          config: dict, user: User | None, warnings: list[str]) -> list[dict[str, Any]]:
         """瓶身序列号 → 物理样本。已登记且没配过液的沿用；配过液、报废 / 耗尽的整张表拒绝（先全部核对，再写）。"""
         problems, notes, existing = self._sample_check(serials)
         warnings.extend(notes)
@@ -388,8 +524,8 @@ class FormulationService:
             # 与样本登记同一套字段：编号与条码都是瓶身序列号，扫码即可找到
             sample = PhysicalSample(
                 id=serial, org_id=self.ctx.org_id, barcode=serial, source=source,
-                sample_type=str(config.get("sample_type") or ""), custodian=user.display_name,
-                lifecycle_state="registered", origin="registered", created_by=user.id,
+                sample_type=str(config.get("sample_type") or ""), custodian=self._actor_name(user),
+                lifecycle_state="registered", origin="registered", created_by=self._actor_id(user),
             )
             self.samples.add(sample)
             self.audit.record(user, "登记样本", sample.id, before="—", after="已登记",
@@ -432,7 +568,7 @@ class FormulationService:
         result["recipe"]["sop_version_id"] = version.id
         result["recipe"]["sop"] = {"code": code, "version": version.version, "title": sop.title}
 
-    def _recipe_for(self, result: dict[str, Any], user: User, filename: str, template: FormulationTemplate):
+    def _recipe_for(self, result: dict[str, Any], user: User | None, filename: str, template: FormulationTemplate):
         """同结构沿用：步骤完全一致（含对应的 SOP 步骤）、关联同一版 SOP、每批样品位一致、BOM 为空、没退役、
         没被标记待修订。SOP 出了新版本，旧版本的流程就不再沿用，按新版本生成。"""
         steps, spec = result["steps"], result["recipe"]
@@ -460,6 +596,25 @@ class FormulationService:
     def _number(recipe_id: str) -> int:
         digits = re.sub(r"\D", "", recipe_id or "")
         return int(digits) if digits else 0
+
+
+def service_may_import(scopes: dict | None, code: str) -> bool:
+    """服务身份的 `formulation_imports`：all，或允许提交的配液模板编号列表。"""
+    granted = (scopes or {}).get("formulation_imports")
+    return granted == "all" or (isinstance(granted, list) and code in granted)
+
+
+def _official_reason(value) -> str | None:
+    """一条结果为什么不进正式统计（与 domain.statistics 同一套原因）；进的话 None。曲线不算数值，不按这条判。"""
+    if value.superseded_by_id:
+        return "superseded"
+    if value.not_measured_reason or (value.value_num is None and not value.value_text and not value.value_series):
+        return "not_measured"
+    if value.review_state != "approved":
+        return "pending_review" if value.review_state == "pending" else "rejected_review"
+    if value.quality != "valid":
+        return value.quality if value.quality in {"suspect", "invalid"} else "unassessed"
+    return None
 
 
 def _serials(result: dict[str, Any]) -> list[str]:

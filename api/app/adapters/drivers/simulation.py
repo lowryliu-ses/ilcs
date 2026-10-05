@@ -4,8 +4,8 @@
 决定下一步），不跳过审核、库存或步骤状态。所有数据都带 simulation 来源标记。
 
 回执在「原样回显下发参数」之外：
-- 步骤声明了投料物料（`request.material`）时，按用量参数回报消耗（逐孔位时取各孔之和，单位是该参数登记的单位），
-  和真实设备一样经消耗入账——模拟阶段也能看到预留、消耗与对账是否对得上。
+- 步骤声明了投料物料（`request.material`；一步投几种料的是 `request.materials`，逐种回报）时，按用量参数回报消耗
+  （逐孔位时取各孔之和，单位是该参数登记的单位），和真实设备一样经消耗入账——模拟阶段也能看到预留、消耗与对账是否对得上。
 - 工位配置 `simulate_outputs: true` 时，给方法输出规则里没回显的检测项生成确定性的示意值，
   否则每一步都是「缺必报项」。缺省关闭：不打开就和以前一样只回显参数。曲线型输出（`kind: "series"`）给一条
   落在上下限里的示意曲线（像放电曲线：先缓降、末端陡降），逐孔各一条，不写整批的「均值」。
@@ -136,14 +136,18 @@ class SimulationAdapter:
         delivered = dict(request.params or {})
         if request.type == "transfer":
             return delivered
-        material = request.material or {}
-        if material.get("name") and material.get("param"):
+        used = []
+        # 一步投几种料（materials）逐种回报；投一种料的是 material
+        for material in [*(request.materials or ()), *([request.material] if request.material else [])]:
+            if not material.get("name") or not material.get("param"):
+                continue
             quantity = commanded_quantity(request.params or {}, material["param"])
             # 0 用量不回报：消耗入账会拒掉 0 并报警，而「这一步没投」本来就不是异常
             if quantity > 0:
-                delivered["materials"] = [
-                    {"material": material["name"], "unit": material.get("unit") or "", "quantity": float(quantity)}
-                ]
+                used.append({"material": material["name"], "unit": material.get("unit") or "",
+                             "quantity": float(quantity)})
+        if used:
+            delivered["materials"] = used
         if self.simulate_outputs and request.outputs:
             self._fill_outputs(request, delivered)
         return delivered

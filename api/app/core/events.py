@@ -45,6 +45,8 @@ WEBHOOK_TOPICS = {
     "report.published": "报告发布",
     "batch.signal_received": "收到批次业务事件",
     "flow.notify": "流程中的消息通知节点",
+    "plan.state_changed": "实验方案状态或审批状态变化",
+    "task.state_changed": "实验任务状态变化",
 }
 # NOTIFY 载荷上限 8000 字节；一个事务改动太多对象时只发主题，不列 ID
 _MAX_IDS = 40
@@ -195,6 +197,21 @@ def _business_events(session: Session, obj: Any, is_new: bool) -> None:
         publish(session, org, "report.published", "report_version", obj.id, {"report_id": getattr(obj, "report_id", "")})
     elif name == "BatchSignal" and is_new:
         publish(session, org, "batch.signal_received", "batch", obj.batch_id, {"name": obj.name, "signal_id": obj.id})
+    elif name == "Plan" and not is_new:
+        # 上游系统提交配方表后等的就是这个：方案锁定、提交评审、批准或驳回
+        state, approval = _changed(obj, "state"), _changed(obj, "approval_state")
+        if state or approval:
+            publish(session, org, "plan.state_changed", "plan", obj.id, {
+                "state": obj.state, "approval_state": obj.approval_state,
+                **({"state_from": state[0]} if state else {}), **({"approval_from": approval[0]} if approval else {}),
+            })
+    elif name == "ExperimentTask":
+        change = (None, obj.state) if is_new else _changed(obj, "state")
+        if change:
+            publish(session, org, "task.state_changed", "experiment_task", obj.id, {
+                "plan_id": obj.plan_id, "batch_id": obj.batch_id, "parent_id": obj.parent_id,
+                "from": change[0], "to": change[1],
+            })
 
 
 def _collect(session: Session, _flush_context) -> None:

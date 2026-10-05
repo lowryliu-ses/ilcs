@@ -396,10 +396,12 @@ export function FormulationTemplateEditorPage() {
             />
           </Panel>
 
+          <ModePanel config={config} fixed={fixed} lookups={lookups} readOnly={readOnly} mutate={mutate} />
           <StagesPanel config={config} lookups={lookups} readOnly={readOnly} mutate={mutate} />
           <RoutesPanel config={config} lookups={lookups} readOnly={readOnly} mutate={mutate}
             categories={[...new Set((materials.data ?? []).filter((row) => row.state === 'active').map((row) => row.category).filter(Boolean))]} />
 
+          {config.task ? null : (
           <Panel title="全局的加料后步骤">
             <div className="small muted">
               每加一种料之后做什么（通常是搅拌）。类别或阶段写了自己的加料后步骤就用它们的；名称里的 {'{material}'} 换成物料名。
@@ -418,6 +420,7 @@ export function FormulationTemplateEditorPage() {
               }
             />
           </Panel>
+          )}
 
           <Panel title="加料后的固定步骤">
             <StepList
@@ -845,11 +848,14 @@ function StagesPanel({
       change(next[index]);
       c.stages = next;
     });
+  const task = Boolean(config.task);
   return (
     <Panel title="加料阶段">
       <div className="small muted">
-        每个阶段按顺序加进这一阶段的各类料（物料类别在下面「加法」里指定进哪个阶段），加完再做这一阶段的固定步骤。
-        阶段缺省一个接一个；不串行的阶段只接它写的「从哪几步之后开始」。
+        {task
+          ? '整任务方式：阶段只决定加料顺序（阶段先后、阶段内按表格列或按类别先后），上位机按这个顺序逐种加；不在这里写加料后的动作。'
+          : `每个阶段按顺序加进这一阶段的各类料（物料类别在下面「加法」里指定进哪个阶段），加完再做这一阶段的固定步骤。
+        阶段缺省一个接一个；不串行的阶段只接它写的「从哪几步之后开始」。`}
       </div>
       {stages.map((stage, index) => {
         // 阶段能等的：前段 + 之前各阶段的固定步骤
@@ -875,6 +881,17 @@ function StagesPanel({
                 </select>
               </Field>
             </div>
+            {task ? (
+              readOnly ? null : (
+                <div className="row">
+                  <span style={{ flex: 1 }} />
+                  <button className="btn sm danger" onClick={() => mutate((c) => void (c.stages = (c.stages ?? []).filter((_, at) => at !== index)))}>
+                    删除阶段
+                  </button>
+                </div>
+              )
+            ) : (
+            <>
             <div className="row">
               <label className="check small">
                 <input type="checkbox" disabled={readOnly} checked={stage.stir_after_last !== false}
@@ -928,6 +945,8 @@ function StagesPanel({
               <StepList steps={stage.then ?? []} earlier={earlier} lookups={lookups} readOnly={readOnly}
                 used={all.map((row) => row.key)} onChange={(steps) => setStage(index, (row) => void (row.then = steps))} />
             </div>
+            </>
+            )}
           </div>
         );
       })}
@@ -935,12 +954,105 @@ function StagesPanel({
         <div>
           <button className="btn sm" onClick={() => mutate((c) => {
             const keys = (c.stages ?? []).map((row) => row.key);
-            c.stages = [...(c.stages ?? []), { key: newKey(keys, 'stage'), label: '新阶段', after: [], stir_after_last: true, then: [] }];
+            const added = c.task
+              ? { key: newKey(keys, 'stage'), label: '新阶段' }
+              : { key: newKey(keys, 'stage'), label: '新阶段', after: [], stir_after_last: true, then: [] };
+            c.stages = [...(c.stages ?? []), added];
           })}>
             加一个阶段
           </button>
         </div>
       )}
+    </Panel>
+  );
+}
+
+/* ---------- 生成方式：逐种料生成步骤，或整任务（上位机一步投完） ---------- */
+
+/** 切到整任务方式：去掉只有逐步编排才用得到的设置（阶段的接法与固定步骤、类别的加料步骤与搅拌、全局搅拌）；
+    切回逐种料：给阶段与类别补上空的写法，由人按产线填。未保存前都可以放弃改动。 */
+function setTaskMode(config: FormulationTemplateConfig, on: boolean, fixed: FixedRef[]) {
+  if (on) {
+    const first = fixed.find((row) => row.section !== 'stage' && row.kind === 'device');
+    config.task = { step: first?.key ?? '', slots: [] };
+    delete config.stir;
+    config.stages = (config.stages ?? []).map((stage) => ({
+      key: stage.key, label: stage.label, ...(stage.order ? { order: stage.order } : {}),
+    }));
+    config.routes = Object.fromEntries(Object.entries(config.routes ?? {}).map(([category, route]) => [
+      category, { stage: route.stage, ...(route.not_last ? { not_last: route.not_last } : {}) },
+    ]));
+    return;
+  }
+  delete config.task;
+  config.stages = (config.stages ?? []).map((stage) => ({ after: [], stir_after_last: true, then: [], ...stage }));
+  config.routes = Object.fromEntries(Object.entries(config.routes ?? {}).map(([category, route]) => [
+    category, { param: '', step: { ...blankDevice(), name: '{material} 加料' }, ...route },
+  ]));
+}
+
+function ModePanel({
+  config, fixed, lookups, readOnly, mutate,
+}: {
+  config: FormulationTemplateConfig;
+  fixed: FixedRef[];
+  lookups: Lookups;
+  readOnly: boolean;
+  mutate: (change: (config: FormulationTemplateConfig) => void) => void;
+}) {
+  const task = config.task;
+  const candidates = fixed.filter((row) => row.section !== 'stage' && row.kind === 'device');
+  const chosen = candidates.find((row) => row.key === task?.step);
+  const capability = lookups.capabilities.find((row) => row.id === chosen?.cap);
+  // 加料位：这一步能力里登记了单位的数值参数，按能力登记的顺序
+  const numeric = Object.keys(capability?.params ?? {}).filter((key) => {
+    const spec = paramSpec(capability, key);
+    return (spec.type === 'number' || spec.type === 'integer') && Boolean(spec.unit);
+  });
+  return (
+    <Panel title="生成方式">
+      <div className="grid cols-2">
+        <Field label="怎么生成流程" hint="上位机收整份实验任务、自己调度线内模组（A-Lab 一类整线）时选整任务">
+          <select value={task ? 'task' : 'steps'} disabled={readOnly}
+            onChange={(event) => mutate((c) => setTaskMode(c, event.target.value === 'task', fixed))}>
+            <option value="steps">逐种料生成加料、搅拌步骤（中控逐步下发）</option>
+            <option value="task">整任务：一个设备步骤投完一瓶的全部组分（上位机执行）</option>
+          </select>
+        </Field>
+        {task ? (
+          <Field label="整任务步骤" hint="前段或后段里的一个设备固定步骤；表格里的料都投在这一步">
+            <select value={task.step} disabled={readOnly}
+              onChange={(event) => mutate((c) => void (c.task = { step: event.target.value, slots: [] }))}>
+              <option value="">选择步骤</option>
+              {candidates.map((row) => (
+                <option key={row.key} value={row.key}>
+                  {row.name || row.key}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+      </div>
+      {task ? (
+        <Field label={`加料位（已选 ${task.slots.length} 个）`}
+          hint="表格里要加的料按加料顺序依次占用这些参数：第 1 种料的每瓶用量写进第 1 个加料位，依此类推">
+          <div className="dep-list">
+            {numeric.map((key) => (
+              <label key={key} className="check">
+                <input type="checkbox" disabled={readOnly} checked={task.slots.includes(key)}
+                  onChange={(event) => mutate((c) => {
+                    const picked = new Set(c.task?.slots ?? []);
+                    if (event.target.checked) picked.add(key);
+                    else picked.delete(key);
+                    c.task = { step: c.task?.step ?? '', slots: numeric.filter((row) => picked.has(row)) };
+                  })} />
+                {withUnit(paramSpec(capability, key).label, paramSpec(capability, key).unit)}
+              </label>
+            ))}
+            {numeric.length ? null : <span className="tiny muted">先选整任务步骤（它的能力里要有登记了单位的数值参数）</span>}
+          </div>
+        </Field>
+      ) : null}
     </Panel>
   );
 }
@@ -969,10 +1081,14 @@ function RoutesPanel({
       // 保持 routes 里的先后（「按类别先后」加料按它排）
       c.routes = Object.fromEntries(Object.entries(c.routes ?? {}).map(([key, value]) => [key === from ? to : key, value]));
     });
+  const task = Boolean(config.task);
   return (
     <Panel title="物料类别的加法">
       <div className="small muted">
-        配方表每一列是一种试剂，按它在物料主数据里的类别决定进哪个阶段、用哪台设备怎么加。类别在「试剂耗材 → 物料主数据」里维护。
+        {task
+          ? '整任务方式：类别只决定进哪个阶段（加料顺序）与「不能是最后一种」的检查；这类料怎么加由上位机定。'
+          : '配方表每一列是一种试剂，按它在物料主数据里的类别决定进哪个阶段、用哪台设备怎么加。'}
+        类别在「试剂耗材 → 物料主数据」里维护。
       </div>
       {routes.map(([category, route], index) => {
         const capability = lookups.capabilities.find((row) => row.id === route.step?.cap);
@@ -996,8 +1112,9 @@ function RoutesPanel({
                   ))}
                 </select>
               </Field>
+              {task ? null : (
               <Field label="用量写到哪个参数" hint="每瓶的量由方案按瓶给出">
-                <select value={route.param} disabled={readOnly || !route.step?.cap} onChange={(event) => setRoute(category, (row) => void (row.param = event.target.value))}>
+                <select value={route.param ?? ''} disabled={readOnly || !route.step?.cap} onChange={(event) => setRoute(category, (row) => void (row.param = event.target.value))}>
                   <option value="">选择参数</option>
                   {numeric.map((key) => (
                     <option key={key} value={key}>
@@ -1006,13 +1123,16 @@ function RoutesPanel({
                   ))}
                 </select>
               </Field>
+              )}
             </div>
             <div className="row">
+              {task ? null : (
               <label className="check small">
                 <input type="checkbox" disabled={readOnly} checked={route.stir_after !== false}
                   onChange={(event) => setRoute(category, (row) => void (row.stir_after = event.target.checked))} />
                 加完做加料后步骤（不是阶段最后一种时）
               </label>
+              )}
               <label className="check small">
                 <input type="checkbox" disabled={readOnly} checked={Boolean(route.not_last)}
                   onChange={(event) => setRoute(category, (row) => {
@@ -1036,6 +1156,8 @@ function RoutesPanel({
                 </button>
               )}
             </div>
+            {task ? null : (
+            <>
             <div>
               <div className="small muted">加料步骤（名称里的 {'{material}'} 换成物料名）</div>
               <StepFields step={route.step ?? blankDevice()} lookups={lookups} readOnly={readOnly} template dosing={route.param}
@@ -1049,6 +1171,8 @@ function RoutesPanel({
                   else delete row.stir;
                 })} />
             </div>
+            </>
+            )}
           </div>
         );
       })}
@@ -1068,7 +1192,9 @@ function RoutesPanel({
               mutate((c) => {
                 c.routes = {
                   ...(c.routes ?? {}),
-                  [category]: { stage: (c.stages ?? [])[0]?.key ?? '', param: '', step: { ...blankDevice(), name: '{material} 加料' } },
+                  [category]: c.task
+                    ? { stage: (c.stages ?? [])[0]?.key ?? '' }
+                    : { stage: (c.stages ?? [])[0]?.key ?? '', param: '', step: { ...blankDevice(), name: '{material} 加料' } },
                 };
               });
               setAdding('');

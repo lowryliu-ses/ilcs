@@ -23,7 +23,7 @@ from ..core.context import AccessContext, system_context
 from ..domain import dataquality, workflow
 from ..domain.adapter_rules import LEVEL_LABELS
 from ..domain.dosing import dosing_param, param_unit
-from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_id_of, step_material
+from ..domain.steps import DEVICE, assist_capabilities, kind_of, normalize, step_doses, step_id_of
 from ..models import Adapter, AdapterExecution, Batch, Checkpoint, Command, FileObject, Station, Telemetry
 from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from .telemetry import context as telemetry_context
@@ -703,7 +703,8 @@ class ExecutionService:
         per_well = (command.params or {}).get("wells") if isinstance((command.params or {}).get("wells"), dict) else {}
         params = {key: value for key, value in (command.params or {}).items() if key != "wells"}
         params["wells"] = {well: dict(per_well.get(well) or {}) for well in run["wells"]}
-        return replace(request, command_id=run["id"], params=params, wells=tuple(run["wells"]))
+        samples = {well: code for well, code in (request.samples or {}).items() if well in run["wells"]}
+        return replace(request, command_id=run["id"], params=params, wells=tuple(run["wells"]), samples=samples)
 
     def _drive_runs(self, batch: Batch, command: Command, ledger: AdapterExecution, record, adapter,
                     request: CommandRequest, result: CommandResult | None = None) -> None:
@@ -1060,29 +1061,56 @@ class ExecutionService:
             hooks["outputs"] = tuple(dict(rule) for rule in outputs if isinstance(rule, dict))
         # 这条指令处理的孔位：有逐孔参数就是它的孔位（与设备按孔位执行的口径一致），没有的（检测步骤、整批同一参数的步骤）
         # 取这一步的处理对象。设备一次只处理一个样本、指令又没拆开时，只有靠它才知道测的是哪一瓶
+        from .batch_service import BatchService
+
+        targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
         per_well = (command.params or {}).get("wells")
         if isinstance(per_well, dict) and per_well:
             hooks["wells"] = tuple(str(well) for well in per_well)
-        else:
-            from .batch_service import BatchService
-
-            targets = BatchService(self.db, self.ctx)._step_targets(batch, step) or {}
-            if targets:
-                hooks["wells"] = tuple(sorted(targets))
-        name = step_material(step)
-        entry = next((row for row in snapshot.get("bom") or [] if row.get("material") == name), None) if name else None
-        if entry is None:
+        elif targets:
+            hooks["wells"] = tuple(sorted(targets))
+        samples = self._sample_codes(targets, hooks.get("wells") or ())
+        if samples:
+            hooks["samples"] = samples
+        doses = step_doses(step)
+        if not doses:
             return hooks
-        unit = str(entry.get("unit") or "")
         row = self.capabilities.get(command.capability or step.get("cap") or "")
         capability = {"params": row.params or {}, "param_specs": row.param_specs or {}} if row else {}
-        param = dosing_param(step, capability, unit)
-        if param:
-            # 单位报用量参数自己登记的单位：下发的数值就是这个单位的量。显式指定的参数单位可能和 BOM 不同
-            # （μL 对 mL、g 对 mg），贴上 BOM 单位会把数值原样记成错的量级；换算交给消耗入账按物料做，
-            # 换算不了就拒绝并报警，不会错账。参数没登记单位时才退回 BOM 单位。
-            hooks["material"] = {"name": name, "unit": param_unit(capability, param) or unit, "param": param}
+        resolved = []
+        for name, _ in doses:
+            entry = next((item for item in snapshot.get("bom") or [] if item.get("material") == name), None)
+            if entry is None:
+                continue
+            unit = str(entry.get("unit") or "")
+            param = dosing_param(step, capability, unit, name)
+            if param:
+                # 单位报用量参数自己登记的单位：下发的数值就是这个单位的量。显式指定的参数单位可能和 BOM 不同
+                # （μL 对 mL、g 对 mg），贴上 BOM 单位会把数值原样记成错的量级；换算交给消耗入账按物料做，
+                # 换算不了就拒绝并报警，不会错账。参数没登记单位时才退回 BOM 单位。
+                resolved.append({"name": name, "unit": param_unit(capability, param) or unit, "param": param})
+        if isinstance(step.get("materials"), list) and step["materials"]:
+            # 一步投几种料：按加料顺序全部带上（上位机按这个顺序逐种加）
+            if resolved:
+                hooks["materials"] = tuple(resolved)
+        elif resolved:
+            hooks["material"] = resolved[0]
         return hooks
+
+    def _sample_codes(self, targets: dict, wells: tuple) -> dict[str, str]:
+        """孔位 → 物理样本条码（没登记条码的用样本编号）：只给这条指令处理的孔位。扫瓶身二维码的设备据此认瓶子。"""
+        from ..models import PhysicalSample
+
+        chosen = {str(well): targets[well] for well in wells if well in targets}
+        ids = {sample.physical_sample_id for sample in chosen.values() if getattr(sample, "physical_sample_id", "")}
+        if not ids:
+            return {}
+        codes = {
+            row.id: (row.barcode or row.id)
+            for row in self.db.query(PhysicalSample).filter(PhysicalSample.id.in_(ids)).all()
+        }
+        return {well: codes[sample.physical_sample_id] for well, sample in chosen.items()
+                if sample.physical_sample_id in codes}
 
     def _step_id(self, batch: Batch, index: int) -> str:
         steps = normalize(batch.recipe_snapshot.get("steps") or [])

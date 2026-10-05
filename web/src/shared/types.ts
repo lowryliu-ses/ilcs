@@ -561,6 +561,8 @@ export type RecipeStep = {
   material?: string;
   /** 投料用量取自哪个能力参数（仅设备步骤）；不填时执行器按物料单位推断 */
   material_param?: string;
+  /** 一步投几种料（仅设备步骤，整线一个任务投完一瓶的全部组分）：按加料顺序，每种料写明用量参数；与 material 二选一 */
+  materials?: { material: string; param: string }[];
   /** 人工步骤占哪台工位（指定一台，或某能力的任一台）；等待步骤 holds_station：样本留在上一步的设备里 */
   resource?: { station?: string; capability?: string; holds_station?: boolean };
   /** 人工步骤要求执行人具备的资质：SOP 编号、安全操作资质编号 */
@@ -1267,6 +1269,8 @@ export type ServiceIdentityRow = {
     plan_proposals?: 'all' | string[];
     batch_signals?: 'all' | string[];
     environment_zones?: 'all' | string[];
+    /** 上游系统可以向哪些配液模板提交配方表（POST /runtime/formulation-templates/{编号}/imports） */
+    formulation_imports?: 'all' | string[];
   };
   created_at: string;
   rotated_at: string | null;
@@ -2937,15 +2941,16 @@ export type FormulationStage = {
   then?: FormulationFixedStep[];
 };
 
-/** 物料类别 → 怎么加：进哪个阶段、用量写到哪个参数、加完是否紧跟搅拌、加料步骤长什么样 */
+/** 物料类别 → 怎么加：进哪个阶段、用量写到哪个参数、加完是否紧跟搅拌、加料步骤长什么样。
+    整任务方式（config.task）下只写 stage 与 not_last：怎么加由上位机定 */
 export type FormulationRoute = {
   stage: string;
-  param: string;
+  param?: string;
   /** 不是阶段最后一个加料时是否紧跟搅拌；缺省是 */
   stir_after?: boolean;
   /** 这类料不能是一瓶在本阶段加的最后一种；写文字就是原因（如 EC 常温是固体） */
   not_last?: boolean | string;
-  step: RecipeStep;
+  step?: RecipeStep;
   /** 这类料的加料后步骤，覆盖阶段与全局的 stir */
   stir?: RecipeStep;
 };
@@ -2997,6 +3002,9 @@ export type FormulationTemplateConfig = {
   routes?: Record<string, FormulationRoute>;
   stir?: RecipeStep;
   suffix?: FormulationFixedStep[];
+  /** 整任务方式：上位机收整份实验任务时，固定设备步骤 step 一步投完一瓶的全部组分，表格里的料按加料顺序依次占用
+      slots 列出的能力参数（加料位）。写了它，阶段与类别只排加料顺序，不再逐种料生成加料、搅拌步骤 */
+  task?: { step: string; slots: string[] };
   experiment_params?: FormulationExperimentParam[];
   row_params?: FormulationRowParam[];
   volume_check?: FormulationVolumeCheck;
