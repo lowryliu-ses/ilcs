@@ -10,6 +10,11 @@
     python3 scripts/load-electrolyte-line.py connect      # gateways.json 里的工位改接设备网关（真实接入链路）
     python3 scripts/load-electrolyte-line.py disconnect   # 这几个工位切回内置模拟
 
+    # A-Lab 整任务方式（上位机实验任务接口）：一个上位机工位、一个整任务步骤；配方表由模拟的上游系统用服务身份提交
+    python3 scripts/load-electrolyte-line.py register --line scripts/lines/c-electrolyte/line-alab.json
+    python3 scripts/load-electrolyte-line.py connect --gateways scripts/lines/c-electrolyte/gateways-alab.json
+    python3 scripts/load-electrolyte-line.py run --line scripts/lines/c-electrolyte/line-alab.json --upstream
+
 - register：能力、资产、工位（接好后重连一次）、设备方法（工程师起草、QA 发布）、物料主数据与测试批号
   （QA 复验放行）、检测指标、操作员资质、配液模板 FT-ELY-01。已有的先查后用，重复运行不会多建。
 - run：先照 register 补齐，再导入配方表（缺省用参考配方 formula-20260929.csv）→ 研究员提交流程 → QA 批准、发布
@@ -22,6 +27,10 @@
   http_json_v1：网关核对加的料、回报天平称出来的实际量，消耗按实际量入账。disconnect 把它们切回内置模拟。
   模拟站的主机名要先加进 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS（deploy/.env）。
 - 资产只给新登记的工位建 AS-<工位> 占位；已登记的工位沿用它现在关联的资产，不补建、不改。
+- --line 换一份产线定义：line-alab.json 是 A-Lab 整任务方式（配液模板 FT-ELY-02 的 task 写法，SOP-ELY-02，
+  工位 EL-ALAB），它的 formula 是缺省配方表。--upstream：配方表不经研究员上传，而由模拟的上游系统（服务身份
+  ely-upstream-sim，管理员签发或轮换密钥、授权这个模板）经 POST /runtime/formulation-templates/{编号}/imports
+  提交；审批、下发照旧由人做，跑完后上游按请求编号查进度与已复核的结果。
 
 正式环境（ILCS_ENVIRONMENT=production）拒绝运行：它会登记模拟工位与测试批号。服务端在正式环境同样拒绝
 模拟适配器下发，这里先挡一道，免得把占位主数据登记进正式库。
@@ -174,7 +183,16 @@ def actors(transport: Transport) -> dict[str, Actor]:
 
 
 def load_line(path: Path = LINE) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    """产线定义；`_path` 记下它在哪，同目录的 SOP（`sop_file`）与缺省配方表（`formula`）按它找。"""
+    line = json.loads(Path(path).read_text(encoding="utf-8"))
+    line["_path"] = str(Path(path).resolve())
+    return line
+
+
+def line_file(line: dict, key: str, default: Path) -> Path:
+    """产线定义里写的同目录文件（SOP、缺省配方表）；没写用缺省的。"""
+    name = line.get(key)
+    return Path(line.get("_path") or LINE).parent / name if name else default
 
 
 # 管理员默认拥有全部能力资质（和种子一致）：产线登记的能力也给它发一份
@@ -206,7 +224,7 @@ def register(team: dict[str, Actor], line: dict) -> dict:
     register_materials(operator, qa, line)
     grant_qualifications(admin, line)
     # 模板生成的流程关联这份 SOP 的生效版本：先有 SOP，再建模板
-    register_sop(researcher, qa, operator, SOP)
+    register_sop(researcher, qa, operator, line_file(line, "sop_file", SOP))
     template = register_template(researcher, line, methods, metrics)
     return {"methods": methods, "metrics": metrics, "template": template,
             "stations": [station["id"] for station in line["stations"]]}
@@ -350,7 +368,7 @@ def _same_outputs(current: list[dict], wanted: list[dict]) -> bool:
     def norm(rows):
         return [{"key": r.get("key"), "label": r.get("label") or "", "unit": r.get("unit") or "",
                  "lo": r.get("lo"), "hi": r.get("hi"), "required": bool(r.get("required")),
-                 "metric_id": r.get("metric_id") or ""} for r in rows or []]
+                 "metric_id": r.get("metric_id") or "", "kind": r.get("kind") or ""} for r in rows or []]
     return norm(current) == norm(wanted)
 
 
@@ -424,11 +442,12 @@ def register_metrics(researcher: Actor, line: dict) -> dict[str, str]:
     ids = {}
     for metric in line["metrics"]:
         row = existing.get((metric["code"], "v1")) or researcher.post("/metrics", {
-            "code": metric["code"], "name": metric["name"], "unit": metric["unit"], "value_type": "number",
-            "sample_types": ["电解液"], "rules": metric.get("rules") or {},
+            "code": metric["code"], "name": metric["name"], "unit": metric["unit"],
+            "value_type": metric.get("value_type", "number"), "sample_types": ["电解液"], "rules": metric.get("rules") or {},
         })
         ids[metric["code"]] = row["id"]
-    ok("检测指标", "、".join(f"{m['name']} {m['unit']}" for m in line["metrics"]))
+    ok("检测指标", "、".join(f"{m['name']} {m['unit']}{'（曲线）' if m.get('value_type') == 'series' else ''}"
+                             for m in line["metrics"]))
     return ids
 
 
@@ -498,6 +517,111 @@ def register_template(researcher: Actor, line: dict, methods: dict[str, str], me
         return template
     ok("配液模板", f"{spec['code']}（沿用）")
     return found
+
+
+# ---------------------------------------------------------------- 上游系统（服务身份）
+
+UPSTREAM_SOURCE = "ely-upstream-sim"
+UPSTREAM_NAME = "AI 配方预测（模拟上游）"
+
+
+class Upstream:
+    """上游系统（AI 配方预测、实验设计平台）：用服务身份调 /runtime 入口，和真实上游系统走同一组接口。"""
+
+    def __init__(self, transport: Transport, source: str, secret: str) -> None:
+        self.transport = transport
+        self.source = source
+        self.secret = secret
+
+    def call(self, method: str, path: str, body: Any = None, expect: tuple[int, ...] = (200, 201)):
+        headers = {"X-Service-Source": self.source, "X-Service-Secret": self.secret}
+        status, content = self.transport(method, path, body, None, headers)
+        if status not in expect:
+            raise Failed(f"上游系统 {method} {path} → {status}：{content}")
+        return content
+
+
+def upstream_for(team: dict[str, Actor], transport: Transport, template_code: str) -> Upstream:
+    """管理员签发上游系统的服务身份（已有就轮换密钥、补上授权），授权它向这个配液模板提交配方表。
+    密钥只在签发 / 轮换的响应里出现一次，这里只留在内存里给这次运行用。"""
+    admin = team["admin"]
+    found = next((row for row in admin.get("/service-identities") if row["source"] == UPSTREAM_SOURCE), None)
+    if found is None:
+        issued = admin.post("/service-identities", {
+            "source": UPSTREAM_SOURCE, "name": UPSTREAM_NAME, "scopes": {"formulation_imports": [template_code]},
+        })
+        ok("上游服务身份", f"{UPSTREAM_SOURCE} 已签发，授权向 {template_code} 提交配方表")
+        return Upstream(transport, UPSTREAM_SOURCE, issued["secret"])
+    scopes = dict(found.get("scopes") or {})
+    granted = scopes.get("formulation_imports")
+    if granted != "all" and template_code not in (granted or []):
+        scopes["formulation_imports"] = sorted({*(granted or []), template_code})
+        found = admin.patch(f"/service-identities/{found['id']}", {"scopes": scopes, "row_version": found["row_version"]})
+    if found.get("state") != "active":
+        admin.post(f"/service-identities/{found['id']}/state", {"state": "active"})
+    rotated = admin.post(f"/service-identities/{found['id']}/rotate")
+    ok("上游服务身份", f"{UPSTREAM_SOURCE}（沿用，已轮换密钥），授权向 {template_code} 提交配方表")
+    return Upstream(transport, UPSTREAM_SOURCE, rotated["secret"])
+
+
+def csv_table(content: bytes) -> list[list[str]]:
+    """上游系统交的是表格本身（第一行表头、每行一瓶），不是文件：这里把 csv 读成行。"""
+    import csv
+    import io
+
+    return [row for row in csv.reader(io.StringIO(content.decode("utf-8-sig"))) if any(cell.strip() for cell in row)]
+
+
+def submit_upstream(upstream: Upstream, template: dict, filename: str, content: bytes, params: dict,
+                    plan_name: str = "") -> dict:
+    """上游系统提交配方表：同一请求编号同一内容重发回放首次结果；表格有问题列出全部问题，什么都不建。"""
+    step(f"上游系统提交配方表 {filename}")
+    if not filename.lower().endswith(".csv"):
+        raise Failed("上游提交按表格行（csv）交；xlsx 请先另存为 csv")
+    request_id = f"ely-{RUN}-{Path(filename).stem}"[:100]
+    path = f"/runtime/formulation-templates/{template['code']}/imports"
+    status, result = upstream.transport("POST", path, {
+        "request_id": request_id, "filename": filename, "table": csv_table(content), "params": params,
+        "plan_name": plan_name,
+    }, None, {"X-Service-Source": upstream.source, "X-Service-Secret": upstream.secret})
+    if status == 422:
+        detail = (result or {}).get("detail") or {}
+        raise Failed("配方表有问题：" + "；".join(detail.get("problems") or [str(detail.get("message") or detail)]))
+    if status not in (200, 201):
+        raise Failed(f"上游系统提交 → {status}：{result}")
+    for warning in result.get("warnings") or []:
+        note(warning)
+    again = upstream.call("POST", path, {
+        "request_id": request_id, "filename": filename, "table": csv_table(content), "params": params,
+        "plan_name": plan_name,
+    })
+    if not again.get("replayed") or again["plan"]["id"] != result["plan"]["id"]:
+        raise Failed("同一请求编号重发没有回放首次结果")
+    recipe = result["recipe"]
+    created = sum(1 for row in result["samples"] if row["created"])
+    ok("上游已提交", f"请求 {request_id}：流程 {recipe['id']}（{'沿用' if recipe['reused'] else '新建草稿'}，"
+                    f"{recipe['state']}）；方案 {result['plan']['id']}；瓶子 {len(result['samples'])} 个（新登记 {created}）；"
+                    f"重发同一请求编号回放首次结果")
+    return result
+
+
+def upstream_progress(upstream: Upstream, template: dict, request_id: str) -> dict:
+    """上游系统按请求编号查进度与结果：只看得到自己提交的；结果标明是否进正式统计、是不是模拟值。"""
+    view = upstream.call("GET", f"/runtime/formulation-templates/{template['code']}/imports/{request_id}")
+    step(f"上游系统查进度：请求 {request_id}")
+    plan = view["plan"]
+    ok("方案", f"{plan['id']} {plan.get('state')} / 审批 {plan.get('approval_state')}")
+    for batch in view["batches"]:
+        ok(f"批次 {batch['id']}", f"{batch.get('state_label') or batch['state']}，样本 {batch.get('sample_done')}/"
+                                  f"{batch.get('sample_count')}")
+    for row in view["results"]:
+        value = f"{row['value']} {row['unit']}" if row.get("value") is not None else f"曲线 {row.get('series_points')} 点"
+        flags = "正式" if row["official"] else f"未进正式统计（{row.get('excluded')}）"
+        ok(f"{row['sample_id']} {row['metric_name'] or row['metric']}",
+           f"{value} · {flags}" + (" · 模拟示意值" if row.get("simulated") else ""))
+    for report_row in view["reports"]:
+        ok("报告", f"{report_row['code']} {report_row['title']}")
+    return view
 
 
 # ---------------------------------------------------------------- run
@@ -647,6 +771,13 @@ def report(detail: dict) -> None:
             parts.append(f"投 {row['material']} {row['quantity']}{row['unit']}")
         outputs = [rule["key"] for rule in (spec.get("method") or {}).get("outputs") or []]
         parts.extend(f"{key} = {delivered[key]}" for key in outputs if key in delivered)
+        wells = delivered.get("wells") if isinstance(delivered.get("wells"), dict) else {}
+        for well, values in wells.items():
+            # 整任务一步测完各瓶：逐瓶列读数（曲线只说点数）
+            shown = [f"{key} = {_shown(values[key])}" for key in outputs if isinstance(values, dict) and key in values]
+            if shown:
+                bottle = values.get("bottle") or well
+                parts.append(f"{bottle}：{'，'.join(shown)}")
         flags = [flag.get("code") for flag in payload.get("flags") or []]
         if flags:
             parts.append("标记 " + "、".join(flags))
@@ -660,11 +791,22 @@ def report(detail: dict) -> None:
         note(f"{alarm['id']} [{alarm['severity']}] {alarm['state']}：{alarm['message']}")
 
 
+def _shown(value: Any) -> str:
+    if isinstance(value, dict) and isinstance(value.get("y"), list):
+        return f"曲线 {len(value['y'])} 点"
+    return str(value)
+
+
 def run(team: dict[str, Actor], context: dict, filename: str, content: bytes, params: dict | None = None, *,
-        pump: Callable[[], Any], rounds: int, plan_name: str = "") -> dict:
-    """导入一张配方表并跑完一批。返回 {recipe, plan, batch, detail}。"""
+        pump: Callable[[], Any], rounds: int, plan_name: str = "", upstream: Upstream | None = None) -> dict:
+    """导入一张配方表并跑完一批。返回 {recipe, plan, batch, detail}。
+
+    给了 `upstream`：配方表由上游系统经服务身份提交，跑完后上游按请求编号查进度与结果（`progress`）。"""
     researcher, qa, operator = team["researcher"], team["qa"], team["operator"]
-    result = import_table(researcher, context["template"], filename, content, params or {}, plan_name)
+    if upstream is not None:
+        result = submit_upstream(upstream, context["template"], filename, content, params or {}, plan_name)
+    else:
+        result = import_table(researcher, context["template"], filename, content, params or {}, plan_name)
     step("审批与下发")
     recipe_id, plan_id = result["recipe"]["id"], result["plan"]["id"]
     release_recipe(researcher, qa, recipe_id)
@@ -676,8 +818,9 @@ def run(team: dict[str, Actor], context: dict, filename: str, content: bytes, pa
     step("数据复核与报告")
     reviewed = review_device_results(researcher, qa, detail)
     report_id = publish_report(researcher, qa, batch_id, detail, reviewed)
+    progress = upstream_progress(upstream, context["template"], result["request_id"]) if upstream else None
     return {"recipe": recipe_id, "plan": plan_id, "batch": batch_id, "import": result, "detail": detail,
-            "results": reviewed, "report": report_id}
+            "results": reviewed, "report": report_id, "progress": progress}
 
 
 def device_results(actor: Actor, detail: dict) -> list[dict]:
@@ -713,7 +856,7 @@ def review_device_results(researcher: Actor, qa: Actor, detail: dict) -> list[di
     for row in fresh:
         by_metric.setdefault(row.get("metric_name") or row.get("metric_code") or "?", []).append(row)
     ok("设备回报结果已复核", "；".join(
-        f"{name} {len(items)} 条（{'、'.join(str(item.get('display') or item.get('value')) for item in items)}）"
+        f"{name} {len(items)} 条（{'、'.join(str(item.get('display') or item.get('value') or '曲线') for item in items)}）"
         for name, items in by_metric.items()))
     return fresh
 
@@ -868,7 +1011,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("register", "run", "connect", "disconnect"))
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
     parser.add_argument("--line", default=str(LINE), help="产线定义（缺省 scripts/lines/c-electrolyte/line.json）")
-    parser.add_argument("--table", default=str(FORMULA), help="配方表 .xlsx / .csv（缺省参考配方）")
+    parser.add_argument("--table", default="", help="配方表 .xlsx / .csv（缺省用产线定义里的 formula，再缺省参考配方）")
+    parser.add_argument("--upstream", action="store_true",
+                        help="配方表由模拟的上游系统用服务身份提交（/runtime 入口），跑完后上游查进度与结果")
     parser.add_argument("--bottles", type=int, help="分装瓶数（缺省按模板）")
     parser.add_argument("--volume", type=float, help="每瓶分装量 mL（缺省按模板）")
     parser.add_argument("--plan-name", default="")
@@ -887,7 +1032,8 @@ def main(argv: list[str] | None = None) -> int:
                 disconnect(team, gateways, load_line(Path(args.line)))
             print(f"\n完成：{'、'.join(gateways['stations'])} 已{'接设备网关' if args.command == 'connect' else '切回内置模拟'}")
             return 0
-        context = register(team, load_line(Path(args.line)))
+        line = load_line(Path(args.line))
+        context = register(team, line)
         if args.command == "register":
             print("\n完成：产线已登记。导入配方表：scripts/load-electrolyte-line.py run --table <文件>")
             return 0
@@ -895,10 +1041,12 @@ def main(argv: list[str] | None = None) -> int:
         if not gate["open"]:
             raise Failed(f"执行门关着（执行器在跑吗？）：{gate['reasons']}")
         params = {key: value for key, value in (("bottles", args.bottles), ("volume", args.volume)) if value is not None}
-        table = Path(args.table)
+        table = Path(args.table) if args.table else line_file(line, "formula", FORMULA)
         every = 3.0
+        upstream = upstream_for(team, http_transport(args.base), context["template"]["code"]) if args.upstream else None
         outcome = run(team, context, table.name, table.read_bytes(), params,
-                      pump=lambda: time.sleep(every), rounds=max(1, int(args.timeout / every)), plan_name=args.plan_name)
+                      pump=lambda: time.sleep(every), rounds=max(1, int(args.timeout / every)), plan_name=args.plan_name,
+                      upstream=upstream)
         print(f"\n完成：流程 {outcome['recipe']} · 方案 {outcome['plan']} · 批次 {outcome['batch']} · 报告 {outcome['report']}")
         return 0
     except Failed as exc:
