@@ -111,11 +111,16 @@ class AlarmRepository(ScopedRepository[Alarm]):
         )
 
     def next_id(self) -> str:
-        """现有最大编号 + 1。按行数算在删除或并发下会撞号。"""
-        numbers = [
-            int(row[0][2:]) for row in self.db.query(Alarm.id).all()
-            if row[0].startswith("A-") and row[0][2:].isdigit()
+        """用过的最大编号 + 1。按行数算在删除或并发下会撞号。
+
+        报警行可能被删掉（测试环境的强制删除、清理已关闭报警），审计里的「触发报警」还记着用过的编号，
+        一并算进来：编号不回头，审计里同一个编号不会指两条不同的报警。"""
+        used = [row[0] for row in self.db.query(Alarm.id).all()]
+        used += [
+            row[0] for row in self.db.query(AuditEvent.target)
+            .filter(AuditEvent.action == "触发报警", AuditEvent.target.like("A-%")).all()
         ]
+        numbers = [int(value[2:]) for value in used if value.startswith("A-") and value[2:].isdigit()]
         return f"A-{max(numbers, default=1040) + 1}"
 
 
