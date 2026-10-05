@@ -15,6 +15,8 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "load-electrolyte-line.py"
 LINE = ROOT / "scripts" / "lines" / "c-electrolyte" / "line-alab.json"
@@ -128,3 +130,151 @@ def test_alab_task_line_runs_one_task_step_submitted_by_the_upstream_system(clie
     status, _ = transport("GET", f"{base}/no-such-result/series", None, None,
                           {"X-Service-Source": upstream.source, "X-Service-Secret": upstream.secret})
     assert status == 404
+
+
+# ---------- 走真实接入链路：设备仓库 alab-electrolyte 模块的网关 + 假上位机 ----------
+
+MODULE_PACKAGES = {"driver", "simulator"}
+
+
+def _purge_module_packages() -> dict:
+    """设备模块的 driver / simulator 包各模块同名：换模块前把已经导入的拿掉，用完再放回原来的。"""
+    import sys
+
+    removed = {name: module for name, module in sys.modules.items() if name.split(".")[0] in MODULE_PACKAGES}
+    for name in removed:
+        sys.modules.pop(name, None)
+    return removed
+
+
+@pytest.fixture()
+def alab_gateway(tmp_path, monkeypatch):
+    """本进程里起 alab-electrolyte 模块的网关（HTTPS + 令牌），后面接进程内的假上位机（时间压缩到几秒跑完一个任务）。"""
+    import sys
+
+    from app.core.config import settings
+    from sim_harness import require_devices
+
+    devices = require_devices()
+    module = devices / "gateway" / "alab-electrolyte"
+    if not (module / "gateway.py").is_file():
+        pytest.skip(f"设备仓库 {devices} 里还没有 alab-electrolyte 模块")
+    saved = _purge_module_packages()
+    monkeypatch.syspath_prepend(str(devices / "gateway"))
+    monkeypatch.syspath_prepend(str(module))
+    from ilcs_gateway import serve
+    from simulator import simulated_line
+
+    secrets = tmp_path / "secrets"
+    monkeypatch.setattr(settings, "adapter_credential_root", str(secrets))
+    line = simulated_line(time_scale=0.0004)
+    server = serve(line, device_id="SIM-ALAB-01", state_dir=tmp_path / "state", address="127.0.0.1", port=0,
+                   token_file=secrets / "SIM-ALAB-01.token", cert=secrets / "SIM-ALAB-01.crt",
+                   key=secrets / "SIM-ALAB-01.key", host_name="localhost")
+    try:
+        yield server, secrets, module
+    finally:
+        server.stop()
+        _purge_module_packages()
+        sys.modules.update(saved)
+
+
+def _patch_adapter(engineer, station_id: str, **changes) -> dict:
+    adapter = engineer.get(f"/stations/{station_id}/adapter")
+    return engineer.patch(f"/stations/{station_id}/adapter", {
+        **changes, "row_version": adapter["row_version"],
+        "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
+    })
+
+
+def test_alab_task_runs_through_the_device_module_gateway_and_fake_controller(client, reset_runtime, executor, db,
+                                                                               alab_gateway):
+    """EL-ALAB 套用模块的接入模板、连到网关：一条整任务指令交给（假）上位机，按瓶回收实加量、读数与谱图。"""
+    import json
+    import time
+
+    from app.models import Alarm
+
+    server, secrets, module = alab_gateway
+    loader = _loader()
+    transport = loader.client_transport(client)
+    team = loader.actors(transport)
+    line = loader.load_line(LINE)
+    context = loader.register(team, line)
+    engineer, qa = team["engineer"], team["qa"]
+
+    profile = json.loads((module / "profile.json").read_text(encoding="utf-8"))
+    imported = [row for row in loader._items(engineer.get("/device-templates"))
+                if row["code"] == profile["code"] and row["revision"] == profile["revision"]]
+    template = imported[0] if imported else engineer.post(
+        "/device-templates/import", {"filename": "profile.json", "document": profile})
+    if template["state"] == "draft":
+        template = qa.post(f"/device-templates/{template['id']}/release", {
+            "row_version": template["row_version"],
+            "signature_id": qa.sign("发布设备接入模板", template["id"], template["row_version"]),
+        })
+    adapter = _patch_adapter(
+        engineer, "EL-ALAB", template_id=template["id"],
+        template_connection={"base_url": f"https://localhost:{server.port}/api/v1",
+                             "ca_file": str(secrets / "SIM-ALAB-01.crt"), "expected_device_id": "SIM-ALAB-01"},
+        credential_ref=f"file://{secrets / 'SIM-ALAB-01.token'}",
+    )
+    assert adapter["driver"] == "http_json_v1", adapter
+    try:
+        # 执行器自动跑只读级验收：假上位机自报为模拟器，只读级就放行；读得到上位机的配方目录与型号
+        for _ in range(20):
+            executor()
+            gate = engineer.get("/stations/EL-ALAB/adapter/acceptance")["gate"]
+            if gate["required"] == "":
+                break
+        assert gate["required"] == "", gate
+        described = engineer.post("/stations/EL-ALAB/adapter/describe")
+        assert described.get("reported_model") == "ALAB-ELY-3" and not described.get("warning"), described
+        assert {row.get("program") for row in described["methods"]} >= {"ELY-STD"}
+
+        uid = uuid4().hex[:6].upper()
+        names, amounts, content = _table(line, uid)
+        serials = list(amounts)
+        upstream = loader.upstream_for(team, transport, "FT-ELY-02")
+
+        def pump():
+            executor()
+            time.sleep(0.05)
+
+        outcome = loader.run(team, context, f"formula-alab-gw-{uid}.csv", content, {}, pump=pump, rounds=600,
+                             upstream=upstream)
+        detail = outcome["detail"]
+        assert detail["state"] == "done", detail.get("failure_reason")
+        task = next(cp["payload"] for cp in detail["checkpoints"] if cp["step_index"] == 3)
+        delivered = task["delivered"]
+        assert task["station_id"] == "EL-ALAB" and delivered["alab_task_id"] and delivered["recipe"] == "ELY-STD"
+        wells = {row["physical_sample_id"]: row["well"] for row in detail["samples"]}
+        rows = delivered["wells"]
+        assert {rows[well]["bottle"] for well in rows} == set(serials), "上位机按瓶身序列号认瓶、按瓶回报"
+        # 每瓶的实加量就是这瓶的配方（±0.3 % 以内）；某瓶某种料是 0 就没加
+        for serial, well in wells.items():
+            dosed = rows[well]["dosed"]
+            for name in names:
+                target = float(amounts[serial][name])
+                if target == 0:
+                    assert name not in dosed, (serial, name)
+                else:
+                    assert abs(dosed[name] - target) <= target * 0.003 + 0.0001, (serial, name, dosed[name], target)
+            assert len(rows[well]["raman_spectrum"]["y"]) > 100
+        readings = {serial: rows[well]["conductivity_mS_cm"] for serial, well in wells.items()}
+        assert len(set(readings.values())) == len(serials), "各瓶按自己的组分算，读数不一样"
+
+        # 消耗按上位机回报的实加量逐种入账（与预留差零点几毫克的部分自动追加预留），没有被拒的
+        consumed = {row["material"]: float(row["consumed_qty"]) for row in detail["reservations"]}
+        for name in names:
+            actual = sum(rows[well]["dosed"].get(name, 0) for well in rows)
+            assert abs(consumed[name] - actual) < 1e-6, (name, consumed[name], actual)
+        db.expire_all()
+        alarms = db.query(Alarm).filter(Alarm.source_id == detail["id"]).all()
+        assert not [a.message for a in alarms if "消耗被拒" in a.message or a.condition_key.startswith("data:")], \
+            [a.message for a in alarms]
+        results = [row for row in outcome["progress"]["results"] if row["metric"] != "ely_raman"]
+        assert len(results) == 3 * len(serials) and all(row["official"] for row in results)
+    finally:
+        _patch_adapter(engineer, "EL-ALAB", kind="simulation", driver="simulation", protocol="内置模拟",
+                       config={"simulate_outputs": True}, credential_ref="", template_id="")
