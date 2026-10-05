@@ -42,7 +42,7 @@ python3 scripts/load-protoforge-flow.py run --temps 40,60,80 --repeats 1
 | 环节 | 菜单 | 谁 | 配什么 |
 |---|---|---|---|
 | 驱动配置 | 工位与接入 → 设备连接 | 自动化工程师 | 驱动宿主的现场配置改了（例如给 OPC UA、HTTP 加了设定类能力），设备服务报的驱动配置就变了：核对后签名批准这次变更，只读级验收通过后放行 |
-| 资产 | 仪器设备 | 自动化工程师 | ST-PF-OPCUA、ST-PF-HTTP 关联占位资产 AS-PF-OPCUA、AS-PF-HTTP（模拟设备，校准不适用）：设备步骤的开跑检查要核对工位资产 |
+| 资产 | 仪器设备 | 自动化工程师 | ST-PF-MB、ST-PF-OPCUA、ST-PF-HTTP 关联占位资产 AS-PF-MB、AS-PF-OPCUA、AS-PF-HTTP（模拟设备，校准不适用；已关联资产的工位沿用）：设备步骤的开跑检查要核对工位资产 |
 | 环境采集 | 工位与接入 → 设备连接（ST-PF-HTTP、ST-PF-OPCUA） | 自动化工程师 | 连接配置加 `environment`（见下），签名保存；不用重新握手。「环境监测」里随后出现来源 `device:<工位>` 的读数 |
 | 能力 | 能力字典 | 自动化工程师 | `cap.plc_run`、`cap.tc_setpoint`、`cap.chamber_setpoint`，参数都是 `temp`（℃），工位范围 0–100 ℃ |
 | 检测指标 | 指标与规则 | 研究员 | `pf_plc_temp` PLC 实测温度、`pf_tc_temp` 温控器回读温度、`pf_chamber_temp` 环境箱回读温度（℃），样本类型「联调样品」 |
