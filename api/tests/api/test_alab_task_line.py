@@ -275,6 +275,16 @@ def test_alab_task_runs_through_the_device_module_gateway_and_fake_controller(cl
             [a.message for a in alarms]
         results = [row for row in outcome["progress"]["results"] if row["metric"] != "ely_raman"]
         assert len(results) == 3 * len(serials) and all(row["official"] for row in results)
+        # 执行中看得到进展：在途回执里的进度一路落库（值没变的不重复记），最后到 100
+        from app.models import Command, Telemetry
+
+        command = db.query(Command).filter(Command.batch_id == detail["id"], Command.step_index == 3,
+                                           Command.type == "dispatch").one()
+        rows = db.query(Telemetry).filter(Telemetry.command_id == command.id, Telemetry.metric == "progress").all()
+        live = [row.value for row in sorted((row for row in rows if row.received_at), key=lambda row: row.received_at)]
+        assert len(live) >= 3 and live == sorted(live), live
+        assert len(live) == len(set(live)), "值没变的不重复记"
+        assert max(row.value for row in rows) == 100
     finally:
         _patch_adapter(engineer, "EL-ALAB", kind="simulation", driver="simulation", protocol="内置模拟",
                        config={"simulate_outputs": True}, credential_ref="", template_id="")

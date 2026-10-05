@@ -623,6 +623,7 @@ class ExecutionService:
             command.state = "running"
             command.updated_at = now()
             self._take_over(command)
+            self._record_progress(batch, command, result)
             return
         # 设备收到了指令却说不清做成没有：动作可能仍在进行。投递是确定的，结论不确定——
         # 与网络超时一样保留占用（含工位上的当前指令），现场核查给出结论后才释放
@@ -1275,6 +1276,33 @@ class ExecutionService:
             condition_key=f"data:{batch.id}:{command.id}:outputs",
         )
         return flags
+
+    def _record_progress(self, batch: Batch, command: Command, result) -> None:
+        """在途回执里的遥测（整线任务的进度、做完了几瓶这类）：长任务跑几个小时，执行中就要看得到进展。只记真实设备的；
+        同一条指令同一个指标的值和上一次记的一样就不再记一点（轮询很密，值多半没变）。完成时的回执照旧由
+        `record_telemetry` 记。"""
+        if result.origin == "simulation" or not result.telemetry:
+            return
+        owners: dict[str, dict] = {}
+        for point in (TelemetryPoint(*row) for row in result.telemetry):
+            last = (
+                self.db.query(Telemetry.value)
+                .filter(Telemetry.command_id == command.id, Telemetry.metric == point.metric,
+                        Telemetry.station_id == command.station_id)
+                .order_by(Telemetry.received_at.desc().nullslast(), Telemetry.device_ts.desc())
+                .first()
+            )
+            if last is not None and last[0] == float(point.value):
+                continue
+            if point.well not in owners:
+                owners[point.well] = telemetry_context(self.db, batch, command, well=point.well)
+            self.db.add(Telemetry(
+                station_id=command.station_id, batch_id=batch.id, metric=point.metric,
+                setpoint=float(point.setpoint) if point.setpoint is not None else None, value=float(point.value),
+                quality=result.quality, origin=result.origin, device_ts=point.device_ts or result.device_ts or now(),
+                # 设备时间多半只到秒，一秒里能轮询好几次：按收到的先后判「上一次记的值」
+                received_at=now(), **owners[point.well],
+            ))
 
     def record_telemetry(self, batch: Batch, command: Command, step: dict, result) -> None:
         """保存真实遥测；只有模拟适配器才生成模拟曲线。每个点带指令、步骤、值守人与（能确定时的）样本：逐孔回报的点
