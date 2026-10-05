@@ -70,8 +70,11 @@ METRICS = {
     "pf_plc_temp": ("PLC 实测温度", "℃"),
     "pf_tc_temp": ("温控器回读温度", "℃"), "pf_chamber_temp": ("环境箱回读温度", "℃"),
 }
-# 设备步骤要核对工位的资产（校准与容量）：两台设定类设备登记占位资产（模拟设备，校准不适用）
+# 设备步骤要核对工位的资产（校准与容量）：三台设备登记占位资产（模拟设备，校准不适用）。
+# 已经关联了资产的工位沿用，新环境里（ST-PF-MB 由 load-driver-host-devices.py 新建）照这里补
 ASSETS = {
+    PLC: {"asset_no": "AS-PF-MB", "name": "ProtoForge PLC（Modbus TCP）", "model": "ProtoForge Modbus PLC",
+          "note": "ProtoForge 场景 ilcs-plc-modbus（从站 2），经驱动宿主 PF-MB-PLC 接入"},
     TC: {"asset_no": "AS-PF-OPCUA", "name": "ProtoForge 温控 / 压力节点（OPC UA）", "model": "ProtoForge OPC UA",
          "note": "ProtoForge OPC UA 设备（Pressure / Temperature / Setpoint 节点），经驱动宿主 PF-OPCUA 接入"},
     CHAMBER: {"asset_no": "AS-PF-HTTP", "name": "ProtoForge 环境箱（HTTP REST）", "model": "ProtoForge HTTP REST",
@@ -136,7 +139,7 @@ def register_capabilities(engineer: Actor) -> None:
 
 
 def register_assets(engineer: Actor) -> None:
-    """两台设定类设备的工位关联占位资产（开跑检查按资产核对校准与容量）：模拟设备，校准不适用并写明豁免理由。"""
+    """三台设备的工位关联占位资产（开跑检查按资产核对校准与容量）：模拟设备，校准不适用并写明豁免理由。"""
     stations = {row["id"]: row for row in engineer.get("/stations")}
     for station_id, spec in ASSETS.items():
         station = stations[station_id]
