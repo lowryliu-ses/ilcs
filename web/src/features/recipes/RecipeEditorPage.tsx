@@ -1831,77 +1831,93 @@ function SeveralMaterials({
     });
   return (
     <Field label="投哪几种料" hint="按加料顺序；不在 BOM 里的料由实验方案按样本给出用量（方案里要有作用在这一行参数上的因子）">
-      <div className="stack">
-        {rows.map((row, position) => {
-          const options = row.material && !materials.includes(row.material) ? [row.material, ...materials] : materials;
-          return (
-            <div className="filters" key={position}>
-              <span className="mono">{position + 1}</span>
-              <select
-                aria-label={`第 ${position + 1} 种料`}
-                value={row.material}
-                disabled={readOnly}
-                onChange={(event) => onSet((current) => void (current.materials![position].material = event.target.value))}
-              >
-                <option value="">选物料</option>
-                {options.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                    {bomMaterials.includes(name) ? '（BOM）' : ''}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label={`第 ${position + 1} 种料的用量参数`}
-                value={row.param}
-                disabled={readOnly}
-                onChange={(event) => onSet((current) => void (current.materials![position].param = event.target.value))}
-              >
-                <option value="">选用量参数</option>
-                {row.param && !params.includes(row.param) ? (
-                  <option value={row.param}>{row.param}（不是该能力的参数）</option>
-                ) : null}
-                {params.map((key) => {
-                  const unit = capability.param_specs?.[key]?.unit;
-                  return (
-                    <option key={key} value={key}>
-                      {capability.params[key] || key}
-                      {unit ? ` · ${unit}` : ' · 未登记单位'}
-                    </option>
-                  );
-                })}
-              </select>
-              <button className="btn sm" disabled={readOnly || position === 0} onClick={() => move(position, position - 1)}>
-                上移
-              </button>
-              <button
-                className="btn sm"
-                disabled={readOnly || position === rows.length - 1}
-                onClick={() => move(position, position + 1)}
-              >
-                下移
-              </button>
-              <button
-                className="btn sm"
-                disabled={readOnly}
-                onClick={() => onSet((current) => void current.materials!.splice(position, 1))}
-              >
-                移除
-              </button>
-            </div>
-          );
-        })}
-        <button
-          className="btn sm"
-          disabled={readOnly}
-          onClick={() =>
-            onSet((current) => {
-              current.materials = [...(current.materials ?? []), { material: '', param: '' }];
-            })
-          }
-        >
-          增加一种料
-        </button>
+      <div className="cfg-table-wrap">
+        {rows.length ? (
+          <div className="program-scroll">
+          <table className="compact cfg-table">
+            <thead>
+              <tr>
+                <th className="num">序</th>
+                <th>物料</th>
+                <th>用量参数</th>
+                {readOnly ? null : <th />}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, position) => {
+                const options = row.material && !materials.includes(row.material) ? [row.material, ...materials] : materials;
+                return (
+                  <tr key={position}>
+                    <td className="num mono">{position + 1}</td>
+                    <td>
+                      <select
+                        aria-label={`第 ${position + 1} 种料`}
+                        value={row.material}
+                        disabled={readOnly}
+                        onChange={(event) => onSet((current) => void (current.materials![position].material = event.target.value))}
+                      >
+                        <option value="">选物料</option>
+                        {options.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                            {bomMaterials.includes(name) ? '（BOM）' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`第 ${position + 1} 种料的用量参数`}
+                        value={row.param}
+                        disabled={readOnly}
+                        onChange={(event) => onSet((current) => void (current.materials![position].param = event.target.value))}
+                      >
+                        <option value="">选用量参数</option>
+                        {row.param && !params.includes(row.param) ? (
+                          <option value={row.param}>{row.param}（不是该能力的参数）</option>
+                        ) : null}
+                        {params.map((key) => {
+                          const unit = capability.param_specs?.[key]?.unit;
+                          return (
+                            <option key={key} value={key}>
+                              {capability.params[key] || key}
+                              {unit ? ` · ${unit}` : ' · 未登记单位'}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </td>
+                    {readOnly ? null : (
+                      <td className="row-end">
+                        <span className="cfg-tools">
+                          <button className="btn sm" title="上移" aria-label={`第 ${position + 1} 种料上移`}
+                            disabled={position === 0} onClick={() => move(position, position - 1)}>↑</button>
+                          <button className="btn sm" title="下移" aria-label={`第 ${position + 1} 种料下移`}
+                            disabled={position === rows.length - 1} onClick={() => move(position, position + 1)}>↓</button>
+                          <button className="btn sm" title="移除" aria-label={`移除第 ${position + 1} 种料`}
+                            onClick={() => onSet((current) => void current.materials!.splice(position, 1))}>删</button>
+                        </span>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        ) : null}
+        {readOnly ? null : (
+          <button
+            className="btn sm cfg-add"
+            onClick={() =>
+              onSet((current) => {
+                current.materials = [...(current.materials ?? []), { material: '', param: '' }];
+              })
+            }
+          >
+            增加一种料
+          </button>
+        )}
       </div>
     </Field>
   );

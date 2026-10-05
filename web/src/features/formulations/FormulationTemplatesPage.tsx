@@ -1012,11 +1012,12 @@ function ModePanel({
   return (
     <Panel title="生成方式">
       <div className="grid cols-2">
-        <Field label="怎么生成流程" hint="上位机收整份实验任务、自己调度线内模组（A-Lab 一类整线）时选整任务">
+        <Field label="怎么生成流程"
+          hint="逐种料：每种料一个加料步骤、加完按规则搅拌，中控逐步下发。整任务：上位机收整份实验任务、自己调度线内模组（A-Lab 一类整线），一个设备步骤投完一瓶的全部组分">
           <select value={task ? 'task' : 'steps'} disabled={readOnly}
             onChange={(event) => mutate((c) => setTaskMode(c, event.target.value === 'task', fixed))}>
-            <option value="steps">逐种料生成加料、搅拌步骤（中控逐步下发）</option>
-            <option value="task">整任务：一个设备步骤投完一瓶的全部组分（上位机执行）</option>
+            <option value="steps">逐种料生成步骤</option>
+            <option value="task">整任务（上位机执行）</option>
           </select>
         </Field>
         {task ? (
