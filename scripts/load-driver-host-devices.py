@@ -23,10 +23,11 @@
 - 设备模块的模拟网关（ilcs-devices/gateway/<模块>，ILCS 网关契约）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
   ST-ECHEM-SIM（scripts/load-device-simulators.py）、ST-NW-01（load-neware-cycler.py）、EL-D-BAL、EL-D-PWD、EL-T-RAM
   （load-electrolyte-line.py connect）、EL-ALAB（A-Lab 上位机的网关，load-electrolyte-line.py connect --gateways
-  gateways-alab.json）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的
-  GW-*（50231–50240，驱动宿主的 http_json 插件，设备文件在 ilcs-devices/host/sites/local/devices）。网关照旧在原来的容器里跑；模拟设备控制口指向网关自己的
-  API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`（一条指令最多几个样本）照模块的
-  profile.json 写进连接配置，契约（保持 / 终止 / 查询 / 去重）也照它声明（A-Lab 上位机能暂停，天平、拉曼这些不能）。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
+  gateways-alab.json）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的 GW-*
+  （50231–50240，驱动宿主的 http_json 插件，设备文件在 ilcs-devices/host/sites/local/devices）。网关照旧在原来的容器里跑；
+  模拟设备控制口指向网关自己的 API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`
+  （一条指令最多几个样本）照模块的 profile.json 写进连接配置，契约（保持 / 终止 / 查询 / 去重）也照它声明（A-Lab 上位机
+  能暂停，天平、拉曼这些不能）。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
   （配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
   `--acceptance` 逐项能力跑动作级 + 故障项目。
 
@@ -199,8 +200,8 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
     adapter = engineer.get(f"/stations/{station_id}/adapter")
     config, credential, supports = config_of(station), f"file://{SECRETS}/ilcs.token", supports_of(station)
     declared = {f"supports_{key}": value for key, value in (adapter.get("capabilities") or {}).items()}
-    if adapter.get("driver") != "sila2_v1" or adapter.get("config") != config or adapter.get("credential_ref") != credential \
-            or declared != supports:
+    if adapter.get("driver") != "sila2_v1" or adapter.get("config") != config \
+            or adapter.get("credential_ref") != credential or declared != supports:
         adapter = engineer.patch(f"/stations/{station_id}/adapter", {
             "kind": "real", "driver": "sila2_v1", "protocol": "SiLA 2（驱动宿主）", "config": config,
             "credential_ref": credential, **supports, "template_id": "",

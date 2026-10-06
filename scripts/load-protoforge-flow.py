@@ -174,7 +174,8 @@ def configure_stations(engineer: Actor) -> None:
         acting = station_id != SENSOR
         wanted = {key: value for key, value in config.items() if key not in {"environment", *(("tasks",) if acting else ())}}
         if not acting and wanted.get("tasks") is not False:
-            raise Failed(f"{station_id} 应只读写点位（tasks: false）：先跑 scripts/load-driver-host-devices.py register --only {station_id}")
+            raise Failed(f"{station_id} 应只读写点位（tasks: false）："
+                         f"先跑 scripts/load-driver-host-devices.py register --only {station_id}")
         if station_id in SENSORS:
             wanted["environment"] = SENSORS[station_id]
         role = "参与自动流程" if acting else "只读写点位"
