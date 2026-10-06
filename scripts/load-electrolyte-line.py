@@ -268,13 +268,29 @@ def register_sop(researcher: Actor, qa: Actor, operator: Actor, path: Path) -> d
 
 
 def register_islands(engineer: Actor, line: dict) -> None:
-    """三段各是一个实验区：工位上写岛号，这里给岛号起名（看板、现场监控按名称显示）。名称一致就不动。"""
+    """三段各是一个实验区：工位上写岛号，这里给岛号起名（看板、现场监控按名称显示）。名称一致就不动。
+
+    编号已经有了别的名字、上面还有不属于这条线的工位时不改名、直接报错：那是别处登记的实验区，
+    改名会把那些工位一起挂到这条线的名下（实验区编号是全库共用的）。
+    """
     current = {row["id"]: row["name"] for row in engineer.get("/islands")}
+    ours = {station["id"] for station in line.get("stations") or []}
+    others: dict[int, list[str]] = {}
+    for row in engineer.get("/stations"):
+        if row.get("island") and not row.get("retired") and row["id"] not in ours:
+            others.setdefault(row["island"], []).append(row["id"])
     changed = 0
     for island in line.get("islands") or []:
-        if current.get(island["id"]) != island["name"]:
-            engineer.put(f"/islands/{island['id']}", {"name": island["name"]})
-            changed += 1
+        name = current.get(island["id"])
+        if name == island["name"]:
+            continue
+        if name and others.get(island["id"]):
+            raise Failed(
+                f"实验区 #{island['id']} 已登记为「{name}」，上面还有不属于这条线的工位"
+                f"（{'、'.join(sorted(others[island['id']]))}）：产线定义里换一个没用过的实验区编号"
+            )
+        engineer.put(f"/islands/{island['id']}", {"name": island["name"]})
+        changed += 1
     ok("实验区", "、".join(f"#{row['id']} {row['name']}" for row in line.get("islands") or [])
                  + (f"（登记 / 改名 {changed}）" if changed else ""))
 
