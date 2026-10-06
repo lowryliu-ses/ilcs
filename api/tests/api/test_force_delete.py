@@ -193,3 +193,38 @@ def test_alarm_numbers_do_not_come_back_after_alarms_are_deleted(db):
     assert int(second.id[2:]) > number, (first.id, second.id)
     db.query(Alarm).filter(Alarm.id == second.id).delete(synchronize_session=False)
     db.commit()
+
+
+def test_report_and_task_numbers_do_not_come_back_after_deletion(db):
+    """删掉的报告、实验任务编号不再发：按行数 + 1 会重发删掉的编号，后面还有编号时直接撞上（报告建不出来、任务主键冲突）。
+    审计里的「生成报告草稿」「建立实验任务」记着用过的编号。"""
+    from app.core.context import system_context
+    from app.models import ExperimentTask, Report
+    from app.repositories.recipes import ExperimentTaskRepository
+    from app.repositories.reports import ReportRepository
+    from app.services.audit_service import AuditService
+
+    ctx = system_context("ORG-001", "用例")
+    audit = AuditService(db, ctx)
+    reports, tasks = ReportRepository(db, ctx), ExperimentTaskRepository(db, ctx)
+
+    first_report, first_task = reports.next_code(), tasks.next_id()
+    db.add(Report(org_id="ORG-001", code=first_report, title="编号用例"))
+    db.add(ExperimentTask(id=first_task, org_id="ORG-001", plan_id="", title="编号用例"))
+    audit.record(None, "生成报告草稿", "编号用例", detail=f"{first_report}；编号用例")
+    audit.record(None, "建立实验任务", first_task, detail="编号用例")
+    db.commit()
+    later_report, later_task = reports.next_code(), tasks.next_id()
+    db.add(Report(org_id="ORG-001", code=later_report, title="编号用例：后建的"))
+    db.add(ExperimentTask(id=later_task, org_id="ORG-001", plan_id="", title="编号用例：后建的"))
+    db.commit()
+    db.query(Report).filter(Report.code == first_report, Report.title == "编号用例").delete(synchronize_session=False)
+    db.query(ExperimentTask).filter(ExperimentTask.id == first_task).delete(synchronize_session=False)
+    db.commit()
+
+    # 删掉前一个以后：按行数会重发 later 的编号（撞上），按用过的最大号续则在 later 之后
+    assert reports.next_code() > later_report > first_report
+    assert tasks.next_id() > later_task > first_task
+    db.query(Report).filter(Report.code == later_report).delete(synchronize_session=False)
+    db.query(ExperimentTask).filter(ExperimentTask.id == later_task).delete(synchronize_session=False)
+    db.commit()

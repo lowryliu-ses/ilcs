@@ -49,14 +49,15 @@ SAMPLE_TYPE = "联调样品"
 TEMP_RANGE = (0, 100)
 RECOVERY = {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "设定类动作没有保持",
             "sideEffect": "重试会再写一次设定值", "verify": ["设定回读"]}
-# 两个设定温度的设备：能力、工位、方法、输出 → 指标
+# 两个设定温度的设备：能力、工位、方法、输出 → 指标。步骤编号沿用原来的（s03 是删掉的「PLC 控温运行」，不复用：
+# 出修订版时同一个编号还指同一步）
 DEVICES = {
-    "tc": {"station": TC, "capability": "cap.tc_setpoint", "capability_name": "温控器设定温度", "step": "s03",
+    "tc": {"station": TC, "capability": "cap.tc_setpoint", "capability_name": "温控器设定温度", "step": "s04",
            "step_name": "温控器设定温度", "factor": "温控器设定温度",
            "method": "ProtoForge 温控器设定温度", "dur_min": 1,
            "method_note": "OPC UA 温控节点：写 Temperature、回读；只写设定值，没有启动信号；高报为真时判故障",
            "outputs": {"temp": "pf_tc_temp"}},
-    "chamber": {"station": CHAMBER, "capability": "cap.chamber_setpoint", "capability_name": "环境箱设定温度", "step": "s04",
+    "chamber": {"station": CHAMBER, "capability": "cap.chamber_setpoint", "capability_name": "环境箱设定温度", "step": "s05",
                 "step_name": "环境箱设定温度", "factor": "环境箱设定温度",
                 "method": "ProtoForge 环境箱设定温度", "dur_min": 1,
                 "method_note": "HTTP REST：POST /temperature 写设定、按点表读回温度；状态 normal 即空闲",
@@ -320,7 +321,7 @@ def recipe_steps(methods: dict[str, str]) -> list[dict]:
             "params": {"temp": 60}, "dur": device["dur_min"], "method": {"id": methods[key]},
             "environment": [*PROCESS_REQUIREMENTS, *AMBIENT_REQUIREMENTS] if key == "tc" else AMBIENT_REQUIREMENTS,
         })
-    steps.append({"step_id": "s05", "kind": "review", "name": "QA 复核运行数据", "review_role": "qa"})
+    steps.append({"step_id": "s06", "kind": "review", "name": "QA 复核运行数据", "review_role": "qa"})
     return steps
 
 
