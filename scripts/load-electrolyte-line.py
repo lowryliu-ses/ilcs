@@ -363,7 +363,11 @@ def register_stations(engineer: Actor, operator: Actor, line: dict) -> None:
     offline = [sid for sid in (s["id"] for s in line["stations"]) if sid in still]
     if offline:
         raise Failed(f"工位仍不可用：{ {sid: still[sid] for sid in offline} }")
-    ok("工位", f"{len(line['stations'])} 个（新登记 {len(created)}），内置模拟适配器在线，资产按校准豁免占位")
+    # 已登记的工位可能已经改接真实接入链路（connect、或经驱动宿主的 load-driver-host-devices.py）：按实际接法数
+    real = sum(1 for station in line["stations"]
+               if engineer.get(f"/stations/{station['id']}/adapter").get("kind") == "real")
+    ok("工位", f"{len(line['stations'])} 个（新登记 {len(created)}），都在线：内置模拟 {len(line['stations']) - real} 个"
+              + (f"、接真实接入链路 {real} 个" if real else "") + "；资产按校准豁免占位")
 
 
 def method_outputs(method: dict, metrics: dict[str, str]) -> list[dict]:

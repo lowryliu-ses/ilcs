@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import or_
 
-from ..models import ExperimentTask, Plan, PlanBatchLink, PlanVersion, Recipe, TaskAssignment
+from ..models import AuditEvent, ExperimentTask, Plan, PlanBatchLink, PlanVersion, Recipe, TaskAssignment
 from .base import Repository, ScopedRepository
 
 
@@ -130,8 +130,13 @@ class ExperimentTaskRepository(ScopedRepository[ExperimentTask]):
         return list(self.query().filter(ExperimentTask.state == "pending_accept").all())
 
     def next_id(self) -> str:
-        count = self.db.query(ExperimentTask).count()
-        return f"ET-{count + 1:05d}"
+        """用过的最大编号 + 1（任务编号是全库的主键）。按行数算的话，任务被删（测试环境的强制删除）以后会撞上还在的
+        编号（主键冲突），或重发删掉的编号——审计里同一个编号就指了两个不同的任务。审计里记过的任务编号一并算进来：
+        编号不回头。"""
+        used = [row[0] for row in self.db.query(ExperimentTask.id).all()]
+        used += [row[0] for row in self.db.query(AuditEvent.target).filter(AuditEvent.target.like("ET-%")).all()]
+        numbers = [int(value[3:]) for value in used if value.startswith("ET-") and value[3:].isdigit()]
+        return f"ET-{max(numbers, default=0) + 1:05d}"
 
 
 class TaskAssignmentRepository(Repository[TaskAssignment]):

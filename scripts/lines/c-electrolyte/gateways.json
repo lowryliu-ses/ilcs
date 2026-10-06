@@ -1,5 +1,5 @@
 {
-  "_说明": "电解液线哪几个工位改走真实接入链路、接哪台设备网关（http_json_v1）。现在接的是设备仓库 ilcs-devices 的 deploy/sim.yml 起的模拟站（el-d-bal-sim、el-d-pwd-sim、el-t-ram-sim）；接真机时把 host、device_id 换成现场网关。load-electrolyte-line.py connect 套用接入模板（module 是设备仓库里的设备模块，模板没登记就从它的 profile.json 导入发布）并填连接参数，disconnect 切回内置模拟。没列出的工位照旧用内置模拟。",
+  "_说明": "电解液线哪几个工位改走真实接入链路、接哪台设备网关（http_json_v1）。现在接的是设备仓库 ilcs-devices 的 deploy/sim.yml 起的模拟站（el-d-bal-sim、el-d-pwd-sim、el-t-ram-sim）；接真机时把 host、device_id 换成现场网关。load-electrolyte-line.py connect 套用接入模板（module 是设备仓库里的设备模块，模板没登记就从它的 profile.json 导入发布）并填连接参数（直连网关；本机经驱动宿主的 GW-EL-* 接，用 load-driver-host-devices.py register，之后 connect 沿用），disconnect 切回内置模拟。没列出的工位照旧用内置模拟。",
   "stations": {
     "EL-D-BAL": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-bal-sim", "device_id": "SIM-EL-D-BAL"},
     "EL-D-PWD": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-pwd-sim", "device_id": "SIM-EL-D-PWD"},
