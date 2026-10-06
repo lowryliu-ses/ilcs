@@ -44,6 +44,42 @@ def _table(line: dict, uid: str) -> tuple[list[str], dict[str, dict[str, Decimal
     return names, amounts, out.getvalue().encode("utf-8-sig")
 
 
+class _Engineer:
+    """只答实验区与工位列表、记下改名请求的假账号：实验区登记的规则不用起服务就能核对。"""
+
+    def __init__(self, islands: dict[int, str], stations: dict[str, int]) -> None:
+        self.islands = islands
+        self.stations = stations
+        self.renamed: list[tuple[str, dict]] = []
+
+    def get(self, path: str):
+        if path == "/islands":
+            return [{"id": key, "name": name} for key, name in self.islands.items()]
+        assert path == "/stations", path
+        return [{"id": key, "island": island, "retired": False} for key, island in self.stations.items()]
+
+    def put(self, path: str, body: dict) -> None:
+        self.renamed.append((path, body))
+
+
+def test_line_does_not_rename_an_area_that_other_stations_already_use():
+    """实验区编号全库共用：line 文件写的编号已经是别的实验区（上面有别的工位）时报错，不改名把那些工位挂到这条线下。"""
+    loader = _loader()
+    line = loader.load_line(LINE)
+    area = line["islands"][0]["id"]
+    taken = _Engineer({area: "电池测试区"}, {"ST-NW-01": area, "EL-ALAB": area})
+    with pytest.raises(loader.Failed, match="ST-NW-01"):
+        loader.register_islands(taken, line)
+    assert taken.renamed == []
+
+    # 只有这条线自己的工位（line 文件里改了实验区名称）、或编号还没用过：照常改名 / 登记
+    ours = _Engineer({area: "旧名称"}, {"EL-ALAB": area, "ST-NW-01": area + 1})
+    loader.register_islands(ours, line)
+    fresh = _Engineer({}, {"ST-NW-01": area + 1})
+    loader.register_islands(fresh, line)
+    assert ours.renamed == fresh.renamed == [(f"/islands/{area}", {"name": "A-Lab 整线（上位机）"})]
+
+
 def test_alab_task_line_runs_one_task_step_submitted_by_the_upstream_system(client, reset_runtime, executor, db):
     from app.models import Alarm, Batch, Command
     from app.core.context import system_context
@@ -55,7 +91,7 @@ def test_alab_task_line_runs_one_task_step_submitted_by_the_upstream_system(clie
     line = loader.load_line(LINE)
     context = loader.register(team, line)
     areas = {row["id"]: row["name"] for row in team["engineer"].get("/islands")}
-    assert areas[10] == "A-Lab 整线（上位机）"
+    assert areas[12] == "A-Lab 整线（上位机）"
     template = team["researcher"].get(f"/formulation-templates/{context['template']['id']}")
     assert template["code"] == "FT-ELY-02" and template["check"]["ok"], template["check"]
 

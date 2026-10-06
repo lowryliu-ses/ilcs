@@ -3,7 +3,7 @@
  "name": "C 公司 A-Lab 电解液产线（整任务：上位机实验任务接口）",
  "note": "上位机按整份实验任务执行，ILCS 下发一条整任务指令、回收每瓶的实际加料量与检测结果。模拟阶段工位先接内置模拟；load-electrolyte-line.py connect --gateways gateways-alab.json 改接设备仓库 ilcs-devices 的 alab-electrolyte 模块（假上位机 + 网关），走真实接入链路。",
  "islands": [
-  {"id": 10, "name": "A-Lab 整线（上位机）"}
+  {"id": 12, "name": "A-Lab 整线（上位机）"}
  ],
  "capabilities": [
   {
@@ -96,7 +96,7 @@
   {
    "id": "EL-ALAB",
    "name": "A-Lab 上位机（整线实验任务）",
-   "island": 10,
+   "island": 12,
    "model": "ALAB-ELY-3",
    "channels": 1,
    "limits": {
