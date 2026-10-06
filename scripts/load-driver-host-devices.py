@@ -4,11 +4,15 @@
     ILCS_HOST_SITE=$PWD/data/driver-host/site docker compose -f ../ilcs-devices/deploy/compose.yml up -d   # 驱动宿主（ilcs-devices 组）
     python3 scripts/load-driver-host-devices.py register [--base http://127.0.0.1:8090] [--acceptance] [--only 工位,…]
 
-- ST-PF-MB（ProtoForge 从站 2 的握手 PLC）：工位已有，原来是 `modbus_map_v1` 直连 PLC，改成 `sila2_v1` 接驱动宿主上的
-  PF-MB-PLC（50201）。换驱动要求设备上没有在动作的指令，否则保存被拒。`--acceptance` 再申请一次动作级验收（cap.plc_run）。
+- ST-PF-MB（ProtoForge 从站 1 的温湿度传感器）：`sila2_v1` 接驱动宿主上的 PF-MB-PLC（50201，设备文件 r2 起只读写点位：
+  温度、湿度与两个报警点，没有 TaskExecution），`"tasks": false`，不声明查询、去重。它原来是从站 2 的握手 PLC（能力
+  cap.plc_run）：工位还叫原来的名字就改成传感器的名字，工位上还登记着能力就移除（签名），驱动配置摘要变了就签名批准。
 - ST-PF-OPCUA（ProtoForge OPC UA 压力传感器）、ST-PF-HTTP（ProtoForge HTTP REST 传感器）：没有就登记（只读写点位，
   不登记能力），`sila2_v1` 接 PF-OPCUA（50202）/ PF-HTTP（50203），`"tasks": false`。HTTP 传感器要 ProtoForge 接进
   ILCS 的后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主才连得到它的 8080。
+- 只读写点位（`"tasks": false`）的工位不承接能力：已登记的能力极限签名移除，排程不会再往它上面排。ProtoForge 全流程
+  （load-protoforge-flow.py）之后再把 ST-PF-OPCUA、ST-PF-HTTP 改成参与自动流程、给三台登记环境采集：重跑本脚本会把它们
+  改回这里的连接配置，之后要再跑一次它的 register。
 
 - ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（模拟电芯检测仪表 ilcs-devices/simulators/scpi_meter，映射照抄驱动宿主的设备配置模板
   ilcs-devices/host/profiles/scpi-cell-meter）：工位已有，原来是
@@ -18,8 +22,9 @@
 
 - 设备模块的模拟网关（ilcs-devices/gateway/<模块>，ILCS 网关契约）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
   ST-ECHEM-SIM（scripts/load-device-simulators.py）、ST-NW-01（load-neware-cycler.py）、EL-D-BAL、EL-D-PWD、EL-T-RAM
-  （load-electrolyte-line.py connect）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的
-  GW-*（50231–50239，驱动宿主的 http_json 插件，在设备管理台里加的）。网关照旧在原来的容器里跑；模拟设备控制口指向网关自己的
+  （load-electrolyte-line.py connect）、EL-ALAB（A-Lab 上位机的网关，load-electrolyte-line.py connect --gateways
+  gateways-alab.json）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的
+  GW-*（50231–50240，驱动宿主的 http_json 插件，设备文件在 ilcs-devices/host/sites/local/devices）。网关照旧在原来的容器里跑；模拟设备控制口指向网关自己的
   API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`（一条指令最多几个样本）照模块的
   profile.json 写进连接配置。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
   （配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
@@ -54,9 +59,11 @@ HOST = "driver-host"
 SECRETS = "/run/secrets/ilcs/host"
 STATIONS = {
     "ST-PF-MB": {
-        "name": "ProtoForge PLC（经驱动宿主）", "port": 50201, "device_id": "PF-MB-PLC-01", "tasks": True,
-        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": True, "supports_dedup": True},
-        "acceptance": ("cap.plc_run", {"temp": 60}), "approval": "本机 ProtoForge 模拟 PLC，经驱动宿主接入；没有真实设备与样品",
+        # 驱动宿主上的设备文件（PF-MB-PLC r2）只读写点位：没有 TaskExecution，查询、去重也不声明（只读级验收就不去查指令）
+        "name": "ProtoForge 温湿度传感器（经驱动宿主）", "port": 50201, "device_id": "PF-MB-PLC-01", "tasks": False,
+        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": False, "supports_dedup": False},
+        # 原来是从站 2 的握手 PLC：工位还叫这些名字就改成传感器的名字（人改过的名字不动）
+        "renamed_from": ("ProtoForge PLC（Modbus TCP）", "ProtoForge PLC（经驱动宿主）"),
     },
     "ST-PF-OPCUA": {
         "name": "ProtoForge 压力传感器（经驱动宿主）", "port": 50202, "device_id": "PF-OPCUA-PRESSURE", "tasks": False,
@@ -104,8 +111,14 @@ STATIONS = {
          [("cap.ely.dose_solid", {"mass": 0.05})]),
         ("EL-T-RAM", "电解液线拉曼（模拟，经驱动宿主）", 50239, "SIM-EL-T-RAM", "el-t-ram-sim", "raman-seabreeze", 10,
          [("cap.ely.raman", {"repeats": 1})]),
+        # A-Lab 上位机的网关（调假上位机的实验任务接口）：验收参数 {} 是整线自检，不带瓶、不动料
+        ("EL-ALAB", "A-Lab 上位机（模拟，经驱动宿主）", 50240, "SIM-ALAB-01", "alab-sim", "alab-electrolyte", 15,
+         [("cap.ely.run", {})]),
     )},
 }
+# A-Lab 的网关接的是上位机的 REST 接口，不开统一控制口（/simulator/* 回 404）：不登记控制口，也不申请故障项目
+STATIONS["EL-ALAB"].pop("simulator_control")
+STATIONS["EL-ALAB"]["faults"] = False
 # 经驱动宿主接的网关工位：别的登记脚本（load-device-simulators.py、load-neware-cycler.py、load-electrolyte-line.py）
 # 见到工位已经这样接着，就沿用、不改回直连
 GATEWAY_STATIONS = {station_id for station_id, station in STATIONS.items() if station.get("describe")}
@@ -136,7 +149,15 @@ def config_of(station: dict[str, Any]) -> dict[str, Any]:
 def ensure_station(engineer: Actor, station_id: str, station: dict[str, Any]) -> None:
     rows = {row["id"]: row for row in engineer.get("/stations")}
     if station_id in rows:
-        ok("工位", f"{station_id}（沿用）")
+        current = rows[station_id]
+        if current["name"] in station.get("renamed_from", ()):
+            engineer.patch(f"/stations/{station_id}", {"name": station["name"], "row_version": current["row_version"]})
+            ok("工位", f"{station_id} 改名：{current['name']} → {station['name']}")
+            current = {row["id"]: row for row in engineer.get("/stations")}[station_id]
+        else:
+            ok("工位", f"{station_id}（沿用）")
+        if not station["tasks"] and current.get("limits"):
+            drop_capabilities(engineer, station_id, current)
         return
     island = (rows.get("ST-PF-MB") or {}).get("island")
     engineer.post("/stations", {
@@ -145,6 +166,20 @@ def ensure_station(engineer: Actor, station_id: str, station: dict[str, Any]) ->
         "signature_id": engineer.sign("工程变更批准", station_id),
     })
     ok("工位", f"{station_id} {station['name']}（只读写点位，不登记能力）")
+
+
+def drop_capabilities(engineer: Actor, station_id: str, current: dict[str, Any]) -> None:
+    """只读写点位的设备不承接能力：工位上还登记着的（比如原来是握手 PLC）签名移除，排程不再往它上面排，
+    引用这些能力的流程随之重校验。"""
+    capabilities = sorted(current["limits"])
+    changed = engineer.patch(f"/stations/{station_id}/limits", {
+        "remove": capabilities, "row_version": current["row_version"],
+        "signature_id": engineer.sign("修改能力极限", station_id, current["row_version"]),
+    })
+    broken = changed.get("broken_recipes") or []
+    ok("能力极限", f"{station_id} 只读写点位：移除 {'、'.join(capabilities)}（已签名）"
+       + (f"；引用它的流程待修订：{'、'.join(str(row.get('id') if isinstance(row, dict) else row) for row in broken)}"
+          if broken else ""))
 
 
 def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str, Any], timeout: float) -> None:
