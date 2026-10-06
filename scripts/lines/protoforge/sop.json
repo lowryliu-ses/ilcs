@@ -1,38 +1,42 @@
 {
-  "_说明": "ProtoForge 联调线的作业指导书：三台 ProtoForge 模拟设备经驱动宿主接入 ILCS（只走 SiLA 2），按 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告跑一遍全流程。load-protoforge-flow.py 按它登记结构化步骤、上传同目录的附件 PDF（render-sop.py 生成）并走评审发布。改了内容就升版本号、重新生成 PDF。v2（2026-10-04）相对 v1：三台设备都参与温度设定（多温度矩阵，每个样本一个温度，设备按样本依次执行）；温度不再当环境指标，环境只核对湿度与压力。v3（2026-10-04）相对 v2：压力要求放宽到 0.5–10 bar（与温控节点的压力设定范围一致）。v4（2026-10-04）相对 v3：握手 PLC 不回报设定回读——ProtoForge 场景的规则触发时会把设定寄存器写回 0，PLC 的逐样本设定看指令参数与遥测。v5（2026-10-06）相对 v4：ProtoForge 里从站 2 的握手 PLC 已删，Modbus 只剩从站 1 的温湿度传感器（ST-PF-MB，只读写点位）——去掉「PLC 控温运行」，两台设备（OPC UA 温控器、HTTP 环境箱）参与温度设定；实验区的温度、湿度改由温湿度传感器给（新增温度 15–35 ℃ 的要求），压力是 OPC UA 节点自己的读数，要求挪到温控器设定那一步。",
+  "_说明": "ProtoForge 联调线的作业指导书：ProtoForge 模拟设备经驱动宿主接入 ILCS（只走 SiLA 2），按 SOP → 流程 → 方案 → 任务 → 排程 → 批次执行 → 复核 → 报告跑一遍全流程。load-protoforge-flow.py 按它登记结构化步骤、上传同目录的附件 PDF（render-sop.py 生成）并走评审发布。改了内容就升版本号、重新生成 PDF。v2（2026-10-04）相对 v1：三台设备都参与温度设定（多温度矩阵，每个样本一个温度，设备按样本依次执行）；温度不再当环境指标，环境只核对湿度与压力。v3（2026-10-04）相对 v2：压力要求放宽到 0.5–10 bar（与温控节点的压力设定范围一致）。v4（2026-10-04）相对 v3：握手 PLC 不回报设定回读——ProtoForge 场景的规则触发时会把设定寄存器写回 0，PLC 的逐样本设定看指令参数与遥测。v5（2026-10-06）相对 v4：ProtoForge 里从站 2 的握手 PLC 已删，Modbus 只剩从站 1 的温湿度传感器（ST-PF-MB，只读写点位）——去掉「PLC 控温运行」，两台设备（OPC UA 温控器、HTTP 环境箱）参与温度设定；实验区的温度、湿度改由温湿度传感器给（新增温度 15–35 ℃ 的要求），压力是 OPC UA 节点自己的读数，要求挪到温控器设定那一步。v6（2026-10-06）相对 v5：ProtoForge 里新加的六台设备也经驱动宿主接进来（S7-1500 OPC UA、S7-1200 S7 协议、S7-1200 Modbus TCP 从站 2、PROFINET TCP 模拟、MQTT 环境监测传感器、三菱 FX5U MC 协议），一个批次把九台都用上：六台参与设定（多设备矩阵，每个样本一组设定值），MQTT 传感器给监测点的空气质量、FX5U 给自己的压力与模块温度，开工前一并核对；流程改名「ProtoForge 全设备多协议联调」，第二步改成「装样并核对各样本设定值」。",
   "code": "SOP-PF-01",
-  "title": "ProtoForge 多温度矩阵控温联调规程",
-  "version": "v5",
+  "title": "ProtoForge 全设备多协议联调规程",
+  "version": "v6",
   "category": "设备联调",
   "capability_scope": [
     "cap.tc_setpoint",
-    "cap.chamber_setpoint"
+    "cap.chamber_setpoint",
+    "cap.pressure_setpoint",
+    "cap.speed_setpoint",
+    "cap.analog_output",
+    "cap.pn_analog_output"
   ],
   "sample_types": [
     "联调样品"
   ],
   "requires_training_ack": true,
-  "purpose": "规定 ProtoForge 联调线（OPC UA 温控 / 压力节点、HTTP REST 环境箱、Modbus TCP 温湿度传感器，均经驱动宿主以 SiLA 2 接入）按多温度矩阵做控温运行的操作：方案用设计点给每个样本一个设定温度，温控器与环境箱依次为每个样本设定温度并回读（一次只做一个设定的设备由驱动按样本依次执行），温湿度传感器给实验区的温度、湿度读数，开工前核对环境与设备在线，QA 复核数据。用于验证 ILCS 从 SOP、流程、矩阵方案、任务到排程、批次执行、数据复核与报告的全链路。设备都是模拟设备，数据带「模拟」标记，不作实测结论。",
-  "safety": "联调用模拟设备，无真实样品、加热体与压力容器。开工前确认三台设备在「工位与接入」里经驱动宿主在线、实验区温度与相对湿度、温控节点压力读数在要求范围内且未过期；读数缺失、过期或超限时不开工，排查传感器与驱动宿主后再继续。运行中不得在 ProtoForge 管理界面手动改写温湿度传感器的读数与报警点、温控节点与环境箱温度。",
+  "purpose": "规定 ProtoForge 联调线九台模拟设备（Modbus TCP、OPC UA、HTTP REST、S7、MC、MQTT、PROFINET 七种协议，均经驱动宿主以 SiLA 2 接入）按多设备矩阵做设定运行的操作：方案用设计点给每个样本一组设定值，OPC UA 温控器、HTTP 环境箱、S7-1500 压力设定、S7-1200（S7 协议）速度设定、S7-1200（Modbus TCP）输出电流、PROFINET 输出电压六台设备依次为每个样本写设定值并回读（一次只做一个设定的设备由驱动按样本依次执行）；Modbus 温湿度传感器给实验区的温度、湿度，MQTT 环境监测传感器给监测点的温度、湿度、CO2、PM2.5、噪声，OPC UA 节点与三菱 FX5U 给压力（FX5U 还有模块温度），开工前核对环境与设备在线，QA 复核数据。用于验证 ILCS 从 SOP、流程、矩阵方案、任务到排程、批次执行、数据复核与报告的全链路，以及七种协议的接入。设备都是模拟设备，数据带「模拟」标记，不作实测结论。",
+  "safety": "联调用模拟设备，无真实样品、加热体、压力容器与运动机构。开工前确认九台设备在「工位与接入」里经驱动宿主在线、实验区温度与相对湿度、监测点空气质量、温控节点与 FX5U 的压力读数在要求范围内且未过期；读数缺失、过期或超限时不开工，排查传感器与驱动宿主后再继续。运行中不得在 ProtoForge 管理界面手动改写传感器读数、各设备的设定点与运行状态。",
   "steps": [
     {
       "title": "核对环境与设备在线",
       "kind": "manual",
       "duration_min": 2,
-      "instructions": "在「环境监测」核对设备模拟联调区的温度（15–35 ℃）、相对湿度（≤ 80 %RH，均来自 ST-PF-MB 温湿度传感器）与 ST-PF-OPCUA 的压力（0.5–10 bar）读数在范围内且未过期；在「工位与接入」核对 ST-PF-MB、ST-PF-OPCUA、ST-PF-HTTP 在线。",
+      "instructions": "在「环境监测」核对：设备模拟联调区的温度（15–35 ℃）、相对湿度（≤ 80 %RH，来自 ST-PF-MB 温湿度传感器）；ProtoForge 环境监测点的温度（10–40 ℃）、湿度（≤ 85 %RH）、CO2（≤ 2000 ppm）、PM2.5（≤ 200 μg/m³）、噪声（≤ 90 dB，来自 ST-PF-MQTT）；ST-PF-FX5U 的压力（0.1–3 MPa）与模块温度（20–60 ℃）；读数都在范围内且未过期。在「工位与接入」核对九台 ProtoForge 设备（ST-PF-MB、ST-PF-OPCUA、ST-PF-HTTP、ST-PF-S71500、ST-PF-S7、ST-PF-S7MB、ST-PF-PN、ST-PF-MQTT、ST-PF-FX5U）在线。",
       "checks": [
-        "温度、湿度、压力读数在范围内且未过期",
-        "三台设备在线"
+        "实验区、监测点与 FX5U 的读数在范围内且未过期",
+        "九台设备在线"
       ]
     },
     {
-      "title": "装样并核对各样本设定温度",
+      "title": "装样并核对各样本设定值",
       "kind": "manual",
       "duration_min": 2,
-      "instructions": "按批次样本清单核对联调样品，按方案的设计点核对每个样本的设定温度（同一样本两台设备同一个温度）。",
+      "instructions": "按批次样本清单核对联调样品，按方案的设计点核对每个样本的六项设定值（两台设备的温度、S7-1500 压力、S7-1200 速度、S7-1200 输出电流、PROFINET 输出电压）。",
       "checks": [
         "样品与清单一致",
-        "每个样本的设定温度与方案一致"
+        "每个样本的六项设定值与方案一致"
       ]
     },
     {
@@ -56,12 +60,52 @@
       ]
     },
     {
+      "title": "S7-1500 压力设定",
+      "kind": "device",
+      "capability": "cap.pressure_setpoint",
+      "duration_min": 1,
+      "instructions": "由系统下发：S7-1500（OPC UA）按样本依次写 DB1.DBD0 压力设定并回读；CPU 状态 STOP 判故障、HOLD 判保持。",
+      "checks": [
+        "每个样本的回读压力与设计值一致"
+      ]
+    },
+    {
+      "title": "S7-1200 速度设定",
+      "kind": "device",
+      "capability": "cap.speed_setpoint",
+      "duration_min": 1,
+      "instructions": "由系统下发：S7-1200（S7 协议，机架 0 槽 1）按样本依次写 DB1.DBD8 速度设定并回读；运行状态为假判故障。",
+      "checks": [
+        "每个样本的回读速度与设计值一致"
+      ]
+    },
+    {
+      "title": "S7-1200 模拟量输出",
+      "kind": "device",
+      "capability": "cap.analog_output",
+      "duration_min": 1,
+      "instructions": "由系统下发：S7-1200（Modbus TCP 从站 2）按样本依次写 ao0 输出电流并回读；运行模式 STOP 判故障。",
+      "checks": [
+        "每个样本的回读电流与设计值一致"
+      ]
+    },
+    {
+      "title": "PROFINET 模拟量输出",
+      "kind": "device",
+      "capability": "cap.pn_analog_output",
+      "duration_min": 1,
+      "instructions": "由系统下发：PROFINET S7-1200（ProtoForge 的 TCP 模拟）按样本依次写 QW64 输出电压并回读（读改写整幅过程映像）。",
+      "checks": [
+        "每个样本的回读电压与设计值一致"
+      ]
+    },
+    {
       "title": "QA 复核运行数据",
       "kind": "review",
       "duration_min": 2,
-      "instructions": "QA 逐样本核对设计温度、温控器与环境箱的回读、环境读数（温度、湿度、压力）与审计记录，确认数据完整后批准。",
+      "instructions": "QA 逐样本核对六项设计值与六台设备的回读、环境读数（实验区温湿度、监测点空气质量、压力）与审计记录，确认数据完整后批准。",
       "checks": [
-        "每个样本两项回报齐全",
+        "每个样本六项回报齐全",
         "环境核对记录完整"
       ]
     }

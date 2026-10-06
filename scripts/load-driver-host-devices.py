@@ -9,10 +9,12 @@ local，环境变量 ILCS_DRIVER_HOST_SITE 换；106.51 与本机共用 local �
 （保持 / 终止 / 查询 / 去重）、插件与网关请求超时取自同目录的设备文件，网关的 `wells_per_command`（只给 ILCS 用的连接配置键）
 取自模块 profile.json；这里不另写一份。现在接的是：
 
-- ProtoForge 三台（ST-PF-MB 温湿度传感器、ST-PF-OPCUA 压力传感器、ST-PF-HTTP HTTP 传感器）：只读写点位（`"tasks": false`），
-  没有就登记（不登记能力）。ST-PF-MB 原来是从站 2 的握手 PLC：还叫原来的名字就改名。HTTP 传感器要 ProtoForge 接进 ILCS 的
-  后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主才连得到它的 8080。ProtoForge 全流程
-  （load-protoforge-flow.py）之后再把 ST-PF-OPCUA、ST-PF-HTTP 改成参与自动流程、给三台登记环境采集：重跑本脚本会把它们
+- ProtoForge 九台（ST-PF-MB 温湿度传感器、ST-PF-OPCUA 压力传感器、ST-PF-HTTP HTTP 传感器，ST-PF-S71500 S7-1500（OPC UA）、
+  ST-PF-S7 S7-1200（S7 协议）、ST-PF-S7MB S7-1200（Modbus TCP 从站 2）、ST-PF-PN PROFINET、ST-PF-MQTT MQTT 环境监测传感器、
+  ST-PF-FX5U 三菱 FX5U（MC 协议））：只读写点位（`"tasks": false`），没有就登记（不登记能力）。ST-PF-MB 原来是从站 2 的握手
+  PLC：还叫原来的名字就改名。ProtoForge 要接进 ILCS 的后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主
+  才连得到它的 HTTP 8080、S7 102、MC 5000、PROFINET 34964 这些没发布到宿主机的端口。ProtoForge 全流程
+  （load-protoforge-flow.py）之后再把六台设定设备改成参与自动流程、给四台登记环境采集：重跑本脚本会把它们
   改回这里的连接配置，之后要再跑一次它的 register。
 - 只读写点位的工位不承接能力：已登记的能力极限签名移除，排程不会再往它上面排。
 - 模拟电芯检测仪表 ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（驱动宿主的 line_command，映射照抄设备配置模板

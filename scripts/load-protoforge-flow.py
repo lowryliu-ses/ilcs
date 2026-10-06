@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""ProtoForge 联调线全流程：三台 ProtoForge 模拟设备经驱动宿主接入（只走 SiLA 2），按 SOP → 能力 / 设备方法 → 流程 →
-多温度矩阵方案 → 实验任务 → 排程 → 批次执行 → 数据复核 → 报告跑一遍。
+"""ProtoForge 联调线全流程：ProtoForge 里的九台模拟设备（Modbus TCP、OPC UA、HTTP REST、S7、MC、MQTT、PROFINET 七种协议）
+都经驱动宿主接入（只走 SiLA 2），按 SOP → 能力 / 设备方法 → 流程 → 矩阵方案 → 实验任务 → 排程 → 批次执行 → 数据复核 →
+报告跑一遍——一个实验任务、一个批次把九台都用上。
 
-    python3 scripts/load-driver-host-devices.py register            # 先把三台设备经驱动宿主接进来（见 ilcs-devices/host/README.md）
+    python3 scripts/load-driver-host-devices.py register            # 先把九台设备经驱动宿主接进来（见 ilcs-devices/host/README.md）
     python3 scripts/load-protoforge-flow.py register [--base http://127.0.0.1:8090]
     python3 scripts/load-protoforge-flow.py run [--temps 40,60,80] [--repeats 1]
 
-两台设备参与温度设定，每个样本一个温度（方案的设计点），一次只做一个设定的设备由驱动按样本依次执行：
+六台设备参与设定（写设定值、回读），每个样本一组设定值（方案的设计点：第 i 个样本取每台设备的第 i 档），一次只做一个设定的
+设备由驱动按样本依次执行：
 - ST-PF-OPCUA（OPC UA 温控 / 压力节点）：「温控器设定温度」（cap.tc_setpoint）写温度节点、回读；
-- ST-PF-HTTP（HTTP REST 设备）：「环境箱设定温度」（cap.chamber_setpoint）POST 写温度、回读。
-ST-PF-MB（Modbus TCP 从站 1 的温湿度传感器，只读写点位）是实验区的环境传感器：温度、相对湿度记成「设备模拟联调区」的读数；
+- ST-PF-HTTP（HTTP REST 设备）：「环境箱设定温度」（cap.chamber_setpoint）POST 写温度、回读；
+- ST-PF-S71500（西门子 S7-1500，OPC UA）：「S7-1500 压力设定」（cap.pressure_setpoint）写 DB1.DBD0、回读；
+- ST-PF-S7（西门子 S7-1200，S7 协议）：「S7-1200 速度设定」（cap.speed_setpoint）写 DB1.DBD8、回读；
+- ST-PF-S7MB（西门子 S7-1200，Modbus TCP 从站 2）：「S7-1200 模拟量输出」（cap.analog_output）写 ao0（mA）、回读；
+- ST-PF-PN（PROFINET S7-1200，ProtoForge 的 TCP 模拟）：「PROFINET 模拟量输出」（cap.pn_analog_output）写 QW64（V）、回读。
+温度两台按 --temps 给的温度，另外四台在各自的范围里按样本数等分取档。另外三台只读写点位，读数当环境 / 过程读数：
+- ST-PF-MB（Modbus TCP 从站 1 的温湿度传感器）：温度、相对湿度记成「设备模拟联调区」的读数；
+- ST-PF-MQTT（MQTT 环境监测传感器）：温度、湿度、CO2、PM2.5、噪声记成「ProtoForge 环境监测点」的读数；
+- ST-PF-FX5U（三菱 FX5U，MC 协议）：压力、模块温度记成它自己（ST-PF-FX5U）的读数；
 OPC UA 节点的压力记成它自己（ST-PF-OPCUA）的读数。流程步骤写了环境要求，开跑检查与设备步骤下发前都按最新读数核对
-（两台设定设备的温度会被设定步骤改写，不当环境温度）。ST-PF-MB 原来是从站 2 的握手 PLC（cap.plc_run），ProtoForge 里已删掉，
-流程里没有 PLC 那一步了。
+（设定设备的温度会被设定步骤改写，不当环境温度）。ST-PF-MB 原来是从站 2 的握手 PLC（cap.plc_run），ProtoForge 里已删掉。
 
-- register：温湿度传感器登记环境采集（仍只读写点位）、两台设定设备接成参与自动流程并登记环境采集（签名保存）；设备服务报了
-  新的驱动配置就签名批准；欠验收的申请动作级验收并等放行；两项能力、两个检测指标、两个设备方法（工程师起草、QA 发布）、
-  操作员资质、SOP-PF-01（研究员起草、QA 批准发布、操作员阅读确认）、流程（研究员起草、关联 SOP、QA 批准发布；原来带 PLC
-  那一步的流程出修订版取代）。已有的先查后用，重复运行不会多建。
-- run：先照 register 补齐，再 矩阵方案（两个设定温度因子按设计点对齐，每个样本一个温度，QA 批准）→ 实验任务 → 批次 →
-  排程 → 开跑检查（含环境核对）→ 签名下发 → 人工节点 → 两个设备步骤（执行器经驱动宿主下发，驱动按样本依次执行）→
-  QA 审核节点 → 逐样本列出设计温度与两台设备的回读 → 结果复核 → 报告发布。要求执行器在跑、三台设备在线。
+- register：三台只读写点位的传感器登记环境采集、六台设定设备接成参与自动流程（OPC UA 节点也登记环境采集，签名保存）；
+  设备服务报了新的驱动配置就签名批准；欠验收的申请动作级验收并等放行；六项能力、六个检测指标、六个设备方法（工程师起草、
+  QA 发布）、操作员资质、SOP-PF-01（研究员起草、QA 批准发布、操作员阅读确认）、流程（研究员起草、关联 SOP、QA 批准发布；
+  原来只有两台设定设备、带 PLC 那一步的流程出修订版取代）。已有的先查后用，重复运行不会多建。
+- run：先照 register 补齐，再 矩阵方案（六个设定因子按设计点对齐，每个样本一组设定值，QA 批准）→ 实验任务 → 批次 →
+  排程 → 开跑检查（含环境核对）→ 签名下发 → 人工节点 → 六个设备步骤（执行器经驱动宿主下发，驱动按样本依次执行）→
+  QA 审核节点 → 逐样本列出设计值与六台设备的回读 → 结果复核 → 报告发布。要求执行器在跑、九台设备在线。
 
 数据来自模拟设备：结果带「模拟」标记，不进闭环训练数据。正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
 """
@@ -43,29 +51,63 @@ step, ok, note, _items = common.step, common.ok, common.note, common._items
 
 SOP = HERE / "lines" / "protoforge" / "sop.json"
 SENSOR, TC, CHAMBER = "ST-PF-MB", "ST-PF-OPCUA", "ST-PF-HTTP"
+S71500, S7, S7MB, PN = "ST-PF-S71500", "ST-PF-S7", "ST-PF-S7MB", "ST-PF-PN"
+MQTT, FX5U = "ST-PF-MQTT", "ST-PF-FX5U"
+STATIONS = (SENSOR, TC, CHAMBER, S71500, S7, S7MB, PN, MQTT, FX5U)
 AMBIENT = "设备模拟联调区"
+AIR = "ProtoForge 环境监测点"
 OPERATOR = "P-003"
 SAMPLE_TYPE = "联调样品"
 TEMP_RANGE = (0, 100)
 RECOVERY = {"maxHoldMin": 0, "pausable": False, "retryable": True, "hold": "设定类动作没有保持",
             "sideEffect": "重试会再写一次设定值", "verify": ["设定回读"]}
-# 两个设定温度的设备：能力、工位、方法、输出 → 指标。步骤编号沿用原来的（s03 是删掉的「PLC 控温运行」，不复用：
-# 出修订版时同一个编号还指同一步）
+# 六台参与设定的设备：能力（一个参数 param，单位 unit，工位极限要覆盖 range）、工位、方法、输出 → 指标。档位：温度两台按
+# --temps，其余按 span 在样本数上等分；acceptance 是动作级验收下发的设定值。步骤编号沿用原来的（s03 是删掉的「PLC 控温运行」，
+# s06 是 QA 复核，都不复用：出修订版时同一个编号还指同一步），新加的四台接着用 s07–s10
 DEVICES = {
     "tc": {"station": TC, "capability": "cap.tc_setpoint", "capability_name": "温控器设定温度", "step": "s04",
-           "step_name": "温控器设定温度", "factor": "温控器设定温度",
+           "step_name": "温控器设定温度", "factor": "温控器设定温度", "param": "temp", "param_label": "设定温度",
+           "unit": "℃", "range": TEMP_RANGE, "span": None, "acceptance": 45,
            "method": "ProtoForge 温控器设定温度", "dur_min": 1,
            "method_note": "OPC UA 温控节点：写 Temperature、回读；只写设定值，没有启动信号；高报为真时判故障",
            "outputs": {"temp": "pf_tc_temp"}},
     "chamber": {"station": CHAMBER, "capability": "cap.chamber_setpoint", "capability_name": "环境箱设定温度", "step": "s05",
-                "step_name": "环境箱设定温度", "factor": "环境箱设定温度",
+                "step_name": "环境箱设定温度", "factor": "环境箱设定温度", "param": "temp", "param_label": "设定温度",
+                "unit": "℃", "range": TEMP_RANGE, "span": None, "acceptance": 45,
                 "method": "ProtoForge 环境箱设定温度", "dur_min": 1,
                 "method_note": "HTTP REST：POST /temperature 写设定、按点表读回温度；状态 normal 即空闲",
                 "outputs": {"temp": "pf_chamber_temp"}},
+    "s71500": {"station": S71500, "capability": "cap.pressure_setpoint", "capability_name": "PLC 压力设定", "step": "s07",
+               "step_name": "S7-1500 压力设定", "factor": "S7-1500 压力设定", "param": "pressure",
+               "param_label": "设定压力", "unit": "MPa", "range": (0, 10), "span": (2.0, 3.0), "acceptance": 2.5,
+               "method": "ProtoForge S7-1500 压力设定", "dur_min": 1,
+               "method_note": "OPC UA（S7-1500 的 DB1.DBD0 节点）：写压力设定、回读；只写设定值，没有启动信号；"
+                              "CPU 状态 0（STOP）判故障、2（HOLD）判保持",
+               "outputs": {"pressure": "pf_s71500_pressure"}},
+    "s7": {"station": S7, "capability": "cap.speed_setpoint", "capability_name": "PLC 速度设定", "step": "s08",
+           "step_name": "S7-1200 速度设定", "factor": "S7-1200 速度设定", "param": "speed", "param_label": "设定速度",
+           "unit": "RPM", "range": (0, 100), "span": (40, 80), "acceptance": 50,
+           "method": "ProtoForge S7-1200 速度设定", "dur_min": 1,
+           "method_note": "S7 协议（机架 0 槽 1）：写 DB1.DBD8 速度设定、回读；只写设定值；运行状态 DB1.DBX0.0 为假判故障",
+           "outputs": {"speed": "pf_s7_speed"}},
+    "s7mb": {"station": S7MB, "capability": "cap.analog_output", "capability_name": "PLC 模拟量输出（电流）", "step": "s09",
+             "step_name": "S7-1200 模拟量输出", "factor": "S7-1200 输出电流", "param": "current",
+             "param_label": "输出电流", "unit": "mA", "range": (4, 20), "span": (8, 16), "acceptance": 12,
+             "method": "ProtoForge S7-1200 模拟量输出", "dur_min": 1,
+             "method_note": "Modbus TCP 从站 2：写 ao0（保持寄存器 8–9，float32）、回读；只写设定值；运行模式 0（STOP）判故障",
+             "outputs": {"current": "pf_s7mb_current"}},
+    "pn": {"station": PN, "capability": "cap.pn_analog_output", "capability_name": "PROFINET 模拟量输出（电压）",
+           "step": "s10", "step_name": "PROFINET 模拟量输出", "factor": "PROFINET 输出电压", "param": "voltage",
+           "param_label": "输出电压", "unit": "V", "range": (0, 10), "span": (2.5, 7.5), "acceptance": 5,
+           "method": "ProtoForge PROFINET 模拟量输出", "dur_min": 1,
+           "method_note": "ProtoForge 的 PROFINET（TCP 模拟，不是真 PN-IO）：读改写整幅过程映像写 QW64、回读；数据状态作状态点",
+           "outputs": {"voltage": "pf_pn_voltage"}},
 }
-METRICS = {"pf_tc_temp": ("温控器回读温度", "℃"), "pf_chamber_temp": ("环境箱回读温度", "℃")}
-# 三台设备登记占位资产（模拟设备，校准不适用）：设备步骤要核对工位的资产（校准与容量）。已经关联了资产的工位沿用，
-# 新环境里（ST-PF-MB 由 load-driver-host-devices.py 新建）照这里补
+METRICS = {"pf_tc_temp": ("温控器回读温度", "℃"), "pf_chamber_temp": ("环境箱回读温度", "℃"),
+           "pf_s71500_pressure": ("S7-1500 压力设定回读", "MPa"), "pf_s7_speed": ("S7-1200 速度设定回读", "RPM"),
+           "pf_s7mb_current": ("S7-1200 输出电流回读", "mA"), "pf_pn_voltage": ("PROFINET 输出电压回读", "V")}
+# 九台设备登记占位资产（模拟设备，校准不适用）：设备步骤要核对工位的资产（校准与容量）。已经关联了资产的工位沿用，
+# 新环境里（工位由 load-driver-host-devices.py 新建）照这里补
 ASSETS = {
     SENSOR: {"asset_no": "AS-PF-MB", "name": "ProtoForge 温湿度传感器（Modbus TCP）",
              "model": "ProtoForge Modbus 温湿度传感器",
@@ -74,26 +116,52 @@ ASSETS = {
          "note": "ProtoForge OPC UA 设备（Pressure / Temperature / Setpoint 节点），经驱动宿主 PF-OPCUA 接入"},
     CHAMBER: {"asset_no": "AS-PF-HTTP", "name": "ProtoForge 环境箱（HTTP REST）", "model": "ProtoForge HTTP REST",
               "note": "ProtoForge HTTP 设备 http-rest，经驱动宿主 PF-HTTP 接入"},
+    S71500: {"asset_no": "AS-PF-S71500", "name": "ProtoForge 西门子 S7-1500 PLC（OPC UA）",
+             "model": "ProtoForge 西门子 S7-1500（OPC UA）",
+             "note": "ProtoForge 设备 s7-1500-plc（OPC UA 节点 ns=2;s=CPU.* / DB1.*），经驱动宿主 PF-S7-1500 接入"},
+    S7: {"asset_no": "AS-PF-S7", "name": "ProtoForge 西门子 S7-1200 PLC（S7 协议）", "model": "ProtoForge 西门子 S7-1200（S7）",
+         "note": "ProtoForge 设备 s7-1200-plc-s7（S7 协议，机架 0 槽 1，DB1），经驱动宿主 PF-S7-1200 接入"},
+    S7MB: {"asset_no": "AS-PF-S7MB", "name": "ProtoForge 西门子 S7-1200 PLC（Modbus TCP）",
+           "model": "ProtoForge 西门子 S7-1200（Modbus TCP）",
+           "note": "ProtoForge 设备 s7-1200-plc（Modbus TCP 从站 2），经驱动宿主 PF-S7-1200-MB 接入"},
+    PN: {"asset_no": "AS-PF-PN", "name": "ProtoForge PROFINET S7-1200", "model": "ProtoForge PROFINET（TCP 模拟）",
+         "note": "ProtoForge 设备 profinet-s7-1200（PROFINET TCP 模拟），经驱动宿主 PF-PROFINET 接入"},
+    MQTT: {"asset_no": "AS-PF-MQTT", "name": "ProtoForge 环境监测传感器（MQTT）", "model": "ProtoForge MQTT 环境监测传感器",
+           "note": "ProtoForge 设备 dev-muwosrtd（MQTT，sensor/env/dev-muwosrtd/*），经驱动宿主 PF-MQTT-ENV 接入（只读写点位）"},
+    FX5U: {"asset_no": "AS-PF-FX5U", "name": "ProtoForge 三菱 FX5U PLC（MC 协议）", "model": "ProtoForge 三菱 FX5U（MC）",
+           "note": "ProtoForge 设备 fx5u-plc（MC 协议 3E 二进制帧），经驱动宿主 PF-FX5U 接入（只读写点位）"},
 }
 # 原来是握手 PLC 时的占位资产：还是这个型号就改成温湿度传感器（人改过的不动）
 LEGACY_ASSET_MODELS = {SENSOR: "ProtoForge Modbus PLC"}
-# 环境采集（连接配置 environment）：温湿度传感器给实验区的温度、湿度，OPC UA 节点给它自己的压力；
-# 两台设定设备的温度会被设定步骤改写，不当环境温度。HTTP 设备不再兼作湿度传感器（实验区湿度归温湿度传感器）
+# 环境采集（连接配置 environment）：温湿度传感器给实验区的温度、湿度，MQTT 环境监测传感器给监测点的温度、湿度、CO2、
+# PM2.5、噪声，OPC UA 节点、FX5U 给它们自己的压力（FX5U 还有模块温度）；设定设备的温度会被设定步骤改写，不当环境温度。
+# HTTP 设备不再兼作湿度传感器（实验区湿度归温湿度传感器）
 SENSORS = {
     SENSOR: {"zone": AMBIENT, "interval_sec": 30, "points": {"temperature": "temperature", "humidity": "humidity"}},
     TC: {"zone": TC, "interval_sec": 30, "points": {"pressure": "pressure"}},
+    MQTT: {"zone": AIR, "interval_sec": 30, "points": {"temperature": "temperature", "humidity": "humidity", "co2": "co2",
+                                                       "pm25": "pm25", "noise": "noise"}},
+    FX5U: {"zone": FX5U, "interval_sec": 30, "points": {"pressure": "pressure", "temperature": "temperature"}},
 }
 AMBIENT_REQUIREMENTS = [{"metric": "temperature", "min": 15, "max": 35, "zone": AMBIENT},
                         {"metric": "humidity", "max": 80, "zone": AMBIENT}]
 PROCESS_REQUIREMENTS = [{"metric": "pressure", "min": 0.5, "max": 10, "zone": TC}]
-RECIPE_NAME = "ProtoForge 多温度矩阵控温联调"
-# 原来带 PLC 那一步的流程叫这个名字：找到已发布的就出修订版取代它
-FORMER_RECIPE_NAMES = ("ProtoForge PLC 控温运行联调",)
-RISK = "RA-PF-01 v4（联调占位：ProtoForge 模拟设备，无真实样品、加热体与压力容器）"
-RECIPE_DESIGN = ("两台 ProtoForge 设备经驱动宿主接入、参与温度设定：OPC UA 温控器与 HTTP 环境箱写设定温度并回读；每个样本"
-                 "一个温度（方案设计点），设备按样本依次执行。Modbus 温湿度传感器给实验区的温度、湿度，OPC UA 节点给压力，"
-                 "步骤环境要求核对；QA 复核")
-
+# 开工前核对：监测点的空气质量、FX5U 的压力与模块温度（范围比 ProtoForge 生成的读数宽一圈：读数在动，只拦真的越界）
+AIR_REQUIREMENTS = [{"metric": "temperature", "min": 10, "max": 40, "zone": AIR},
+                    {"metric": "humidity", "max": 85, "zone": AIR},
+                    {"metric": "co2", "max": 2000, "zone": AIR},
+                    {"metric": "pm25", "max": 200, "zone": AIR},
+                    {"metric": "noise", "max": 90, "zone": AIR}]
+PLC_REQUIREMENTS = [{"metric": "pressure", "min": 0.1, "max": 3, "zone": FX5U},
+                    {"metric": "temperature", "min": 20, "max": 60, "zone": FX5U}]
+RECIPE_NAME = "ProtoForge 全设备多协议联调"
+# 以前的流程名：找到已发布的就出修订版取代它（只有两台设定设备的多温度矩阵；更早带 PLC 那一步的）
+FORMER_RECIPE_NAMES = ("ProtoForge 多温度矩阵控温联调", "ProtoForge PLC 控温运行联调")
+RISK = "RA-PF-01 v5（联调占位：ProtoForge 模拟设备，无真实样品、加热体、压力容器与运动机构）"
+RECIPE_DESIGN = ("ProtoForge 九台设备经驱动宿主接入（七种协议）：六台参与设定——OPC UA 温控器、HTTP 环境箱、S7-1500（OPC UA）"
+                 "压力、S7-1200（S7）速度、S7-1200（Modbus）输出电流、PROFINET 输出电压，写设定值并回读；每个样本一组设定值"
+                 "（方案设计点），设备按样本依次执行。Modbus 温湿度传感器给实验区的温度、湿度，MQTT 传感器给监测点的空气质量，"
+                 "OPC UA 节点与 FX5U 给压力，步骤环境要求核对；QA 复核")
 
 def refuse_production() -> None:
     if os.environ.get("ILCS_ENVIRONMENT", "").strip().lower() == "production":
@@ -114,33 +182,35 @@ def wait_for(describe: str, probe: Callable[[], Any], timeout: float, every: flo
 
 
 def register_capabilities(engineer: Actor) -> None:
-    """三项能力（参数 temp ℃）。新登记的连同工位一起登记，工位的范围缺省 0–100 ℃。"""
+    """六项能力（各一个数值参数）。新登记的连同工位一起登记，工位的范围缺省 0–100，要覆盖设备的设定范围。"""
     existing = {row["id"]: row for row in engineer.get("/capabilities")}
     for device in DEVICES.values():
         capability = device["capability"]
         current = existing.get(capability)
         if current is None:
             engineer.post("/capabilities", {
-                "id": capability, "name": device["capability_name"], "params": {"temp": "设定温度"},
-                "param_specs": {"temp": {"type": "number", "unit": "℃"}}, "recovery": RECOVERY,
+                "id": capability, "name": device["capability_name"], "params": {device["param"]: device["param_label"]},
+                "param_specs": {device["param"]: {"type": "number", "unit": device["unit"]}}, "recovery": RECOVERY,
                 "stations": [device["station"]], "signature_id": engineer.sign("能力模型变更批准", capability),
             })
             ok("能力", f"{capability} {device['capability_name']}（新登记，落在 {device['station']}）")
             continue
-        if "temp" not in (current.get("params") or {}):
-            raise Failed(f"能力 {capability} 已存在但没有参数 temp")
+        if device["param"] not in (current.get("params") or {}):
+            raise Failed(f"能力 {capability} 已存在但没有参数 {device['param']}")
         if device["station"] not in (current.get("stations") or []):
             raise Failed(f"能力 {capability} 已存在但 {device['station']} 没有声明实现它：在能力字典里加上这台工位")
         ok("能力", f"{capability} {current['name']}（沿用）")
     stations = {row["id"]: row for row in engineer.get("/stations")}
     for device in DEVICES.values():
-        window = ((stations[device["station"]].get("limits") or {}).get(device["capability"]) or {}).get("temp")
-        if not window or float(window[0]) > TEMP_RANGE[0] or float(window[1]) < TEMP_RANGE[1]:
-            raise Failed(f"{device['station']} 的 {device['capability']} 温度范围是 {window}，要覆盖 {TEMP_RANGE}")
+        window = ((stations[device["station"]].get("limits") or {}).get(device["capability"]) or {}).get(device["param"])
+        low, high = device["range"]
+        if not window or float(window[0]) > low or float(window[1]) < high:
+            raise Failed(f"{device['station']} 的 {device['capability']} {device['param']} 范围是 {window}，"
+                         f"要覆盖 {low:g}–{high:g} {device['unit']}")
 
 
 def register_assets(engineer: Actor) -> None:
-    """三台设备的工位关联占位资产（开跑检查按资产核对校准与容量）：模拟设备，校准不适用并写明豁免理由。"""
+    """九台设备的工位关联占位资产（开跑检查按资产核对校准与容量）：模拟设备，校准不适用并写明豁免理由。"""
     stations = {row["id"]: row for row in engineer.get("/stations")}
     for station_id, spec in ASSETS.items():
         station = stations[station_id]
@@ -164,14 +234,15 @@ def register_assets(engineer: Actor) -> None:
 
 
 def configure_stations(engineer: Actor) -> None:
-    """两台设定设备参与自动流程（去掉 tasks: false），温湿度传感器仍只读写点位；登记环境采集的登记上、不再采集的去掉。
+    """六台设定设备参与自动流程（去掉 tasks: false），三台传感器仍只读写点位；登记环境采集的登记上、不再采集的去掉。
     改了就签名保存（改 tasks 要重新握手、欠动作级验收）。"""
-    for station_id in (SENSOR, TC, CHAMBER):
+    acting_stations = {device["station"] for device in DEVICES.values()}
+    for station_id in STATIONS:
         adapter = engineer.get(f"/stations/{station_id}/adapter")
         if adapter.get("kind") != "real":
             raise Failed(f"{station_id} 还没接成真实设备：先跑 scripts/load-driver-host-devices.py register")
         config = dict(adapter.get("config") or {})
-        acting = station_id != SENSOR
+        acting = station_id in acting_stations
         wanted = {key: value for key, value in config.items() if key not in {"environment", *(("tasks",) if acting else ())}}
         if not acting and wanted.get("tasks") is not False:
             raise Failed(f"{station_id} 应只读写点位（tasks: false）："
@@ -192,9 +263,10 @@ def configure_stations(engineer: Actor) -> None:
 
 
 def clear_gates(engineer: Actor, timeout: float) -> None:
-    """三台设备的接入闸门：设备服务报了新的驱动配置就签名批准（随后只读级验收）；两台设定设备欠动作级的按自己的能力
-    申请动作级验收（温湿度传感器只读写点位，只欠只读级）。"""
-    for station_id, device in [(SENSOR, None), *((row["station"], row) for row in DEVICES.values())]:
+    """九台设备的接入闸门：设备服务报了新的驱动配置就签名批准（随后只读级验收）；六台设定设备欠动作级的按自己的能力
+    申请动作级验收（三台传感器只读写点位，只欠只读级）。"""
+    acting = {row["station"]: row for row in DEVICES.values()}
+    for station_id, device in ((station_id, acting.get(station_id)) for station_id in STATIONS):
 
         def adapter():
             return engineer.get(f"/stations/{station_id}/adapter")
@@ -213,7 +285,8 @@ def clear_gates(engineer: Actor, timeout: float) -> None:
                            timeout)
         if current["acceptance"]["required"] == "physical" and device:
             requested = engineer.post(f"/stations/{station_id}/adapter/acceptance", {
-                "level": "physical", "faults": False, "capability": device["capability"], "params": {"temp": 45},
+                "level": "physical", "faults": False, "capability": device["capability"],
+                "params": {device["param"]: device["acceptance"]},
                 "approval": "ProtoForge 模拟设备，经驱动宿主接入；没有真实设备与样品",
                 "signature_id": engineer.sign("批准设备接入验收", station_id, current["config_version"]),
             })
@@ -309,17 +382,18 @@ def grant_qualifications(admin: Actor) -> None:
 def recipe_steps(methods: dict[str, str]) -> list[dict]:
     steps = [
         {"step_id": "s01", "kind": "manual", "name": "核对环境与设备在线", "dur": 2, "requires_signature": False,
-         "environment": AMBIENT_REQUIREMENTS,
-         "form": [{"key": "devices_online", "label": "ST-PF-MB、ST-PF-OPCUA、ST-PF-HTTP 在线", "type": "bool",
+         "environment": [*AMBIENT_REQUIREMENTS, *AIR_REQUIREMENTS, *PLC_REQUIREMENTS],
+         "form": [{"key": "devices_online", "label": f"九台 ProtoForge 设备在线（{'、'.join(STATIONS)}）", "type": "bool",
                    "required": True}]},
-        {"step_id": "s02", "kind": "manual", "name": "装样并核对各样本设定温度", "dur": 2, "requires_signature": False,
+        {"step_id": "s02", "kind": "manual", "name": "装样并核对各样本设定值", "dur": 2, "requires_signature": False,
          "requires_sample_check": True,
-         "form": [{"key": "setpoint_ok", "label": "已按方案核对每个样本的设定温度", "type": "bool", "required": True}]},
+         "form": [{"key": "setpoint_ok", "label": "已按方案核对每个样本的六项设定值", "type": "bool", "required": True}]},
     ]
     for key, device in DEVICES.items():
+        low, high = device["span"] or (40, 80)  # 缺省值：方案的设计点会按样本改写
         steps.append({
             "step_id": device["step"], "kind": "device", "name": device["step_name"], "cap": device["capability"],
-            "params": {"temp": 60}, "dur": device["dur_min"], "method": {"id": methods[key]},
+            "params": {device["param"]: round((low + high) / 2, 3)}, "dur": device["dur_min"], "method": {"id": methods[key]},
             "environment": [*PROCESS_REQUIREMENTS, *AMBIENT_REQUIREMENTS] if key == "tc" else AMBIENT_REQUIREMENTS,
         })
     steps.append({"step_id": "s06", "kind": "review", "name": "QA 复核运行数据", "review_role": "qa"})
@@ -372,8 +446,9 @@ def release_recipe(researcher: Actor, qa: Actor, methods: dict[str, str], sop: d
         qa.post(f"/recipes/{draft['id']}/transition", {
             "target_state": target, "signature_id": qa.sign(meaning, draft["id"], fresh["row_version"]),
         })
-    ok("流程已发布", f"{draft['id']} {RECIPE_NAME}（核对环境 → 装样 → 温控器设定 → 环境箱设定 → QA 复核，"
-                    f"关联 {sop['code']} {sop['version']}）"
+    ok("流程已发布", f"{draft['id']} {RECIPE_NAME}（核对环境 → 装样 → "
+                    + " → ".join(device["step_name"] for device in DEVICES.values())
+                    + f" → QA 复核，关联 {sop['code']} {sop['version']}）"
        + (f"；原版 {released[0]['id']} 随之退役" if released else ""))
     return draft["id"]
 
@@ -399,17 +474,27 @@ def register(team: dict[str, Actor], args: argparse.Namespace) -> dict:
 # ---------------------------------------------------------------- run
 
 
+def levels(device: dict, temps: list[float]) -> list[float]:
+    """这台设备每个样本的设定值：温度两台照 --temps；其余在 span 里按样本数等分（两端都取），保留三位小数。"""
+    if device["span"] is None:
+        return list(temps)
+    low, high, count = *device["span"], len(temps)
+    return [round(low + (high - low) * index / (count - 1), 3) for index in range(count)]
+
+
 def approve_plan(researcher: Actor, qa: Actor, recipe_id: str, metrics: dict[str, str], temps: list[float],
                  repeats: int, name: str) -> str:
-    """多温度矩阵：两个设定温度因子分别落到两个设备步骤，设计点把它们对齐成「每个样本一个温度」。"""
-    factors = [{"name": device["factor"], "unit": "℃", "levels": temps,
-                "target": {"step_id": device["step"], "param": "temp"}} for device in DEVICES.values()]
+    """多设备矩阵：六个设定因子分别落到六个设备步骤，设计点把它们对齐成「每个样本一组设定值」（第 i 个样本取每台的第 i 档）。"""
+    table = {key: levels(device, temps) for key, device in DEVICES.items()}
+    factors = [{"name": device["factor"], "unit": device["unit"], "levels": table[key],
+                "target": {"step_id": device["step"], "param": device["param"]}} for key, device in DEVICES.items()]
+    points = [[table[key][index] for key in DEVICES] for index in range(len(temps))]
     plan = researcher.post("/plans", {
         "name": name, "recipe_id": recipe_id, "plan_type": "matrix", "repeats": repeats, "layout": "sequential",
-        "factors": factors, "design_points": [[temp] * len(factors) for temp in temps],
-        "goal": (f"{len(temps)} 个设定温度（{'、'.join(f'{t:g}' for t in temps)} ℃）× {repeats} 次重复：两台 ProtoForge 设备经驱动宿主"
-                 "按样本依次设定温度并回读，温湿度传感器给实验区读数，验证矩阵条件下发、逐样本执行、环境核对、复核与报告全链路"
-                 "（模拟设备）"),
+        "factors": factors, "design_points": points,
+        "goal": (f"{len(temps)} 组设定值 × {repeats} 次重复：六台 ProtoForge 设备经驱动宿主按样本依次设定并回读（温度 "
+                 f"{'、'.join(f'{t:g}' for t in temps)} ℃，压力、速度、电流、电压按样本递增），三台传感器给环境 / 过程读数，"
+                 "验证七种协议的接入、矩阵条件下发、逐样本执行、环境核对、复核与报告全链路（模拟设备）"),
         "required_metrics": list(metrics.values()),
     })
     plan_id = plan["id"]
@@ -428,7 +513,7 @@ def approve_plan(researcher: Actor, qa: Actor, recipe_id: str, metrics: dict[str
 
 def create_task(researcher: Actor, operator: Actor, plan_id: str, title: str) -> str:
     task = researcher.post("/experiment-tasks", {"plan_id": plan_id, "title": title, "priority": 2,
-                                                  "note": "ProtoForge 联调线全流程（多温度矩阵）"})
+                                                  "note": "ProtoForge 联调线全流程（九台设备、多设备矩阵）"})
     researcher.post(f"/experiment-tasks/{task['id']}/assign", {"assignee_user_id": operator.id})
     operator.post(f"/experiment-tasks/{task['id']}/accept")
     ok("实验任务", f"{task['id']} {title}（研究员建、分配给操作员 {OPERATOR}、已接受）")
@@ -500,7 +585,7 @@ def drive(operator: Actor, qa: Actor, batch_id: str, timeout: float) -> dict:
 
 
 def show_wells(detail: dict) -> None:
-    """逐样本：方案给的设计温度、两台设备回报的值（设备按样本依次执行，回执按孔位）。"""
+    """逐样本：方案给的设计值、六台设备回报的值（设备按样本依次执行，回执按孔位）。"""
     steps = {device["step"]: key for key, device in DEVICES.items()}
     snapshot_steps = (detail.get("snapshot") or {}).get("steps") or []
     by_step: dict[str, dict] = {}
@@ -510,14 +595,16 @@ def show_wells(detail: dict) -> None:
         wells = ((checkpoint.get("payload") or {}).get("delivered") or {}).get("wells") or {}
         if step_id in steps and wells:
             by_step[steps[step_id]] = wells
-    step("逐样本回报（设计温度 → 温控器回读 · 环境箱回读）")
+    step("逐样本回报（设备：设计值 → 回读）")
     for sample in sorted(detail["samples"], key=lambda row: row["position"]):
-        well = sample["well"]
-        tc = by_step.get("tc", {}).get(well, {})
-        chamber = by_step.get("chamber", {}).get(well, {})
-        levels = sample.get("levels") or []
-        designed = f"{levels[0]:g} ℃" if levels else "—"
-        ok(f"{well} {sample['id']}", f"设计 {designed} → 温控器 {tc.get('temp', '—')} · 环境箱 {chamber.get('temp', '—')}")
+        well, designed = sample["well"], sample.get("levels") or []
+        parts = []
+        for index, (key, device) in enumerate(DEVICES.items()):
+            output = next(iter(device["outputs"]))
+            planned = f"{designed[index]:g}" if index < len(designed) else "—"
+            reported = by_step.get(key, {}).get(well, {}).get(output, "—")
+            parts.append(f"{device['step_name']} {planned} → {reported} {device['unit']}")
+        ok(f"{well} {sample['id']}", "；".join(parts))
 
 
 def device_results(actor: Actor, detail: dict) -> list[dict]:
@@ -550,10 +637,12 @@ def review_results(qa: Actor, researcher: Actor, detail: dict) -> list[dict]:
 
 def publish_report(researcher: Actor, qa: Actor, batch_id: str, detail: dict, results: list[dict], temps: list[float]) -> str:
     conclusion = (
-        f"批次 {batch_id} 按 {RECIPE_NAME}（多温度矩阵）完成 {len(detail['samples'])} 个联调样品：设定温度 "
-        f"{'、'.join(f'{t:g}' for t in temps)} ℃，每个样品一个温度；ST-PF-OPCUA（温控器）、ST-PF-HTTP（环境箱）经驱动宿主以 "
-        "SiLA 2 接入，驱动按样本依次执行并按样本回报；开跑检查与下发前按 ST-PF-MB（温湿度传感器）的实验区温度、湿度与 "
-        f"ST-PF-OPCUA 的压力读数核对了环境要求；{len(results)} 条设备回报已复核。模拟设备：数值不是实测，"
+        f"批次 {batch_id} 按 {RECIPE_NAME}（多设备矩阵）完成 {len(detail['samples'])} 个联调样品：设定温度 "
+        f"{'、'.join(f'{t:g}' for t in temps)} ℃，每个样品一组设定值；ProtoForge 九台设备（Modbus TCP、OPC UA、HTTP REST、S7、"
+        "MC、MQTT、PROFINET）经驱动宿主以 SiLA 2 接入——ST-PF-OPCUA（温控器）、ST-PF-HTTP（环境箱）、ST-PF-S71500（压力设定）、"
+        "ST-PF-S7（速度设定）、ST-PF-S7MB（输出电流）、ST-PF-PN（输出电压）由驱动按样本依次执行并按样本回报；开跑检查与下发前"
+        "按 ST-PF-MB（温湿度传感器）的实验区温度、湿度，ST-PF-MQTT 的监测点空气质量，ST-PF-OPCUA、ST-PF-FX5U 的压力读数核对了"
+        f"环境要求；{len(results)} 条设备回报已复核。模拟设备：数值不是实测，"
         "只用于验证 SOP、流程、矩阵方案、任务、排程、执行、复核与报告链路。")
     report = researcher.post("/reports", {"batch_id": batch_id, "conclusion": conclusion})
     researcher.post(f"/reports/{report['id']}/submit")
@@ -574,12 +663,12 @@ def run(team: dict[str, Actor], context: dict, args: argparse.Namespace) -> dict
     if not gate["open"] or blocked:
         raise Failed(f"执行门没开或设备被挡：{gate.get('reasons')} {blocked}")
     temps = args.temps
-    name = args.plan_name or f"ProtoForge 联调：{'/'.join(f'{t:g}' for t in temps)} ℃ 多温度矩阵 × {args.repeats}"
+    name = args.plan_name or f"ProtoForge 全设备联调：{'/'.join(f'{t:g}' for t in temps)} ℃ 多设备矩阵 × {args.repeats}"
     step("方案与实验任务")
     plan_id = approve_plan(researcher, qa, context["recipe"], context["metrics"], temps, args.repeats, name)
     task_id = create_task(researcher, operator, plan_id, name)
     step("排程与下发")
-    batch_id = launch(operator, plan_id, task_id, f"ProtoForge 联调：{len(temps) * args.repeats} 个样品多温度矩阵")
+    batch_id = launch(operator, plan_id, task_id, f"ProtoForge 全设备联调：{len(temps) * args.repeats} 个样品多设备矩阵")
     step("执行")
     detail = drive(operator, qa, batch_id, args.timeout)
     show_wells(detail)
@@ -599,7 +688,7 @@ def _temps(text: str) -> list[float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="ProtoForge 联调线全流程（经驱动宿主、只走 SiLA 2，多温度矩阵）")
+    parser = argparse.ArgumentParser(description="ProtoForge 联调线全流程（九台设备经驱动宿主、只走 SiLA 2，多设备矩阵）")
     parser.add_argument("command", choices=("register", "run"))
     parser.add_argument("--base", default=os.environ.get("ILCS_BASE_URL", "http://127.0.0.1:8090"))
     parser.add_argument("--temps", type=_temps, default=[40.0, 60.0, 80.0], help="设计温度 ℃，逗号分隔（2–8 个）")
