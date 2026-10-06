@@ -22,13 +22,14 @@
   签名下发 → 人工节点按表单填写，直到批次完成 → 打印每步检查点、消耗入账、检测值与报警。
   run 要求执行器在跑（本机部署的 executor），它负责投递与推进。
   一瓶一配方：配过液的瓶子不能再导入，同一张表（含缺省参考配方）run 过一次后再 run 会在导入时被拒，换新序列号的表。
-- connect：gateways.json 列出的工位（现在是配液天平、配粉天平、拉曼）套用设备接入模板、连到设备网关（模拟阶段是设备仓库
-  ilcs-devices 的 deploy/sim.yml 起的模拟站），等执行器跑完只读级验收放行；之后 run 的这几步就走
-  http_json_v1：网关核对加的料、回报天平称出来的实际量，消耗按实际量入账。disconnect 把它们切回内置模拟。
+- connect：gateways.json 列出的工位（三台天平、三台搅拌、拉曼）套用设备接入模板、直连设备网关（模拟阶段是设备仓库
+  ilcs-devices 的 deploy/sim.yml 起的模拟站；已经经驱动宿主接着的沿用，见 load-driver-host-devices.py），等执行器跑完
+  只读级验收放行；之后 run 的这几步就走真实接入链路：网关核对加的料、回报天平称出来的实际量，消耗按实际量入账。
+  disconnect 把它们切回内置模拟。
   模拟站的主机名要先加进 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS（deploy/.env）。
 - 资产只给新登记的工位建 AS-<工位> 占位；已登记的工位沿用它现在关联的资产，不补建、不改。
-- --line 换一份产线定义：line-alab.json 是 A-Lab 整任务方式（配液模板 FT-ELY-02 的 task 写法，SOP-ELY-02，
-  工位 EL-ALAB），它的 formula 是缺省配方表。--upstream：配方表不经研究员上传，而由模拟的上游系统（服务身份
+- --line 换一份产线定义：line-alab.json 是外部 A-Lab 系统（厂商的另一套设备）的整任务方式（配液模板 FT-ELY-02 的
+  task 写法，SOP-ELY-02，工位 EL-ALAB），它的 formula 是缺省配方表。--upstream：配方表不经研究员上传，而由模拟的上游系统（服务身份
   ely-upstream-sim，管理员签发或轮换密钥、授权这个模板）经 POST /runtime/formulation-templates/{编号}/imports
   提交；审批、下发照旧由人做，跑完后上游按请求编号查进度与已复核的结果。
 
