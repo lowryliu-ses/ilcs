@@ -20,7 +20,8 @@ local，环境变量 ILCS_DRIVER_HOST_SITE 换；106.51 与本机共用 local �
 - 设备模块的模拟网关（驱动宿主的 http_json 插件转成 SiLA 服务，GW-*）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
   ST-ECHEM-SIM、ST-NW-01，电解液线的 EL-D-BAL、EL-D-ADD、EL-D-PWD、EL-D-STIR、EL-D-COLD、EL-D-MIX、EL-T-RAM，A-Lab 上位机
   EL-ALAB。原来直连网关（`http_json_v1` 套用接入模板）的改成 `sila2_v1` 接驱动宿主；模拟设备控制口指向网关自己的 API
-  （HTTPS + 网关令牌；A-Lab 的网关接上位机 REST 接口、不开控制口，不申请故障项目）。连上后重读设备自报的方法目录（排程只往
+  （HTTPS + 网关令牌，ILCS 直连它：网关主机名要在 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS 里，不然故障项目跳过；A-Lab 的网关
+  接上位机 REST 接口、不开控制口，不申请故障项目）。连上后重读设备自报的方法目录（排程只往
   报过这个程序的工位排）。驱动宿主上改了设备文件（配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
 
 `--acceptance` 逐项能力跑动作级（有控制口的再跑故障项目）。都用驱动宿主的自签证书（`secrets/host/driver-host.crt`）和给
@@ -202,7 +203,9 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
         listed = engineer.get(f"/stations/{station_id}/adapter/acceptance")
         gate, runs = listed["gate"], listed.get("runs") or []
         version = current["config_version"]  # 发现驱动配置变了，ILCS 会把配置版本加一：按当前的比
-        if gate["required"] == "" and gate.get("accepted_config_version") == version:
+        if gate["required"] == "":
+            # 不欠验收就是放行了：要验收的改动保存时就记下欠的级别；只动了环境采集这类键的改动不欠验收，
+            # 配置版本照样加一，最近一次放行的还是旧版本——不能等「放行版本 = 当前版本」
             return next((row for row in runs if row["id"] == gate.get("accepted_run_id")), {"id": gate.get("accepted_run_id")})
         latest = next((row for row in runs if row.get("config_version") == version), None)
         if latest and latest.get("state") == "done" and not latest.get("ok") and latest.get("level") == "readonly":
@@ -212,8 +215,11 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
     run = wait_for(f"{station_id} 接入验收放行", accepted, timeout=timeout)
     current = engineer.get(f"/stations/{station_id}/adapter")
     driver = current.get("approved_driver") or {}
-    ok("接入验收", f"{station_id} 配置 v{current['config_version']} 已由 {str(run['id'])[:8]} 放行；批准驱动配置 "
-       f"{driver.get('plugin') or '—'} {str(driver.get('config_digest') or '')[:19]}")
+    accepted_version = (current.get("acceptance") or {}).get("accepted_config_version")
+    passed = (f"配置 v{current['config_version']} 已由 {str(run['id'])[:8]} 放行" if accepted_version == current["config_version"]
+              else f"配置 v{current['config_version']} 的改动不欠验收（最近一次放行 v{accepted_version}）")
+    ok("接入验收", f"{station_id} {passed}；批准驱动配置 {driver.get('plugin') or '—'} "
+       f"{str(driver.get('config_digest') or '')[:19]}")
 
 
 def approve_driver(engineer: Actor, station_id: str, current: dict[str, Any]) -> None:
