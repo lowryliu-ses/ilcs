@@ -280,9 +280,16 @@ def clear_gates(engineer: Actor, timeout: float) -> None:
                 "signature_id": engineer.sign("批准驱动配置变更", station_id, current["config_version"]),
             })
             ok("批准驱动配置变更", f"{station_id} {reported.get('plugin')} {str(reported.get('config_digest') or '')[:19]}")
-        current = wait_for(f"{station_id} 只读级验收出结论", lambda: (lambda row: row if row["acceptance"]["required"] != "readonly"
-                                                                  and not row["driver_awaiting_approval"] else None)(adapter()),
-                           timeout)
+        def settled():
+            # 改了连接配置（改 tasks、加环境采集）执行器会自己排一次验收：等它出结论再看还欠什么——排着的时候闸门可能先显示
+            # 欠动作级，而设备自报为模拟器时只读级就放行；这时候再申请会撞上「已有排队或进行中的接入验收」
+            runs = engineer.get(f"/stations/{station_id}/adapter/acceptance").get("runs") or []
+            if any(run.get("state") not in {"done", "error", "cancelled"} for run in runs):
+                return None
+            row = adapter()
+            return row if row["acceptance"]["required"] != "readonly" and not row["driver_awaiting_approval"] else None
+
+        current = wait_for(f"{station_id} 只读级验收出结论", settled, timeout)
         if current["acceptance"]["required"] == "physical" and device:
             requested = engineer.post(f"/stations/{station_id}/adapter/acceptance", {
                 "level": "physical", "faults": False, "capability": device["capability"],
