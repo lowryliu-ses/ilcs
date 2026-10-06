@@ -532,7 +532,7 @@ class IdentityService:
         """校验并规范化服务授权范围，拒绝拼错字段造成的假授权。"""
         scopes = raw or {}
         allowed_keys = {"stations", "analysis_tasks", "instrument_serials", "plan_proposals", "batch_signals",
-                        "environment_zones"}
+                        "environment_zones", "formulation_imports"}
         unknown = sorted(set(scopes) - allowed_keys)
         if unknown:
             raise ValidationFailed(
@@ -577,6 +577,15 @@ class IdentityService:
                 normalized["environment_zones"] = sorted({item.strip() for item in zones if item.strip()})
             else:
                 raise ValidationFailed("environment_zones 只能是 all 或区域名数组", code="service_scope_invalid")
+        imports = scopes.get("formulation_imports")
+        if imports is not None:
+            # 上游系统（AI 配方预测、实验设计平台）可以向哪些配液模板提交配方表：all 或模板编号数组
+            if imports == "all":
+                normalized["formulation_imports"] = "all"
+            elif isinstance(imports, list) and all(isinstance(item, str) for item in imports):
+                normalized["formulation_imports"] = sorted({item.strip() for item in imports if item.strip()})
+            else:
+                raise ValidationFailed("formulation_imports 只能是 all 或配液模板编号数组", code="service_scope_invalid")
         tasks = scopes.get("analysis_tasks")
         if tasks is not None:
             if tasks == "all":

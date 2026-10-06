@@ -2,6 +2,9 @@
 
 只有「配方按表格给、按瓶逐种加料」的配液线用得上；其余场景直接在流程编辑器里画流程、建方案，不经过它。
 """
-from .router import router
+from .router import router, runtime_router
 
-__all__ = ["router"]
+# 界面用的模板维护与导入；上游系统用服务身份提交配方表、查进度（/runtime/formulation-templates）
+routers = [router, runtime_router]
+
+__all__ = ["router", "routers", "runtime_router"]

@@ -80,6 +80,9 @@ class CommandRequest:
     # 的单位。只在执行设备动作的指令上填；线协议带它（`http_json_v1` 请求体、`sila2_v1` 的 ContextJson），
     # 称量加料的设备据此核对装的料、按这个名字回报实际消耗，内置模拟据此回报消耗
     material: dict = field(default_factory=dict)
+    # 一步投几种料（步骤的 `materials`，整线一个任务投完一瓶的全部组分）：按加料顺序的 ({name, unit, param}, …)，
+    # 每种料的用量取自下发参数里各自的 param。线协议带它（同 material）；这样的步骤不带 material
+    materials: tuple = ()
     # 设备方法的输出规则（步骤快照 method.outputs：{key, label, unit, lo, hi, required, metric_id}）；只是内部挂钩，
     # 内置模拟按它给示意值，不上线协议
     outputs: tuple = ()
@@ -87,6 +90,9 @@ class CommandRequest:
     # 按样本拆开下发时是这一条的那几个。线协议带它（同 material）：没有逐孔参数的检测步骤，设备靠它知道测的是哪几瓶、
     # 按孔位回报读数；内置模拟按它逐孔给示意值
     wells: tuple = ()
+    # 这些孔位上是哪个物理样本：{孔位: 样本条码}（没登记条码的用样本编号）。线协议带它（同 wells）：扫瓶身二维码的设备
+    # 据此核对放上来的是不是这一瓶、按样本认配方；不处理样本的指令为空
+    samples: dict = field(default_factory=dict)
 
 
 class TelemetryPoint(NamedTuple):

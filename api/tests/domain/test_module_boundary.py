@@ -45,7 +45,9 @@ def test_module_list_parsing():
 
 def test_disabled_modules_mount_nothing():
     assert modules.routers([]) == []
-    assert [router.prefix for router in modules.routers(["formulation"])] == ["/formulation-templates"]
+    assert [router.prefix for router in modules.routers(["formulation"])] == [
+        "/formulation-templates", "/runtime/formulation-templates",
+    ]
 
 
 def test_unknown_module_rejected():

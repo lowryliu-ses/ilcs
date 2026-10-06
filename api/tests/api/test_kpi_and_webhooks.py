@@ -206,3 +206,28 @@ def test_a_rolled_back_savepoint_keeps_events_registered_before_it(admin, db):
         WebhookDelivery.subscription_id == subscription["id"]).all())
     assert ids == ["B-BEFORE", "B-RELEASED-0", "B-RELEASED-1", "B-RELEASED-2"]
     _disable_subscriptions(db)
+
+
+def test_plan_and_task_state_changes_are_published_for_upstream_systems(admin, researcher, qa, db):
+    """上游系统提交配方表之后等的是方案批准、任务建起来：方案状态 / 审批状态变化与任务状态变化都发出向事件。"""
+    from test_core_chain_review import _approve, _plan_task
+
+    _disable_subscriptions(db)
+    _subscribe(admin, ["plan.state_changed", "task.state_changed"], name="上游系统")
+    created = researcher.post("/api/plans", {
+        "name": "出向事件 方案", "recipe_id": "R-205", "plan_type": "single_condition", "sample_count": 2,
+        "required_metrics": ["METRIC-discharge_capacity-v1"],
+    })
+    assert created.status_code == 201, created.text
+    plan_id = created.json()["id"]
+    _approve(researcher, qa, plan_id)
+    task = _plan_task(researcher, plan_id)
+    recorder = _Recorder()
+    _deliver(recorder)
+    bodies = [json.loads(request.content) for request in recorder.requests]
+    plans = [body["data"] for body in bodies if body["topic"] == "plan.state_changed" and body["object"]["id"] == plan_id]
+    assert {"state": "locked", "approval_state": "draft", "state_from": "draft"} in plans, plans
+    assert any(row["approval_state"] == "approved" and row.get("approval_from") == "review" for row in plans), plans
+    tasks = [body for body in bodies if body["topic"] == "task.state_changed" and body["object"]["id"] == task["id"]]
+    assert tasks and tasks[0]["data"]["plan_id"] == plan_id and tasks[0]["data"]["from"] is None
+    _disable_subscriptions(db)

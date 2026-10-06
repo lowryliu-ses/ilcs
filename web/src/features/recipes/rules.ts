@@ -87,6 +87,19 @@ export function stepMaterial(step: RecipeStep): string {
   return typeof material === 'string' && material.trim() ? material : '';
 }
 
+/** 这一步投的全部物料（按加料顺序）：投一种料的是 stepMaterial，一步投几种料的是 materials 里的那些。对应后端 steps.step_materials。 */
+export function stepMaterials(step: RecipeStep): string[] {
+  if (!consumesMaterials(step)) return [];
+  const rows = rawField(step, 'materials');
+  if (Array.isArray(rows) && rows.length) {
+    return rows
+      .map((row) => (row && typeof row === 'object' ? (row as Record<string, unknown>).material : undefined))
+      .filter((name): name is string => typeof name === 'string' && Boolean(name.trim()));
+  }
+  const single = stepMaterial(step);
+  return single ? [single] : [];
+}
+
 /** 投料物料的字段完整性，对应后端 steps.material_issues；用量参数是否属于能力在 deviceIssues 里判。 */
 function materialIssues(step: RecipeStep): string[] {
   const issues: string[] = [];
@@ -97,6 +110,39 @@ function materialIssues(step: RecipeStep): string[] {
   }
   const param = rawField(step, 'material_param');
   if (param != null && param !== '' && kindOf(step) !== 'device') issues.push('只有设备步骤可以指定用量参数');
+  if ('materials' in step) issues.push(...severalMaterialsIssues(step));
+  return issues;
+}
+
+/** 一步投几种料（materials），对应后端 steps._materials_issues：只有设备步骤能这样写，每种料一项、写明用量参数，
+    料与参数都不重复，和 material / material_param 二选一。 */
+function severalMaterialsIssues(step: RecipeStep): string[] {
+  const rows = rawField(step, 'materials');
+  if (kindOf(step) !== 'device') return ['只有设备步骤能一步投几种料（materials）'];
+  if (!Array.isArray(rows) || !rows.length) return ['materials 要写成 [{"material": 物料名, "param": 用量参数}…]，至少一种'];
+  const issues: string[] = [];
+  const single = rawField(step, 'material_param');
+  if ('material' in step || (single != null && single !== '')) {
+    issues.push('一步投几种料用 materials，不能同时写 material / material_param');
+  }
+  const names = new Set<string>();
+  const params = new Set<string>();
+  rows.forEach((row, index) => {
+    const position = index + 1;
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      issues.push(`materials 第 ${position} 项必须是对象`);
+      return;
+    }
+    const { material: name, param } = row as Record<string, unknown>;
+    const label = typeof name === 'string' && name.trim() ? name : `第 ${position} 项`;
+    if (typeof name !== 'string' || !name.trim()) issues.push(`materials 第 ${position} 项的物料名称必须是非空文字`);
+    else if (names.has(name)) issues.push(`物料 ${name} 在 materials 里出现了两次`);
+    else names.add(name);
+    if (typeof param !== 'string' || !param.trim()) issues.push(`materials 里 ${label} 要写用量参数 param`);
+    else if (params.has(param)) issues.push(`用量参数 ${param} 被两种料共用`);
+    else params.add(param);
+  });
+  if (!consumesMaterials(step)) issues.push('声明了投料物料，但没有勾选「消耗物料」');
   return issues;
 }
 
@@ -380,15 +426,24 @@ function deviceIssues(step: RecipeStep, capabilities: CapabilityIndex): string[]
       if (!(key in defined)) issues.push(`参数 ${key} 不属于该能力`);
     });
     // 用量参数：执行器按它从下发参数里取投料量，再按物料单位对账，所以必须是登记了单位的能力参数
+    const dosingParamIssues = (param: unknown, material: string) => {
+      const owner = material ? `${material} 的` : '';
+      if (typeof param !== 'string' || !(param in defined)) return [`${owner}用量参数 ${String(param)} 不是该能力的参数`];
+      const type = specOf(capability, param).type;
+      if (type === 'enum' || type === 'program') return [`${owner}用量参数 ${param} 不是数值参数，不能当投料量`];
+      if (!specOf(capability, param).unit) return [`${owner}用量参数 ${param} 没有登记单位，无法与物料单位对账`];
+      return [];
+    };
     const materialParam = rawField(step, 'material_param');
-    if (materialParam != null && materialParam !== '') {
-      if (typeof materialParam !== 'string' || !(materialParam in defined)) {
-        issues.push(`用量参数 ${String(materialParam)} 不是该能力的参数`);
-      } else if (specOf(capability, materialParam).type === 'enum' || specOf(capability, materialParam).type === 'program') {
-        issues.push(`用量参数 ${materialParam} 不是数值参数，不能当投料量`);
-      } else if (!specOf(capability, materialParam).unit) {
-        issues.push(`用量参数 ${materialParam} 没有登记单位，无法与物料单位对账`);
-      }
+    if (materialParam != null && materialParam !== '') issues.push(...dosingParamIssues(materialParam, ''));
+    // 一步投几种料：每种料写明的用量参数同样要是登记了单位的数值参数
+    const rows = rawField(step, 'materials');
+    if (Array.isArray(rows)) {
+      rows.forEach((row) => {
+        if (!row || typeof row !== 'object') return;
+        const { material, param } = row as Record<string, unknown>;
+        if (param != null && param !== '') issues.push(...dosingParamIssues(param, typeof material === 'string' ? material : ''));
+      });
     }
   }
   // 引用设备方法：参数必须落在方法允许的范围内（与服务端 `domain/methods.step_problems` 同源）
@@ -1034,7 +1089,7 @@ export function editorChecks(
     例外是人工步骤：方案因子只能作用于设备步骤（参数要下发），人工步骤投的料没有因子能给出用量，只能按 BOM 预留，
     所以它投的物料不在 BOM 里就不能过——否则流程能发布，但任何方案都锁定不了。 */
 function bomCheck(materialSteps: RecipeStep[], bom: BomItem[]): Check {
-  const declared = [...new Set(materialSteps.map(stepMaterial).filter(Boolean))];
+  const declared = [...new Set(materialSteps.flatMap(stepMaterials))];
   const base = { key: 'bom', label: '物料需求（BOM）' };
   const listed = new Set(bom.map((item) => item.material));
   const manualOutside = materialSteps
@@ -1047,7 +1102,7 @@ function bomCheck(materialSteps: RecipeStep[], bom: BomItem[]): Check {
     return { ...base, ok: true, detail: outside.length ? `${detail}；${outside.join('、')} 不在 BOM 里，用量由实验方案给出` : detail };
   }
   if (!materialSteps.length) return { ...base, ok: true, detail: '无需物料：本流程没有消耗物料的步骤' };
-  if (materialSteps.every((step) => stepMaterial(step))) {
+  if (materialSteps.every((step) => stepMaterials(step).length > 0)) {
     return { ...base, ok: true, detail: `${declared.join('、')} 的用量由实验方案按样本给出` };
   }
   return { ...base, ok: false, detail: '存在消耗物料的步骤但未定义 BOM，排程前无法预留' };

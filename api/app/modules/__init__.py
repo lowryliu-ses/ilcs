@@ -34,4 +34,9 @@ def load_models() -> None:
 
 
 def routers(names: list[str]) -> list[APIRouter]:
-    return [import_module(AVAILABLE[name]).router for name in resolve(names)]
+    """启用的模块要挂的路由：模块导出 `routers`（界面用的与服务身份用的 /runtime 入口分开）就挂它们，否则挂 `router`。"""
+    out: list[APIRouter] = []
+    for name in resolve(names):
+        module = import_module(AVAILABLE[name])
+        out.extend(getattr(module, "routers", None) or [module.router])
+    return out

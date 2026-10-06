@@ -688,8 +688,12 @@ def _fault_checks(
     motions = _motion_counter(injector)
     try:
         unsupported = dict(getattr(injector, "unsupported", lambda: {})() or {})
-    except (AdapterError, AdapterUnreachable):
-        unsupported = {}
+    except (AdapterError, AdapterUnreachable) as exc:
+        # 控制口连状态都读不到（网关接的是真实接口、没开 /simulator/*，或控制口登记错了）：一项都注入不了，
+        # 如实标跳过，不让整次验收出错
+        for key, label in FAULT_KEYS:
+            report.add(key, label, SKIP, f"模拟设备控制口用不了，注入不了故障：{exc}")
+        return
     instance = factory()
     handoff = getattr(instance, "handoff", "") == "async"
     probes: list[str] = []

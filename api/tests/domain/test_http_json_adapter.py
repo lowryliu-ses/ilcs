@@ -277,3 +277,23 @@ def test_http_json_payload_carries_the_wells_the_command_covers():
     assert "wells" not in HttpJsonAdapter._payload(CommandRequest(**base))
     measured = HttpJsonAdapter._payload(CommandRequest(**base, wells=("B3",)))
     assert measured["wells"] == ["B3"] and measured["params"] == {"repeats": 1}
+
+
+def test_http_json_payload_carries_several_materials_and_the_bottles():
+    """一步投几种料的步骤带 materials（按加料顺序），处理样本的指令带 samples（孔位 → 瓶身条码）；不带的不出现这两个键。"""
+    from app.adapters.base import CommandRequest
+    from app.adapters.drivers.http_json import HttpJsonAdapter
+    from app.adapters.drivers.sila2 import Sila2Adapter
+
+    base = {"command_id": "CMD-T", "station_id": "ST-ALAB", "capability": "cap.ely.run",
+            "params": {"wells": {"A1": {"m01": 12.0, "m02": 20.0}}}, "type": "dispatch", "batch_id": "B-1",
+            "step_index": 3}
+    plain = HttpJsonAdapter._payload(CommandRequest(**base))
+    assert "materials" not in plain and "samples" not in plain
+    materials = ({"name": "EC", "unit": "g", "param": "m01"}, {"name": "EMC", "unit": "g", "param": "m02"})
+    body = HttpJsonAdapter._payload(CommandRequest(**base, materials=materials, wells=("A1",),
+                                                   samples={"A1": "ELY-A001"}))
+    assert body["materials"] == [dict(row) for row in materials], "顺序就是加料顺序"
+    assert body["samples"] == {"A1": "ELY-A001"} and body["wells"] == ["A1"] and "material" not in body
+    context = json.loads(Sila2Adapter._context(CommandRequest(**base, materials=materials, samples={"A1": "ELY-A001"})))
+    assert context["materials"] == body["materials"] and context["samples"] == {"A1": "ELY-A001"}

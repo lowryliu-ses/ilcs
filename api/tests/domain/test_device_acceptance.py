@@ -398,3 +398,33 @@ def test_polling_rides_out_a_brief_loss_of_contact():
 
     result, seen = _wait(Gone(), "ACC-T-run", 0.1, 0.01, lambda _: None)
     assert result is None and seen == ["unreachable"], "一直连不上：超时后照实报，不编结论"
+
+
+class UnreachableControlPort:
+    """控制口读不到状态（网关接的是真实接口、没开 /simulator/*）：什么故障都注入不了。"""
+
+    def unsupported(self):
+        from app.adapters.base import AdapterError
+
+        raise AdapterError("模拟设备控制接口 HTTP 404")
+
+    def set(self, mode: str, parameter: float = 0.0) -> None:
+        raise AssertionError("控制口读不到状态时不该再去注入")
+
+    def executions(self, command_id: str):
+        return None
+
+
+def test_fault_items_skip_when_the_control_port_is_unusable(credential_root):
+    """故障项目要的控制口用不了：四项如实标跳过、写明原因，只读与动作项目照常出结论，整次验收不出错。"""
+    from app.adapters.drivers.http_json import HttpJsonAdapter
+
+    with gateway_sim(credential_root, task_seconds=0.3) as (_, _, port):
+        config, token = gateway_config(port, credential_root)
+        rec = record("HTTPS JSON", config, token, driver="http_json_v1", kind="real")
+        report = _run(rec, lambda: HttpJsonAdapter(rec), physical=True, injector=UnreachableControlPort())
+    checks = {check.key: check for check in report.checks}
+    assert report.ok, report.markdown()
+    for key in ("lost_receipt", "busy", "interlock", "offline"):
+        assert checks[key].state == "skip" and "控制口用不了" in checks[key].detail, checks[key]
+    assert checks["complete"].state == "pass" and checks["abort"].state == "pass"

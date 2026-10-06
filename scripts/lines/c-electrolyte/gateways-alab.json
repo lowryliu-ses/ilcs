@@ -1,0 +1,6 @@
+{
+  "_说明": "A-Lab 整任务方式：上位机工位 EL-ALAB 接哪台网关（http_json_v1）。现在接的是设备仓库 ilcs-devices 的 alab-electrolyte 模块起的模拟站：alab-vendor-sim 是假上位机（厂商实验任务接口），alab-sim 是网关（调厂商接口、按 ILCS 契约回执）；接真机时把 host、device_id 换成现场网关，网关配置里的上位机地址换成厂商上位机。load-electrolyte-line.py connect --gateways 本文件 套用接入模板并填连接参数，disconnect 切回内置模拟。",
+  "stations": {
+    "EL-ALAB": {"module": "alab-electrolyte", "template": "TPL-ALAB-ELECTROLYTE", "host": "alab-sim", "device_id": "SIM-ALAB-01"}
+  }
+}

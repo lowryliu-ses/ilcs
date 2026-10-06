@@ -54,3 +54,16 @@ class FormulationImportIn(FormulationPreviewIn):
     """导入：服务端重新生成（不信任前端预览），一个事务里登记样本、建流程草稿（或沿用）与方案草稿。"""
 
     plan_name: str = Field(default="", max_length=200)
+
+
+class FormulationSubmitIn(BaseModel):
+    """上游系统（服务身份）提交一张配方表：表格写法与界面导入相同（第一行表头、每行一瓶、序列号列 + 各试剂列），
+    `request_id` 是提交方自己的请求编号——同一编号同一内容重发回放首次结果，内容不同拒绝。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    filename: str = Field(default="", max_length=200)
+    table: list[list[TableCell]]
+    params: dict[str, float | str] = {}
+    plan_name: str = Field(default="", max_length=200)

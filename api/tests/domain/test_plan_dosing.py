@@ -120,3 +120,25 @@ def test_preflight_zero_plan_materials_are_not_applicable():
         check for check in preflight.evaluate(_context(material_steps=1)) if check.key == "material"
     )
     assert blocked.state == preflight.BLOCKED
+
+
+def test_each_material_of_a_several_material_step_needs_its_own_factor():
+    """一步投几种料（整线任务）：每种料各认一个因子，作用在这种料写明的用量参数上；说明里点明是哪种料。"""
+    capabilities = {"cap.run": {"name": "整线任务", "params": {"m01": "加料位 1", "m02": "加料位 2"},
+                                "param_specs": {"m01": {"unit": "g"}, "m02": {"unit": "g"}}}}
+    step = {"step_id": "s01", "kind": "device", "name": "整线任务", "cap": "cap.run", "params": {}, "dur": 60,
+            "consumes_materials": True,
+            "materials": [{"material": "EC", "param": "m01"}, {"material": "EMC", "param": "m02"}]}
+    ec = factor(name="EC 用量", material="EC", param="m01")
+    emc = factor(name="EMC 用量", material="EMC", param="m02")
+    rows = plan_dosed_steps([step], [], [ec, emc], capabilities)
+    assert [(row.material, row.factor) for row in rows] == [("EC", 0), ("EMC", 1)]
+    assert set(dosing_factors([step], [], [ec, emc], capabilities)) == {0, 1}
+
+    missing = plan_dosed_steps([step], [], [ec], capabilities)
+    assert missing[1].factor is None and "方案里也没有给出 EMC 用量的因子" in missing[1].problem
+    wrong = plan_dosed_steps([step], [], [ec, factor(name="EMC 用量", material="EMC", param="m01")], capabilities)
+    assert "作用在 m01，这一步 EMC 的用量取 m02" in wrong[1].problem
+    # BOM 已列的料不由因子给量
+    listed = plan_dosed_steps([step], [{"material": "EMC", "qty": 5, "unit": "g"}], [ec], capabilities)
+    assert [row.material for row in listed] == ["EC"]

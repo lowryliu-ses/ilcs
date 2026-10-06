@@ -2718,6 +2718,72 @@
         "title": "FormulationPreviewIn",
         "type": "object"
       },
+      "FormulationSubmitIn": {
+        "additionalProperties": false,
+        "description": "上游系统（服务身份）提交一张配方表：表格写法与界面导入相同（第一行表头、每行一瓶、序列号列 + 各试剂列），\n`request_id` 是提交方自己的请求编号——同一编号同一内容重发回放首次结果，内容不同拒绝。",
+        "properties": {
+          "filename": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Filename",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "default": {},
+            "title": "Params",
+            "type": "object"
+          },
+          "plan_name": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Plan Name",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "table": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Table",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "table"
+        ],
+        "title": "FormulationSubmitIn",
+        "type": "object"
+      },
       "FormulationTemplateIn": {
         "additionalProperties": false,
         "description": "配液模板：固定步骤 + 加料阶段 + 物料类别 → 加法 + 搅拌规则 + 实验参数，config 结构见 rules.py。",
@@ -26396,6 +26462,262 @@
         "summary": "Device Readings",
         "tags": [
           "environment"
+        ]
+      }
+    },
+    "/api/runtime/formulation-templates/{code}/imports": {
+      "post": {
+        "description": "提交一张配方表：与界面导入同一套校验与生成，登记瓶子、建流程草稿（同结构沿用）与方案草稿。\n\n之后的评审、批准、建批次、签名下发照旧由人做。按 `request_id` 去重：同一编号同一内容回放首次结果\n（`replayed: true`），内容不同 409；表格有问题 422，`detail.problems` 列出全部问题，什么都不建。",
+        "operationId": "submit_table_api_runtime_formulation_templates__code__imports_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FormulationSubmitIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Table",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/formulation-templates/{code}/imports/{request_id}": {
+      "get": {
+        "description": "按请求编号查进度：流程与方案的审批状态、实验任务、批次、每瓶的检测结果（标明是否进正式统计）。\n只看得到本服务身份自己提交的。",
+        "operationId": "submission_progress_api_runtime_formulation_templates__code__imports__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submission Progress",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/api/runtime/formulation-templates/{code}/imports/{request_id}/results/{result_id}/series": {
+      "get": {
+        "description": "取一条曲线结果（拉曼谱等）的完整数据点；只限这次提交生成的批次里的结果。",
+        "operationId": "submission_result_series_api_runtime_formulation_templates__code__imports__request_id__results__result_id__series_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "result_id",
+            "required": true,
+            "schema": {
+              "title": "Result Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Source"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Service-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Secret"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submission Result Series",
+        "tags": [
+          "runtime"
         ]
       }
     },

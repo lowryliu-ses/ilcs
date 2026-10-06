@@ -667,7 +667,8 @@ class PlanService:
 
     # ---------- 写 ----------
 
-    def create(self, payload: dict, user: User) -> dict:
+    def create(self, payload: dict, user: User | None) -> dict:
+        """新建方案草稿。`user` 为空是服务身份在起草（上游系统提交配方表）：负责人记成这个服务身份。"""
         if payload.get("template_id"):
             # 套用模板：模板给缺省结构，请求里显式给的字段优先
             template = self._template(payload["template_id"])
@@ -692,7 +693,7 @@ class PlanService:
             project_id=payload.get("project_id", ""),
             name=payload["name"],
             recipe_id=payload["recipe_id"],
-            owner=user.display_name,
+            owner=user.display_name if user is not None else (self.ctx.subject_label or "外部系统"),
             state="draft",
             approval_state="draft",
             plan_type=plan_type,

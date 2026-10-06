@@ -1,0 +1,349 @@
+{
+ "_说明": "C 公司 A-Lab 电解液产线的整任务方式：厂商上位机的实验任务接口收整份实验任务（每瓶配方与加料顺序、搅拌、分装与测试参数），自己调度机械手、过渡舱、天平与测试模组；ILCS 负责配方校验、评审审批、物料预留与按实际量入账、排程、结果复核与报告。逐步编排的产线定义在 line.json，两者共用物料、批号与检测指标。见 docs/电解液配液线.md 第八节。",
+ "name": "C 公司 A-Lab 电解液产线（整任务：上位机实验任务接口）",
+ "note": "上位机按整份实验任务执行，ILCS 下发一条整任务指令、回收每瓶的实际加料量与检测结果。模拟阶段工位先接内置模拟；load-electrolyte-line.py connect --gateways gateways-alab.json 改接设备仓库 ilcs-devices 的 alab-electrolyte 模块（假上位机 + 网关），走真实接入链路。",
+ "islands": [
+  {"id": 10, "name": "A-Lab 整线（上位机）"}
+ ],
+ "capabilities": [
+  {
+   "id": "cap.ely.run",
+   "name": "A-Lab 电解液实验任务",
+   "params": {
+    "m01": "第 1 种料用量",
+    "m02": "第 2 种料用量",
+    "m03": "第 3 种料用量",
+    "m04": "第 4 种料用量",
+    "m05": "第 5 种料用量",
+    "m06": "第 6 种料用量",
+    "m07": "第 7 种料用量",
+    "m08": "第 8 种料用量",
+    "m09": "第 9 种料用量",
+    "m10": "第 10 种料用量",
+    "m11": "第 11 种料用量",
+    "m12": "第 12 种料用量",
+    "stir_temp": "加料后制冷搅拌温度",
+    "stir_time": "加料后制冷搅拌时间",
+    "stir_rpm": "加料后制冷搅拌转速",
+    "cold_temp": "冷藏搅拌温度",
+    "cold_time": "冷藏搅拌时间",
+    "cold_rpm": "冷藏搅拌转速",
+    "mix_temp": "终混温度",
+    "mix_time": "终混时间",
+    "mix_rpm": "终混转速",
+    "bottles": "分装瓶数",
+    "volume": "每瓶分装量",
+    "cnd_temp": "电导率测试温度",
+    "cnd_repeats": "电导率重复测量次数",
+    "dv_temp": "密度黏度测试温度",
+    "dv_repeats": "密度黏度重复测量次数",
+    "raman_repeats": "拉曼重复采谱次数"
+   },
+   "param_specs": {
+    "m01": {"type": "number", "unit": "g", "required": false},
+    "m02": {"type": "number", "unit": "g", "required": false},
+    "m03": {"type": "number", "unit": "g", "required": false},
+    "m04": {"type": "number", "unit": "g", "required": false},
+    "m05": {"type": "number", "unit": "g", "required": false},
+    "m06": {"type": "number", "unit": "g", "required": false},
+    "m07": {"type": "number", "unit": "g", "required": false},
+    "m08": {"type": "number", "unit": "g", "required": false},
+    "m09": {"type": "number", "unit": "g", "required": false},
+    "m10": {"type": "number", "unit": "g", "required": false},
+    "m11": {"type": "number", "unit": "g", "required": false},
+    "m12": {"type": "number", "unit": "g", "required": false},
+    "stir_temp": {"type": "number", "unit": "℃"},
+    "stir_time": {"type": "number", "unit": "s"},
+    "stir_rpm": {"type": "number", "unit": "rpm"},
+    "cold_temp": {"type": "number", "unit": "℃"},
+    "cold_time": {"type": "number", "unit": "s"},
+    "cold_rpm": {"type": "number", "unit": "rpm"},
+    "mix_temp": {"type": "number", "unit": "℃"},
+    "mix_time": {"type": "number", "unit": "s"},
+    "mix_rpm": {"type": "number", "unit": "rpm"},
+    "bottles": {"type": "integer", "unit": "瓶"},
+    "volume": {"type": "number", "unit": "mL"},
+    "cnd_temp": {"type": "number", "unit": "℃"},
+    "cnd_repeats": {"type": "integer", "unit": "次"},
+    "dv_temp": {"type": "number", "unit": "℃"},
+    "dv_repeats": {"type": "integer", "unit": "次"},
+    "raman_repeats": {"type": "integer", "unit": "次"}
+   },
+   "recovery": {
+    "maxHoldMin": 120,
+    "maxRunMin": 720,
+    "pausable": true,
+    "retryable": false,
+    "hold": "上位机做完当前这一步操作后暂停，瓶子与试剂留在原位",
+    "sideEffect": "已加进瓶里的料不能撤回：中途终止或失败的瓶子按现场核查处置，不重发整份任务",
+    "verify": ["上位机任务状态", "各瓶已加的料与当前位置"],
+    "note": "按物理常识预填，待厂商确认（暂停点、终止后的物理状态、能否从断点续做）"
+   }
+  }
+ ],
+ "asset": {
+  "vendor": "C 公司",
+  "calibration_exempt_reason": "模拟阶段占位：设备未到场，接真机前按实物登记型号、序列号与校准",
+  "note": "模拟阶段占位资产"
+ },
+ "adapter": {
+  "protocol": "内置模拟",
+  "adapter_kind": "simulation",
+  "adapter_driver": "simulation",
+  "adapter_config": {"simulate_outputs": true}
+ },
+ "stations": [
+  {
+   "id": "EL-ALAB",
+   "name": "A-Lab 上位机（整线实验任务）",
+   "island": 10,
+   "model": "ALAB-ELY-3",
+   "channels": 1,
+   "limits": {
+    "cap.ely.run": {
+     "m01": [0, 60],
+     "m02": [0, 60],
+     "m03": [0, 60],
+     "m04": [0, 60],
+     "m05": [0, 60],
+     "m06": [0, 60],
+     "m07": [0, 60],
+     "m08": [0, 60],
+     "m09": [0, 60],
+     "m10": [0, 60],
+     "m11": [0, 60],
+     "m12": [0, 60],
+     "stir_temp": [-20, 0],
+     "stir_time": [1, 120],
+     "stir_rpm": [0, 1500],
+     "cold_temp": [-20, 10],
+     "cold_time": [1, 7200],
+     "cold_rpm": [0, 1500],
+     "mix_temp": [-20, 60],
+     "mix_time": [1, 7200],
+     "mix_rpm": [0, 1500],
+     "bottles": [1, 6],
+     "volume": [1, 50],
+     "cnd_temp": [0, 60],
+     "cnd_repeats": [1, 5],
+     "dv_temp": [0, 60],
+     "dv_repeats": [1, 5],
+     "raman_repeats": [1, 5]
+    }
+   }
+  }
+ ],
+ "methods": [
+  {
+   "key": "alab_run",
+   "name": "A-Lab 电解液配制与检测（整任务）",
+   "capability": "cap.ely.run",
+   "station": "EL-ALAB",
+   "program": "ELY-STD",
+   "params": {
+    "m01": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m02": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m03": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m04": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m05": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m06": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m07": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m08": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m09": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m10": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m11": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "m12": {"default": 0, "min": 0, "max": 60, "unit": "g"},
+    "stir_temp": {"default": -10, "min": -20, "max": 0, "unit": "℃"},
+    "stir_time": {"default": 60, "min": 1, "max": 120, "unit": "s"},
+    "stir_rpm": {"default": 400, "min": 0, "max": 1500, "unit": "rpm"},
+    "cold_temp": {"default": 5, "min": -20, "max": 10, "unit": "℃"},
+    "cold_time": {"default": 600, "min": 1, "max": 7200, "unit": "s"},
+    "cold_rpm": {"default": 300, "min": 0, "max": 1500, "unit": "rpm"},
+    "mix_temp": {"default": 25, "min": -20, "max": 60, "unit": "℃"},
+    "mix_time": {"default": 3600, "min": 1, "max": 7200, "unit": "s"},
+    "mix_rpm": {"default": 500, "min": 0, "max": 1500, "unit": "rpm"},
+    "bottles": {"default": 2, "min": 1, "max": 6, "unit": "瓶"},
+    "volume": {"default": 20, "min": 1, "max": 50, "unit": "mL"},
+    "cnd_temp": {"default": 25, "min": 0, "max": 60, "unit": "℃"},
+    "cnd_repeats": {"default": 3, "min": 1, "max": 5, "unit": "次"},
+    "dv_temp": {"default": 25, "min": 0, "max": 60, "unit": "℃"},
+    "dv_repeats": {"default": 3, "min": 1, "max": 5, "unit": "次"},
+    "raman_repeats": {"default": 3, "min": 1, "max": 5, "unit": "次"}
+   },
+   "outputs": [
+    {
+     "key": "conductivity_mS_cm",
+     "label": "电导率",
+     "unit": "mS/cm",
+     "lo": 0.1,
+     "hi": 30,
+     "required": true,
+     "metric": "ely_conductivity"
+    },
+    {
+     "key": "density_g_cm3",
+     "label": "密度",
+     "unit": "g/cm3",
+     "lo": 0.8,
+     "hi": 1.6,
+     "required": true,
+     "metric": "ely_density"
+    },
+    {
+     "key": "viscosity_mPa_s",
+     "label": "黏度",
+     "unit": "mPa·s",
+     "lo": 0.5,
+     "hi": 20,
+     "required": true,
+     "metric": "ely_viscosity"
+    },
+    {
+     "key": "raman_spectrum",
+     "label": "拉曼谱",
+     "unit": "counts",
+     "kind": "series",
+     "required": true,
+     "metric": "ely_raman"
+    }
+   ],
+   "dur_min": 240,
+   "note": "上位机的工艺程序 ELY-STD：按顺序逐瓶加料（某瓶某种料为 0 就跳过它），每种溶剂加完制冷搅拌（EC 除外），液体加完拧盖冷藏搅拌，锂盐与添加剂加完关盖终混，再分装、测电导率、密度黏度与拉曼。时长与程序标识待厂商确认"
+  }
+ ],
+ "materials": [
+  {"name": "EC", "category": "预热溶剂"},
+  {"name": "EMC", "category": "溶剂"},
+  {"name": "DEC", "category": "溶剂"},
+  {"name": "DMC", "category": "溶剂"},
+  {"name": "EP", "category": "溶剂"},
+  {"name": "LiPF6", "category": "锂盐"},
+  {"name": "LiFSI", "category": "锂盐"},
+  {"name": "LiTFSI", "category": "锂盐"},
+  {"name": "LiBF4", "category": "锂盐"},
+  {"name": "LiDFP", "category": "锂盐"},
+  {"name": "VC", "category": "添加剂"},
+  {"name": "FEC", "category": "添加剂"}
+ ],
+ "lots": {
+  "unit": "g",
+  "qty": {"预热溶剂": "1000", "溶剂": "1000", "锂盐": "500", "添加剂": "500"},
+  "expiry": "2027-12-31",
+  "storage": "模拟阶段测试批号：手套箱内常温避光；接真机前换成实物批号"
+ },
+ "metrics": [
+  {"code": "ely_conductivity", "name": "电导率", "unit": "mS/cm", "rules": {"min": 0, "max": 30}},
+  {"code": "ely_density", "name": "密度", "unit": "g/cm3", "rules": {"min": 0.8, "max": 1.6}},
+  {"code": "ely_viscosity", "name": "黏度", "unit": "mPa·s", "rules": {"min": 0.5, "max": 20}},
+  {
+   "code": "ely_raman",
+   "name": "拉曼谱",
+   "unit": "counts",
+   "value_type": "series",
+   "rules": {"x_label": "拉曼位移", "x_unit": "cm-1"}
+  }
+ ],
+ "operator": "P-003",
+ "sop_file": "sop-alab.json",
+ "formula": "formula-alab-20261005.csv",
+ "template": {
+  "code": "FT-ELY-02",
+  "name": "C 公司电解液配制（A-Lab 整任务）",
+  "description": "按配方表逐瓶配制电解液：整份实验任务交给 A-Lab 上位机，按液体（预热溶剂与溶剂）→ 锂盐与添加剂的顺序加料，上位机完成搅拌、分装与检测",
+  "config": {
+   "plate": 12,
+   "risk": "RA-ELY-02（模拟阶段）",
+   "sop": {"code": "SOP-ELY-02"},
+   "design": "C 公司 A-Lab 电解液配制（整任务：上位机实验任务接口）",
+   "unit": "g",
+   "sample_type": "电解液",
+   "serial_headers": ["序列号", "编号", "瓶号", "样品编号", "serial", "id"],
+   "required_metrics": ["ely_conductivity", "ely_density", "ely_viscosity"],
+   "prefix": [
+    {
+     "key": "load",
+     "kind": "manual",
+     "name": "过渡舱载入空瓶",
+     "sop_step": "过渡舱载入空瓶",
+     "dur": 10,
+     "after": [],
+     "requires_signature": true,
+     "form": [
+      {"key": "empty_bottles", "label": "载入空瓶数", "type": "number"},
+      {"key": "labels_ok", "label": "已核对瓶身二维码完整", "type": "bool"}
+     ]
+    },
+    {
+     "key": "dispense",
+     "kind": "manual",
+     "name": "手动分装物料",
+     "sop_step": "手动分装物料",
+     "dur": 20,
+     "after": ["load"],
+     "form": [
+      {"key": "lots_recorded", "label": "已按配方表核对并记录原料批号", "type": "bool"}
+     ]
+    },
+    {
+     "key": "scan",
+     "kind": "manual",
+     "name": "手动扫码核对瓶身序列号",
+     "sop_step": "扫码核对瓶身序列号",
+     "dur": 5,
+     "after": ["dispense"],
+     "form": [
+      {"key": "scanned", "label": "扫码数量", "type": "number"}
+     ]
+    },
+    {
+     "key": "alab",
+     "kind": "device",
+     "name": "A-Lab 上位机执行实验任务",
+     "sop_step": "上位机执行整份实验任务",
+     "cap": "cap.ely.run",
+     "method": "alab_run",
+     "params": {
+      "stir_temp": -10,
+      "stir_time": 60,
+      "stir_rpm": 400,
+      "cold_temp": 5,
+      "cold_time": 600,
+      "cold_rpm": 300,
+      "mix_temp": 25,
+      "mix_time": 3600,
+      "mix_rpm": 500,
+      "bottles": 2,
+      "volume": 20,
+      "cnd_temp": 25,
+      "cnd_repeats": 3,
+      "dv_temp": 25,
+      "dv_repeats": 3,
+      "raman_repeats": 3
+     },
+     "dur": 240,
+     "after": ["scan"]
+    }
+   ],
+   "stages": [
+    {"key": "liquid", "label": "液体"},
+    {"key": "salt", "label": "锂盐与添加剂"}
+   ],
+   "routes": {
+    "预热溶剂": {"stage": "liquid", "not_last": "EC 常温是固体，加完要紧接着加下一种溶剂，单独制冷会凝固"},
+    "溶剂": {"stage": "liquid"},
+    "锂盐": {"stage": "salt"},
+    "添加剂": {"stage": "salt"}
+   },
+   "task": {
+    "step": "alab",
+    "slots": ["m01", "m02", "m03", "m04", "m05", "m06", "m07", "m08", "m09", "m10", "m11", "m12"]
+   },
+   "suffix": [],
+   "experiment_params": [
+    {"key": "bottles", "label": "分装瓶数", "step": "alab", "param": "bottles", "unit": "瓶", "default": 2},
+    {"key": "volume", "label": "每瓶分装量", "step": "alab", "param": "volume", "unit": "mL", "default": 20}
+   ],
+   "volume_check": {"bottles": "bottles", "volume": "volume", "density": 1.35, "reserve": 5}
+  }
+ }
+}

@@ -18,7 +18,7 @@ from .steps import (
     AUTOMATIC_KINDS, BRANCH, DEVICE, GATE, KIND_NAMES, KINDS, MANUAL, MERGE, NOTIFY, REVIEW, SPLIT, SUBFLOW, WAIT,
     applies_to_issues, assist_issues, branch_issues, merge_issues, notify_issues,
     consumes_materials, gate_issues, holds_station, holds_station_issues, kind_of, manual_issues, material_issues,
-    needs_station, qualification_issues, resource_demand, resource_issues, review_issues, step_material,
+    needs_station, qualification_issues, resource_demand, resource_issues, review_issues, step_material, step_materials,
     skippable_issues, split_issues, step_id_of, subflow_issues, timeout_issues, wait_issues,
 )
 
@@ -80,13 +80,25 @@ def device_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[s
     # 用量参数：执行器按它从下发参数里取这一步的投料量，再按物料单位对账，所以必须是登记了单位的能力参数
     material_param = step.get("material_param")
     if material_param not in (None, "") and spec is not None:
-        if not isinstance(material_param, str) or material_param not in defined:
-            issues.append(f"用量参数 {material_param} 不是该能力的参数")
-        elif spec_of(spec, material_param)["type"] in ("enum", "program"):
-            issues.append(f"用量参数 {material_param} 不是数值参数，不能当投料量")
-        elif not spec_of(spec, material_param)["unit"]:
-            issues.append(f"用量参数 {material_param} 没有登记单位，无法与物料单位对账")
+        issues.extend(_dosing_param_issues(spec, defined, material_param, ""))
+    # 一步投几种料：每种料写明的用量参数同样要是登记了单位的数值参数（字段本身的完整性见 steps.material_issues）
+    rows = step.get("materials")
+    if isinstance(rows, list) and spec is not None:
+        for row in rows:
+            if isinstance(row, dict) and row.get("param") not in (None, ""):
+                issues.extend(_dosing_param_issues(spec, defined, row["param"], str(row.get("material") or "")))
     return issues
+
+
+def _dosing_param_issues(spec: dict[str, Any], defined: dict[str, str], param: Any, material: str) -> list[str]:
+    owner = f"{material} 的" if material else ""
+    if not isinstance(param, str) or param not in defined:
+        return [f"{owner}用量参数 {param} 不是该能力的参数"]
+    if spec_of(spec, param)["type"] in ("enum", "program"):
+        return [f"{owner}用量参数 {param} 不是数值参数，不能当投料量"]
+    if not spec_of(spec, param)["unit"]:
+        return [f"{owner}用量参数 {param} 没有登记单位，无法与物料单位对账"]
+    return []
 
 
 def step_issues(step: dict[str, Any], capabilities: CapabilitySpecs) -> list[str]:
@@ -349,7 +361,7 @@ def _bom_check(material_steps: list[dict[str, Any]], bom: list[dict]) -> tuple[b
     manual = manual_materials_outside_bom(material_steps, bom)
     if manual:
         return False, manual
-    declared = list(dict.fromkeys(filter(None, (step_material(step) for step in material_steps))))
+    declared = list(dict.fromkeys(name for step in material_steps for name in step_materials(step)))
     if bom:
         detail = "、".join(f"{i.get('material')} {i.get('qty')}{i.get('unit')}" for i in bom)
         listed = {str(item.get("material") or "") for item in bom}
@@ -359,7 +371,7 @@ def _bom_check(material_steps: list[dict[str, Any]], bom: list[dict]) -> tuple[b
         return True, detail
     if not material_steps:
         return True, "无需物料：本流程没有消耗物料的步骤"
-    if all(step_material(step) for step in material_steps):
+    if all(step_materials(step) for step in material_steps):
         return True, f"{'、'.join(declared)} 的用量由实验方案按样本给出"
     return False, "存在消耗物料的步骤但未定义 BOM，排程前无法预留"
 

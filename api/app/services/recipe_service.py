@@ -276,17 +276,21 @@ class RecipeService:
         return self.to_dict(recipe, detail=True)
 
     def create_from_steps(
-        self, name: str, plate: int, steps: list[dict], user: User, *, sop_version_id: str = "", note: str = "",
-        bom: list[dict] | None = None, risk: str = "", design: str = "",
+        self, name: str, plate: int, steps: list[dict], user: User | None, *, sop_version_id: str = "",
+        note: str = "", bom: list[dict] | None = None, risk: str = "", design: str = "",
     ) -> Recipe:
-        """由数字 SOP / 配方表生成的流程草稿。不提交：调用方在同一事务里写自己的审计后提交。"""
+        """由数字 SOP / 配方表生成的流程草稿。不提交：调用方在同一事务里写自己的审计后提交。
+
+        `user` 为空是服务身份在起草（上游系统提交配方表）：作者记成这个服务身份，评审、批准照旧由人做。"""
         recipe_id = self._next_recipe_id()
+        author = user.display_name if user is not None else (self.ctx.subject_label or "外部系统")
         recipe = Recipe(
-            id=recipe_id, name=name, version="0.1.0", state="draft", owner=user.display_name, updated=today_iso(),
+            id=recipe_id, name=name, version="0.1.0", state="draft", owner=author, updated=today_iso(),
             plate=plate, steps=copy.deepcopy(steps), bom=copy.deepcopy(bom or []), risk=risk, design=design,
-            history=[{"v": "0.1.0", "state": "draft", "note": note or "由数字 SOP 生成", "by": user.display_name,
+            history=[{"v": "0.1.0", "state": "draft", "note": note or "由数字 SOP 生成", "by": author,
                       "at": today_iso()}],
-            author_user_id=user.id, used_step_ids=[step["step_id"] for step in steps if step.get("step_id")],
+            author_user_id=user.id if user is not None else f"service:{self.ctx.subject_id}",
+            used_step_ids=[step["step_id"] for step in steps if step.get("step_id")],
             sop_version_id=sop_version_id,
         )
         self.recipes.add(recipe)
@@ -370,6 +374,11 @@ class RecipeService:
             # 消耗物料与投哪种料都影响预留与对账，评审要看得到它们的变化
             material = step.get("material")
             via = f"，用量取 {step['material_param']}" if step.get("material_param") else ""
+            rows = step.get("materials") if isinstance(step.get("materials"), list) else []
+            if rows:
+                # 一步投几种料：按加料顺序列出每种料与用量参数
+                material = "、".join(f"{row.get('material')}←{row.get('param')}" for row in rows if isinstance(row, dict))
+                via = ""
             if step.get("consumes_materials"):
                 tail += f" · 消耗物料（{material}{via}）" if material else " · 消耗物料"
             elif material:

@@ -290,7 +290,10 @@ function scopeSummary(row: ServiceIdentityRow) {
   const zones = row.scopes.environment_zones === 'all'
     ? '全部区域的环境读数'
     : row.scopes.environment_zones?.length ? `环境读数 ${row.scopes.environment_zones.join('、')}` : '';
-  const extra = [serials, zones].filter(Boolean).join(' · ');
+  const imports = row.scopes.formulation_imports === 'all'
+    ? '向全部配液模板提交配方表'
+    : row.scopes.formulation_imports?.length ? `提交配方表 ${row.scopes.formulation_imports.join('、')}` : '';
+  const extra = [serials, zones, imports].filter(Boolean).join(' · ');
   return <>{stations}<div className="tiny muted">{tasks}{extra ? ` · ${extra}` : ''}</div></>;
 }
 
@@ -318,6 +321,9 @@ function IdentityForm({
   const zoneScope = identity?.scopes.environment_zones;
   const [allZones, setAllZones] = useState(zoneScope === 'all');
   const [zones, setZones] = useState(Array.isArray(zoneScope) ? zoneScope.join('、') : '');
+  const importScope = identity?.scopes.formulation_imports;
+  const [allImports, setAllImports] = useState(importScope === 'all');
+  const [imports, setImports] = useState(Array.isArray(importScope) ? importScope.join('、') : '');
 
   // 表单只管这几项；别处授予的范围（外部优化器的方案、批次事件）原样带回去，编辑时不能悄悄抹掉
   const scopes = () => ({
@@ -326,6 +332,7 @@ function IdentityForm({
     analysis_tasks: allTasks ? 'all' : list(tasks),
     instrument_serials: list(serials),
     environment_zones: allZones ? 'all' : list(zones),
+    formulation_imports: allImports ? 'all' : list(imports),
   });
   const save = useMutation<[], ServiceIdentityRow | SecretResult>(
     () => identity
@@ -373,6 +380,10 @@ function IdentityForm({
       <label className="row small"><input type="checkbox" checked={allZones} onChange={(event) => setAllZones(event.target.checked)} />允许上报全部区域的环境读数</label>
       {!allZones ? <Field label="授权环境区域" hint="手套箱 / 温湿度连接器可以上报哪些区域的读数（区域名与步骤环境要求里写的一致）；留空表示不能上报">
         <textarea rows={2} value={zones} onChange={(event) => setZones(event.target.value)} placeholder="配液段手套箱、测试段手套箱" />
+      </Field> : null}
+      <label className="row small"><input type="checkbox" checked={allImports} onChange={(event) => setAllImports(event.target.checked)} />允许向全部配液模板提交配方表</label>
+      {!allImports ? <Field label="可提交配方表的配液模板" hint="上游系统（AI 配方预测、实验设计平台）经 /runtime/formulation-templates/{编号}/imports 提交；生成的流程与方案仍是草稿，评审与下发由人做。留空表示不能提交">
+        <textarea rows={2} value={imports} onChange={(event) => setImports(event.target.value)} placeholder="FT-ELY-02" />
       </Field> : null}
       {save.error ? <div className="note bad">{save.error.message}</div> : null}
     </Modal>

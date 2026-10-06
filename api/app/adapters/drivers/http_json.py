@@ -107,9 +107,15 @@ class HttpJsonAdapter:
             # 这一步投哪种料（名称、单位、用量取哪个参数）：称量加料的网关据此核对装在设备上的料对不对，
             # 并按实际称量回报 delivered.materials。只是附加字段，params 照旧原样下发
             extra["material"] = dict(request.material)
+        if request.materials:
+            # 一步投几种料：按加料顺序的 [{name, unit, param}]，各自的用量取 params（逐孔位时 params.wells）里的 param
+            extra["materials"] = [dict(row) for row in request.materials]
         if request.wells:
             # 这条指令处理的孔位（样本）：没有逐孔参数的检测步骤也带，设备据此知道测的是哪几瓶、按孔位回报 delivered.wells
             extra["wells"] = list(request.wells)
+        if request.samples:
+            # 孔位上是哪个样本（条码）：扫瓶身二维码的设备据此核对瓶子
+            extra["samples"] = dict(request.samples)
         return {**extra,
             "command_id": request.command_id,
             "station_id": request.station_id,

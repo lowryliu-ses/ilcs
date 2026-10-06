@@ -281,3 +281,62 @@ def test_table_endpoint_reads_a_sheet_without_any_template(researcher, operator,
     assert body["filename"] == "配方.csv" and body["table"][1][0] == "R-1" and body["warnings"] == []
     assert researcher.upload(f"{BASE}/table", "配方.txt", b"x", "text/plain").status_code == 422
     assert operator.upload(f"{BASE}/table", "配方.csv", _csv(table), "text/csv").status_code == 403
+
+
+def _uploader(client, admin, scopes: dict):
+    from tests.conftest import ServiceSession
+
+    created = admin.post("/api/service-identities", {
+        "source": f"ai-formula-{uuid.uuid4().hex[:8]}", "name": "AI 配方预测", "scopes": scopes,
+    })
+    assert created.status_code == 201, created.text
+    issued = created.json()
+    return ServiceSession(client, issued["source"], issued["secret"])
+
+
+def test_upstream_service_submits_a_table_idempotently_and_follows_progress(client, admin, researcher, qa, line, db):
+    """上游系统用服务身份提交配方表：按授权的模板、按请求编号去重；生成的仍是草稿，审批由人做；按请求编号查进度。"""
+    template = _template(researcher, line)
+    code = template["code"]
+    url = f"/api/runtime/formulation-templates/{code}/imports"
+    table = _table(line, [[f"ELY-S{line['tag']}-1", 10.5, 15.2, 4.6, 1.3],
+                          [f"ELY-S{line['tag']}-2", 11.0, 14.0, 4.6, 0]])
+    body = {"request_id": f"req-{line['tag']}", "filename": "ai-round-1.csv", "table": table, "plan_name": "AI 第 1 轮"}
+
+    # 没被授权这个模板：403；人员会话不能用这个入口
+    other = _uploader(client, admin, {"formulation_imports": ["FT-OTHER"]})
+    denied = other.post(url, body)
+    assert denied.status_code == 403 and denied.json()["detail"]["code"] == "formulation_import_not_authorized"
+    assert researcher.post(url, body).status_code == 401
+
+    upstream = _uploader(client, admin, {"formulation_imports": [code]})
+    first = upstream.post(url, body)
+    assert first.status_code == 201, first.text
+    result = first.json()
+    assert result["replayed"] is False and result["request_id"] == body["request_id"] and result["template"] == code
+    assert result["recipe"]["state"] == "draft" and result["plan"]["state"] == "draft"
+    assert [row["id"] for row in result["samples"]] == [row[0] for row in table[1:]]
+    plan = db.get(Plan, result["plan"]["id"])
+    assert plan.owner == "AI 配方预测", "起草人记成提交它的服务身份"
+    assert db.get(Recipe, result["recipe"]["id"]).author_user_id.startswith("service:")
+
+    again = upstream.post(url, body)
+    assert again.status_code == 201 and again.json()["replayed"] is True
+    assert again.json()["plan"]["id"] == result["plan"]["id"], "同一编号同一内容回放，不再建方案"
+    changed = upstream.post(url, {**body, "plan_name": "改了名字"})
+    assert changed.status_code == 409 and changed.json()["detail"]["code"] == "submission_conflict"
+    broken = upstream.post(url, {**body, "request_id": f"req-{line['tag']}-bad",
+                                 "table": _table(line, [[f"ELY-S{line['tag']}-9", -1, 1, 1, 1]])})
+    assert broken.status_code == 422 and any("负数" in item for item in broken.json()["detail"]["problems"])
+    assert db.query(Plan).filter(Plan.id != plan.id, Plan.recipe_id == plan.recipe_id).count() == 0, "有问题什么都不建"
+
+    progress = upstream.get(f"{url}/{body['request_id']}")
+    assert progress.status_code == 200, progress.text
+    view = progress.json()
+    assert view["plan"]["id"] == plan.id and view["plan"]["approval_state"] == "draft"
+    assert view["samples"] == [row[0] for row in table[1:]] and view["batches"] == [] and view["results"] == []
+    assert other.get(f"/api/runtime/formulation-templates/FT-OTHER/imports/{body['request_id']}").status_code == 404
+    assert upstream.get(f"{url}/no-such-request").status_code == 404
+    audit = researcher.get(f"/api/audit?target={template['id']}").json()
+    rows = audit["items"] if isinstance(audit, dict) else audit
+    assert any("AI 配方预测 提交，请求 " in row.get("detail", "") for row in rows), "审计写明是谁提交的"

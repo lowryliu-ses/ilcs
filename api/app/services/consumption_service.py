@@ -27,7 +27,7 @@ from ..core.errors import DomainError
 from ..domain import params as units
 from ..domain.dosing import QUANTUM, commanded_quantity, dosing_param, param_unit
 from ..domain.inventory import QuantityError, convert
-from ..domain.steps import consumes_materials, normalize, step_material
+from ..domain.steps import consumes_materials, normalize, step_materials
 from ..models import Batch, Command, Lot
 from ..repositories.materials import MaterialRepository, ReservationRepository
 from ..repositories.resources import CapabilityRepository
@@ -251,12 +251,13 @@ class ConsumptionService:
         steps = normalize(snapshot.get("steps") or [])
         planned: tuple[Decimal, str] | None = None
         step = steps[command.step_index] if command.step_index < len(steps) else {}
-        # 只有这一步声明投的就是这种料，才拿这条指令的用量参数当计划量；多种料的设备在别的料的步骤上回报它时，
-        # 拿别的料的下发量来比只会误报偏差
-        if entry.get("source") == "plan" and step_material(step) == lot.material:
+        # 只有这一步声明投的就是这种料（一步投几种料的，其中之一），才拿这条指令的用量参数当计划量；多种料的设备在
+        # 别的料的步骤上回报它时，拿别的料的下发量来比只会误报偏差
+        if entry.get("source") == "plan" and lot.material in step_materials(step):
             row = CapabilityRepository(self.db).get(command.capability or step.get("cap") or "")
             capability = {"params": row.params or {}, "param_specs": row.param_specs or {}} if row else {}
-            param = dosing_param(step, capability, str(entry.get("unit") or ""))
+            # 一步投几种料时取这种料自己的用量参数
+            param = dosing_param(step, capability, str(entry.get("unit") or ""), lot.material)
             if param:
                 planned = (
                     commanded_quantity(command.params or {}, param),
@@ -264,8 +265,8 @@ class ConsumptionService:
                 )
         if planned is None:
             consuming = [step for step in steps if consumes_materials(step)]
-            declared = [step for step in consuming if step_material(step) == lot.material]
-            undeclared = [step for step in consuming if not step_material(step)]
+            declared = [step for step in consuming if lot.material in step_materials(step)]
+            undeclared = [step for step in consuming if not step_materials(step)]
             sharing = declared or undeclared or consuming
             planned = (
                 Decimal(str(entry.get("qty") or 0)) / max(1, len(sharing)),

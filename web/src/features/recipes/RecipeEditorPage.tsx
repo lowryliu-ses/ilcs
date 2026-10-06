@@ -1662,7 +1662,22 @@ function setConsumes(step: RecipeStep, on: boolean) {
   if (!on) {
     delete step.material;
     delete step.material_param;
+    delete step.materials;
   }
+}
+
+/** 设备步骤在「投一种料」与「一步投几种料」之间切换：已经选好的料与参数带过去，不丢。 */
+function setSeveral(step: RecipeStep, on: boolean) {
+  if (on) {
+    step.materials = [{ material: step.material ?? '', param: step.material_param ?? '' }];
+    delete step.material;
+    delete step.material_param;
+    return;
+  }
+  const first = step.materials?.[0];
+  delete step.materials;
+  if (first?.material) step.material = first.material;
+  if (first?.param) step.material_param = first.param;
 }
 
 /* 投料物料与用量参数。
@@ -1690,70 +1705,221 @@ function MaterialFields({
   const options = step.material && !materials.includes(step.material) ? [step.material, ...materials] : materials;
   const params = Object.keys(capability?.params ?? {});
   const inBom = !step.material || bomMaterials.includes(step.material);
-  return (
-    <div className="grid cols-2">
-      <Field
-        label="投料物料"
-        hint={
-          !capability
-            ? inBom
-              ? '人工步骤投的物料要列在流程 BOM 里，用量按 BOM'
-              : `${step.material} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，请把它加进 BOM`
-            : inBom
-            ? 'BOM 没列这种物料时，用量由实验方案按样本给出'
-            : `${step.material} 不在 BOM 里：用量由实验方案按样本给出（方案里要有给出它用量的因子）`
-        }
+  const several = Array.isArray(step.materials);
+  const mode = capability ? (
+    <Field label="投料方式" hint="整线一个任务把一瓶的全部组分按顺序投完（如 A-Lab 上位机任务）时选「一步投几种料」">
+      <select
+        value={several ? 'several' : 'single'}
+        disabled={readOnly}
+        onChange={(event) => onSet((current) => setSeveral(current, event.target.value === 'several'))}
       >
-        <select
-          value={step.material ?? ''}
-          disabled={readOnly}
-          onChange={(event) =>
-            onSet((current) => {
-              const value = event.target.value;
-              if (value) current.material = value;
-              else delete current.material;
-            })
+        <option value="single">投一种料</option>
+        <option value="several">一步投几种料（按顺序）</option>
+      </select>
+    </Field>
+  ) : null;
+  if (capability && several) {
+    return (
+      <>
+        {mode}
+        <SeveralMaterials
+          step={step}
+          materials={materials}
+          bomMaterials={bomMaterials}
+          capability={capability}
+          readOnly={readOnly}
+          onSet={onSet}
+        />
+      </>
+    );
+  }
+  return (
+    <>
+      {mode}
+      <div className="grid cols-2">
+        <Field
+          label="投料物料"
+          hint={
+            !capability
+              ? inBom
+                ? '人工步骤投的物料要列在流程 BOM 里，用量按 BOM'
+                : `${step.material} 不在 BOM 里：人工步骤的用量只能按 BOM 预留，请把它加进 BOM`
+              : inBom
+              ? 'BOM 没列这种物料时，用量由实验方案按样本给出'
+              : `${step.material} 不在 BOM 里：用量由实验方案按样本给出（方案里要有给出它用量的因子）`
           }
         >
-          <option value="">不指定</option>
-          {options.map((name) => (
-            <option key={name} value={name}>
-              {name}
-              {bomMaterials.includes(name) ? '（BOM）' : ''}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {capability ? (
-        <Field label="用量参数" hint="下发时从这个参数取投料量；留空按物料单位自动推断">
           <select
-            value={step.material_param ?? ''}
+            value={step.material ?? ''}
             disabled={readOnly}
             onChange={(event) =>
               onSet((current) => {
                 const value = event.target.value;
-                if (value) current.material_param = value;
-                else delete current.material_param;
+                if (value) current.material = value;
+                else delete current.material;
               })
             }
           >
-            <option value="">自动推断</option>
-            {step.material_param && !params.includes(step.material_param) ? (
-              <option value={step.material_param}>{step.material_param}（不是该能力的参数）</option>
-            ) : null}
-            {params.map((key) => {
-              const unit = capability.param_specs?.[key]?.unit;
-              return (
-                <option key={key} value={key}>
-                  {capability.params[key] || key}
-                  {unit ? ` · ${unit}` : ' · 未登记单位'}
-                </option>
-              );
-            })}
+            <option value="">不指定</option>
+            {options.map((name) => (
+              <option key={name} value={name}>
+                {name}
+                {bomMaterials.includes(name) ? '（BOM）' : ''}
+              </option>
+            ))}
           </select>
         </Field>
-      ) : null}
-    </div>
+        {capability ? (
+          <Field label="用量参数" hint="下发时从这个参数取投料量；留空按物料单位自动推断">
+            <select
+              value={step.material_param ?? ''}
+              disabled={readOnly}
+              onChange={(event) =>
+                onSet((current) => {
+                  const value = event.target.value;
+                  if (value) current.material_param = value;
+                  else delete current.material_param;
+                })
+              }
+            >
+              <option value="">自动推断</option>
+              {step.material_param && !params.includes(step.material_param) ? (
+                <option value={step.material_param}>{step.material_param}（不是该能力的参数）</option>
+              ) : null}
+              {params.map((key) => {
+                const unit = capability.param_specs?.[key]?.unit;
+                return (
+                  <option key={key} value={key}>
+                    {capability.params[key] || key}
+                    {unit ? ` · ${unit}` : ' · 未登记单位'}
+                  </option>
+                );
+              })}
+            </select>
+          </Field>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+/* 一步投几种料：按加料顺序逐行写「哪种料、用量取哪个参数」。上位机按这个顺序逐种加，某瓶某种料是 0 就跳过它；
+   每种料的用量由实验方案按样本给出（因子作用在这一行的参数上），或按 BOM。顺序可以上下调。 */
+function SeveralMaterials({
+  step,
+  materials,
+  bomMaterials,
+  capability,
+  readOnly,
+  onSet,
+}: {
+  step: RecipeStep;
+  materials: string[];
+  bomMaterials: string[];
+  capability: CapabilityRow;
+  readOnly: boolean;
+  onSet: (change: (step: RecipeStep) => void) => void;
+}) {
+  const rows = step.materials ?? [];
+  const params = Object.keys(capability.params ?? {});
+  const move = (from: number, to: number) =>
+    onSet((current) => {
+      const list = [...(current.materials ?? [])];
+      const [row] = list.splice(from, 1);
+      list.splice(to, 0, row);
+      current.materials = list;
+    });
+  return (
+    <Field label="投哪几种料" hint="按加料顺序；不在 BOM 里的料由实验方案按样本给出用量（方案里要有作用在这一行参数上的因子）">
+      <div className="cfg-table-wrap">
+        {rows.length ? (
+          <div className="program-scroll">
+          <table className="compact cfg-table">
+            <thead>
+              <tr>
+                <th className="num">序</th>
+                <th>物料</th>
+                <th>用量参数</th>
+                {readOnly ? null : <th />}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, position) => {
+                const options = row.material && !materials.includes(row.material) ? [row.material, ...materials] : materials;
+                return (
+                  <tr key={position}>
+                    <td className="num mono">{position + 1}</td>
+                    <td>
+                      <select
+                        aria-label={`第 ${position + 1} 种料`}
+                        value={row.material}
+                        disabled={readOnly}
+                        onChange={(event) => onSet((current) => void (current.materials![position].material = event.target.value))}
+                      >
+                        <option value="">选物料</option>
+                        {options.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                            {bomMaterials.includes(name) ? '（BOM）' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`第 ${position + 1} 种料的用量参数`}
+                        value={row.param}
+                        disabled={readOnly}
+                        onChange={(event) => onSet((current) => void (current.materials![position].param = event.target.value))}
+                      >
+                        <option value="">选用量参数</option>
+                        {row.param && !params.includes(row.param) ? (
+                          <option value={row.param}>{row.param}（不是该能力的参数）</option>
+                        ) : null}
+                        {params.map((key) => {
+                          const unit = capability.param_specs?.[key]?.unit;
+                          return (
+                            <option key={key} value={key}>
+                              {capability.params[key] || key}
+                              {unit ? ` · ${unit}` : ' · 未登记单位'}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </td>
+                    {readOnly ? null : (
+                      <td className="row-end">
+                        <span className="cfg-tools">
+                          <button className="btn sm" title="上移" aria-label={`第 ${position + 1} 种料上移`}
+                            disabled={position === 0} onClick={() => move(position, position - 1)}>↑</button>
+                          <button className="btn sm" title="下移" aria-label={`第 ${position + 1} 种料下移`}
+                            disabled={position === rows.length - 1} onClick={() => move(position, position + 1)}>↓</button>
+                          <button className="btn sm" title="移除" aria-label={`移除第 ${position + 1} 种料`}
+                            onClick={() => onSet((current) => void current.materials!.splice(position, 1))}>删</button>
+                        </span>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        ) : null}
+        {readOnly ? null : (
+          <button
+            className="btn sm cfg-add"
+            onClick={() =>
+              onSet((current) => {
+                current.materials = [...(current.materials ?? []), { material: '', param: '' }];
+              })
+            }
+          >
+            增加一种料
+          </button>
+        )}
+      </div>
+    </Field>
   );
 }
 
