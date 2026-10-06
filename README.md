@@ -262,13 +262,13 @@ cd ilcs && rsync -av --delete \
   --exclude '*.db' --exclude '*.db-shm' --exclude '*.db-wal' \
   --exclude '.pytest_cache' --exclude '.playwright-cli' --exclude '.DS_Store' \
   --exclude 'web/src' --exclude 'web/tsconfig.tsbuildinfo' --exclude 'api/tests' \
-  --exclude 'data' --exclude 'secrets' --exclude 'deploy/.env' --exclude '.git' --exclude 'output' \
+  --exclude 'data' --exclude 'secrets' --exclude 'deploy/.env' --exclude 'deploy/.env.bak*' --exclude '.git' --exclude 'output' \
   ./  10.10.106.51:/opt/ilcs/
 
 # 设备仓库同步到 ILCS 旁边（/opt/ilcs-devices）：驱动宿主、设备模块的模拟网关、试点模拟设备与连接器在那边起
 cd ../ilcs-devices && rsync -av --delete \
   --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.DS_Store' --exclude '.git' \
-  --exclude 'secrets' --exclude 'state' \
+  --exclude 'secrets' --exclude 'state' --exclude 'deploy/.env' \
   ./  10.10.106.51:/opt/ilcs-devices/
 
 # 首次部署：从样例生成配置，把密钥改掉
@@ -328,7 +328,7 @@ IPv4 网段不宽于 /16——设备网段里新接的设备就不用改 `.env`�
 `database_unavailable`，不再只报告过期的启动状态。正式入口仍须由现有公共网关提供 HTTPS；
 8090 的内网 HTTP 端口不应直接暴露到不受信网络。
 
-`--exclude 'data'`、`--exclude 'secrets'` 与 `--exclude 'deploy/.env'` 不能省：本地没有这些运行数据，`--delete` 会连生产库、上传文件、设备凭据和容器配置一起删掉。
+`--exclude 'data'`、`--exclude 'secrets'` 与 `--exclude 'deploy/.env'` 不能省：本地没有这些运行数据，`--delete` 会连生产库、上传文件、设备凭据和容器配置一起删掉。设备仓库那边的 `deploy/.env` 同样不能省（目标机的驱动宿主现场目录、管理台发布地址写在里面）；`deploy/.env.bak*` 是目标机上手工留的配置备份，也别让 `--delete` 删掉。
 `ILCS_FILE_MAX_BYTES` 与 nginx 的 `client_max_body_size` 必须一起改：网关小于应用上限时，大文件会在网关被截断而应用侧看不到任何错误。
 上传后尚未形成正式业务引用的文件默认保留 24 小时，执行器每小时分组织清理并写审计；
 `ILCS_FILE_ORPHAN_RETENTION_HOURS`、`ILCS_FILE_CLEANUP_INTERVAL_SEC` 和
