@@ -4,36 +4,29 @@
     ILCS_HOST_SITE=$PWD/data/driver-host/site docker compose -f ../ilcs-devices/deploy/compose.yml up -d   # 驱动宿主（ilcs-devices 组）
     python3 scripts/load-driver-host-devices.py register [--base http://127.0.0.1:8090] [--acceptance] [--only 工位,…]
 
-- ST-PF-MB（ProtoForge 从站 1 的温湿度传感器）：`sila2_v1` 接驱动宿主上的 PF-MB-PLC（50201，设备文件 r2 起只读写点位：
-  温度、湿度与两个报警点，没有 TaskExecution），`"tasks": false`，不声明查询、去重。它原来是从站 2 的握手 PLC（能力
-  cap.plc_run）：工位还叫原来的名字就改成传感器的名字，工位上还登记着能力就移除（签名），驱动配置摘要变了就签名批准。
-- ST-PF-OPCUA（ProtoForge OPC UA 压力传感器）、ST-PF-HTTP（ProtoForge HTTP REST 传感器）：没有就登记（只读写点位，
-  不登记能力），`sila2_v1` 接 PF-OPCUA（50202）/ PF-HTTP（50203），`"tasks": false`。HTTP 传感器要 ProtoForge 接进
-  ILCS 的后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主才连得到它的 8080。
-- 只读写点位（`"tasks": false`）的工位不承接能力：已登记的能力极限签名移除，排程不会再往它上面排。ProtoForge 全流程
+哪个工位接驱动宿主上的哪台设备，以设备仓库为准：现场目录的工位对照表 `host/sites/<现场>/ilcs-stations.json`（现场缺省
+local，环境变量 ILCS_DRIVER_HOST_SITE 换；106.51 与本机共用 local 这份，只差 ProtoForge 的主机名）。端口、设备编号、契约
+（保持 / 终止 / 查询 / 去重）、插件与网关请求超时取自同目录的设备文件，网关的 `wells_per_command`（只给 ILCS 用的连接配置键）
+取自模块 profile.json；这里不另写一份。现在接的是：
+
+- ProtoForge 三台（ST-PF-MB 温湿度传感器、ST-PF-OPCUA 压力传感器、ST-PF-HTTP HTTP 传感器）：只读写点位（`"tasks": false`），
+  没有就登记（不登记能力）。ST-PF-MB 原来是从站 2 的握手 PLC：还叫原来的名字就改名。HTTP 传感器要 ProtoForge 接进 ILCS 的
+  后端网络（`docker network connect ilcs_backend protoforge`），驱动宿主才连得到它的 8080。ProtoForge 全流程
   （load-protoforge-flow.py）之后再把 ST-PF-OPCUA、ST-PF-HTTP 改成参与自动流程、给三台登记环境采集：重跑本脚本会把它们
   改回这里的连接配置，之后要再跑一次它的 register。
+- 只读写点位的工位不承接能力：已登记的能力极限签名移除，排程不会再往它上面排。
+- 模拟电芯检测仪表 ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（驱动宿主的 line_command，映射照抄设备配置模板
+  host/profiles/scpi-cell-meter）：模拟设备控制口（simulator_control）留在 ILCS 的连接配置里，验收的故障项目照做。
+- 设备模块的模拟网关（驱动宿主的 http_json 插件转成 SiLA 服务，GW-*）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
+  ST-ECHEM-SIM、ST-NW-01，电解液线的 EL-D-BAL、EL-D-ADD、EL-D-PWD、EL-D-STIR、EL-D-COLD、EL-D-MIX、EL-T-RAM，A-Lab 上位机
+  EL-ALAB。原来直连网关（`http_json_v1` 套用接入模板）的改成 `sila2_v1` 接驱动宿主；模拟设备控制口指向网关自己的 API
+  （HTTPS + 网关令牌，ILCS 直连它：网关主机名要在 ILCS 的 ILCS_ADAPTER_ALLOWED_HOSTS 里，不然故障项目跳过；A-Lab 的网关
+  接上位机 REST 接口、不开控制口，不申请故障项目）。连上后重读设备自报的方法目录（排程只往
+  报过这个程序的工位排）。驱动宿主上改了设备文件（配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
 
-- ST-OCV-SIM、ST-OCV2-SIM、ST-ACIR-SIM（模拟电芯检测仪表 ilcs-devices/simulators/scpi_meter，映射照抄驱动宿主的设备配置模板
-  ilcs-devices/host/profiles/scpi-cell-meter）：工位已有，原来是
-  `line_command_v1` 直连模拟仪表（接入模板 TPL-SCPI-*），改成 `sila2_v1` 接驱动宿主上的 OCV-K2450（50211）/ OCV-K2400
-  （50212）/ ACIR-BT3562（50213），映射照抄模板、搬到驱动宿主；模拟设备控制口（simulator_control）留在 ILCS 的连接配置里，
-  验收的故障项目照做。`--acceptance` 跑动作级 + 故障项目（cap.cell_check）。
-
-- 设备模块的模拟网关（ilcs-devices/gateway/<模块>，ILCS 网关契约）：ST-BAL-SIM、ST-STIR-SIM、ST-RAM-SIM、ST-CHILL-SIM、
-  ST-ECHEM-SIM（scripts/load-device-simulators.py）、ST-NW-01（load-neware-cycler.py）、EL-D-BAL、EL-D-PWD、EL-T-RAM
-  （load-electrolyte-line.py connect）、EL-ALAB（A-Lab 上位机的网关，load-electrolyte-line.py connect --gateways
-  gateways-alab.json）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的 GW-*
-  （50231–50240，驱动宿主的 http_json 插件，设备文件在 ilcs-devices/host/sites/local/devices）。网关照旧在原来的容器里跑；
-  模拟设备控制口指向网关自己的 API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`
-  （一条指令最多几个样本）照模块的 profile.json 写进连接配置，契约（保持 / 终止 / 查询 / 去重）也照它声明（A-Lab 上位机
-  能暂停，天平、拉曼这些不能）。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
-  （配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
-  `--acceptance` 逐项能力跑动作级 + 故障项目。
-
-都用驱动宿主的自签证书（`secrets/host/driver-host.crt`）和给 ILCS 的令牌（`secrets/host/ilcs.token`），等执行器跑完只读级验收
-——首次接入的验收通过时，同时批准设备服务报的这一份驱动配置。只走 HTTP，签名用演示账号口令逐次签署；已经接好的不重复改。
-正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
+`--acceptance` 逐项能力跑动作级（有控制口的再跑故障项目）。都用驱动宿主的自签证书（`secrets/host/driver-host.crt`）和给
+ILCS 的令牌（`secrets/host/ilcs.token`），等执行器跑完只读级验收——首次接入的验收通过时，同时批准设备服务报的这一份驱动配置。
+只走 HTTP，签名用演示账号口令逐次签署；已经接好的不重复改。正式环境（ILCS_ENVIRONMENT=production）拒绝运行。
 """
 from __future__ import annotations
 
@@ -58,68 +51,59 @@ step, ok, note, wait_for = common.step, common.ok, common.note, common.wait_for
 
 HOST = "driver-host"
 SECRETS = "/run/secrets/ilcs/host"
-STATIONS = {
-    "ST-PF-MB": {
-        # 驱动宿主上的设备文件（PF-MB-PLC r2）只读写点位：没有 TaskExecution，查询、去重也不声明（只读级验收就不去查指令）
-        "name": "ProtoForge 温湿度传感器（经驱动宿主）", "port": 50201, "device_id": "PF-MB-PLC-01", "tasks": False,
-        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": False, "supports_dedup": False},
-        # 原来是从站 2 的握手 PLC：工位还叫这些名字就改成传感器的名字（人改过的名字不动）
-        "renamed_from": ("ProtoForge PLC（Modbus TCP）", "ProtoForge PLC（经驱动宿主）"),
-    },
-    "ST-PF-OPCUA": {
-        "name": "ProtoForge 压力传感器（经驱动宿主）", "port": 50202, "device_id": "PF-OPCUA-PRESSURE", "tasks": False,
-        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": True, "supports_dedup": True},
-    },
-    "ST-PF-HTTP": {
-        "name": "ProtoForge HTTP 传感器（经驱动宿主）", "port": 50203, "device_id": "http-rest", "tasks": False,
-        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": True, "supports_dedup": True},
-    },
-    **{station_id: {
-        "name": name, "port": port, "device_id": device_id, "tasks": True,
-        "supports": {"supports_hold": False, "supports_abort": False, "supports_query": True, "supports_dedup": True},
-        "simulator_control": {"url": f"http://{sim}:9900", "token_ref": f"file:///run/secrets/ilcs/simctl/{unit}.token"},
-        "acceptance": ("cap.cell_check", {}), "faults": True,
-        "approval": "本机模拟电芯检测仪表（ilcs-devices/simulators/scpi_meter），经驱动宿主接入；没有真实仪表与电芯",
-    } for station_id, name, port, device_id, sim, unit in (
-        ("ST-OCV-SIM", "模拟 Keithley 2450 开路电压（经驱动宿主）", 50211, "ILCS-SIMULATOR-2450-01", "k2450-sim", "SIM-K2450-01"),
-        ("ST-OCV2-SIM", "模拟 Keithley 2400 开路电压（经驱动宿主）", 50212, "ILCS-SIMULATOR-2400-01", "k2400-sim", "SIM-K2400-01"),
-        ("ST-ACIR-SIM", "模拟 Hioki BT3562 交流内阻（经驱动宿主）", 50213, "ILCS-SIMULATOR", "bt3562-sim", "SIM-BT3562-01"),
-    )},
-    # 设备模块的模拟网关：经驱动宿主的 http_json 插件转成 SiLA 服务（驱动宿主对网关一次调用最长 连接 3 s + 请求超时）
-    **{station_id: {
-        # 契约（supports_*）照模块 profile.json 声明，见 supports_of
-        "name": name, "port": port, "device_id": device_id, "tasks": True,
-        "simulator_control": {"url": f"https://{host}:8443/api/v1", "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt",
-                              "token_ref": f"file:///run/secrets/ilcs/gateway/{device_id}.token"},
-        "request_timeout_sec": 3 + gateway_timeout + 5, "acceptance": acceptance, "faults": True, "describe": True,
-        "module": module, "approval": f"本机设备模块的模拟网关（{host}），经驱动宿主接入；没有真实设备与样品",
-    } for station_id, name, port, device_id, host, module, gateway_timeout, acceptance in (
-        ("ST-BAL-SIM", "天平称量加料站（模拟，经驱动宿主）", 50231, "SIM-BAL-DOSE-01", "balance-sim", "balance-dosing", 10,
-         [("cap.weigh", {}), ("cap.ely.dose_solid", {"mass": 0.05}), ("cap.ely.dose_liquid", {"mass": 1.0})]),
-        ("ST-STIR-SIM", "IKA 加热搅拌（模拟，经驱动宿主）", 50232, "SIM-IKA-STIR-01", "ika-stirrer-sim", "ika-stirrer", 10,
-         [("cap.ely.stir", {"temp": 40, "time": 2, "rpm": 300})]),
-        ("ST-RAM-SIM", "拉曼光谱仪（模拟，经驱动宿主）", 50233, "SIM-RAMAN-01", "raman-sim", "raman-seabreeze", 10,
-         [("cap.ely.raman", {"repeats": 1})]),
-        ("ST-CHILL-SIM", "冷水机制冷搅拌（模拟，经驱动宿主）", 50234, "SIM-CHILL-01", "thermostat-sim", "thermostat", 10,
-         [("cap.thermostat", {"temp": 20, "time": 1}), ("cap.ely.stir", {"temp": 20, "time": 2, "rpm": 300})]),
-        ("ST-ECHEM-SIM", "电化学工作站（模拟，经驱动宿主）", 50235, "SIM-ECHEM-01", "potentiostat-sim", "potentiostat", 20,
-         [("cap.echem", {})]),
-        ("ST-NW-01", "Neware 充放电柜（模拟，经驱动宿主）", 50236, "SIM-NW-BTS-01", "neware-sim", "neware-bts", 10,
-         [("cap.test", {"channel": 1})]),
-        ("EL-D-BAL", "电解液线配液天平（模拟，经驱动宿主）", 50237, "SIM-EL-D-BAL", "el-d-bal-sim", "balance-dosing", 10,
-         [("cap.ely.dose_liquid", {"mass": 1.0})]),
-        ("EL-D-PWD", "电解液线配粉天平（模拟，经驱动宿主）", 50238, "SIM-EL-D-PWD", "el-d-pwd-sim", "balance-dosing", 10,
-         [("cap.ely.dose_solid", {"mass": 0.05})]),
-        ("EL-T-RAM", "电解液线拉曼（模拟，经驱动宿主）", 50239, "SIM-EL-T-RAM", "el-t-ram-sim", "raman-seabreeze", 10,
-         [("cap.ely.raman", {"repeats": 1})]),
-        # A-Lab 上位机的网关（调假上位机的实验任务接口）：验收参数 {} 是整线自检，不带瓶、不动料
-        ("EL-ALAB", "A-Lab 上位机（模拟，经驱动宿主）", 50240, "SIM-ALAB-01", "alab-sim", "alab-electrolyte", 15,
-         [("cap.ely.run", {})]),
-    )},
-}
-# A-Lab 的网关接的是上位机的 REST 接口，不开统一控制口（/simulator/* 回 404）：不登记控制口，也不申请故障项目
-STATIONS["EL-ALAB"].pop("simulator_control")
-STATIONS["EL-ALAB"]["faults"] = False
+# 驱动宿主容器里网关的凭据目录与 ILCS 容器里的是同一个 secrets/gateway（两边挂的路径不同）
+HOST_GATEWAY_SECRETS, ILCS_GATEWAY_SECRETS = "/run/secrets/ilcs-host/gateway/", "/run/secrets/ilcs/gateway/"
+SITE = os.environ.get("ILCS_DRIVER_HOST_SITE") or "local"
+
+
+def _ilcs_secret(path: str, device: str) -> str:
+    if not path.startswith(HOST_GATEWAY_SECRETS):
+        raise Failed(f"{device}：网关凭据 {path} 不在驱动宿主的 {HOST_GATEWAY_SECRETS} 下，推不出 ILCS 那边的路径")
+    return ILCS_GATEWAY_SECRETS + path[len(HOST_GATEWAY_SECRETS):]
+
+
+def load_stations(site: str = SITE) -> dict[str, dict[str, Any]]:
+    """工位 → 怎么接驱动宿主。对照表在设备仓库的现场目录（host/sites/<现场>/ilcs-stations.json）：接哪台设备、工位名、
+    只读写点位、设备自报的身份、接入验收；端口、设备编号、契约（supports）与网关的请求超时取自同目录的设备文件，
+    模拟网关的统一控制口按设备文件里的网关地址与凭据推出来。设备怎么接以设备仓库为准，这里不再另写一份。"""
+    root = DEVICES_REPO / "host" / "sites" / site
+    table = root / "ilcs-stations.json"
+    if not table.exists():
+        raise Failed(f"找不到设备仓库的工位对照表 {table}：环境变量 ILCS_DEVICES 指向 ilcs-devices 的检出")
+    stations: dict[str, dict[str, Any]] = {}
+    for station_id, row in json.loads(table.read_text(encoding="utf-8"))["stations"].items():
+        device = json.loads((root / "devices" / f"{row['device']}.json").read_text(encoding="utf-8"))
+        config, gateway = device.get("config") or {}, device["plugin"] == "http_json"
+        entry: dict[str, Any] = {
+            "name": row["name"], "device": row["device"], "port": device["port"], "tasks": row.get("tasks", True),
+            "device_id": row.get("device_id") or config.get("expected_device_id") or device.get("device_id"),
+            "supports": {f"supports_{key}": bool(device["supports"][key]) for key in ("hold", "abort", "query", "dedup")},
+            "renamed_from": tuple(row.get("renamed_from") or ()),
+        }
+        if gateway:
+            # 驱动宿主对网关一次调用最长 连接 3 s + 请求超时，ILCS 再留 5 s；连上后重读网关自报的方法目录
+            entry.update(module=row["module"], describe=True,
+                         request_timeout_sec=3 + config.get("request_timeout_sec", 10) + 5)
+        control = row.get("simulator_control", "derived")
+        if control == "derived" and gateway and device.get("simulator"):
+            # 模拟网关的统一控制口就是网关自己的 API（HTTPS + 网关令牌）
+            control = {"url": config["base_url"], "ca_file": _ilcs_secret(config["ca_file"], row["device"]),
+                       "token_ref": "file://" + _ilcs_secret(device["credential_ref"].removeprefix("file://"), row["device"])}
+        elif isinstance(control, dict):
+            control = {"url": control["url"], "token_ref": f"file:///run/secrets/ilcs/{control['token']}"}
+        else:
+            control = None
+        if control:
+            entry["simulator_control"] = control
+        if row.get("acceptance"):
+            entry.update(acceptance=[(capability, params) for capability, params in row["acceptance"]],
+                         faults=bool(control),
+                         approval=f"模拟设备 {row['device']}（驱动宿主现场 {site}），经驱动宿主接入；没有真实设备与样品")
+        stations[station_id] = entry
+    return stations
+
+
+STATIONS = load_stations()
 # 经驱动宿主接的网关工位：别的登记脚本（load-device-simulators.py、load-neware-cycler.py、load-electrolyte-line.py）
 # 见到工位已经这样接着，就沿用、不改回直连
 GATEWAY_STATIONS = {station_id for station_id, station in STATIONS.items() if station.get("describe")}
@@ -152,11 +136,7 @@ def config_of(station: dict[str, Any]) -> dict[str, Any]:
 
 
 def supports_of(station: dict[str, Any]) -> dict[str, bool]:
-    """工位声明的契约。设备模块的网关照模块 profile.json 的 supports（驱动宿主上的 GW-* 设备文件也照它写：A-Lab 上位机
-    能暂停，天平、拉曼这些不能），其余照上面写的。"""
-    if station.get("module"):
-        supports = _profile(station["module"])["supports"]
-        return {f"supports_{key}": bool(supports[key]) for key in ("hold", "abort", "query", "dedup")}
+    """工位声明的契约：照驱动宿主上的设备文件（网关设备的又照模块 profile.json：A-Lab 上位机能暂停，天平、拉曼这些不能）。"""
     return station["supports"]
 
 
@@ -223,7 +203,9 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
         listed = engineer.get(f"/stations/{station_id}/adapter/acceptance")
         gate, runs = listed["gate"], listed.get("runs") or []
         version = current["config_version"]  # 发现驱动配置变了，ILCS 会把配置版本加一：按当前的比
-        if gate["required"] == "" and gate.get("accepted_config_version") == version:
+        if gate["required"] == "":
+            # 不欠验收就是放行了：要验收的改动保存时就记下欠的级别；只动了环境采集这类键的改动不欠验收，
+            # 配置版本照样加一，最近一次放行的还是旧版本——不能等「放行版本 = 当前版本」
             return next((row for row in runs if row["id"] == gate.get("accepted_run_id")), {"id": gate.get("accepted_run_id")})
         latest = next((row for row in runs if row.get("config_version") == version), None)
         if latest and latest.get("state") == "done" and not latest.get("ok") and latest.get("level") == "readonly":
@@ -233,8 +215,11 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
     run = wait_for(f"{station_id} 接入验收放行", accepted, timeout=timeout)
     current = engineer.get(f"/stations/{station_id}/adapter")
     driver = current.get("approved_driver") or {}
-    ok("接入验收", f"{station_id} 配置 v{current['config_version']} 已由 {str(run['id'])[:8]} 放行；批准驱动配置 "
-       f"{driver.get('plugin') or '—'} {str(driver.get('config_digest') or '')[:19]}")
+    accepted_version = (current.get("acceptance") or {}).get("accepted_config_version")
+    passed = (f"配置 v{current['config_version']} 已由 {str(run['id'])[:8]} 放行" if accepted_version == current["config_version"]
+              else f"配置 v{current['config_version']} 的改动不欠验收（最近一次放行 v{accepted_version}）")
+    ok("接入验收", f"{station_id} {passed}；批准驱动配置 {driver.get('plugin') or '—'} "
+       f"{str(driver.get('config_digest') or '')[:19]}")
 
 
 def approve_driver(engineer: Actor, station_id: str, current: dict[str, Any]) -> None:
