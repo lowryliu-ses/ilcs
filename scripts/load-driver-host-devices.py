@@ -26,7 +26,7 @@
   gateways-alab.json）原来是 `http_json_v1` 直连网关（套用接入模板），改成 `sila2_v1` 接驱动宿主上的
   GW-*（50231–50240，驱动宿主的 http_json 插件，设备文件在 ilcs-devices/host/sites/local/devices）。网关照旧在原来的容器里跑；模拟设备控制口指向网关自己的
   API（HTTPS + 网关令牌），验收的故障项目照做；模板里给 ILCS 用的 `wells_per_command`（一条指令最多几个样本）照模块的
-  profile.json 写进连接配置。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
+  profile.json 写进连接配置，契约（保持 / 终止 / 查询 / 去重）也照它声明（A-Lab 上位机能暂停，天平、拉曼这些不能）。连上后重读设备自报的方法目录（排程只往报过这个程序的工位排）。驱动宿主上改了设备文件
   （配置摘要变了）再跑一次：签名批准新的驱动配置，等只读级验收放行。
   `--acceptance` 逐项能力跑动作级 + 故障项目。
 
@@ -86,8 +86,8 @@ STATIONS = {
     )},
     # 设备模块的模拟网关：经驱动宿主的 http_json 插件转成 SiLA 服务（驱动宿主对网关一次调用最长 连接 3 s + 请求超时）
     **{station_id: {
+        # 契约（supports_*）照模块 profile.json 声明，见 supports_of
         "name": name, "port": port, "device_id": device_id, "tasks": True,
-        "supports": {"supports_hold": False, "supports_abort": True, "supports_query": True, "supports_dedup": True},
         "simulator_control": {"url": f"https://{host}:8443/api/v1", "ca_file": f"/run/secrets/ilcs/gateway/{device_id}.crt",
                               "token_ref": f"file:///run/secrets/ilcs/gateway/{device_id}.token"},
         "request_timeout_sec": 3 + gateway_timeout + 5, "acceptance": acceptance, "faults": True, "describe": True,
@@ -134,6 +134,10 @@ def refuse_production() -> None:
         raise Failed("正式环境拒绝运行：本脚本把模拟设备接进 ILCS")
 
 
+def _profile(module: str) -> dict[str, Any]:
+    return json.loads((DEVICES_REPO / "gateway" / module / "profile.json").read_text(encoding="utf-8"))
+
+
 def config_of(station: dict[str, Any]) -> dict[str, Any]:
     config = {"host": HOST, "port": station["port"], "ca_file": f"{SECRETS}/driver-host.crt",
               "expected_device_id": station["device_id"], "connect_timeout_sec": 3,
@@ -141,9 +145,18 @@ def config_of(station: dict[str, Any]) -> dict[str, Any]:
     if station.get("simulator_control"):
         config["simulator_control"] = station["simulator_control"]
     if station.get("module"):
-        profile = json.loads((DEVICES_REPO / "gateway" / station["module"] / "profile.json").read_text(encoding="utf-8"))
+        profile = _profile(station["module"])
         config.update({key: profile["config"][key] for key in ILCS_KEYS if key in profile["config"]})
     return config if station["tasks"] else {**config, "tasks": False}
+
+
+def supports_of(station: dict[str, Any]) -> dict[str, bool]:
+    """工位声明的契约。设备模块的网关照模块 profile.json 的 supports（驱动宿主上的 GW-* 设备文件也照它写：A-Lab 上位机
+    能暂停，天平、拉曼这些不能），其余照上面写的。"""
+    if station.get("module"):
+        supports = _profile(station["module"])["supports"]
+        return {f"supports_{key}": bool(supports[key]) for key in ("hold", "abort", "query", "dedup")}
+    return station["supports"]
 
 
 def ensure_station(engineer: Actor, station_id: str, station: dict[str, Any]) -> None:
@@ -184,11 +197,13 @@ def drop_capabilities(engineer: Actor, station_id: str, current: dict[str, Any])
 
 def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str, Any], timeout: float) -> None:
     adapter = engineer.get(f"/stations/{station_id}/adapter")
-    config, credential = config_of(station), f"file://{SECRETS}/ilcs.token"
-    if adapter.get("driver") != "sila2_v1" or adapter.get("config") != config or adapter.get("credential_ref") != credential:
+    config, credential, supports = config_of(station), f"file://{SECRETS}/ilcs.token", supports_of(station)
+    declared = {f"supports_{key}": value for key, value in (adapter.get("capabilities") or {}).items()}
+    if adapter.get("driver") != "sila2_v1" or adapter.get("config") != config or adapter.get("credential_ref") != credential \
+            or declared != supports:
         adapter = engineer.patch(f"/stations/{station_id}/adapter", {
             "kind": "real", "driver": "sila2_v1", "protocol": "SiLA 2（驱动宿主）", "config": config,
-            "credential_ref": credential, **station["supports"], "template_id": "",
+            "credential_ref": credential, **supports, "template_id": "",
             "row_version": adapter["row_version"],
             "signature_id": engineer.sign("设备集成配置变更批准", station_id, adapter["row_version"]),
         })
