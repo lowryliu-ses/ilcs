@@ -212,7 +212,8 @@ def connect(engineer: Actor, operator: Actor, station_id: str, station: dict[str
     else:
         ok("设备连接", f"{station_id} → {HOST}:{station['port']}（沿用）")
     if (operator.get("/gate").get("blocked_stations") or {}).get(station_id):
-        operator.post(f"/stations/{station_id}/adapter/reconnect")
+        # 执行器可能已经在跑这次改动的只读级验收（409 acceptance_running）：不用重连，下面等它出结论
+        operator.call("POST", f"/stations/{station_id}/adapter/reconnect", expect=(200, 201, 409))
 
     def accepted():
         current = engineer.get(f"/stations/{station_id}/adapter")
