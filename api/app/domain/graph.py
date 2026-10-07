@@ -288,6 +288,28 @@ def sample_scopes(steps: list[dict[str, Any]], index: int) -> dict[str, set[str]
     return scopes
 
 
+def branch_reach(steps: list[dict[str, Any]], index: int) -> dict[str, set[str]]:
+    """这一步从哪些条件分支的哪些出口上来：{分支: 出口集合}。自己或祖先带 `when` 的边都算；
+    汇合在分支之后的步骤会同时带上几个出口。"""
+    reach: dict[str, set[str]] = {}
+    for member in ancestors(steps, index) | {index}:
+        for branch_id, case in when_of(steps[member]).items():
+            reach.setdefault(branch_id, set()).add(case)
+    return reach
+
+
+def exclusive_paths(steps: list[dict[str, Any]], first: int, second: int) -> bool:
+    """两步不会对同一个样本都做：它们挂在同一个条件分支互不相交的出口上（谁也不是谁的祖先）。
+
+    整批判定的分支只走一个出口，按样本分流的分支每个样本只走自己那个出口；并行分叉（没有 when 的边）
+    两边都做，不算互斥。
+    """
+    if first == second or first in ancestors(steps, second) or second in ancestors(steps, first):
+        return False
+    one, other = branch_reach(steps, first), branch_reach(steps, second)
+    return any(one[branch_id].isdisjoint(other[branch_id]) for branch_id in one.keys() & other.keys())
+
+
 def ready_after(
     steps: list[dict[str, Any]], completed: set[str], attempted: set[str],
 ) -> list[int]:

@@ -73,6 +73,12 @@ def value_columns(definition: MetricDefinition, value) -> dict:
     return {"value_num": None, "value_text": str(value), "value_series": None}
 
 
+def _derived_from(value: ResultValue, curve_code: str) -> bool:
+    """这条结果是不是从这个曲线指标派生出来的（带「由曲线派生」标记、来源是它）。"""
+    marks = [item for item in value.flags or [] if isinstance(item, dict) and item.get("code") == "derived"]
+    return bool(marks) and marks[0].get("source") == curve_code
+
+
 class AnalysisService:
     def __init__(self, db: Session, ctx: AccessContext):
         self.db = db
@@ -494,9 +500,11 @@ class AnalysisService:
         return problems
 
     def _derived_rows(self, prepared: list[dict], required_ids: list[str],
-                      current: dict[str, ResultValue]) -> tuple[list[dict], list[str]]:
+                      current: dict[str, ResultValue], rederive: bool = False) -> tuple[list[dict], list[str]]:
         """曲线指标在规则里声明了 `derived`（[{metric: 数值指标代码, of: 取法}]）：从这次的曲线算出数值，
-        写成任务要求里同代码的数值指标。同一事件里已经显式给了那个指标就以显式值为准；任务里已有当前值的不覆盖。
+        写成任务要求里同代码的数值指标。同一事件里已经显式给了那个指标就以显式值为准；任务里已有当前值的不覆盖——
+        除非 `rederive`（设备回报路径，写入时取代旧值）且那个当前值就是从同一曲线指标派生的：同一步重做出了新曲线，
+        派生值跟着重算，与人工更正曲线时（`_rederive`）同一个判据；显式回报的、人工改过的（没有派生标记）不动。
         返回 (要写的行, 没派生的说明)。"""
         sources = [row for row in prepared
                    if row["definition"].value_type == "series" and row.get("value") is not None]
@@ -519,7 +527,9 @@ class AnalysisService:
                 if target.id in provided:
                     continue
                 existing = current.get(target.id)
-                if existing is not None and not existing.not_measured_reason:
+                if existing is not None and not existing.not_measured_reason and not (
+                    rederive and _derived_from(existing, code)
+                ):
                     notes.append(f"{target.code} 已有当前值（v{existing.result_version}），没有用曲线 {code} 派生的值覆盖")
                     continue
                 number = curves.derive(source["value"], spec.get("of"))
@@ -665,9 +675,9 @@ class AnalysisService:
                 target = self.metrics.get(metric_id)
                 if target is None or target.code != spec.get("metric") or target.value_type != "number":
                     continue
-                marks = [item for item in value.flags or [] if isinstance(item, dict) and item.get("code") == "derived"]
-                if not marks or marks[0].get("source") != definition.code:
+                if not _derived_from(value, definition.code):
                     continue
+                marks = [item for item in value.flags or [] if isinstance(item, dict) and item.get("code") == "derived"]
                 number = curves.derive(revision.value_series, spec.get("of")) if not revision.not_measured_reason else None
                 flags = dataquality.range_flags("number", target.rules or {}, number, target.code) if number is not None else []
                 fresh = ResultValue(

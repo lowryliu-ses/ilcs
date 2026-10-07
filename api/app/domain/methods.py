@@ -305,3 +305,46 @@ def station_allows(model: str, programs: tuple[str, ...], step: dict[str, Any]) 
     if program and programs and "*" not in programs and program not in programs:
         reasons.append(f"设备未报告支持程序 {program}")
     return reasons
+
+
+def linked_metric_ids(step: dict[str, Any]) -> list[str]:
+    """这一步（设备方法快照里）输出项关联的指标，按出现顺序去重。"""
+    outputs = ((step or {}).get("method") or {}).get("outputs") or []
+    found = [str(rule.get("metric_id") or "").strip() for rule in outputs if isinstance(rule, dict)]
+    return list(dict.fromkeys(metric_id for metric_id in found if metric_id))
+
+
+def shared_metric_problems(
+    steps: list[dict[str, Any]], derived: dict[str, list[str]] | None = None, names: dict[str, str] | None = None,
+) -> dict[str, list[str]]:
+    """两个设备步骤关联了同一个指标（含曲线指标派生出的数值指标）：问题记在后关联的那一步上。
+
+    一个样本每个指标只保留一条当前结果：后一步的读数会被当成更正，把前一步的值取代成旧版本，前一阶段的数据
+    悄悄离开正式统计与报告。所以在发布与建批时就拦下，请两步各关联一个指标（如加热前、加热后各一个）。
+    同一步重做（返工、回环、续跑）是同一个步骤，不算；挂在同一个条件分支不同出口上的两步不会对同一个样本都做，
+    也不算（`graph.exclusive_paths`）。`derived` 是曲线指标 → 它派生的数值指标，`names` 给提示用的指标代码。
+    """
+    from .graph import exclusive_paths
+
+    seen: dict[str, list[int]] = {}
+    problems: dict[str, list[str]] = {}
+    for index, step in enumerate(steps or []):
+        if kind_of(step) != DEVICE:
+            continue
+        linked = linked_metric_ids(step)
+        for metric_id in list(linked):
+            linked.extend(target for target in (derived or {}).get(metric_id, []) if target not in linked)
+        for metric_id in linked:
+            clash = next(
+                (earlier for earlier in seen.get(metric_id, []) if not exclusive_paths(steps, earlier, index)), None,
+            )
+            if clash is not None:
+                label = (names or {}).get(metric_id) or metric_id
+                problems.setdefault(step_id_of(step, index), []).append(
+                    f"指标 {label} 已由第 {clash + 1} 步「{steps[clash].get('name') or step_id_of(steps[clash], clash)}」"
+                    "的设备方法关联：一个样本每个指标只保留一条当前结果，这一步回报的值会把前一步的当成旧版本取代、"
+                    "前一阶段的数据不再进正式统计。两步要分开记，请各关联一个指标（如加热前、加热后各一个）；"
+                    "只要最后一次读数的复测，就让前一步的输出项不关联指标（读数仍留在批次检查点里）"
+                )
+            seen.setdefault(metric_id, []).append(index)
+    return problems

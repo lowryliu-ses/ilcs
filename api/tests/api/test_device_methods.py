@@ -164,3 +164,36 @@ def test_option_and_program_parameter_rules_are_saved_through_the_api(admin, res
     assert any("不是能力登记的选项" in issue for issue in issues) and any("不在允许的选项" in issue for issue in issues), issues
     for row in (method, wrong.json()):
         assert researcher.delete(f"/api/device-methods/{row['id']}").status_code == 200
+
+
+def test_two_device_steps_linking_one_metric_are_refused_before_any_result(researcher, qa, operator, db, reset_runtime):
+    """同一指标被两个设备步骤关联：一个样本每个指标只保留一条当前结果，后一步的读数会把前一步的当成旧版本取代。
+    流程校验把它列为后一步的问题（不能发布）；绕过发布的老流程，建批次时同样拦下。"""
+    from uuid import uuid4
+
+    metric = researcher.post("/api/metrics", {"code": f"moist_{uuid4().hex[:6]}", "name": "水分", "value_type": "number",
+                                              "unit": "ppm"})
+    assert metric.status_code == 201, metric.text
+    method = _released_method(researcher, qa, {
+        **DEFINITION, "name": f"带指标的干燥 {uuid4().hex[:4]}",
+        "outputs": [{"key": "moisture_ppm", "label": "水分", "unit": "ppm", "metric_id": metric.json()["id"]}],
+    })
+    recipe = db.get(Recipe, "R-205")
+    original = copy.deepcopy(recipe.steps)
+    try:
+        first = {**original[0], "method": {"id": method["id"]}}
+        again = {**first, "step_id": f"{first.get('step_id') or 's01'}-again", "name": "二次干燥"}
+        recipe.steps = [first, again, *original[1:]]
+        db.commit()
+
+        validation = researcher.get("/api/recipes/R-205").json()["validation"]
+        assert validation[0]["ok"], validation[0]["blockers"]
+        assert not validation[1]["ok"] and any("已由第 1 步" in issue for issue in validation[1]["issues"]), validation[1]
+
+        refused = operator.post("/api/batches", {"plan_id": "EP-205-01"})
+        assert refused.status_code == 409 and refused.json()["detail"]["code"] == "metric_linked_twice", refused.text
+    finally:
+        db.expire_all()
+        recipe = db.get(Recipe, "R-205")
+        recipe.steps = original
+        db.commit()
