@@ -176,12 +176,35 @@ def test_legacy_quality_flag_is_marked_as_historical(operator, researcher, sched
     for _ in range(12):
         executor()
 
+    # 还没有任何结果的新批次不是历史批次：走通用的结果视图，没有可统计的指标，不回落到固定三指标视图
     before = operator.get(f"/api/results/{scheduled_batch}").json()
-    assert before.get("legacy") is True, "没有类型化结果时回落到历史视图并标注"
-    sample_id = before["groups"][0]["samples"][0]["id"]
+    assert not before.get("legacy") and before["metrics"] == [], before
+    sample_id = operator.get(f"/api/batches/{scheduled_batch}").json()["samples"][0]["id"]
 
     flagged = researcher.post(
         f"/api/samples/{sample_id}/flag", {"quality": "invalid", "note": "谱图基线漂移"}
     )
     assert flagged.status_code == 200
     assert "不等于结果审核通过" in flagged.json()["legacy_note"]
+
+
+def test_only_batches_with_rows_in_the_legacy_table_open_the_legacy_view(operator, scheduled_batch, executor, db):
+    """历史结果表里确有旧三指标数据、又没有类型化结果的批次，才回落到历史视图。"""
+    from app.models import Result, Sample
+
+    operator.post(
+        f"/api/batches/{scheduled_batch}/dispatch",
+        {"manual_review": True, "signature_id": operator.sign("批准执行", target=scheduled_batch)},
+    )
+    for _ in range(12):
+        executor()
+    # 照历史三指标回传的样子造一条旧数据：写一行历史结果，样本记完成（旧回传「回传即完成」）
+    sample = db.query(Sample).filter(Sample.batch_id == scheduled_batch).first()
+    db.add(Result(org_id=sample.org_id, sample_id=sample.id, discharge_capacity=201.5, areal_density=15.1))
+    sample.state = "done"
+    db.commit()
+
+    view = operator.get(f"/api/results/{scheduled_batch}").json()
+    assert view.get("legacy") is True, view
+    listed = next(row for row in operator.get("/api/results").json() if row["batch_id"] == scheduled_batch)
+    assert listed["legacy_results"] is True

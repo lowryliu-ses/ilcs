@@ -18,6 +18,8 @@ type ResultIndexRow = {
   sample_done: number;
   sample_count: number;
   typed_results: boolean;
+  /** 历史结果表里确有旧三指标数据（打开时走历史视图）；还没出结果的新批次是 false */
+  legacy_results: boolean;
   result_count: number;
   pending_review: number;
   official_count: number;
@@ -78,7 +80,7 @@ export function ResultsPage() {
                     {row.sample_done}/{row.sample_count}
                   </td>
                   <td className="mono small">
-                    {row.typed_results ? row.result_count : <span className="tag">历史三指标</span>}
+                    {row.legacy_results ? <span className="tag">历史三指标</span> : row.result_count}
                   </td>
                   <td className="mono small">
                     {row.pending_review ? <b className="warn-text">{row.pending_review}</b> : 0}
@@ -119,7 +121,7 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
     );
   }
 
-  // 历史批次没有类型化结果：回落到旧的固定三指标视图，并明确标注
+  // 历史批次（历史结果表里有旧数据、没有类型化结果）：回落到旧的固定三指标视图，并明确标注
   if (view.legacy) {
     return <LegacyAnalysis batchId={batchId} view={view as unknown as Analysis} />;
   }
@@ -240,10 +242,16 @@ function MetricPanel({ block, showEffects }: { block: MetricBlock; showEffects: 
           </span>
         </div>
         <div className="metric">
-          <span className="metric-label">最佳条件组</span>
-          <strong className="metric-value">{summary.best_group ?? '—'}</strong>
+          {/* 只按数值高低列出：越大越好、越小越好还是越接近目标越好由指标与方案决定，这里不判优劣 */}
+          <span className="metric-label">均值最高 / 最低的条件组</span>
+          <strong className="metric-value">
+            {summary.highest_group ?? '—'}
+            {summary.lowest_group ? ` / ${summary.lowest_group}` : ''}
+          </strong>
           <span className="metric-hint">
-            {summary.best_mean === null ? '无' : num(summary.best_mean, 2)}
+            {summary.highest_mean === null ? '无' : num(summary.highest_mean, 2)}
+            {summary.lowest_mean === null ? '' : ` / ${num(summary.lowest_mean, 2)}`}
+            {' · 只按高低列出，不判优劣'}
             {summary.single_repeat ? ' · 单次重复，无法给出组内 CV' : ''}
           </span>
         </div>
@@ -361,23 +369,9 @@ function MetricPanel({ block, showEffects }: { block: MetricBlock; showEffects: 
 
 /** 历史固定三指标视图。它按样本上的旧质量标记聚合，所以要标明这不是新模型的审核结论。 */
 function LegacyAnalysis({ batchId, view }: { batchId: string; view: Analysis }) {
-  const toast = useToast();
+  // 不放「导出 CSV」：导出接口按类型化结果出数，历史批次只会导出一行表头
   return (
-    <Panel
-      title={`历史结果 · ${batchId}`}
-      aside={
-        <button
-          className="btn sm"
-          onClick={() =>
-            api
-              .download(`/results/${batchId}/export`, `${batchId}-results.csv`)
-              .catch((error) => toast.push(error.message))
-          }
-        >
-          导出 CSV
-        </button>
-      }
-    >
+    <Panel title={`历史结果 · ${batchId}`}>
       <div className="note warn">
         该批次没有类型化结果，显示的是历史固定三指标视图。表中的「有效」是历史人工质量标记，
         不等于新模型下的审核通过 + 质量有效，不能作为正式统计依据。

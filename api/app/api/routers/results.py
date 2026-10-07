@@ -27,6 +27,15 @@ def list_result_batches(db: DbSession, ctx: Ctx):
     return ResultService(db, ctx).batches_with_results()
 
 
+# 固定路径要声明在 /results/{batch_id} 之前：否则「compare」会被当成批次号截走
+@router.get("/results/compare")
+def compare(db: DbSession, ctx: Ctx, batch_ids: str, metric_id: str, official: bool = True):
+    """跨批次比较。单位或方法版本不可比时返回 comparable=false 与原因。"""
+    return ReportService(db, ctx).compare(
+        [b for b in batch_ids.split(",") if b], metric_id, official
+    )
+
+
 @router.get("/results/{batch_id}")
 def analysis(
     db: DbSession, ctx: Ctx, batch_id: str, official: bool = True, metric_ids: str = ""
@@ -35,10 +44,11 @@ def analysis(
 
     `official=true` 是正式范围：审核通过 + 质量有效 + 选定版本。
     `official=false` 是探索性范围，响应里的 `scope_label` 会说清楚，导出也会标注。
-    没有类型化结果的历史批次回落到旧的固定三指标视图，并带 legacy 标记。
+    还没有回传结果的批次照样走这个视图（`metrics` 为空）。只有历史结果表里确有这个批次的旧数据、
+    又没有类型化结果时，才回落到旧的固定三指标视图，并带 legacy 标记。
     """
     service = ResultService(db, ctx)
-    if not service.has_typed_results(batch_id):
+    if not service.has_typed_results(batch_id) and service.has_legacy_results(batch_id):
         return service.legacy_analysis(batch_id)
     selected = [m for m in metric_ids.split(",") if m] or None
     return ReportService(db, ctx).analysis_view(batch_id, selected, official)
@@ -55,14 +65,6 @@ def export(db: DbSession, ctx: Ctx, batch_id: str, official: bool = True):
     scope = "official" if official else "exploratory"
     return csv_response(
         f"{batch_id}-results-{scope}.csv", ReportService(db, ctx).export_rows(batch_id, official)
-    )
-
-
-@router.get("/results/compare")
-def compare(db: DbSession, ctx: Ctx, batch_ids: str, metric_id: str, official: bool = True):
-    """跨批次比较。单位或方法版本不可比时返回 comparable=false 与原因。"""
-    return ReportService(db, ctx).compare(
-        [b for b in batch_ids.split(",") if b], metric_id, official
     )
 
 

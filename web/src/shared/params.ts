@@ -8,8 +8,6 @@ import { canonicalUnit } from './units';
 
 export type ParamKind = 'number' | 'integer' | 'enum' | 'program';
 
-export const PARAM_KIND_LABEL: Record<ParamKind, string> = { number: '数值', integer: '整数', enum: '选项', program: '程序表' };
-
 export type ResolvedSpec = {
   label: string; type: ParamKind; unit: string; required: boolean; options: string[];
   /** 程序表：列定义与最多行数 */
@@ -180,13 +178,4 @@ export function programRefs(value: unknown): string[] {
     }),
   );
   return [...found];
-}
-
-/** 一行说明：几步、按第一个选项列（通常是工步类型）列出 */
-export function programSummary(value: unknown, spec?: ResolvedSpec): string {
-  if (!Array.isArray(value) || !value.length) return '空程序表';
-  const first = spec?.columns.find((column) => column.type === 'enum')?.key;
-  const names = first ? value.map((row) => (row as ProgramRow)?.[first]).filter((cell) => typeof cell === 'string') : [];
-  const shown = names.slice(0, 6).join(' → ') + (names.length > 6 ? ' …' : '');
-  return `${value.length} 步${shown ? `：${shown}` : ''}`;
 }

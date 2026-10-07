@@ -4092,11 +4092,21 @@
         "type": "object"
       },
       "MethodParamRule": {
+        "description": "设备方法里一个参数的规则，按能力登记的参数类型填：数值参数给缺省值、上下限与单位；选项型参数给缺省选项\n与允许的选项（能力登记选项的子集）；程序表参数只给缺省程序表（一行一个工步）。逐项核对在 domain/methods.py。",
         "properties": {
           "default": {
             "anyOf": [
               {
                 "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
               },
               {
                 "type": "null"
@@ -4125,6 +4135,20 @@
               }
             ],
             "title": "Min"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Options"
           },
           "unit": {
             "default": "",
@@ -25929,7 +25953,7 @@
     },
     "/api/results/{batch_id}": {
       "get": {
-        "description": "结果分析。\n\n`official=true` 是正式范围：审核通过 + 质量有效 + 选定版本。\n`official=false` 是探索性范围，响应里的 `scope_label` 会说清楚，导出也会标注。\n没有类型化结果的历史批次回落到旧的固定三指标视图，并带 legacy 标记。",
+        "description": "结果分析。\n\n`official=true` 是正式范围：审核通过 + 质量有效 + 选定版本。\n`official=false` 是探索性范围，响应里的 `scope_label` 会说清楚，导出也会标注。\n还没有回传结果的批次照样走这个视图（`metrics` 为空）。只有历史结果表里确有这个批次的旧数据、\n又没有类型化结果时，才回落到旧的固定三指标视图，并带 legacy 标记。",
         "operationId": "analysis_api_results__batch_id__get",
         "parameters": [
           {

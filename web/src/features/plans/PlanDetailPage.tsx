@@ -8,11 +8,11 @@ import { useMutation, useQuery } from '../../shared/query';
 import { useSession } from '../../shared/session';
 import { CommentsPanel } from '../../shared/comments';
 import type {
-  AnalysisRunRow, ApprovalLevel, DatasetSnapshotRow, DesignSpace, DiffRow, Factor, LotRow, MetricRow, PlanDetail, ProposalRow,
+  AnalysisRunRow, ApprovalLevel, DatasetSnapshotRow, DesignSpace, DiffRow, Factor, LotRow, PlanDetail, ProposalRow,
 } from '../../shared/types';
 import { useSignature } from '../../shared/signature';
 import {
-  Blocked, CheckList, ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast,
+  CheckList, ConfirmDialog, Empty, Field, Modal, NumberInput, Panel, Pill, useToast,
 } from '../../shared/ui';
 
 export function PlanDetailPage() {
@@ -481,6 +481,20 @@ export function PlanDetailPage() {
             将删除「{data.name}」及其 {data.conditions.length} 组条件与孔位布局定义。
             流程 {data.recipe_id} 不受影响。
           </div>
+        </ConfirmDialog>
+      ) : null}
+
+      {rejecting ? (
+        <ConfirmDialog
+          title={`驳回实验方案 · ${data.id}${currentLevel ? `（${currentLevel.label}）` : ''}`}
+          confirmLabel="驳回"
+          reasonLabel="驳回理由"
+          pending={decide.pending}
+          error={decide.error?.message}
+          onConfirm={(reason) => decide.run({ conclusion: 'rejected', reason }).catch(() => undefined)}
+          onClose={() => setRejecting(false)}
+        >
+          <div className="note">驳回理由记在方案上；作者修改后可以重新提交评审。</div>
         </ConfirmDialog>
       ) : null}
 

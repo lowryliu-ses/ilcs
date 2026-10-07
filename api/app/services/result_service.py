@@ -205,6 +205,11 @@ class ResultService:
             return False
         return bool(self.values.for_tasks([task.id for task in tasks]))
 
+    def has_legacy_results(self, batch_id: str) -> bool:
+        """历史结果表里有没有这个批次的旧三指标数据。没有的批次（包括还没出结果的新批次）不走历史视图。"""
+        samples = self.samples.for_batch(batch_id)
+        return bool(samples) and bool(self.results.for_samples([s.id for s in samples]))
+
     def raw_curve_rows(self, sample_id: str, user: User) -> tuple[str, list[list]]:
         """历史模拟曲线下载。
 
@@ -240,6 +245,7 @@ class ResultService:
             typed = self.has_typed_results(batch.id)
             if not done and not typed:
                 continue
+            legacy = not typed and self.has_legacy_results(batch.id)
             recipe = self.recipes.get(batch.recipe_id)
             tasks = self.tasks.for_batch(batch.id)
             values = self.values.for_tasks([task.id for task in tasks])
@@ -254,6 +260,8 @@ class ResultService:
                     "sample_done": len(done),
                     "sample_count": len(samples),
                     "typed_results": typed,
+                    # 只有历史结果表里确有旧数据的批次才标「历史三指标」，打开时走旧视图
+                    "legacy_results": legacy,
                     "result_count": len(live),
                     "pending_review": len([row for row in live if row.review_state == "pending"]),
                     "official_count": len(
