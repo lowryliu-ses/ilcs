@@ -209,6 +209,8 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
 
 function MetricPanel({ block, showEffects }: { block: MetricBlock; showEffects: boolean }) {
   const summary = block.summary;
+  // 各组均值完全一样时没有高低可言：不点名「最高」「最低」哪一组
+  const tied = summary.lowest_group !== null && summary.highest_mean === summary.lowest_mean;
   // 条件组均值按组序排成一条折线；空组保留为 null，图上断开而不是补 0
   const series = useMemo(
     () => [
@@ -245,12 +247,12 @@ function MetricPanel({ block, showEffects }: { block: MetricBlock; showEffects: 
           {/* 只按数值高低列出：越大越好、越小越好还是越接近目标越好由指标与方案决定，这里不判优劣 */}
           <span className="metric-label">均值最高 / 最低的条件组</span>
           <strong className="metric-value">
-            {summary.highest_group ?? '—'}
-            {summary.lowest_group ? ` / ${summary.lowest_group}` : ''}
+            {tied ? '各组均值相同' : summary.highest_group ?? '—'}
+            {!tied && summary.lowest_group ? ` / ${summary.lowest_group}` : ''}
           </strong>
           <span className="metric-hint">
             {summary.highest_mean === null ? '无' : num(summary.highest_mean, 2)}
-            {summary.lowest_mean === null ? '' : ` / ${num(summary.lowest_mean, 2)}`}
+            {!tied && summary.lowest_mean !== null ? ` / ${num(summary.lowest_mean, 2)}` : ''}
             {' · 只按高低列出，不判优劣'}
             {summary.single_repeat ? ' · 单次重复，无法给出组内 CV' : ''}
           </span>
