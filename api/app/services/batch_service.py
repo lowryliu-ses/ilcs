@@ -1524,14 +1524,17 @@ class BatchService:
             row.station_id for row in self.allocations.for_batch(batch.id)
             if row.step_index == step_index and row.kind == "assist"
         ] if command_type in DISPATCHING and capability is None else []
-        # 按样本计通道的工位：这条动作占在用样本数那么多份通道（执行器按它数占用）
-        units, per_sample_station = 1, None
+        # 按样本计通道的工位（主工位或协同工位）：这条动作在它上面占在用样本数那么多份通道，记在 units 上，
+        # 执行器按它数占用（按批计的工位一律 1 份）——与排程给每个工位记的份数同一口径
+        units, per_sample = 1, []
         if command_type in DISPATCHING and capability is None and target_station:
             from ..models import Station
 
-            station_row = self.db.get(Station, target_station)
-            if station_row is not None and (station_row.channel_unit or "batch") == "sample":
-                per_sample_station = station_row
+            for station_id in dict.fromkeys([target_station, *assist_ids]):
+                station_row = self.db.get(Station, station_id)
+                if station_row is not None and (station_row.channel_unit or "batch") == "sample":
+                    per_sample.append(station_row)
+            if per_sample:
                 units = max(1, len(self.samples.active_for_batch(batch.id)))
         command = Command(
             org_id=batch.org_id or self.ctx.org_id,
@@ -1565,10 +1568,12 @@ class BatchService:
         if program_problems:
             self._refuse_unsent(batch, command, "程序表不能下发：" + "；".join(program_problems[:5]))
             return command
-        if per_sample_station is not None and units > max(1, int(per_sample_station.channels or 1)):
+        crowded = [row for row in per_sample if units > max(1, int(row.channels or 1))]
+        if crowded:
+            role = "工位" if crowded[0].id == target_station else "协同工位"
             self._refuse_unsent(
                 batch, command,
-                f"工位 {per_sample_station.id} 按样本计通道，只有 {per_sample_station.channels} 个通道，"
+                f"{role} {crowded[0].id} 按样本计通道，只有 {crowded[0].channels} 个通道，"
                 f"这一批在用 {units} 个样本放不下：请改排到通道够的工位",
             )
             return command

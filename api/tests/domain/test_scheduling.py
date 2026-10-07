@@ -204,3 +204,19 @@ def test_steps_on_different_plates_are_not_serialized():
     same = plan_steps([mix, {**coat, "labware": ""}], T0, context(clean_min=0), exclusive_carrier={""})
     first, second = sorted((a for a in same if a.kind == WORK), key=lambda a: a.starts_at)
     assert second.starts_at >= first.ends_at
+
+
+def test_a_per_sample_assist_too_small_for_the_batch_is_skipped_not_fatal():
+    """按样本计通道的协同工位与主工位一样：放不下这一批的不当候选，改选别的；以前它留在候选里，整步排程直接报错。"""
+    main = StationSpec(id="MAIN", limits={"cap.main": {}})
+    small = StationSpec(id="HELP-A", limits={"cap.help": {}}, per_sample=True, channels=4)
+    plain = StationSpec(id="HELP-B", limits={"cap.help": {}})
+    step = {"name": "带协同", "cap": "cap.main", "dur": 10, "assist": ["cap.help"]}
+
+    planned = plan_steps([step], T0, SchedulingContext(stations=[main, small, plain], clean_min=0), samples=5)
+    assert {(row.station_id, row.kind) for row in planned} == {("MAIN", WORK), ("HELP-B", "assist")}
+
+    with pytest.raises(SchedulingError, match="HELP-A 按样本计通道，只有 4 个"):
+        plan_steps([step], T0, SchedulingContext(stations=[main, small], clean_min=0), samples=5)
+    roomy = plan_steps([step], T0, SchedulingContext(stations=[main, small], clean_min=0), samples=4)
+    assert next(row for row in roomy if row.kind == "assist").units == 4, "放得下时协同工位按样本数占份数"

@@ -79,9 +79,13 @@ class RunCommand:
     params: dict
 
 
-def units_of(command: Command, station_id: str) -> int:
-    """一条动作在这台工位上占几份通道：主工位按指令记下的份数（按样本计通道的工位是样本数），协同工位 1 份。"""
-    return max(1, int(command.units or 1)) if station_id == command.station_id else 1
+def units_of(command: Command, station: Station | None) -> int:
+    """一条动作在这台工位上占几份通道：按样本计通道的工位——主工位或协同工位——占下发时记下的样本数
+    （`commands.units`），按批计的工位 1 份。与排程的 `units_on` 同一口径：排程给按样本计的协同工位记的
+    也是样本数，执行侧只记 1 份的话，前一批还没做完时后一批就能挤进来。"""
+    if station is None or (station.channel_unit or "batch") != "sample":
+        return 1
+    return max(1, int(command.units or 1))
 
 class ExecutionService:
     """一个 ExecutionService 实例服务一个组织上下文。
@@ -230,7 +234,8 @@ class ExecutionService:
 
         资产按份数计，与排程同一个口径：一条动作在这台资产上占几个工位（主工位 + 协同工位）就算几份，
         新动作自己要的份数一并算进去——只看「还剩不剩一份」会放行一条要两份的协同动作。按样本计通道的
-        工位上，一条动作在主工位上占下发时记下的样本数那么多份（`commands.units`）。
+        工位上（主工位或协同工位），一条动作占下发时记下的样本数那么多份（`commands.units`）。
+        人工步骤、等待期间占着工位的份数在工位与资产两层都算。
         """
         from ..core.db import serialize
 
@@ -247,46 +252,70 @@ class ExecutionService:
             serialize(self.db, f"occupancy:{key}")
         exempt = {command.id, command.target_command_id}
         if any(
-            self._channels_full(station, exempt, units_of(command, station.id), command.batch_id or "")
+            self._channels_full(station, exempt, units_of(command, station), command)
             for station in stations
         ):
             return True
         demand: dict[str, int] = {}
         for station in stations:
             if station.asset_id:
-                demand[station.asset_id] = demand.get(station.asset_id, 0) + units_of(command, station.id)
-        return any(self._asset_full(asset_id, units, exempt) for asset_id, units in demand.items())
+                demand[station.asset_id] = demand.get(station.asset_id, 0) + units_of(command, station)
+        return any(self._asset_full(asset_id, units, exempt, command) for asset_id, units in demand.items())
 
-    def _channels_full(self, station: Station, exempt: set[str], demand: int = 1, batch_id: str = "") -> bool:
+    def _channels_full(self, station: Station, exempt: set[str], demand: int = 1, command: Command | None = None) -> bool:
         on_station = [c for c in self.commands.occupying([station.id]) if c.id not in exempt]
-        load = sum(units_of(c, station.id) for c in on_station)
-        return load + self._held_by_steps(station.id, batch_id) + demand > max(1, int(station.channels or 1))
+        load = sum(units_of(c, station) for c in on_station)
+        return load + self._held_by_steps(station, command) + demand > max(1, int(station.channels or 1))
 
-    def _held_by_steps(self, station_id: str, batch_id: str = "") -> int:
+    def _held_by_steps(self, station: Station, command: Command | None = None) -> int:
         """人工步骤正在占用、等待期间样本还留在里面的份数：没有指令，但这台设备此刻腾不出来。
-        本批次自己的不算——它的下一个设备动作本来就要等这一步结束才开出。"""
+
+        按样本计通道的工位上，一条占位占那个批次在用样本数那么多份，与排程给它记的份数同一口径。
+        本批次的占位只在它是这条动作的前驱时不算——下一个设备动作本来就要等它结束才开出；
+        并行分支上的占位照样算，排程也是把两者串开排的。
+        """
         from ..domain import workflow
+        from ..domain.graph import ancestors
         from ..models import StepRun
 
         rows = self.db.query(StepRun).filter(
-            StepRun.station_id == station_id, StepRun.kind.in_(["manual", "wait"]),
+            StepRun.station_id == station.id, StepRun.kind.in_(["manual", "wait"]),
             StepRun.state.in_(sorted(workflow.OPEN_STATES)),
         ).all()
-        return sum(1 for row in rows if row.batch_id != batch_id)
+        if not rows:
+            return 0
+        own = (command.batch_id or "") if command is not None else ""
+        before: set[str] = set()
+        if own and any(row.batch_id == own for row in rows):
+            batch = self.db.get(Batch, own)
+            steps = normalize((batch.recipe_snapshot or {}).get("steps") or []) if batch is not None else []
+            if 0 <= int(command.step_index or 0) < len(steps):
+                before = {step_id_of(steps[i], i) for i in ancestors(steps, int(command.step_index or 0))}
+        per_sample = (station.channel_unit or "batch") == "sample"
+        load = 0
+        for row in rows:
+            if row.batch_id == own and row.step_id in before:
+                continue
+            load += max(1, len(self.samples.active_for_batch(row.batch_id))) if per_sample else 1
+        return load
 
-    def _asset_full(self, asset_id: str, demand: int, exempt: set[str]) -> bool:
-        """资产此刻压着的份数加上新动作要的份数，是否超过容量。"""
+    def _asset_full(self, asset_id: str, demand: int, exempt: set[str], command: Command | None = None) -> bool:
+        """资产此刻压着的份数加上新动作要的份数，是否超过容量。
+
+        压着的份数：映射到这台资产的各工位上的在途动作、人工步骤与等待占位，加上人工 / 维护 / 校准预约。
+        """
         from ..models import Asset
 
         asset = self.db.get(Asset, asset_id)
         capacity = max(1, int(asset.capacity or 1)) if asset is not None else 1
-        mapped = {row[0] for row in self.db.query(Station.id).filter(Station.asset_id == asset_id).all()}
+        mapped = {row.id: row for row in self.db.query(Station).filter(Station.asset_id == asset_id).all()}
         load = sum(
-            units_of(c, station_id)
+            units_of(c, mapped[station_id])
             for c in self.commands.occupying(sorted(mapped)) if c.id not in exempt
-            for station_id in mapped & {c.station_id, *(c.assist_station_ids or [])}
+            for station_id in mapped.keys() & {c.station_id, *(c.assist_station_ids or [])}
         )
-        return load + self._booked_now(asset_id, capacity) + demand > capacity
+        held = sum(self._held_by_steps(station, command) for station in mapped.values())
+        return load + held + self._booked_now(asset_id, capacity) + demand > capacity
 
     def _booked_now(self, asset_id: str, capacity: int) -> int:
         """此刻压在资产上的人工 / 维护 / 校准预约份数。排程产生的占用由指令本身表达，不重复计。"""

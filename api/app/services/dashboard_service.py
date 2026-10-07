@@ -21,6 +21,7 @@ from ..repositories.resources import IslandRepository, StationRepository
 from .alarm_service import AlarmService
 from .asset_service import AssetService
 from .batch_service import BatchService
+from .execution_service import units_of
 from .gate_service import GateService
 from .material_service import MaterialService
 from .people_service import PeopleService
@@ -100,7 +101,7 @@ class DashboardService:
         ).all():
             finished = command.updated_at if command.state not in {"accepted", "running", "sent"} else moment
             spans.setdefault(command.station_id, []).append(
-                kpi.Span(command.started_at, finished, max(1, int(command.units or 1)))
+                kpi.Span(command.started_at, finished, units_of(command, stations.get(command.station_id)))
             )
         planned: dict[str, list[kpi.Span]] = {}
         for allocation in self.db.query(Allocation).join(Batch, Batch.id == Allocation.batch_id).filter(
