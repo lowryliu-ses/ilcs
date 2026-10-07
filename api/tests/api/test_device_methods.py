@@ -113,3 +113,54 @@ def test_a_curve_output_keeps_its_kind_and_links_a_curve_metric(researcher):
     assert any("输出类型要选曲线" in issue for issue in numeric["issues"]), numeric["issues"]
     for row in (method, numeric):
         assert researcher.delete(f"/api/device-methods/{row['id']}").status_code == 200
+
+
+def test_option_and_program_parameter_rules_are_saved_through_the_api(admin, researcher):
+    """选项型参数的方法规则（缺省选项 + 允许的选项）与程序表参数的缺省程序表走接口能存下来：
+    接口模型以前只收数值缺省值，页面一提交选项型或程序表规则就 422，只给允许的选项则被悄悄丢掉。"""
+    from uuid import uuid4
+
+    uid = uuid4().hex[:6]
+    cap = f"cap.rules_{uid}"
+    columns = [
+        {"key": "mode", "label": "工步", "type": "enum", "options": ["恒流充电", "静置"], "required": True},
+        {"key": "current", "label": "电流", "unit": "C"},
+        {"key": "time", "label": "时长", "unit": "min"},
+    ]
+    created = admin.post("/api/capabilities", {
+        "id": cap, "name": f"规则 {uid}", "params": {"temp": "温度", "solvent": "溶剂", "protocol": "工步"},
+        "param_specs": {"temp": {"unit": "℃"}, "solvent": {"type": "enum", "options": ["THF", "DMF", "Toluene"]},
+                        "protocol": {"type": "program", "columns": columns, "max_rows": 10}},
+        "recovery": {"pausable": False, "retryable": False}, "stations": [],
+        "signature_id": admin.sign("能力模型变更批准", target=cap),
+    })
+    assert created.status_code == 201, created.text
+    protocol = [{"mode": "恒流充电", "current": 0.1}, {"mode": "静置", "time": 10}]
+    definition = {
+        "name": f"选项与程序表 {uid}", "capability_id": cap, "program": "P-1", "dur_min": 5,
+        "params": {"temp": {"default": 60, "min": 20, "max": 80, "unit": "℃"},
+                   "solvent": {"default": "THF", "options": ["THF", "DMF"]},
+                   "protocol": {"default": protocol}},
+    }
+    saved = researcher.post("/api/device-methods", definition)
+    assert saved.status_code == 201, saved.text
+    method = saved.json()
+    assert method["issues"] == [], method["issues"]
+    assert method["params"]["solvent"]["default"] == "THF" and method["params"]["solvent"]["options"] == ["THF", "DMF"]
+    assert method["params"]["protocol"]["default"] == protocol
+    assert method["params"]["temp"]["default"] == 60 and "options" not in method["params"]["temp"], "数值参数不存空的选项"
+
+    narrowed = researcher.patch(f"/api/device-methods/{method['id']}", {
+        "params": {**definition["params"], "solvent": {"options": ["DMF"]}}, "row_version": method["row_version"],
+    })
+    assert narrowed.status_code == 200, narrowed.text
+    assert narrowed.json()["params"]["solvent"] == {"options": ["DMF"]}
+
+    wrong = researcher.post("/api/device-methods", {
+        **definition, "name": f"错的选项 {uid}", "params": {"solvent": {"default": "Toluene", "options": ["THF", "水"]}},
+    })
+    assert wrong.status_code == 201, wrong.text
+    issues = wrong.json()["issues"]
+    assert any("不是能力登记的选项" in issue for issue in issues) and any("不在允许的选项" in issue for issue in issues), issues
+    for row in (method, wrong.json()):
+        assert researcher.delete(f"/api/device-methods/{row['id']}").status_code == 200

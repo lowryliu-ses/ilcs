@@ -1407,6 +1407,7 @@ export type Dashboard = {
     sample_done: number;
     sample_count: number;
     typed_results: boolean;
+    legacy_results: boolean;
     result_count: number;
     pending_review: number;
     official_count: number;
@@ -2435,8 +2436,11 @@ export type MetricBlock = {
     median_cv_pct: number | null;
     high_cv_groups: number;
     single_repeat: boolean;
-    best_group: string | null;
-    best_mean: number | null;
+    /** 均值最高与最低的条件组：只按高低列出，不判优劣（只有一组时没有最低） */
+    highest_group: string | null;
+    highest_mean: number | null;
+    lowest_group: string | null;
+    lowest_mean: number | null;
   };
   excluded: DatasetGroup['excluded'];
   /** 以下只在父任务的合并视图里有：各批单位、方法版本是否一致，分批明细与批次差异 */
@@ -2589,24 +2593,6 @@ export type LotLedger = {
   ledger_sum: string;
   reconciled: boolean;
   lines: LedgerLine[];
-};
-
-/* ---------- 文件 ---------- */
-
-export type FileRow = {
-  id: string;
-  filename: string;
-  media_type: string;
-  byte_size: number;
-  checksum: string;
-  state: string;
-  origin: string;
-  ref_type: string;
-  ref_id: string;
-  note: string;
-  uploaded_by: string;
-  created_at: string;
-  downloadable: boolean;
 };
 
 export type MaintenanceOrderRow = {

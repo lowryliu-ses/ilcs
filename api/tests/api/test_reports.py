@@ -214,6 +214,27 @@ def test_official_statistics_exclude_invalid_results_with_reasons(operator, revi
     assert "不可用于正式报告" in exploratory_export.text
 
 
+def test_cross_batch_compare_route_is_reachable(operator, reviewed_batch):
+    """/results/compare 以前声明在 /results/{batch_id} 之后，「compare」被当成批次号截走，这个接口从来访问不到。"""
+    batch_id = reviewed_batch["batch_id"]
+    compared = operator.get("/api/results/compare", params={"batch_ids": batch_id, "metric_id": CAPACITY})
+    assert compared.status_code == 200, compared.text
+    body = compared.json()
+    assert body["comparable"] is True and [row["batch_id"] for row in body["batches"]] == [batch_id]
+    assert body["batches"][0]["included"] == 2, "跨批比较与单批统计同一纳入口径：invalid 的那条不算"
+
+
+def test_summary_lists_highest_and_lowest_groups_without_naming_a_best(operator, reviewed_batch):
+    """统计不知道指标越大越好还是越小越好：只列均值最高与最低的条件组，不再给「最佳条件组」。"""
+    block = next(row for row in operator.get(f"/api/results/{reviewed_batch['batch_id']}").json()["metrics"]
+                 if row["metric_id"] == CAPACITY)
+    summary = block["summary"]
+    assert "best_group" not in summary
+    means = {group["group"]: group["mean"] for group in block["groups"] if group["mean"] is not None}
+    assert summary["highest_group"] == max(means, key=means.get)
+    assert summary["lowest_group"] == (min(means, key=means.get) if len(means) > 1 else None)
+
+
 def test_non_matrix_plan_hides_factor_effects(researcher, qa, operator, reset_runtime):
     """DEV-14.2：非矩阵实验不显示无意义的因子主效应。"""
     approve_plan(researcher, qa, "EP-210-01")

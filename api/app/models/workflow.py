@@ -11,8 +11,6 @@ from sqlalchemy.types import JSON
 from ..core.clock import now
 from .base import Base, uid
 
-STEP_KINDS = ("device", "manual", "wait", "review", "gate", "split", "branch")
-
 
 class StepRun(Base):
     """一次步骤执行。同一步的重试通过 attempt 区分，旧记录保留。"""

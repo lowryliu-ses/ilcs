@@ -193,6 +193,29 @@ def test_statistics_exclude_non_valid_samples():
     assert round(groups[0]["cv_pct"], 3) == round(statistics.cv_percent([200, 210]), 3)
 
 
+def test_dataset_summary_does_not_call_the_highest_mean_best():
+    """误差率这类越小越好的指标：均值最高的那组恰恰最差。统计只列最高与最低，不判优劣；CV 按均值绝对值算。"""
+    def row(group: str, value: float, assignment: str) -> statistics.Observation:
+        return statistics.Observation(
+            assignment_id=assignment, analysis_task_id=f"T-{assignment}", round_no=1, metric_id="error_rate",
+            result_version=1, value=value, unit="%", quality="valid", review_state="approved", condition_group=group,
+        )
+
+    dataset = statistics.build_dataset(
+        [row("C01", 1.0, "A1"), row("C01", 1.2, "A2"), row("C02", 9.0, "A3"), row("C02", 8.6, "A4")], "error_rate",
+    )
+    groups = statistics.dataset_groups(dataset)
+    summary = statistics.dataset_summary(dataset, groups, plan_repeats=2)
+    assert "best_group" not in summary
+    assert (summary["highest_group"], summary["lowest_group"]) == ("C02", "C01")
+    assert summary["highest_mean"] == 8.8 and round(summary["lowest_mean"], 6) == 1.1
+
+    single = statistics.dataset_summary(dataset, groups[:1], plan_repeats=2)
+    assert single["highest_group"] == "C01" and single["lowest_group"] is None, "只有一组时没有「最低」可比"
+
+    assert statistics.cv_percent([-10.0, -12.0]) == statistics.cv_percent([10.0, 12.0]) > 0, "负均值不得出负的 CV"
+
+
 def test_stale_heartbeat_blocks_only_that_station():
     """单台设备心跳超时只挡用到它的批次，不把全站停摆。"""
     adapters = [

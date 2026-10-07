@@ -19,7 +19,7 @@ import { time } from '../../shared/format';
 import { useMutation, useQuery } from '../../shared/query';
 import { useSignature } from '../../shared/signature';
 import type {
-  AdapterCatalog, AdapterRow, AdapterTestResult, ConfigCheck, DriverField, DriverInfo, StationRow, TemplateOption,
+  AdapterCatalog, AdapterRow, AdapterTestResult, ConfigCheck, DriverInfo, StationRow, TemplateOption,
 } from '../../shared/types';
 import { Field, Modal, useToast } from '../../shared/ui';
 import { AcceptancePanel } from './AcceptancePanel';

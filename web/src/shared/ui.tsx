@@ -36,22 +36,6 @@ const STATE_CLASS: Record<string, string> = {
   scrapped: 'aborted',
 };
 
-/** 步骤类型的中文名。批次详情、任务中心、报告都读同一份。 */
-export const STEP_KIND_LABEL: Record<string, string> = {
-  device: '设备', manual: '人工', wait: '等待', review: '审核', gate: '质检关卡', split: '样本拆分',
-  branch: '条件分支', subflow: '子流程', notify: '消息通知',
-};
-
-/** 开跑检查的三种结论。「不适用」不是通过的近义词，颜色也不一样。 */
-export const CHECK_STATE_LABEL: Record<string, string> = {
-  pass: '通过', blocked: '阻塞', not_applicable: '不适用',
-};
-
-/** 状态对应的配色类名（planned / scheduled / running / paused / fault / done / aborted / neutral）。 */
-export function stateClass(state: string): string {
-  return STATE_CLASS[state] ?? 'neutral';
-}
-
 /* 设备连接状态（适配器的 status）→ [配色, 说明]。没有适配器的工位是「未接入」。
    「工位与接入」与「仪器设备」读同一份，两边说法一致。 */
 const CONNECTION_STATE: Record<string, [string, string]> = {

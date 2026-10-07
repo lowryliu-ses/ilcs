@@ -9,7 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_serializer
 
 from ..core.clock import as_utc
 
@@ -253,10 +253,22 @@ class RecipePatchIn(BaseModel):
 
 
 class MethodParamRule(BaseModel):
-    default: float | None = None
+    """设备方法里一个参数的规则，按能力登记的参数类型填：数值参数给缺省值、上下限与单位；选项型参数给缺省选项
+    与允许的选项（能力登记选项的子集）；程序表参数只给缺省程序表（一行一个工步）。逐项核对在 domain/methods.py。"""
+
+    default: float | str | list[dict[str, Any]] | None = None
     min: float | None = None
     max: float | None = None
     unit: str = ""
+    options: list[str] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_options(self, handler):
+        # 数值参数没有选项：不往方法里存一个空的 options 键
+        data = handler(self)
+        if data.get("options") is None:
+            data.pop("options", None)
+        return data
 
 
 class MethodOutputRule(BaseModel):

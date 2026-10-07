@@ -42,10 +42,11 @@ def stddev(values: list[float]) -> float | None:
 
 
 def cv_percent(values: list[float]) -> float | None:
+    """变异系数，按均值的绝对值算：负均值的指标不该得出负的 CV。均值为 0 时没有意义，返回 None。"""
     average, deviation = mean(values), stddev(values)
     if not average or deviation is None:
         return None
-    return deviation / average * 100
+    return deviation / abs(average) * 100
 
 
 def median(values: list[float]) -> float | None:
@@ -270,8 +271,11 @@ def dataset_effects(dataset: Dataset, factors: list[dict], plan_type: str = "mat
 
 def dataset_summary(dataset: Dataset, groups: list[dict], plan_repeats: int | None) -> dict:
     cvs = [g["cv_pct"] for g in groups if g["cv_pct"] is not None]
-    eligible = [g for g in groups if g["n_included"] >= 1]
-    best = max(eligible, key=lambda g: g["mean"] if g["mean"] is not None else -1, default=None)
+    # 只列均值最高与最低的条件组，不判「最佳」：越大越好、越小越好还是越接近目标值越好，取决于指标与方案，
+    # 这里不知道（杂质、误差率、黏度这类指标，均值最高恰恰最差）
+    ranked = sorted((g for g in groups if g["n_included"] >= 1 and g["mean"] is not None), key=lambda g: g["mean"])
+    highest = ranked[-1] if ranked else None
+    lowest = ranked[0] if len(ranked) > 1 else None
     return {
         "metric_id": dataset.metric_id,
         "metric_name": dataset.metric_name,
@@ -287,8 +291,10 @@ def dataset_summary(dataset: Dataset, groups: list[dict], plan_repeats: int | No
         "median_cv_pct": median(cvs),
         "high_cv_groups": len([c for c in cvs if c > 3]),
         "single_repeat": bool(plan_repeats is not None and plan_repeats < 2),
-        "best_group": best["group"] if best else None,
-        "best_mean": best["mean"] if best else None,
+        "highest_group": highest["group"] if highest else None,
+        "highest_mean": highest["mean"] if highest else None,
+        "lowest_group": lowest["group"] if lowest else None,
+        "lowest_mean": lowest["mean"] if lowest else None,
     }
 
 
@@ -407,7 +413,7 @@ def batch_effect(dataset: Dataset, alpha: float = 0.05) -> dict | None:
         "significant": p_value < alpha,
         "note": (
             ("各条件组先减去组均值后比较批次；" if len(groups) > 1 else "")
-            + (f"批次之间差异显著（p = {p_value:.3g} < {alpha}）：合并统计前先确认原因（电解液批号、上柜时间、设备通道）"
+            + (f"批次之间差异显著（p = {p_value:.3g} < {alpha}）：合并统计前先确认原因（如物料批号、设备与通道、操作日期）"
                if p_value < alpha else f"没有发现批次之间的显著差异（p = {p_value:.3g}）")
         ),
     }

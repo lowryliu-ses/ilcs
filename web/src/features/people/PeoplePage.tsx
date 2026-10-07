@@ -17,7 +17,6 @@ const EMPLOYMENT: [string, string][] = [
 
 export function PeoplePage() {
   const { can } = useSession();
-  const toast = useToast();
   const [page, setPage] = useState(1);
   const [keyword, setKeyword] = useState('');
   const [state, setState] = useState('');
