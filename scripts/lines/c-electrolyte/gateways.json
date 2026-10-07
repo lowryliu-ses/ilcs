@@ -1,5 +1,5 @@
 {
-  "_说明": "电解液线哪几个工位走真实接入链路、接哪台设备网关。现在接的是设备仓库 ilcs-devices 的 deploy/sim.yml 起的模拟站（el-d-bal-sim、el-d-add-sim、el-d-pwd-sim、el-d-stir-sim、el-d-cold-sim、el-d-mix-sim、el-t-ram-sim）。本机与 106.51 都经驱动宿主接（驱动宿主上的 GW-EL-*，以设备仓库 host/sites/local/ilcs-stations.json 为准，用 load-driver-host-devices.py register）；这份文件给不经驱动宿主、直连网关（http_json_v1）时用：load-electrolyte-line.py connect 套用接入模板（module 是设备仓库里的设备模块，模板没登记就从它的 profile.json 导入发布）并填连接参数（工位已经经驱动宿主接着时沿用），disconnect 切回内置模拟。接真机时把 host、device_id 换成现场网关。没列出的工位照旧用内置模拟。",
+  "_说明": "电解液线哪几个工位走真实接入链路、接哪台设备网关。现在接的是设备仓库 ilcs-devices 的 deploy/sim.yml 起的模拟站（el-d-bal-sim、el-d-add-sim、el-d-pwd-sim、el-d-stir-sim、el-d-cold-sim、el-d-mix-sim、el-t-ram-sim、el-t-cnd-sim、el-t-dv-sim）。本机与 106.51 都经驱动宿主接（驱动宿主上的 GW-EL-*，以设备仓库 host/sites/local/ilcs-stations.json 为准，用 load-driver-host-devices.py register）；这份文件给不经驱动宿主、直连网关（http_json_v1）时用：load-electrolyte-line.py connect 套用接入模板（module 是设备仓库里的设备模块，模板没登记就从它的 profile.json 导入发布）并填连接参数（工位已经经驱动宿主接着时沿用），disconnect 切回内置模拟。接真机时把 host、device_id 换成现场网关。没列出的工位照旧用内置模拟。",
   "stations": {
     "EL-D-BAL": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-bal-sim", "device_id": "SIM-EL-D-BAL"},
     "EL-D-ADD": {"module": "balance-dosing", "template": "TPL-BALANCE-DOSING", "host": "el-d-add-sim", "device_id": "SIM-EL-D-ADD"},
@@ -7,6 +7,8 @@
     "EL-D-STIR": {"module": "thermostat", "template": "TPL-THERMOSTAT", "host": "el-d-stir-sim", "device_id": "SIM-EL-D-STIR"},
     "EL-D-COLD": {"module": "thermostat", "template": "TPL-THERMOSTAT", "host": "el-d-cold-sim", "device_id": "SIM-EL-D-COLD"},
     "EL-D-MIX": {"module": "ika-stirrer", "template": "TPL-IKA-STIRRER", "host": "el-d-mix-sim", "device_id": "SIM-EL-D-MIX"},
-    "EL-T-RAM": {"module": "raman-seabreeze", "template": "TPL-RAMAN-SEABREEZE", "host": "el-t-ram-sim", "device_id": "SIM-EL-T-RAM"}
+    "EL-T-RAM": {"module": "raman-seabreeze", "template": "TPL-RAMAN-SEABREEZE", "host": "el-t-ram-sim", "device_id": "SIM-EL-T-RAM"},
+    "EL-T-CND": {"module": "conductivity", "template": "TPL-CONDUCTIVITY", "host": "el-t-cnd-sim", "device_id": "SIM-EL-T-CND"},
+    "EL-T-DV": {"module": "density-viscosity", "template": "TPL-DENSITY-VISCOSITY", "host": "el-t-dv-sim", "device_id": "SIM-EL-T-DV"}
   }
 }
