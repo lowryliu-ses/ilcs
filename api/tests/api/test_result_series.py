@@ -171,6 +171,39 @@ def test_device_reported_curves_are_written_per_well(admin, db, finished_batch):
         assert written[curve["id"]].value_series["traces"][0]["x"] == [0.0, 50.0, 100.0 + index]
         assert written[capacity["id"]].value_num == 100.0 + index
         assert any(flag["code"] == "derived" for flag in written[capacity["id"]].flags)
+
+    # 同一步重做出了新曲线：曲线出新版本，从上一版曲线派生的截止比容量跟着重新派生（以前派生值停在旧曲线上）
+    redo = Command(id=f"{command.id[:24]}-redo", org_id=command.org_id, batch_id=batch.id, station_id=command.station_id,
+                   capability=command.capability, type="retry", state="done", delivery_state="delivered",
+                   step_index=command.step_index)
+    db.add(redo)
+    db.flush()
+    again = {"wells": {sample.well: {"curve": {"x": [0, 50, 120 + index], "y": [4.1, 3.6, 2.9]}}
+                       for index, sample in enumerate(targets)}}
+    assert service.record(batch, redo, step, again, "device")["problems"] == []
+    db.flush()
+    for index, sample in enumerate(targets):
+        current = service.values.current_for_task(next(
+            task.id for task in service.tasks.for_sample(sample.id) if task.method == "设备回报"
+        ))
+        assert current[curve["id"]].result_version == 2
+        assert current[capacity["id"]].value_num == 120.0 + index and current[capacity["id"]].result_version == 2
+        assert current[capacity["id"]].revises_id == by_sample[sample.id][capacity["id"]].id
+
+    # 另一步回报同一指标：不当成更正取代前一步的值——不写、报警，前一步的值仍是当前值
+    other = Command(id=f"{command.id[:24]}-other", org_id=command.org_id, batch_id=batch.id, station_id=command.station_id,
+                    capability=command.capability, type="dispatch", state="done", delivery_state="delivered",
+                    step_index=command.step_index + 1)
+    db.add(other)
+    db.flush()
+    refused = service.record(batch, other, step, delivered, "device")
+    assert refused["written"] == 0 and refused["problems"], refused
+    assert f"已由第 {command.step_index + 1} 步" in refused["problems"][0]
+    for index, sample in enumerate(targets):
+        current = service.values.current_for_task(next(
+            task.id for task in service.tasks.for_sample(sample.id) if task.method == "设备回报"
+        ))
+        assert current[curve["id"]].result_version == 2 and current[capacity["id"]].value_num == 120.0 + index
     db.rollback()
 
 

@@ -57,10 +57,31 @@ class RecipeService:
     def validation_of(self, recipe: Recipe) -> list[dict]:
         # 设备方法引用先解析：缺省参数、适用型号与程序要参与工位匹配
         steps, method_problems = resolved_steps(self.db, self.ctx, recipe.steps or [])
+        for step_id, rows in self._metric_link_problems(recipe, steps).items():
+            method_problems.setdefault(step_id, []).extend(rows)
         return validate_steps(
             steps, self.stations.specs(), self.capabilities.specs(),
             self._subflow_problems(recipe), method_problems,
         )
+
+    def _metric_link_problems(self, recipe: Recipe, steps: list[dict]) -> dict[str, list[str]]:
+        """同一指标被两个设备步骤关联（按展开子流程后的步骤看）：问题记在后关联的那一步上，子流程里的记在
+        子流程节点上。和建批次时（`BatchService._freeze_recipe`）同一道检查，发布前就拦下。"""
+        from ..domain.subflow import SubflowError, has_subflow
+        from .device_result_service import metric_link_problems
+        from .flow_expansion import expanded_steps
+
+        if has_subflow(recipe.steps or []):
+            try:
+                steps, _ = expanded_steps(self.db, self.ctx, recipe)
+            except SubflowError:
+                return {}  # 引用本身的问题在 _subflow_problems 里报
+        problems: dict[str, list[str]] = {}
+        for step_id, rows in metric_link_problems(self.db, self.ctx, steps).items():
+            # 展开后的标识是「子流程节点.子步骤」：记到最外层那个节点上
+            top = step_id.split(".", 1)[0]
+            problems.setdefault(top, []).extend(rows if top == step_id else [f"子流程里的 {step_id}：{row}" for row in rows])
+        return problems
 
     def _subflow_problems(self, recipe: Recipe) -> dict[str, list[str]]:
         """子流程引用的问题：展开到底，不存在 / 未发布 / 循环引用 / 嵌套过深都在这里查出来。"""

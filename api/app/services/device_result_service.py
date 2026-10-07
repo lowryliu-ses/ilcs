@@ -7,9 +7,12 @@
   设备只给了顶层值（批次级读数）时照 `dataquality.output_flags` 的口径当作每个孔位的值，并打上「批次级读数」标记。
 - 每个样本一张「设备回报」检测任务，要求指标 = 这个批次快照里所有输出项关联的指标（建任务时冻结）。
 - 按「指令 + 孔位」去重（回传事件表的同一唯一键）：回执重放不重复写；同一步重做（返工、续跑）的新读数取代上一版，
-  留版本链，重新待复核。
+  留版本链，重新待复核。别的步骤已经回报过同一指标（当前值沿更正链追到的是另一步的设备回报）的不写、报警：
+  当成更正取代会让前一阶段的数据悄悄离开正式统计。发布流程与建批次时已按 `metric_link_problems` 拦下这种配置，
+  这里是最后一道（已发布的老流程、派生指标按代码在写入时才取定）。
 - 曲线型输出（`{"x": [...], "y": [...]}` 或几条 `traces`）按曲线指标记；曲线声明了派生的数值指标时一并写
-  （要求指标里含这些派生指标，建任务时一起冻结）。回传事件里只留曲线的概要，完整的点在结果里。
+  （要求指标里含这些派生指标，建任务时一起冻结）。同一步重做出了新曲线时，从上一版曲线派生的数值跟着重新派生
+  （与人工更正曲线时一样）；设备显式回报的、人工改过的派生值不动。回传事件里只留曲线的概要，完整的点在结果里。
 - 设备回执的质量不是 good（设备自己说读数可能无效）：照写、置可疑、打「设备质量」标记，复核时下结论。
 - 值不成立（类型、单位不对）不写并报警；越界照写、置可疑、打标，与回传同一口径。内置模拟给的是示意值：
   打「模拟设备示意值」标记，照常走审核与报告，但不进闭环训练数据（`proposal_service._exclusion`）。走真实协议接入的
@@ -27,6 +30,7 @@ from ..core.clock import now
 from ..core.context import AccessContext
 from ..domain import dataquality
 from ..domain import series as curves
+from ..domain.methods import shared_metric_problems
 from ..domain.metrics import check_value
 from ..domain.steps import normalize
 from ..models import AnalysisTask, Batch, Command, IngestEvent, ResultValue, Sample
@@ -58,6 +62,31 @@ def linked_metrics(snapshot: dict) -> list[str]:
             if metric_id not in seen:
                 seen.append(metric_id)
     return seen
+
+
+def metric_link_problems(db: Session, ctx: AccessContext, steps: list[dict]) -> dict[str, list[str]]:
+    """同一指标被两个设备步骤关联（含曲线派生出的数值指标）的问题：{后关联的那一步: [问题]}。
+
+    `steps` 是展开子流程、解析过设备方法之后的步骤（方法快照里有输出项）。派生指标按代码取当时在用的版本，
+    与写入时（`DeviceResultService._required`）同一个取法。规则见 `domain.methods.shared_metric_problems`。
+    """
+    steps = normalize(steps or [])
+    linked = list(dict.fromkeys(str(rule["metric_id"]).strip() for step in steps for rule in linked_rules(step)))
+    if not linked:
+        return {}
+    metrics = MetricRepository(db, ctx)
+    definitions = metrics.many(linked)
+    derived: dict[str, list[str]] = {}
+    names = {metric_id: definition.code for metric_id, definition in definitions.items()}
+    for metric_id, definition in definitions.items():
+        if definition.value_type != "series":
+            continue
+        for spec in (definition.rules or {}).get("derived") or []:
+            target = metrics.by_code(str(spec.get("metric") or ""))
+            if target is not None and target.value_type == "number" and target.state == "active":
+                derived.setdefault(metric_id, []).append(target.id)
+                names[target.id] = target.code
+    return shared_metric_problems(steps, derived, names)
 
 
 class DeviceResultService:
@@ -126,10 +155,14 @@ class DeviceResultService:
             if not prepared:
                 continue
             current = self.values.current_for_task(task.id)
-            derived, _ = self.analysis._derived_rows(prepared, list(task.required_metrics or []), current)
+            prepared = self._this_step_only(prepared, current, batch, command, sample, problems)
+            if not prepared:
+                continue
+            # 同一步重做出了新曲线：上一版曲线派生的数值跟着重新派生（_write 取代旧值）
+            derived, _ = self.analysis._derived_rows(prepared, list(task.required_metrics or []), current, rederive=True)
             for row in derived:
                 row.update({"batch_level": any(item["batch_level"] for item in prepared), "key": row["definition"].code})
-            prepared.extend(derived)
+            prepared.extend(self._this_step_only(derived, current, batch, command, sample, problems))
             others = {metric: value for metric, value in current.items()
                       if metric not in {row["definition"].id for row in prepared}}
             # 前后逻辑规则：设备值不因冲突拒收（值是设备真实回报的），拒收级也只打标，交审核下结论
@@ -168,6 +201,39 @@ class DeviceResultService:
                 owner="数据审核员", origin="system", condition_key=f"data:{batch.id}:{command.id}:results",
             )
         return {"written": written, "samples": samples, "problems": problems}
+
+    def _this_step_only(self, rows: list[dict], current: dict[str, ResultValue], batch: Batch, command: Command,
+                        sample: Sample, problems: list[str]) -> list[dict]:
+        """去掉当前值是别的步骤回报的那几项：不写，记成问题（报警）。同一步重做照常取代。"""
+        kept: list[dict] = []
+        steps = normalize((batch.recipe_snapshot or {}).get("steps") or [])
+        for row in rows:
+            previous = current.get(row["definition"].id)
+            origin = self._origin_step(previous) if previous is not None else None
+            if origin is None or origin == command.step_index:
+                kept.append(row)
+                continue
+            name = steps[origin].get("name") if 0 <= origin < len(steps) else ""
+            problems.append(
+                f"样本 {sample.id} 的 {row['definition'].code} 已由第 {origin + 1} 步「{name}」回报，"
+                f"第 {command.step_index + 1} 步的读数没有写：一个样本每个指标只保留一条当前结果，写进去会把前一步的值"
+                "当成旧版本取代。两步要分开记，请各关联一个指标"
+            )
+        return kept
+
+    def _origin_step(self, value: ResultValue | None) -> int | None:
+        """这条当前值最初是哪一步设备回报的（沿更正链往回找）；人工录入、外部回传的返回 None。"""
+        seen: set[str] = set()
+        while value is not None and value.id not in seen:
+            seen.add(value.id)
+            if value.ingest_event_id:
+                event = self.db.get(IngestEvent, value.ingest_event_id)
+                if event is None or not str(event.source or "").startswith("device:"):
+                    return None
+                index = (event.payload or {}).get("step_index")
+                return index if isinstance(index, int) else None
+            value = self.db.get(ResultValue, value.revises_id) if value.revises_id else None
+        return None
 
     def _required(self, snapshot: dict) -> list[str]:
         """「设备回报」任务的要求指标：输出项关联的指标，加上其中曲线指标声明派生的（在用的）数值指标。"""
@@ -225,7 +291,7 @@ class DeviceResultService:
             self.db.add(value)
             self.db.flush()
             if previous is not None:
-                # 同一步重做（返工、续跑）的新读数：取代上一版，旧版保留，重新待复核
+                # 同一步重做（返工、续跑）的新读数：取代上一版，旧版保留，重新待复核（别的步骤回报的已在 _this_step_only 去掉）
                 previous.superseded_by_id = value.id
                 previous.row_version = int(previous.row_version or 0) + 1
         return len(prepared)

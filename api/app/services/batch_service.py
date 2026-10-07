@@ -956,6 +956,16 @@ class BatchService:
                 f"设备方法引用失效：{labels[0]}",
                 {"blocked": [{"key": "method", "label": label} for label in labels]}, code="method_invalid",
             )
+        # 同一指标被两个设备步骤关联：发布时已拦，这里兜住发布在这道检查之前的老流程（派生指标也按此刻在用的版本看）
+        from .device_result_service import metric_link_problems
+
+        linked = metric_link_problems(self.db, self.ctx, steps)
+        if linked:
+            labels = [f"{step_id}：{problem}" for step_id, rows in linked.items() for problem in rows]
+            raise StateConflict(
+                f"同一指标被两个设备步骤关联，不建批次：{labels[0]}",
+                {"blocked": [{"key": "metric_link", "label": label} for label in labels]}, code="metric_linked_twice",
+            )
         return copy.deepcopy(
             {
                 "id": recipe.id, "name": recipe.name, "version": recipe.version, "plate": recipe.plate,
