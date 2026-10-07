@@ -51,8 +51,8 @@ class Command(Base):
     target_command_id: Mapped[str] = mapped_column(String, default="")
     # 协同资源：这一步执行期间一并占用的其他工位（机械臂、放置位、配套设备），随本指令一起取得、一起释放
     assist_station_ids: Mapped[list] = mapped_column(JSON, default=list)
-    # 这条动作在主工位上占几份通道：按样本计通道的工位是下发时批次在用的样本数，其余为 1。
-    # 协同工位各占 1 份
+    # 下发时批次在用的样本数（主工位或协同工位里有按样本计通道的才记，否则为 1）。按样本计通道的工位上
+    # 这条动作占这么多份通道，按批计的工位 1 份：见 execution_service.units_of
     units: Mapped[int] = mapped_column(Integer, default=1)
     # 取自上游结果的参数（前馈）：每个样本一条，记来源步骤与检查点 / 记录、原始值与单位、系数及其出处、
     # 下发的计算值。下发时算一次、随指令冻结；重投同一指令不重新求值

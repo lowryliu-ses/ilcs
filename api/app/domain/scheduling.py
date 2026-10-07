@@ -210,17 +210,25 @@ def _candidates(context: SchedulingContext, step: dict[str, Any], index: int, sa
 
 def _assist_candidates(
     context: SchedulingContext, step: dict[str, Any], index: int, capability: str, exclude: set[str],
+    samples: int = 1,
 ) -> list[StationSpec]:
     probe = {"cap": capability, "params": {}}
+    able = [s for s in context.stations if s.id not in exclude and station_fits(s, probe)]
+    # 按样本计通道的协同工位与主工位一样：一批的样本数超过它的通道数就永远排不上，不当作候选——
+    # 留着它会让整步排程报错，哪怕另一台协同工位放得下
+    narrow = [s for s in able if units_on(s, samples) > max(1, int(s.channels or 1))]
     usable = [
-        s for s in context.stations
-        if s.id not in exclude and station_fits(s, probe) and s.healthy
+        s for s in able
+        if s not in narrow and s.healthy
         and (context.allow_unclean or s.clean)
         and s.id not in context.held_station_ids and s.id not in context.unavailable_station_ids
     ]
     if not usable:
+        crowded = "；".join(f"{s.id} 按样本计通道，只有 {s.channels} 个，放不下这一批 {samples} 个样本" for s in narrow)
         raise SchedulingError(
-            f"第 {index + 1} 步「{step.get('name')}」需要的协同资源 {capability} 没有可用工位", index,
+            f"第 {index + 1} 步「{step.get('name')}」需要的协同资源 {capability} 没有可用工位"
+            + (f"：{crowded}" if crowded and len(narrow) == len(able) else ""),
+            index,
         )
     return usable
 
@@ -237,7 +245,7 @@ def _with_assists(
     `main_span` 是主设备要空着的时长（工作加随后的清洗窗口），缺省同 `duration`。
     """
     options = {
-        capability: _assist_candidates(context, step, index, capability, {main.id})
+        capability: _assist_candidates(context, step, index, capability, {main.id}, samples)
         for capability in assist_capabilities(step)
     }
     for _ in range(500):

@@ -20,7 +20,8 @@ def test_holding_wait_takes_the_device_it_waits_in(operator, reset_runtime, db, 
         dry = {**steps[0], "step_id": "s01"}
         cool = {"step_id": "s02", "name": "炉内冷却", "kind": "wait", "dur": 60,
                 "wait_for": {"mode": "duration"}, "resource": {"holds_station": True}}
-        return [dry, cool]
+        again = {**steps[0], "step_id": "s03", "name": "冷却后复烘"}
+        return [dry, cool, again]
 
     batch_id = _graph_batch(operator, db, holding)
     _dispatch(operator, batch_id)
@@ -34,12 +35,12 @@ def test_holding_wait_takes_the_device_it_waits_in(operator, reset_runtime, db, 
     cool = _open_runs(operator, batch_id, executor, "s02")
     assert cool["station_id"] == dry_window["station_id"]
 
-    # 别的批次要在这台设备上动作：样本还在里面，不能投递；本批次自己的动作不受它挡
+    # 别的批次要在这台设备上动作：样本还在里面，不能投递；本批次冷却之后的那一步不受它挡（它本来就等冷却结束）
     service = ExecutionService(db, system_context("ORG-001"))
     other = Command(station_id=cool["station_id"], batch_id="B-OTHER", capability="cap.vacuum_dry", type="dispatch",
                     step_index=0, units=1)
     mine = Command(station_id=cool["station_id"], batch_id=batch_id, capability="cap.vacuum_dry", type="dispatch",
-                   step_index=0, units=1)
+                   step_index=2, units=1)
     assert service._occupied(other)
     assert not service._occupied(mine)
     db.rollback()

@@ -81,6 +81,35 @@ def test_refused_command_is_rerouted_to_an_equivalent_station(operator, admin, r
     _disable_rules(db)
 
 
+def test_reroute_replans_the_whole_step_including_its_assist_resource(operator, admin, reset_runtime, db, executor):
+    """改派按排程器重排整步：协同资源跟着在新时段重新预约。以前只补回主工位一段，带协同资源的步骤改派后
+    必然被「排程里没有预约」拒发。"""
+    _disable_rules(db)
+    _rule(admin, action="reroute", params={"max_attempts": 1}, match={"capability": "cap.mix"})
+
+    def with_robot(steps):
+        mix, rest = _mix_flow(steps)
+        return [{**mix, "assist": ["cap.transfer"]}, rest]
+
+    batch_id = _graph_batch(operator, db, with_robot)
+    _dispatch(operator, batch_id)
+    station = _first_station(operator, batch_id)
+    _set_adapter(db, station, connected=False)
+    try:
+        detail = _run(operator, batch_id, executor)
+    finally:
+        _set_adapter(db, station, connected=True)
+    assert detail["state"] == "done", detail["failure_reason"]
+    step = [row for row in detail["allocations"] if row["step_index"] == 0]
+    work = next(row for row in step if row["kind"] == "work")
+    assist = next(row for row in step if row["kind"] == "assist")
+    assert work["station_id"] != station, "改派到了另一台同能力工位"
+    assert (assist["starts_at"], assist["ends_at"]) == (work["starts_at"], work["ends_at"]), "协同资源随新时间窗重新预约"
+    commands = [row for row in detail["commands"] if row["step_index"] == 0 and row["type"] == "dispatch"]
+    assert commands[-1]["station_id"] == work["station_id"] and commands[-1]["assist_station_ids"] == [assist["station_id"]]
+    _disable_rules(db)
+
+
 def test_without_a_rule_the_fault_goes_to_a_person_and_recovery_closes_it(operator, reset_runtime, db, executor):
     _disable_rules(db)
     batch_id = _graph_batch(operator, db, _mix_flow)
@@ -168,6 +197,39 @@ def test_station_loss_reroutes_future_windows_when_a_rule_says_so(operator, admi
     finally:
         _set_adapter(db, station, connected=True, last_heartbeat=now())
         DeviceMonitor(db).evaluate_station(station)
+        db.commit()
+        _disable_rules(db)
+
+
+def test_losing_an_assist_station_moves_the_whole_step_to_another_helper(operator, admin, reset_runtime, db):
+    """失联的是协同工位：这一步整步重排，换一台协同工位、与主设备同起同止。以前只挪主工位那一段的时间窗，
+    当协同资源用的那台根本不在改派范围里。"""
+    from app.core.clock import now
+    from app.services.monitoring_service import DeviceMonitor
+
+    _disable_rules(db)
+    _rule(admin, action="reroute", match={})
+
+    def with_robot(steps):
+        mix, rest = _mix_flow(steps)
+        return [{**mix, "assist": ["cap.transfer"]}, rest]
+
+    batch_id = _graph_batch(operator, db, with_robot)
+    assert operator.post(f"/api/batches/{batch_id}/schedule", {}).status_code == 200
+    helper = next(row["station_id"] for row in operator.get(f"/api/batches/{batch_id}").json()["allocations"]
+                  if row["step_index"] == 0 and row["kind"] == "assist")
+    _set_adapter(db, helper, connected=False, last_heartbeat=now() - timedelta(minutes=30))
+    try:
+        DeviceMonitor(db).evaluate_station(helper)
+        db.commit()
+        step = [row for row in operator.get(f"/api/batches/{batch_id}").json()["allocations"] if row["step_index"] == 0]
+        work = next(row for row in step if row["kind"] == "work")
+        assist = next(row for row in step if row["kind"] == "assist")
+        assert assist["station_id"] != helper, "失联的协同工位被换掉"
+        assert (assist["starts_at"], assist["ends_at"]) == (work["starts_at"], work["ends_at"]), "与主设备同起同止"
+    finally:
+        _set_adapter(db, helper, connected=True, last_heartbeat=now())
+        DeviceMonitor(db).evaluate_station(helper)
         db.commit()
         _disable_rules(db)
 

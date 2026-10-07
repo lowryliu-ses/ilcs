@@ -25,6 +25,12 @@ from ..models import Allocation, Batch, Command, ExceptionEvent, ExceptionRule, 
 from .audit_service import AuditService
 
 _GUARD = "ilcs_exception_handling"
+
+
+class _Undo(Exception):
+    """自动处置做到一半发现不成立：撤回这次处置的全部改动。"""
+
+
 OPEN = {"open", "manual"}
 
 
@@ -307,9 +313,13 @@ class ExceptionService:
         return True, f"{delay_sec:.0f} s 后在 {command.station_id} 重新下发（新指令 {fresh.id[:8]}）"
 
     def _reroute(self, batch: Batch, command: Command) -> tuple[bool, str]:
-        """改派：在具备同样能力、参数范围覆盖、此刻可用的其他工位里取最早能开工的一台，重排这一步的时间窗后重新下发。"""
-        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free, units_on
-        from ..repositories.resources import StationRepository
+        """改派：在具备同样能力、参数范围覆盖、此刻可用的其他工位里取最早能开工的一台，重排这一步后重新下发。
+
+        整步重排（见 `_replan_step`）：只补回主工位那一段的话，带协同资源的步骤会被「排程里没有预约」拒发，
+        转运与清洗也不再预留。换工位排不下、与别的批次撞上、新指令下发不成立，都整体撤回：旧指令、
+        时间窗与批次状态原样留着，事件转人工。
+        """
+        from ..domain.scheduling import WORK, SchedulingError
         from .schedule_service import ScheduleService, lock_schedule
 
         if command.type in {"resume", "retry"} and command.target_command_id:
@@ -319,57 +329,76 @@ class ExceptionService:
                 return False, (
                     f"被保持的动作 {held.id[:8]} 停在 {held.station_id} 上，不能改派到别的工位：先终止原动作再重试"
                 )
-        steps = normalize(batch.recipe_snapshot.get("steps") or [])
         index = command.step_index
-        step = steps[index]
         lock_schedule(self.db)
         schedule = ScheduleService(self.db, self.ctx)
-        context = schedule.context({batch.id})
-        mine = self.db.query(Allocation).filter(Allocation.batch_id == batch.id).all()
-        for row in mine:
-            if row.step_index != index:
-                context.busy.setdefault(row.station_id, []).append(
-                    Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
-                )
-        samples = schedule.samples_of(batch)
-        specs = {spec.id: spec for spec in context.stations}
         try:
-            candidates = [
-                sid for sid in candidate_station_ids(context, step, index, samples) if sid != command.station_id
-            ]
+            replan, planned = self._replan_step(
+                schedule, batch, index, command.station_id, now(), f"{command.station_id} 这一步刚投递不成",
+            )
         except SchedulingError as error:
             return False, f"没有可改派的工位：{error.message}"
-        if not candidates:
-            return False, "没有具备同样能力且此刻可用的其他工位"
-        current = next((row for row in mine if row.step_index == index and row.kind == "work"), None)
-        ready = max(now(), current.starts_at if current else now())
-        duration = timedelta(minutes=float(step.get("dur") or 0))
-        begin, station_id = min(
-            (earliest_free(context, sid, ready, duration, units_on(specs.get(sid), samples)), sid) for sid in candidates
-        )
-        station = StationRepository(self.db, self.ctx).get(station_id)
+        work = next((item for item in planned if item.step_index == index and item.kind == WORK), None)
+        if work is None:
+            return False, "这一步不占设备，没有可改派的工位"
+        station_id = work.station_id
+        savepoint = self.db.begin_nested()
         try:
-            # 保存点：改派后的时间窗若与别的批次重叠，撤销这次时间窗改动，批次保持原样留在故障
-            with self.db.begin_nested():
-                for row in mine:
-                    if row.step_index == index:
-                        self.db.delete(row)
-                self.db.add(Allocation(
-                    batch_id=batch.id, step_index=index, station_id=station_id,
-                    asset_id=station.asset_id if station is not None else "", starts_at=begin,
-                    ends_at=begin + duration, kind="work", units=units_on(specs.get(station_id), samples),
-                ))
-                self.db.flush()
-                schedule._refuse_overlaps(batch.id)
+            self._write_step(schedule, batch, replan, planned)
+            run = self._run_of(command)
+            self._settle_old(command, f"未送达设备；异常引擎改派到 {station_id}")
+            self._resume_batch(batch, command, run)
+            fresh = self._reissue(batch, command, station_id)
+            if fresh.state != "sent":
+                raise _Undo(f"改派到 {station_id} 后下发未成立：{fresh.error}")
         except StateConflict as error:
+            savepoint.rollback()
             return False, f"改派后的时间窗与其他批次重叠：{error}"
-        run = self._run_of(command)
-        self._settle_old(command, f"未送达设备；异常引擎改派到 {station_id}")
-        self._resume_batch(batch, command, run)
-        fresh = self._reissue(batch, command, station_id)
-        if fresh.state != "sent":
-            return False, f"改派到 {station_id} 后下发未成立：{fresh.error}"
-        return True, f"第 {index + 1} 步由 {command.station_id} 改派到 {station_id}，{begin:%H:%M} 开工（新指令 {fresh.id[:8]}）"
+        except _Undo as undo:
+            savepoint.rollback()
+            return False, f"{undo}；改派已撤回，批次原样留在故障"
+        savepoint.commit()
+        return True, f"第 {index + 1} 步由 {command.station_id} 改派到 {station_id}，{work.starts_at:%H:%M} 开工（新指令 {fresh.id[:8]}）"
+
+    def _replan_step(self, schedule, batch: Batch, index: int, avoid: str, start_from, why: str):
+        """按排程器重排这一步，避开 `avoid` 这台工位（主工位与协同资源都不再选它）：主工位、协同资源、
+        转运与清洗窗口，连同随它占着工位的等待，与建批排程同一个口径；其余步骤的时间窗原地保留。
+        只算不写，返回 (要换掉时间窗的步骤, 新时间窗)；排不下抛 SchedulingError。"""
+        from ..domain.scheduling import Interval, plan_steps
+        from ..domain.steps import held_after
+
+        steps = normalize(batch.recipe_snapshot.get("steps") or [])
+        replan = {index, *(wait for wait, device in held_after(steps).items() if device == index)}
+        keep = set(range(len(steps))) - replan
+        protected = [row for row in schedule.allocations.for_batch(batch.id) if row.step_index not in replan]
+        known_ends, known_where, plate_state = schedule._known_tail(batch, steps, keep, protected)
+        context = schedule.context({batch.id})
+        for row in protected:
+            context.busy.setdefault(row.station_id, []).append(
+                Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
+            )
+        context.unavailable_station_ids[avoid] = f"{why}，不再排回去"
+        planned = plan_steps(
+            steps, start_from, context, first_index=min(replan), frozen=keep, known_ends=known_ends,
+            known_where=known_where, plate_state=plate_state, exclusive_carrier=schedule.carrier_roles(batch),
+            samples=schedule.samples_of(batch),
+        )
+        return replan, planned
+
+    def _write_step(self, schedule, batch: Batch, replan: set[int], planned) -> None:
+        """换掉这几步的时间窗；与别的批次重叠时抛 StateConflict（调用方在保存点里，撤回整次改派）。"""
+        assets = {row.id: row.asset_id for row in schedule.stations.list() if row.asset_id}
+        schedule.allocations.delete_steps(batch.id, replan)
+        self.db.add_all([
+            Allocation(
+                batch_id=batch.id, step_index=item.step_index, station_id=item.station_id,
+                asset_id=assets.get(item.station_id, ""), starts_at=item.starts_at, ends_at=item.ends_at,
+                kind=item.kind, units=item.units,
+            )
+            for item in planned
+        ])
+        self.db.flush()
+        schedule._refuse_overlaps(batch.id)
 
     def _skip(self, batch: Batch, command: Command) -> tuple[bool, str]:
         from .workflow_service import WorkflowService
@@ -441,9 +470,13 @@ class ExceptionService:
         return event
 
     def reroute_future_windows(self, station_id: str) -> tuple[list[str], list[str]]:
-        """把这台工位上还没开始、步骤也还没开出的时间窗改派到等价工位（时间不变优先，否则最早可用）。"""
-        from ..domain.scheduling import Interval, SchedulingError, candidate_station_ids, earliest_free, units_on
-        from ..repositories.resources import StationRepository
+        """把这台工位上还没开始、步骤也还没开出的时间窗改派到等价工位（时间不变优先，否则最早可用）。
+
+        按步骤整步重排（见 `_replan_step`）：它当主工位的步骤换主工位，当协同资源的步骤换协同工位，
+        协同、转运、清洗窗口随新时段一起重排——只挪主工位那一段，协同资源会留在旧时段、失联的协同工位
+        也不会被换掉。
+        """
+        from ..domain.scheduling import WORK, SchedulingError
         from .schedule_service import ScheduleService, lock_schedule
 
         lock_schedule(self.db)
@@ -453,55 +486,52 @@ class ExceptionService:
         rows = (
             self.db.query(Allocation, Batch).join(Batch, Batch.id == Allocation.batch_id)
             .filter(
-                Allocation.station_id == station_id, Allocation.kind == "work", Allocation.starts_at > now(),
+                Allocation.station_id == station_id, Allocation.kind.in_(["work", "assist"]),
+                Allocation.starts_at > now(),
                 Batch.state.in_(["scheduled", "running", "paused"]), Batch.org_id == self.ctx.org_id,
-            ).all()
+            )
+            .order_by(Allocation.starts_at)
+            .all()
         )
+        seen: set[tuple[str, int]] = set()
         for allocation, batch in rows:
-            steps = normalize(batch.recipe_snapshot.get("steps") or [])
             index = allocation.step_index
-            step = steps[index] if index < len(steps) else {}
+            if (batch.id, index) in seen:
+                continue
+            seen.add((batch.id, index))
+            label = f"{batch.id} 第 {index + 1} 步"
             opened = self.db.query(StepRun).filter(
                 StepRun.batch_id == batch.id, StepRun.step_index == index,
                 StepRun.state.notin_(["superseded", "cancelled"]),
             ).count()
-            label = f"{batch.id} 第 {index + 1} 步"
             if opened:
                 stuck.append(f"{label} 已开出")
                 continue
-            context = schedule.context({batch.id})
-            for row in self.db.query(Allocation).filter(Allocation.batch_id == batch.id).all():
-                if row.id != allocation.id:
-                    context.busy.setdefault(row.station_id, []).append(
-                        Interval(row.starts_at, row.ends_at, max(1, int(row.units or 1)))
-                    )
-            samples = schedule.samples_of(batch)
-            specs = {spec.id: spec for spec in context.stations}
-            try:
-                candidates = [
-                    sid for sid in candidate_station_ids(context, step, index, samples) if sid != station_id
-                ]
-            except SchedulingError:
-                candidates = []
-            if not candidates:
-                stuck.append(f"{label} 没有等价工位")
-                continue
-            duration = allocation.ends_at - allocation.starts_at
-            begin, target = min(
-                (earliest_free(context, sid, allocation.starts_at, duration, units_on(specs.get(sid), samples)), sid)
-                for sid in candidates
-            )
             before = f"{allocation.starts_at:%H:%M}"
-            allocation.units = units_on(specs.get(target), samples)
-            allocation.station_id = target
-            station = StationRepository(self.db, self.ctx).get(target)
-            allocation.asset_id = station.asset_id if station is not None else ""
-            allocation.starts_at, allocation.ends_at = begin, begin + duration
-            self.db.flush()
-            moved.append(f"{label} → {target}（{before} → {begin:%H:%M}）")
+            try:
+                replan, planned = self._replan_step(
+                    schedule, batch, index, station_id, allocation.starts_at, f"{station_id} 不可用",
+                )
+            except SchedulingError as error:
+                stuck.append(f"{label} 没有等价工位：{error.message}")
+                continue
+            work = next((item for item in planned if item.step_index == index and item.kind == WORK), None)
+            savepoint = self.db.begin_nested()
+            try:
+                self._write_step(schedule, batch, replan, planned)
+            except StateConflict as error:
+                savepoint.rollback()
+                stuck.append(f"{label} 改派后与其他批次重叠：{error}")
+                continue
+            savepoint.commit()
+            target = work.station_id if work is not None else "—"
+            begin = work.starts_at if work is not None else allocation.starts_at
+            helpers = sorted({item.station_id for item in planned if item.step_index == index and item.kind == "assist"})
+            moved.append(f"{label} → {target}（{before} → {begin:%H:%M}）" + (f"，协同 {'、'.join(helpers)}" if helpers else ""))
             self.audit.record(
                 None, "异常改派时间窗", batch.id, before=station_id, after=target,
-                detail=f"{station_id} 不可用，第 {index + 1} 步未开始的时间窗改派到 {target}",
+                detail=f"{station_id} 不可用，第 {index + 1} 步未开始的时间窗整步重排到 {target}"
+                       + (f"（协同 {'、'.join(helpers)}）" if helpers else ""),
             )
         return moved, stuck
 
