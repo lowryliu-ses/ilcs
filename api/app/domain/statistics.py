@@ -8,7 +8,6 @@
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
 
 # 正式统计的纳入条件
 OFFICIAL_REVIEW = "approved"
@@ -418,101 +417,3 @@ def batch_effect(dataset: Dataset, alpha: float = 0.05) -> dict | None:
         ),
     }
 
-
-# ---------- 历史固定三指标（旧批次分析页仍在用） ----------
-
-def valid_values(samples: list[dict], metric: str) -> list[float]:
-    return [
-        s["metrics"][metric]
-        for s in samples
-        if s.get("quality") == "valid" and (s.get("metrics") or {}).get(metric) is not None
-    ]
-
-
-def group_samples(samples: list[dict]) -> "OrderedDict[str, list[dict]]":
-    groups: "OrderedDict[str, list[dict]]" = OrderedDict()
-    for sample in samples:
-        groups.setdefault(sample.get("condition_group") or "C00", []).append(sample)
-    return groups
-
-
-def group_statistics(
-    samples: list[dict], golden_samples: list[dict] | None = None,
-    metric: str = "discharge_capacity",
-) -> list[dict]:
-    golden_means = {}
-    if golden_samples:
-        for group, rows in group_samples(golden_samples).items():
-            golden_means[group] = mean(valid_values(rows, metric))
-
-    rows = []
-    for group, group_rows in group_samples(samples).items():
-        values = valid_values(group_rows, metric)
-        golden_mean = golden_means.get(group)
-        group_mean = mean(values)
-        rows.append(
-            {
-                "group": group,
-                "label": group_rows[0].get("condition_label", ""),
-                "is_control": any(r.get("is_control") for r in group_rows),
-                "n_valid": len(values),
-                "n_total": len(group_rows),
-                "mean": group_mean,
-                "sd": stddev(values),
-                "cv_pct": cv_percent(values),
-                "areal_density": mean(valid_values(group_rows, "areal_density")),
-                "golden_mean": golden_mean,
-                "delta": (group_mean - golden_mean) if (golden_mean is not None and group_mean is not None) else None,
-                "samples": [
-                    {"id": r["id"], "well": r["well"], "repeat": r.get("repeat"), "state": r.get("state"),
-                     "quality": r.get("quality"), "value": (r.get("metrics") or {}).get(metric)}
-                    for r in group_rows
-                ],
-            }
-        )
-    return rows
-
-
-def factor_effects(samples: list[dict], factors: list[dict], metric: str = "discharge_capacity") -> list[dict]:
-    effects = []
-    for position, factor in enumerate(factors):
-        levels = []
-        for level in factor.get("levels") or []:
-            values = [
-                s["metrics"][metric]
-                for s in samples
-                if s.get("quality") == "valid"
-                and s.get("levels")
-                and position < len(s["levels"])
-                and s["levels"][position] == level
-                and (s.get("metrics") or {}).get(metric) is not None
-            ]
-            levels.append({"level": level, "mean": mean(values), "n": len(values)})
-        means = [row["mean"] for row in levels if row["mean"] is not None]
-        effects.append(
-            {
-                "factor": factor.get("name"),
-                "unit": factor.get("unit", ""),
-                "levels": levels,
-                "range": (max(means) - min(means)) if len(means) > 1 else None,
-            }
-        )
-    return effects
-
-
-def summary(groups: list[dict], plan_repeats: int | None) -> dict[str, Any]:
-    cvs = [g["cv_pct"] for g in groups if g["cv_pct"] is not None]
-    eligible = [g for g in groups if g["n_valid"] >= min(2, max(1, g["n_total"]))]
-    best = max(eligible, key=lambda g: g["mean"] if g["mean"] is not None else -1, default=None)
-    deltas = [g["delta"] for g in groups if g["delta"] is not None]
-    return {
-        "groups": len(groups),
-        "valid_samples": sum(g["n_valid"] for g in groups),
-        "total_samples": sum(g["n_total"] for g in groups),
-        "median_cv_pct": median(cvs),
-        "high_cv_groups": len([c for c in cvs if c > 3]),
-        "single_repeat": bool(plan_repeats is not None and plan_repeats < 2),
-        "best_group": best["group"] if best else None,
-        "best_mean": best["mean"] if best else None,
-        "delta_vs_golden": mean(deltas),
-    }

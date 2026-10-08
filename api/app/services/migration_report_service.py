@@ -13,7 +13,7 @@ from ..core.db import dec
 from ..core.schema import EXPECTED_REVISION, current_revision
 from ..models import (
     AnalysisTask, Asset, Batch, Command, InventoryLedger, Lot, Organization, Person,
-    PhysicalSample, Plan, Recipe, Reservation, Result, ResultReview, ResultValue, Sample,
+    PhysicalSample, Plan, Recipe, Reservation, ResultReview, ResultValue, Sample,
     Station, User,
 )
 
@@ -44,7 +44,7 @@ class MigrationReportService:
             for name, model in (
                 ("组织", Organization), ("账号", User), ("流程", Recipe), ("方案", Plan),
                 ("批次", Batch), ("运行分配", Sample), ("物理样本", PhysicalSample),
-                ("批号", Lot), ("预留", Reservation), ("历史结果", Result),
+                ("批号", Lot), ("预留", Reservation),
                 ("结果明细", ResultValue), ("检测任务", AnalysisTask),
             )
         }
@@ -58,7 +58,7 @@ class MigrationReportService:
         # 归属完整性：不能有业务行落在组织之外
         orphan_org = 0
         org_ids = {row.id for row in self.db.query(Organization).all()}
-        for model in (Batch, Plan, Recipe, Lot, Sample, Result, AnalysisTask):
+        for model in (Batch, Plan, Recipe, Lot, Sample, AnalysisTask):
             for row in self.db.query(model).all():
                 if getattr(row, "org_id", "") not in org_ids:
                     orphan_org += 1

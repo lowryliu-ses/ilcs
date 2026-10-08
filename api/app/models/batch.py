@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
+    Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -74,9 +74,7 @@ class Sample(Base):
     levels: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_control: Mapped[bool] = mapped_column(Boolean, default=False)
     state: Mapped[str] = mapped_column(String, default="pending")  # pending|running|done|failed
-    # 历史人工质量标记。新模型的权威质量在 ResultValue.quality 上；
-    # 这里的值只作历史展示，不等于审核通过。
-    quality: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 处理说明：质检剔除、报废、拆分与合并的去向。结果质量在 ResultValue.quality 上，不在这里
     flag_note: Mapped[str] = mapped_column(Text, default="")
     station_id: Mapped[str] = mapped_column(String, default="")
 
@@ -102,23 +100,6 @@ class AnalysisTask(Base):
     created_by: Mapped[str] = mapped_column(String, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class Result(Base):
-    """历史固定三指标结果。新数据走 ResultValue；这张表保留给历史批次读取。"""
-
-    __tablename__ = "results"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
-    org_id: Mapped[str] = mapped_column(String, default="", index=True)
-    sample_id: Mapped[str] = mapped_column(ForeignKey("samples.id"))
-    task_id: Mapped[str] = mapped_column(String, default="")
-    areal_density: Mapped[float | None] = mapped_column(Float, nullable=True)
-    discharge_capacity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    retention: Mapped[float | None] = mapped_column(Float, nullable=True)
-    raw_uri: Mapped[str] = mapped_column(String, default="")
-    checksum: Mapped[str] = mapped_column(String, default="")
-    parser_version: Mapped[str] = mapped_column(String, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class ScheduleProposal(Base):

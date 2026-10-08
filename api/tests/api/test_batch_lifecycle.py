@@ -129,8 +129,8 @@ def test_full_run_leaves_results_unassessed_until_review(
     # 批次完成后收尾：未领用的预留余量显式释放，不再一直挂着占库存
     assert all(r["state"] == "released" for r in detail["reservations"]), detail["reservations"]
 
-    for row in detail["samples"]:
-        assert row["legacy_quality"] is None, "批次完成不得自动授予质量结论"
+    # 批次完成不得自动授予质量结论：没有回传就没有结果，结果视图里没有可统计的指标
+    assert operator.get(f"/api/results/{scheduled_batch}").json()["metrics"] == []
 
     golden = qa.post(
         "/api/recipes/R-205/golden-batch",
@@ -167,44 +167,19 @@ def test_repeated_command_delivery_executes_once(operator, scheduled_batch):
         assert db.query(Checkpoint).filter(Checkpoint.command_id == command.id).count() == 1
 
 
-def test_legacy_quality_flag_is_marked_as_historical(operator, researcher, scheduled_batch, executor):
-    """过渡期的人工质量标记保留，但响应明确它不等于审核通过。"""
+def test_a_batch_without_results_gets_the_plain_results_view(operator, scheduled_batch, executor):
+    """还没有任何结果的批次走通用的结果视图（没有可统计的指标）；早期固定三指标的历史视图、
+    样本人工质量标记与模拟曲线下载已经退役（迁移 0055）。"""
     operator.post(
         f"/api/batches/{scheduled_batch}/dispatch",
         {"manual_review": True, "signature_id": operator.sign("批准执行", target=scheduled_batch)},
     )
     for _ in range(12):
         executor()
-
-    # 还没有任何结果的新批次不是历史批次：走通用的结果视图，没有可统计的指标，不回落到固定三指标视图
-    before = operator.get(f"/api/results/{scheduled_batch}").json()
-    assert not before.get("legacy") and before["metrics"] == [], before
-    sample_id = operator.get(f"/api/batches/{scheduled_batch}").json()["samples"][0]["id"]
-
-    flagged = researcher.post(
-        f"/api/samples/{sample_id}/flag", {"quality": "invalid", "note": "谱图基线漂移"}
-    )
-    assert flagged.status_code == 200
-    assert "不等于结果审核通过" in flagged.json()["legacy_note"]
-
-
-def test_only_batches_with_rows_in_the_legacy_table_open_the_legacy_view(operator, scheduled_batch, executor, db):
-    """历史结果表里确有旧三指标数据、又没有类型化结果的批次，才回落到历史视图。"""
-    from app.models import Result, Sample
-
-    operator.post(
-        f"/api/batches/{scheduled_batch}/dispatch",
-        {"manual_review": True, "signature_id": operator.sign("批准执行", target=scheduled_batch)},
-    )
-    for _ in range(12):
-        executor()
-    # 照历史三指标回传的样子造一条旧数据：写一行历史结果，样本记完成（旧回传「回传即完成」）
-    sample = db.query(Sample).filter(Sample.batch_id == scheduled_batch).first()
-    db.add(Result(org_id=sample.org_id, sample_id=sample.id, discharge_capacity=201.5, areal_density=15.1))
-    sample.state = "done"
-    db.commit()
 
     view = operator.get(f"/api/results/{scheduled_batch}").json()
-    assert view.get("legacy") is True, view
-    listed = next(row for row in operator.get("/api/results").json() if row["batch_id"] == scheduled_batch)
-    assert listed["legacy_results"] is True
+    assert "legacy" not in view and view["metrics"] == [], view
+    sample = operator.get(f"/api/batches/{scheduled_batch}").json()["samples"][0]
+    assert not {"legacy_quality", "metrics", "raw_uri"} & set(sample), sample
+    assert operator.post(f"/api/samples/{sample['id']}/flag", {"quality": "invalid"}).status_code == 404
+    assert operator.get(f"/api/samples/{sample['id']}/raw").status_code == 404

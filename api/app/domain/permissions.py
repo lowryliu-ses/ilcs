@@ -63,7 +63,6 @@ PERMISSIONS: dict[str, list[str]] = {
     "analysis.create": ["researcher", "operator", "admin"],
     "result.enter": ["researcher", "operator", "admin"],
     "result.review": ["qa", "admin"],
-    "result.flag": ["researcher", "qa", "admin"],
     # ---------- SOP、报告与治理 ----------
     "sop.edit": ["researcher", "qa", "admin"],
     "sop.approve": ["qa", "admin"],
@@ -148,7 +147,7 @@ PERMISSION_CATALOG: list[tuple[str, list[tuple[str, str]]]] = [
     ("人员与资质", [("person.edit", "维护人员档案"), ("qualification.edit", "维护资质")]),
     ("数据与审核", [
         ("metric.edit", "维护指标定义"), ("analysis.create", "建立检测任务"), ("result.enter", "录入检测结果"),
-        ("result.review", "复核检测结果"), ("result.flag", "标记可疑结果"),
+        ("result.review", "复核检测结果"),
     ]),
     ("SOP、报告与报警", [
         ("sop.edit", "编辑 SOP"), ("sop.approve", "批准 SOP"), ("report.edit", "编辑报告"),
@@ -181,7 +180,8 @@ def merge_saved_matrix(saved: dict[str, list[str]], known: list[str] | None) -> 
         if role not in saved:
             merged[role] = grants
             continue
-        merged[role] = sorted(set(saved[role]) | {key for key in grants if key in new_keys})
+        # 存过的矩阵里可能有已经退役的权限键（如 result.flag）：不再带出来，否则管理员再保存会被判「未知权限」
+        merged[role] = sorted((set(saved[role]) & set(PERMISSIONS)) | {key for key in grants if key in new_keys})
     return merged
 
 

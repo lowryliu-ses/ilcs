@@ -202,7 +202,7 @@ class AnalysisService:
     def settle_assignment(self, sample_id: str | None) -> bool:
         """运行分配记为完成：批次跑完了，它名下未取消的检测任务也都采集齐了。返回这次有没有改成完成。
 
-        与历史三指标回传（`ResultService.ingest_legacy`，回传即完成）同一个意思：这一次运行的检测结果到齐了。
+        意思是这一次运行的检测结果到齐了。
         批次跑完才记：设备步骤中途写入的结果不能让样本提前「完成」——保持、故障时的恢复评估与异常影响范围
         数的是还没做完的样本（`SampleRepository.unfinished_count`）。批次完成、结果写入或更正、取消检测任务时
         各核一次。已失败、已拆分的不动；只进不退：完成之后再开重测不改回去，与历史回传一致。

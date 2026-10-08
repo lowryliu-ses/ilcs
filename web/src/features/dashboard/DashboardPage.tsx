@@ -427,15 +427,9 @@ export function DashboardPage() {
                     {row.is_golden ? <span className="tag">黄金批次</span> : null}
                   </td>
                   <td className="num mono">
-                    {row.legacy_results ? (
-                      <span className="tag">历史三指标</span>
-                    ) : (
-                      <>
-                        {row.result_count} /{' '}
-                        <span className={row.pending_review ? 'warn-text' : ''}>{row.pending_review}</span> /{' '}
-                        <b>{row.official_count}</b>
-                      </>
-                    )}
+                    {row.result_count} /{' '}
+                    <span className={row.pending_review ? 'warn-text' : ''}>{row.pending_review}</span> /{' '}
+                    <b>{row.official_count}</b>
                   </td>
                   <td>
                     {row.pending_review ? (
