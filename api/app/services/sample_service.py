@@ -137,7 +137,7 @@ class SampleService:
                     "id": row.id, "batch_id": row.batch_id, "container_id": row.container_id,
                     "well": row.well, "condition_group": row.condition_group,
                     "condition_label": row.condition_label, "repeat": row.repeat,
-                    "state": row.state, "legacy_quality": row.quality,
+                    "state": row.state,
                 }
                 for row in assignments
             ],

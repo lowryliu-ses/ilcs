@@ -35,7 +35,7 @@ from ..domain.steps import (
     step_id_of,
 )
 from ..models import Batch, Command, PhysicalSample, Sample, SlotOccupancy, User
-from ..repositories.batches import AllocationRepository, BatchRepository, ResultRepository, SampleRepository
+from ..repositories.batches import AllocationRepository, BatchRepository, SampleRepository
 from ..repositories.execution import (
     DISPATCHING, MOTION, CheckpointRepository, CommandRepository, TelemetryRepository, outcome_unknown,
     still_occupying,
@@ -81,7 +81,6 @@ class BatchService:
         self.allocations = AllocationRepository(db)
         self.samples = SampleRepository(db, ctx)
         self.physical = PhysicalSampleRepository(db, ctx)
-        self.results = ResultRepository(db, ctx)
         self.commands = CommandRepository(db, ctx)
         self.checkpoints = CheckpointRepository(db)
         self.telemetry = TelemetryRepository(db)
@@ -536,10 +535,8 @@ class BatchService:
 
     def sample_rows(self, batch_id: str) -> list[dict]:
         samples = self.samples.for_batch(batch_id)
-        results = self.results.for_samples([s.id for s in samples])
         rows = []
         for sample in samples:
-            result = results.get(sample.id)
             physical = self.physical.get(sample.physical_sample_id) if sample.physical_sample_id else None
             rows.append(
                 {
@@ -555,14 +552,7 @@ class BatchService:
                     "levels": sample.levels,
                     "is_control": sample.is_control,
                     "state": sample.state,
-                    "legacy_quality": sample.quality,
                     "flag_note": sample.flag_note,
-                    "metrics": {
-                        "areal_density": result.areal_density if result else None,
-                        "discharge_capacity": result.discharge_capacity if result else None,
-                        "retention": result.retention if result else None,
-                    },
-                    "raw_uri": result.raw_uri if result else "",
                 }
             )
         return rows

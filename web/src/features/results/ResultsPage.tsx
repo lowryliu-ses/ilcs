@@ -6,7 +6,7 @@ import { LineChart } from '../../shared/chart';
 import { CurveOverlay } from '../../shared/curves';
 import { num, signed } from '../../shared/format';
 import { useQuery } from '../../shared/query';
-import type { Analysis, AnalysisView, MetricBlock } from '../../shared/types';
+import type { AnalysisView, MetricBlock } from '../../shared/types';
 import { Empty, ListState, Panel, Pill, ScopeNotice, useToast } from '../../shared/ui';
 
 type ResultIndexRow = {
@@ -17,9 +17,6 @@ type ResultIndexRow = {
   plan_id: string;
   sample_done: number;
   sample_count: number;
-  typed_results: boolean;
-  /** 历史结果表里确有旧三指标数据（打开时走历史视图）；还没出结果的新批次是 false */
-  legacy_results: boolean;
   result_count: number;
   pending_review: number;
   official_count: number;
@@ -80,7 +77,7 @@ export function ResultsPage() {
                     {row.sample_done}/{row.sample_count}
                   </td>
                   <td className="mono small">
-                    {row.legacy_results ? <span className="tag">历史三指标</span> : row.result_count}
+                    {row.result_count}
                   </td>
                   <td className="mono small">
                     {row.pending_review ? <b className="warn-text">{row.pending_review}</b> : 0}
@@ -119,11 +116,6 @@ function BatchAnalysis({ batchId }: { batchId: string }) {
         <ListState loading={analysis.loading} error={analysis.error} />
       </Panel>
     );
-  }
-
-  // 历史批次（历史结果表里有旧数据、没有类型化结果）：回落到旧的固定三指标视图，并明确标注
-  if (view.legacy) {
-    return <LegacyAnalysis batchId={batchId} view={view as unknown as Analysis} />;
   }
 
   return (
@@ -365,57 +357,6 @@ function MetricPanel({ block, showEffects }: { block: MetricBlock; showEffects: 
           </table>
         </>
       ) : null}
-    </Panel>
-  );
-}
-
-/** 历史固定三指标视图。它按样本上的旧质量标记聚合，所以要标明这不是新模型的审核结论。 */
-function LegacyAnalysis({ batchId, view }: { batchId: string; view: Analysis }) {
-  // 不放「导出 CSV」：导出接口按类型化结果出数，历史批次只会导出一行表头
-  return (
-    <Panel title={`历史结果 · ${batchId}`}>
-      <div className="note warn">
-        该批次没有类型化结果，显示的是历史固定三指标视图。表中的「有效」是历史人工质量标记，
-        不等于新模型下的审核通过 + 质量有效，不能作为正式统计依据。
-      </div>
-      <div className="metrics">
-        <div className="metric">
-          <span className="metric-label">历史标记有效样品</span>
-          <strong className="metric-value">
-            {view.summary.valid_samples}/{view.summary.total_samples}
-          </strong>
-          <span className="metric-hint">历史质量标记</span>
-        </div>
-        <div className="metric">
-          <span className="metric-label">中位 CV</span>
-          <strong className="metric-value">{num(view.summary.median_cv_pct, 2)}%</strong>
-          <span className="metric-hint">{view.summary.high_cv_groups} 个组 CV &gt; 3%</span>
-        </div>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>条件组</th>
-            <th>条件</th>
-            <th className="num">有效 / 总数</th>
-            <th className="num">均值</th>
-            <th className="num">CV%</th>
-          </tr>
-        </thead>
-        <tbody>
-          {view.groups.map((group) => (
-            <tr key={group.group}>
-              <td className="mono">{group.group}</td>
-              <td className="small">{group.label}</td>
-              <td className="num mono">
-                {group.n_valid}/{group.n_total}
-              </td>
-              <td className="num mono">{num(group.mean, 2)}</td>
-              <td className="num mono">{num(group.cv_pct, 2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </Panel>
   );
 }

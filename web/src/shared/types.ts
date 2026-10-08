@@ -211,11 +211,7 @@ export type AssignmentRow = {
   levels: (number | string)[] | null;
   is_control: boolean;
   state: string;
-  /** 历史人工质量标记，不等于结果审核通过 */
-  legacy_quality: string | null;
   flag_note: string;
-  metrics: { areal_density: number | null; discharge_capacity: number | null; retention: number | null };
-  raw_uri: string;
 };
 
 /** 预留占用。数量一律是十进制字符串——前端不做浮点运算，直接显示服务端的值。 */
@@ -1406,8 +1402,6 @@ export type Dashboard = {
     recipe_name: string;
     sample_done: number;
     sample_count: number;
-    typed_results: boolean;
-    legacy_results: boolean;
     result_count: number;
     pending_review: number;
     official_count: number;
@@ -1456,21 +1450,6 @@ export type Dashboard = {
   role: string;
 };
 
-export type GroupStat = {
-  group: string;
-  label: string;
-  is_control: boolean;
-  n_valid: number;
-  n_total: number;
-  mean: number | null;
-  sd: number | null;
-  cv_pct: number | null;
-  areal_density: number | null;
-  golden_mean: number | null;
-  delta: number | null;
-  samples: { id: string; well: string; repeat: number; state: string; quality: string | null; value: number | null }[];
-};
-
 export type TelemetrySeries = {
   station_id: string;
   metric: string;
@@ -1486,31 +1465,6 @@ export type TelemetryFeed = {
   state: string;
   golden_batch_id: string;
   series: TelemetrySeries[];
-};
-
-export type Analysis = {
-  batch_id: string;
-  recipe_id: string;
-  recipe_name: string;
-  plan_id: string;
-  plan_name: string;
-  state: string;
-  golden_batch_id: string;
-  is_golden: boolean;
-  groups: GroupStat[];
-  effects: { factor: string; unit: string; levels: { level: number | string; mean: number | null; n: number }[]; range: number | null }[];
-  summary: {
-    groups: number;
-    valid_samples: number;
-    total_samples: number;
-    median_cv_pct: number | null;
-    high_cv_groups: number;
-    single_repeat: boolean;
-    best_group: string | null;
-    best_mean: number | null;
-    delta_vs_golden: number | null;
-  };
-  samples: AssignmentRow[];
 };
 
 /* ---------- 组织与访问范围 ---------- */
@@ -1695,7 +1649,6 @@ export type SampleDetail = SampleRow & {
     condition_label: string;
     repeat: number;
     state: string;
-    legacy_quality: string | null;
   }[];
   transfers: TransferRow[];
   slots: { container_id: string; well: string; occupied_at: string; released_at: string | null }[];
@@ -2504,12 +2457,6 @@ export type AnalysisView = {
   /** 曲线指标：不进数值统计，按样本叠加画（/results/{batch}/series） */
   series_metrics?: { metric_id: string; metric_name: string; unit: string; x_label: string; x_unit: string }[];
   show_factor_effects: boolean;
-  /** 历史批次没有类型化结果时回落到旧视图 */
-  legacy?: boolean;
-  legacy_note?: string;
-  groups?: unknown[];
-  summary?: Record<string, unknown>;
-  samples?: unknown[];
 };
 
 /** 曲线叠加：一个曲线指标在批次（或父任务各批次）里每个样本的当前曲线，纳入口径与数值统计相同 */

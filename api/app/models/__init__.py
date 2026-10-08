@@ -1,5 +1,5 @@
 from .base import Base, uid
-from .batch import Allocation, AnalysisTask, Batch, Result, Sample, ScheduleProposal
+from .batch import Allocation, AnalysisTask, Batch, Sample, ScheduleProposal
 from .execution import AdapterExecution, Checkpoint, Command, ExecutorHeartbeat, Telemetry
 from .file import FileObject
 from .governance import (
@@ -38,7 +38,7 @@ __all__ = [
     "InventoryLedger", "Island", "Lab", "Lot", "Material", "Membership", "MetricDefinition",
     "Organization", "Person", "PhysicalSample", "Plan", "PlanBatchLink", "PlanVersion", "Project",
     "ProjectMember", "Qualification", "Recipe", "Report", "ReportVersion", "Reservation",
-    "ResourceBooking", "Result", "ResultReview", "ResultValue", "Sample", "SampleTransfer",
+    "ResourceBooking", "ResultReview", "ResultValue", "Sample", "SampleTransfer",
     "ServiceIdentity", "SlotOccupancy", "Sop", "SopAck", "SopVersion", "Station", "StepAdvance",
     "StepRun", "TaskAssignment", "Telemetry", "User", "WasteTank", "WorkflowEvent", "uid",
     "RolePermissionSet", "roles_of", "Labware", "LabwareMove", "LabwareType", "Location", "BatchSignal",

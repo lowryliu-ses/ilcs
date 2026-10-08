@@ -44,7 +44,7 @@ from ..models import (
     DeviceTemplate, ExceptionEvent, ExperimentTask, IngestEvent, InventoryEvent, InventoryLedger, Labware,
     LabwareMove, Location, Lot, MaintenanceOrder, PersonBooking, PhysicalSample, Plan, PlanBatchLink,
     PlanProposal, PlanTemplate, PlanVersion, PointWrite, Qualification, Recipe, Report, ReportVersion,
-    Reservation, ResourceBooking, Result, ResultReview, ResultValue, Sample, SampleTransfer, ScheduleProposal,
+    Reservation, ResourceBooking, ResultReview, ResultValue, Sample, SampleTransfer, ScheduleProposal,
     ServiceIdentity, SlotOccupancy, Station, StepAdvance, StepRun, TaskAssignment, Telemetry, User,
     WasteTank, WorkflowEvent, roles_of,
 )
@@ -237,8 +237,6 @@ class ForceDeleteService:
         if analysis:
             drop("回报事件", q(IngestEvent).filter(_in(IngestEvent.analysis_task_id, analysis)))
             drop("检测任务", q(AnalysisTask).filter(_in(AnalysisTask.id, analysis)))
-        if sample_ids or T:
-            drop("样品结果", q(Result).filter(_in(Result.sample_id, sample_ids) | _in(Result.task_id, T)))
         reports = _ids(q(Report.id).filter(
             Report.org_id == self.ctx.org_id,
             _in(Report.batch_id, B) | _in(Report.task_id, T) | _in(Report.plan_id, P),

@@ -6,7 +6,7 @@ from sqlalchemy import or_
 
 from ..domain.scheduling import WORK, Interval
 from ..models import (
-    Allocation, AnalysisTask, Batch, PlanBatchLink, Reservation, Result, Sample,
+    Allocation, AnalysisTask, Batch, PlanBatchLink, Reservation, Sample,
 )
 from .base import Repository, ScopedRepository
 
@@ -237,26 +237,6 @@ class SampleRepository(ScopedRepository[Sample]):
             if only_if_not and sample.state == only_if_not:
                 continue
             sample.state = state
-
-
-class ResultRepository(ScopedRepository[Result]):
-    """历史固定三指标结果。新数据读 result_values。"""
-
-    model = Result
-
-    def for_samples(self, sample_ids: list[str]) -> dict[str, Result]:
-        if not sample_ids:
-            return {}
-        rows = self.query().filter(Result.sample_id.in_(sample_ids)).all()
-        return {row.sample_id: row for row in rows}
-
-    def latest_for_sample(self, sample_id: str) -> Result | None:
-        return (
-            self.query()
-            .filter(Result.sample_id == sample_id)
-            .order_by(Result.created_at.desc())
-            .first()
-        )
 
 
 class AnalysisTaskRepository(ScopedRepository[AnalysisTask]):

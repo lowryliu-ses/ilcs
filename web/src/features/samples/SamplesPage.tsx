@@ -350,9 +350,6 @@ export function SampleDetailPage() {
                       </td>
                       <td>
                         <Pill state={row.state} />
-                        {row.legacy_quality ? (
-                          <div className="tiny muted">历史质量标记 {row.legacy_quality}</div>
-                        ) : null}
                       </td>
                     </tr>
                   ))}

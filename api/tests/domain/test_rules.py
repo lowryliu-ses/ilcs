@@ -176,23 +176,6 @@ def test_seeded_randomized_layout_is_reproducible():
     assert any(a.is_control for a in first)
 
 
-def test_statistics_exclude_non_valid_samples():
-    samples = [
-        {"id": "S1", "well": "A1", "repeat": 1, "condition_group": "C01", "condition_label": "1%",
-         "quality": "valid", "metrics": {"discharge_capacity": 200, "areal_density": 15.0}},
-        {"id": "S2", "well": "A2", "repeat": 2, "condition_group": "C01", "condition_label": "1%",
-         "quality": "valid", "metrics": {"discharge_capacity": 210, "areal_density": 15.2}},
-        {"id": "S3", "well": "A3", "repeat": 3, "condition_group": "C01", "condition_label": "1%",
-         "quality": "invalid", "metrics": {"discharge_capacity": 90, "areal_density": 9.0}},
-    ]
-
-    groups = statistics.group_statistics(samples)
-
-    assert groups[0]["n_valid"] == 2 and groups[0]["n_total"] == 3
-    assert groups[0]["mean"] == 205
-    assert round(groups[0]["cv_pct"], 3) == round(statistics.cv_percent([200, 210]), 3)
-
-
 def test_dataset_summary_does_not_call_the_highest_mean_best():
     """误差率这类越小越好的指标：均值最高的那组恰恰最差。统计只列最高与最低，不判优劣；CV 按均值绝对值算。"""
     def row(group: str, value: float, assignment: str) -> statistics.Observation:

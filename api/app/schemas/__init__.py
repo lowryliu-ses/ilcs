@@ -1091,11 +1091,6 @@ class ResultRevisionIn(BaseModel):
     reason: str
 
 
-class FlagIn(BaseModel):
-    quality: Literal["valid", "suspect", "invalid"]
-    note: str = ""
-
-
 # ---------- SOP ----------
 
 class SopVersionCreateIn(BaseModel):
